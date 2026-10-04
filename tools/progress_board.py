@@ -654,11 +654,11 @@ def rest_pr(raw: Any) -> dict[str, Any]:
     }
 
 
-def rest_review_decision(reviews: list[dict[str, Any]], raw: dict[str, Any]) -> str:
+def rest_review_decision(reviews: list[dict[str, Any]], raw: dict[str, Any], rules: dict[str, Any]) -> str:
     # A comment-only review does not withdraw an earlier approval/request.
     latest = {}
     for review in sorted(reviews, key=lambda r: (str(r.get("submitted_at") or ""), int(r.get("id") or 0))):
-        if review.get("author_association") not in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        if not release_pipeline().trusted_commenter(review, rules):
             continue
         state = str(review.get("state") or "").upper()
         if state in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
@@ -696,10 +696,9 @@ def rest_checks(repo: str, head: str) -> list[dict[str, Any]]:
 class GitHubReadPass:
     def __init__(self) -> None:
         self.path = board_dir() / ".github-pr-cache.json"
-        self.saved = {identity: info for identity, info in read_json_file(self.path).items()
-                      if validated_pr(info) is not None}
-        self.results: dict[tuple[str, int, str], tuple[dict[str, Any] | None, str | None]] = {}
-        self.heads: dict[tuple[str, int], str] = {}
+        self.saved: dict[str, dict[str, Any]] = {}
+        self.reconcile()
+        self.results: dict[str, tuple[dict[str, Any] | None, str | None]] = {}
         # Legacy boards share identities too. Seed all their terminal facts
         # before the first open card in any one board can rediscover that PR.
         for path in board_dir().glob("*.json"):
@@ -707,19 +706,39 @@ class GitHubReadPass:
                 continue
             self.seed((read_json_file(path).get("tasks") or {}).values())
 
-    def save(self, identity: str, payload: dict[str, Any]) -> None:
-        # Merge one entry under a dedicated lock; concurrent renderer processes
-        # cannot erase each other's snapshots or overwrite terminal evidence.
+    def reconcile(self) -> None:
+        self.saved = {identity: info for identity, info in read_json_file(self.path).items()
+                      if validated_pr(info) is not None}
+
+    def observe(self) -> int:
+        # Reserve ordering before network I/O. PR timestamps cannot order CI
+        # or mergeability observations; completion time cannot order readers.
+        with board_lock("github-pr-cache"):
+            saved = read_json_file(self.path)
+            generation = int(saved.get("_generation") or 0) + 1
+            saved["_generation"] = generation
+            atomic_write(self.path, json.dumps(saved, sort_keys=True) + "\n")
+        return generation
+
+    def save(self, identity: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # Retain the winning fact in memory as well as on disk. MERGED facts
+        # are immutable except for one authenticated legacy enrichment.
         with board_lock("github-pr-cache"):
             saved = read_json_file(self.path)
             old = saved.get(identity) or {}
-            if old.get("state") in {"MERGED", "CLOSED"}:
-                return
-            if str(old.get("updatedAt") or "") > str(payload.get("updatedAt") or ""):
-                return
-            saved[identity] = payload
-            atomic_write(self.path, json.dumps(saved, sort_keys=True) + "\n")
-            self.saved[identity] = payload
+            terminal_conflict = (old.get("state") == "MERGED" and
+                                 (not old.get("_legacy_terminal") or payload.get("_legacy_terminal")
+                                  or payload.get("state") != "MERGED" or merge_sha(old) != merge_sha(payload)))
+            superseded = (str(old.get("updatedAt") or "") > str(payload.get("updatedAt") or "")
+                          or int(old.get("_observation") or 0) > int(payload.get("_observation") or 0))
+            if terminal_conflict or superseded:
+                winner = old
+            else:
+                winner = payload
+                saved[identity] = payload
+                atomic_write(self.path, json.dumps(saved, sort_keys=True) + "\n")
+            self.saved[identity] = winner
+            return winner
 
     def seed(self, tasks: Any) -> None:
         for task in tasks:
@@ -737,7 +756,7 @@ class GitHubReadPass:
                           "body": task.get("summary") or "", "headRefName": task.get("branch") or "",
                           "url": task.get("url") or f"https://github.com/{task_repo(task)}/pull/{task['pr']}",
                           "createdAt": task.get("created_at") or task.get("updated_at") or stamp(),
-                          "updatedAt": task.get("github_updated_at"), "mergedAt": task.get("merged_at") or task.get("updated_at"),
+                          "updatedAt": task.get("github_updated_at"), "mergedAt": task.get("merged_at"),
                           "reviewDecision": "", "mergeable": "UNKNOWN"})
             elif task.get("pr_phase") == "Closed unmerged":
                 self.save(identity, {"state": "CLOSED", "isDraft": False, "_legacy_terminal": True, "headRefOid": task.get("pr_head") or "",
@@ -747,67 +766,73 @@ class GitHubReadPass:
     def read(self, number: int, repo: str, raw: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
         repo = safe_repo(repo)
         identity = f"{repo}#{number}"
+        self.reconcile()
         old = self.saved.get(identity)
-        if old and old.get("state") in {"MERGED", "CLOSED"}:
+        if old and old.get("state") == "MERGED" and not old.get("_legacy_terminal"):
             return old, None
-        pair = (repo, number)
-        raw_head = raw.get("head") if isinstance(raw, dict) else None
-        head = raw_head.get("sha", "") if isinstance(raw_head, dict) else self.heads.get(pair, "")
-        if not isinstance(head, str):
-            head = ""
-        key = (*pair, head)
-        if key in self.results:
-            return self.results[key]
-        # A pass already hydrated this identity: reuse it even when another
-        # board did not know its head before the read.
-        known = self.heads.get(pair)
-        if known is not None and (raw is None or head == known) and (*pair, known) in self.results:
-            return self.results[(*pair, known)]
+        cached = self.results.get(identity)
+        if cached:
+            info, error = cached
+            if info and old and int(old.get("_observation") or 0) > int(info.get("_observation") or 0):
+                info, error = old, None
+            # Discovery rows are evidence: a different state, version or head
+            # invalidates even an earlier result from this same render pass.
+            matches = (raw is None or (info is not None
+                       and raw.get("state") == ("open" if info["state"] == "OPEN" else "closed")
+                       and raw.get("updated_at") == info.get("updatedAt")
+                       and (not isinstance(raw.get("head"), dict)
+                            or raw["head"].get("sha") == info.get("headRefOid"))))
+            if matches:
+                return info, error
+        observation = self.observe()
         result: tuple[dict[str, Any] | None, str | None]
         try:
-            unchanged_hint = (isinstance(raw, dict) and old and raw.get("state") == "open"
-                              and raw.get("updated_at") == old.get("updatedAt")
-                              and head == old.get("headRefOid") and old.get("mergeable") != "UNKNOWN")
-            # List responses discover identities/versions but omit mergeability
-            # and changed_files. Only an unchanged known version skips detail.
-            if not unchanged_hint:
-                raw = gh_json(["api", f"repos/{repo}/pulls/{number}"], timeout=30)
+            # Mergeability changes with the base and CI changes independently
+            # of updated_at. Neither can use PR-version invalidation.
+            raw = gh_json(["api", f"repos/{repo}/pulls/{number}"], timeout=30)
             info = rest_pr(raw)
             assert isinstance(raw, dict)  # rest_pr has validated the response
             head = info["headRefOid"]
-            self.heads[pair] = head
-            key = (*pair, head)
-            if (old and info["state"] == "OPEN" and info.get("updatedAt")
-                    and info["updatedAt"] == old.get("updatedAt") and head == old.get("headRefOid")
-                    and old.get("mergeable") != "UNKNOWN"):
-                info = old
-                # CI events do not advance the PR timestamp. Keep reading an
-                # unfinished/failed rollup until it settles; metadata, reviews
-                # and comments still reuse the unchanged-version snapshot.
-                checks = old.get("statusCheckRollup") or []
-                if not checks or any(check_outcome(c) not in PASSING_CHECKS for c in checks):
-                    info = {**old, "statusCheckRollup": rest_checks(repo, head)}
-                    self.save(identity, info)
+            base = f"repos/{repo}"
+            if old and old.get("_legacy_terminal") and old["state"] == "MERGED":
+                if info["state"] != "MERGED" or merge_sha(info) != merge_sha(old):
+                    raise RuntimeError("legacy merge evidence disagrees with GitHub")
+                info["comments"] = old["comments"]
+                info["reviewDecision"] = old["reviewDecision"]
+                info["statusCheckRollup"] = old["statusCheckRollup"]
             else:
-                base = f"repos/{repo}"
                 info["statusCheckRollup"] = rest_checks(repo, head)
-                comments = rest_rows(f"{base}/issues/{number}/comments")
-                info["comments"] = [{"author": c.get("user"), "authorAssociation": c.get("author_association"),
-                                     "body": c.get("body"), "createdAt": c.get("created_at")} for c in comments]
-                reviews = rest_rows(f"{base}/pulls/{number}/reviews")
-                info["reviewDecision"] = rest_review_decision(reviews, raw)
-                if info["state"] == "MERGED":
-                    files = rest_rows(f"{base}/pulls/{number}/files")
-                    info["files"] = [{"path": f.get("filename")} for f in files]
-                    info["changedFiles"] = raw.get("changed_files")
-                if validated_pr(info) is None:
-                    raise RuntimeError("gh returned a malformed PR payload")
-                self.save(identity, info)
-            result = (info, None)
+                if (old and not old.get("_legacy_terminal") and info.get("updatedAt")
+                        and info["updatedAt"] == old.get("updatedAt")
+                        and head == old.get("headRefOid") and info["state"] == old["state"]):
+                    info["comments"] = old["comments"]
+                    reviews = old.get("_reviews")
+                else:
+                    comments = rest_rows(f"{base}/issues/{number}/comments")
+                    info["comments"] = [{"author": c.get("user"), "authorAssociation": c.get("author_association"),
+                                         "body": c.get("body"), "createdAt": c.get("created_at")} for c in comments]
+                    reviews = None
+                # Cache review observations, never the trust-policy result.
+                # Existing snapshots without raw reviews migrate on this read.
+                if reviews is None:
+                    reviews = rest_rows(f"{base}/pulls/{number}/reviews")
+                info["_reviews"] = reviews
+                info["reviewDecision"] = rest_review_decision(reviews, raw, review_rules(repo))
+            if info["state"] == "MERGED":
+                files = rest_rows(f"{base}/pulls/{number}/files")
+                info["files"] = [{"path": f.get("filename")} for f in files]
+                info["changedFiles"] = raw.get("changed_files")
+                if changed_paths(info) is None:
+                    raise RuntimeError("merged PR file manifest is incomplete")
+            if validated_pr(info) is None:
+                raise RuntimeError("gh returned a malformed PR payload")
+            info["_observation"] = observation
+            result = (self.save(identity, info), None)
         except (RuntimeError, TypeError, ValueError, AttributeError, KeyError) as exc:
+            self.reconcile()
+            old = self.saved.get(identity) or old
             result = (old, str(exc))
-        self.results[key] = result
-        self.heads[pair] = key[2]
+        self.results[identity] = result
         return result
 
 
@@ -1366,8 +1391,8 @@ def list_repositories(prior: list[str]) -> list[str]:
 
 
 def read_repository(repo: str, since: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """REST discovery plus one shared hydration per PR. Closed PR discovery
-    is incremental; a persisted terminal identity is never read again."""
+    """REST discovery plus shared hydration. Only authenticated merged facts
+    are immutable; closed-unmerged identities can reopen."""
     assert GITHUB_PASS is not None
     cursor_path = board_dir() / ".github-discovery.json"
     cursor = read_json_file(cursor_path).get(repo) or since + "T00:00:00Z"
@@ -1381,7 +1406,8 @@ def read_repository(repo: str, since: str) -> tuple[list[dict[str, Any]], list[d
         info, error = GITHUB_PASS.read(raw["number"], repo, raw)
         if error or info is None or not valid_open_pr(info):
             raise RuntimeError(error or "gh returned a malformed open PR")
-        open_prs.append(info)
+        if info["state"] == "OPEN":
+            open_prs.append(info)
     # Issues support updated-since; pulls do not. They supply identities only.
     # Each new closed identity is hydrated once to distinguish merged/closed.
     query = urlencode({"state": "closed", "since": cursor, "sort": "updated", "direction": "asc"})
@@ -1390,14 +1416,27 @@ def read_repository(repo: str, since: str) -> tuple[list[dict[str, Any]], list[d
             continue
         if not isinstance(issue.get("number"), int):
             raise RuntimeError("gh returned a malformed closed PR identity")
-        info, error = GITHUB_PASS.read(issue["number"], repo)
+        info, error = GITHUB_PASS.read(issue["number"], repo, issue)
         if error or info is None:
             raise RuntimeError(error or "gh returned a malformed closed PR")
+        if info["state"] == "OPEN":
+            # Do not advance past an unaccounted closure (including GitHub
+            # replication lag). A later sweep must rediscover this identity.
+            raise RuntimeError("closed discovery disagrees with PR detail")
+    GITHUB_PASS.reconcile()
+    # Migrate legacy facts once, including unknown merge dates, before applying
+    # the recent-merge filter or verifying delivery from the changed paths.
+    for identity, info in list(GITHUB_PASS.saved.items()):
+        if identity.startswith(repo + "#") and info.get("state") == "MERGED" and info.get("_legacy_terminal"):
+            _, error = GITHUB_PASS.read(info["number"], repo)
+            if error:
+                raise RuntimeError(error)
+    GITHUB_PASS.reconcile()
+    open_prs = [GITHUB_PASS.saved.get(f"{repo}#{info['number']}", info) for info in open_prs]
+    open_prs = [info for info in open_prs if info["state"] == "OPEN"]
     merged_prs = [info for identity, info in GITHUB_PASS.saved.items()
                   if identity.startswith(repo + "#") and info.get("state") == "MERGED"
                   and str(info.get("mergedAt") or "") >= since]
-    # A legacy board can prove a terminal commit without retaining the file
-    # manifest. Keep that evidence; do not re-query a terminal PR for enrichment.
     for info in merged_prs:
         if not isinstance(info.get("number"), int):
             raise RuntimeError("cached merged PR identity is malformed")

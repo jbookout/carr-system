@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -56,6 +57,17 @@ class RestRefresh(unittest.TestCase):
         B.write_json({"project": name, "tasks": tasks})
 
     def test_two_open_twenty_merged_never_query_terminal_or_graphql(self):
+        # Authenticate terminal manifests once; subsequent renders use them.
+        def github(args, timeout=30):
+            path = args[1]
+            if "/pulls/" in path and path.rsplit("/", 1)[1].isdigit():
+                n = int(path.rsplit("/", 1)[1])
+                return pull(n, state="closed", merged_at="2026-10-04T00:00:00Z", merge_commit_sha=f"{n:040x}")
+            return self.github(args, timeout)
+        with patch.object(B, "gh_json", github):
+            for n in range(3, 23):
+                self.assertIsNone(B.fetch_pr(n, REPO)[1])
+        self.calls.clear()
         tasks = {str(n): {"pr": n, "repo": REPO, "status": "done", "stage": "merged",
                          "pr_phase": "Merged", "merge_sha": f"{n:040x}", "pr_head": SHA}
                  for n in range(3, 23)}
@@ -77,7 +89,10 @@ class RestRefresh(unittest.TestCase):
             self.assertEqual(len(self.calls), 5)
             self.calls.clear()
             B.render("one")
-            self.assertEqual(self.calls, [["api", f"repos/{REPO}/pulls/1"]])
+            self.assertEqual(len(self.calls), 3)
+            self.assertTrue(self.calls[0][1].endswith("/pulls/1"))
+            self.assertTrue(any("/check-runs?" in c[1] for c in self.calls))
+            self.assertTrue(any("/statuses?" in c[1] for c in self.calls))
 
     def test_read_failure_keeps_last_state_and_marks_snapshot_stale(self):
         self.board("demo", {"a": {"pr": 1, "repo": REPO, "status": "running"}})
@@ -92,7 +107,7 @@ class RestRefresh(unittest.TestCase):
         self.assertEqual(snapshot["github_sync"]["failed"][0]["card"], "a")
         self.assertIn("REST rate limited", snapshot["github_sync"]["failed"][0]["error"])
 
-    def test_terminal_observation_survives_restart_and_never_refetches(self):
+    def test_merged_is_immutable_but_closed_refreshes_once_per_pass(self):
         for state in ("MERGED", "CLOSED"):
             with self.subTest(state=state):
                 raw = pull(40 if state == "MERGED" else 41, state="closed",
@@ -104,8 +119,17 @@ class RestRefresh(unittest.TestCase):
                     result, error = B.fetch_pr(raw["number"], REPO)
                 self.assertIsNone(error)
                 self.assertEqual(result["state"], state)
-                with patch.object(B, "gh_json", side_effect=AssertionError("terminal refetched")):
-                    again, error = B.fetch_pr(raw["number"], REPO)
+                if state == "MERGED":
+                    with patch.object(B, "gh_json", side_effect=AssertionError("terminal refetched")):
+                        again, error = B.fetch_pr(raw["number"], REPO)
+                else:
+                    with patch.object(B, "gh_json", github), B.github_read_pass():
+                        again, error = B.fetch_pr(raw["number"], REPO)
+                        self.calls.clear()
+                        B.fetch_pr(raw["number"], REPO)
+                        self.assertEqual(self.calls, [])
+                    again = {k: v for k, v in again.items() if k != "_observation"}
+                    result = {k: v for k, v in result.items() if k != "_observation"}
                 self.assertEqual(again, result)
                 self.assertIsNone(error)
 
@@ -215,6 +239,178 @@ class RestRefresh(unittest.TestCase):
                 self.assertIsNone(error)
                 self.assertEqual(observed["reviewDecision"], "")
                 self.assertEqual(B.derived_pr_state(observed), ("review", "review", "Awaiting review"))
+
+    def test_discovered_closure_invalidates_shared_open_result_before_cursor_moves(self):
+        merged = False
+        def github(args, timeout=30):
+            path = args[1]
+            if "/pulls?" in path:
+                return []
+            if "/issues?" in path:
+                return [{"number": 1, "state": "closed", "updated_at": "2026-10-04T01:00:00Z",
+                         "pull_request": {"url": "pr"}}]
+            if path.endswith("/pulls/1") and merged:
+                return pull(state="closed", merged_at="2026-10-04T01:00:00Z",
+                            updated_at="2026-10-04T01:00:00Z", merge_commit_sha="b" * 40)
+            return self.github(args, timeout)
+        with patch.object(B, "gh_json", github), B.github_read_pass():
+            self.assertEqual(B.fetch_pr(1, REPO)[0]["state"], "OPEN")
+            merged = True
+            opened, closed = B.read_repository(REPO, "2026-10-01")
+            self.assertEqual(opened, [])
+            self.assertEqual([p["number"] for p in closed], [1])
+            self.assertTrue(B.read_json_file(B.board_dir() / ".github-discovery.json").get(REPO))
+        with patch.object(B, "rest_rows", return_value=[]), B.github_read_pass():
+            self.assertEqual([p["number"] for p in B.read_repository(REPO, "2026-10-01")[1]], [1])
+
+    def test_unaccounted_closure_never_advances_cursor(self):
+        def github(args, timeout=30):
+            if "/pulls?" in args[1]:
+                return []
+            if "/issues?" in args[1]:
+                return [{"number": 1, "state": "closed", "updated_at": "2026-10-04T01:00:00Z",
+                         "pull_request": {"url": "pr"}}]
+            return self.github(args, timeout)
+        with patch.object(B, "gh_json", github), B.github_read_pass():
+            with self.assertRaisesRegex(RuntimeError, "closed discovery"):
+                B.read_repository(REPO, "2026-10-01")
+        self.assertNotIn(REPO, B.read_json_file(B.board_dir() / ".github-discovery.json"))
+
+    def test_success_refreshes_after_failure_rerun_or_new_check_on_same_pr_version(self):
+        checks = [{"name": "CI", "status": "completed", "conclusion": "success"}]
+        def github(args, timeout=30):
+            return {"check_runs": checks} if "/check-runs?" in args[1] else self.github(args, timeout)
+        with patch.object(B, "gh_json", github):
+            B.fetch_pr(1, REPO)
+            for checks, summary in [
+                ([{"name": "CI", "status": "completed", "conclusion": "failure"}], "0 pass · 0 pending · 1 fail"),
+                ([{"name": "CI", "status": "queued", "conclusion": None}], "0 pass · 1 pending · 0 fail"),
+                ([{"name": "CI", "status": "completed", "conclusion": "success"},
+                  {"name": "new", "status": "queued", "conclusion": None}], "1 pass · 1 pending · 0 fail")]:
+                observed, error = B.fetch_pr(1, REPO)
+                self.assertIsNone(error)
+                self.assertEqual(B.checks_summary(observed), summary)
+
+    def test_mergeability_refreshes_in_both_directions_even_with_discovery_hint(self):
+        mergeable = True
+        def github(args, timeout=30):
+            return pull(mergeable=mergeable) if args[1].endswith("/pulls/1") else self.github(args, timeout)
+        with patch.object(B, "gh_json", github):
+            B.fetch_pr(1, REPO)
+            for mergeable, expected in [(False, "CONFLICTING"), (True, "MERGEABLE")]:
+                with B.github_read_pass() as reader:
+                    observed, error = reader.read(1, REPO, pull())
+                self.assertIsNone(error)
+                self.assertEqual(observed["mergeable"], expected)
+
+    def test_closed_project_refresh_and_open_discovery_replace_closed_snapshot(self):
+        raw = pull(state="closed")
+        def github(args, timeout=30):
+            return raw if args[1].endswith("/pulls/1") else self.github(args, timeout)
+        with patch.object(B, "gh_json", github):
+            self.assertEqual(B.fetch_pr(1, REPO)[0]["state"], "CLOSED")
+            raw = pull(updated_at="2026-10-04T01:00:00Z")
+            self.assertEqual(B.fetch_pr(1, REPO)[0]["state"], "OPEN")
+            with B.github_read_pass() as reader:
+                self.assertEqual(reader.read(1, REPO, raw)[0]["state"], "OPEN")
+            self.assertEqual(B.fetch_pr(1, REPO)[0]["state"], "OPEN")
+        self.board("legacy", {"a": {"pr": 2, "repo": REPO, "pr_phase": "Closed unmerged"}})
+        with patch.object(B, "gh_json", self.github), B.github_read_pass() as reader:
+            observed, error = reader.read(2, REPO, pull(2))
+            self.assertIsNone(error)
+            self.assertTrue(B.valid_open_pr(observed))
+            self.assertEqual(observed["state"], "OPEN")
+
+    def test_delayed_success_cannot_overwrite_newer_failure_or_return_losing_snapshot(self):
+        nested = False
+        newer = None
+        def github(args, timeout=30):
+            nonlocal nested, newer
+            if "/check-runs?" in args[1]:
+                if not nested:
+                    nested = True
+                    newer = B.GitHubReadPass().read(1, REPO)[0]
+                    return {"check_runs": [{"name": "CI", "status": "completed", "conclusion": "success"}]}
+                return {"check_runs": [{"name": "CI", "status": "completed", "conclusion": "failure"}]}
+            return self.github(args, timeout)
+        with patch.object(B, "gh_json", github):
+            delayed, error = B.GitHubReadPass().read(1, REPO)
+        self.assertIsNone(error)
+        self.assertEqual(B.checks_summary(newer), "0 pass · 0 pending · 1 fail")
+        self.assertEqual(B.checks_summary(delayed), B.checks_summary(newer))
+        cached = B.read_json_file(B.board_dir() / ".github-pr-cache.json")[f"{REPO}#1"]
+        self.assertEqual(B.checks_summary(cached), B.checks_summary(newer))
+
+    def test_repository_reconciles_terminal_fact_written_after_pass_started(self):
+        with B.github_read_pass():
+            def github(args, timeout=30):
+                if args[1].endswith("/pulls/1"):
+                    return pull(state="closed", merged_at="2026-10-04T00:00:00Z", merge_commit_sha="b" * 40)
+                return self.github(args, timeout)
+            with patch.object(B, "gh_json", github):
+                self.assertEqual(B.GitHubReadPass().read(1, REPO)[0]["state"], "MERGED")
+            with patch.object(B, "rest_rows", return_value=[]):
+                self.assertEqual([p["number"] for p in B.read_repository(REPO, "2026-10-01")[1]], [1])
+
+    def test_legacy_seed_does_not_turn_activity_time_into_merge_time(self):
+        self.board("legacy", {"a": {"pr": 1, "repo": REPO, "pr_phase": "Merged",
+                                  "merge_sha": "b" * 40, "created_at": "2020-01-01T00:00:00Z",
+                                  "updated_at": "2026-10-04T00:00:00Z"}})
+        reader = B.GitHubReadPass()
+        self.assertIsNone(reader.saved[f"{REPO}#1"].get("mergedAt"))
+
+    def test_legacy_merged_manifest_is_authenticated_once_and_allows_delivery(self):
+        task = {"pr": 1, "repo": REPO, "pr_phase": "Merged", "stage": "merged", "status": "done",
+                "merge_sha": "b" * 40, "pr_head": SHA, "merged_at": "2026-10-04T00:00:00Z"}
+        self.board("all-repos", {"carr-system-1": task})
+        def github(args, timeout=30):
+            if args[1].endswith("/pulls/1"):
+                return pull(state="closed", merged_at=task["merged_at"], merge_commit_sha=task["merge_sha"])
+            return self.github(args, timeout)
+        with patch.object(B, "gh_json", github):
+            info, error = B.fetch_pr(1, REPO)
+        self.assertIsNone(error)
+        self.assertEqual(B.changed_paths(info), ["mcp-server/src/index.js"])
+        with patch.object(B, "gh_json", side_effect=AssertionError("migrated terminal refetched")):
+            self.assertEqual(B.fetch_pr(1, REPO)[0], info)
+        with patch.object(B, "latest_release", return_value={"sha": task["merge_sha"], "lane": "worker",
+                                                             "ts": None, "source": "test receipt"}):
+            board = B.assemble_all_repos(B.read_state("all-repos"), {REPO: ([], [info])})
+        self.assertEqual(board["tasks"]["carr-system-1"]["stage"], "live")
+
+    def test_recorded_fixture_contact_fields_are_synthetic_and_provenance_says_so(self):
+        root = Path(__file__).with_name("fixtures") / "progress-board-rest"
+        recorded = json.loads((root / "gh-pr-view-open.json").read_text())
+        for commit in recorded["commits"]:
+            for author in commit["authors"]:
+                self.assertTrue(author["email"].endswith("@example.invalid"), "fixture author contact must be synthetic")
+        for path in root.glob("*.json"):
+            for address in re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]+", path.read_text()):
+                self.assertTrue(address.endswith("@example.invalid"), f"{path.name} contact must be synthetic")
+        self.assertIn("sanitized", json.loads((root / "provenance.json").read_text())["capture_note"].lower())
+
+    def test_formal_reviews_use_configured_associations_and_login_exceptions(self):
+        rules = {"review_author_associations": ["OWNER"], "review_logins": ["trusted"]}
+        review = {"id": 1, "user": {"login": "collaborator"}, "author_association": "COLLABORATOR",
+                  "state": "APPROVED"}
+        def github(args, timeout=30):
+            return [review] if "/reviews?" in args[1] else self.github(args, timeout)
+        with patch.object(B, "gh_json", github), patch.object(B, "review_rules", return_value=rules):
+            self.assertEqual(B.fetch_pr(1, REPO)[0]["reviewDecision"], "")
+            review = {**review, "user": {"login": "trusted"}, "author_association": "NONE"}
+            self.assertEqual(B.fetch_pr(2, REPO)[0]["reviewDecision"], "APPROVED")
+
+    def test_cached_formal_review_is_recomputed_when_configured_trust_changes(self):
+        rules = {"review_author_associations": ["COLLABORATOR"], "review_logins": []}
+        def github(args, timeout=30):
+            if "/reviews?" in args[1]:
+                return [{"id": 1, "user": {"login": "collaborator"}, "author_association": "COLLABORATOR",
+                         "state": "APPROVED"}]
+            return self.github(args, timeout)
+        with patch.object(B, "gh_json", github), patch.object(B, "review_rules", side_effect=lambda repo: rules):
+            self.assertEqual(B.fetch_pr(1, REPO)[0]["reviewDecision"], "APPROVED")
+            rules = {"review_author_associations": ["OWNER"], "review_logins": []}
+            self.assertEqual(B.fetch_pr(1, REPO)[0]["reviewDecision"], "")
 
 
 if __name__ == "__main__":

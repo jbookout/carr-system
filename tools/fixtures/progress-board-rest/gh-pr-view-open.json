@@ -5,20 +5,20 @@
       "authoredDate": "2026-10-04T03:13:01Z",
       "authors": [
         {
-          "email": "joe.bookout.carr.us@gmail.com",
+          "email": "fixture-author-0@example.invalid",
           "id": "MDQ6VXNlcjY0MjA3Mzc0",
           "login": "jbookout",
           "name": "jbookout"
         },
         {
-          "email": "noreply@anthropic.com",
+          "email": "fixture-author-1@example.invalid",
           "id": "MDQ6VXNlcjgxODQ3",
           "login": "claude",
           "name": "Claude Opus 5.5"
         }
       ],
       "committedDate": "2026-10-04T05:34:54Z",
-      "messageBody": "\u2026edger stays a prefix\n\nPR #1498 merged 0783_deal_timeline_lease_read.sql after the 6c346181 worker\nrelease (run 20261003T220008Z-fc609c) had already applied 0785, 0786 and 0787\nto staging and production. The applied ledger (..., 0782, 0785, 0786, 0787)\nwas then no longer a prefix of the source tree (..., 0782, 0783, 0785, ...),\nso the 98080b3c release stopped at staging-prepare with \"partial candidate\nledger is not an exact source prefix\". tools/migrate.py's applied-ledger\ncheck would refuse the same reorder in production. 0783 applied nowhere.\n\nSame shape and fix as #1464 (0757 -> 0763) and #1500 (0769/0770 -> 0785/0786).\n0798 reserved via tools/reserve-migration.py. The file moves unchanged (same\nbytes); the only other edit repoints the local-deals-store test at the new\npath.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+      "messageBody": "\u2026edger stays a prefix\n\nPR #1498 merged 0783_deal_timeline_lease_read.sql after the 6c346181 worker\nrelease (run 20261003T220008Z-fc609c) had already applied 0785, 0786 and 0787\nto staging and production. The applied ledger (..., 0782, 0785, 0786, 0787)\nwas then no longer a prefix of the source tree (..., 0782, 0783, 0785, ...),\nso the 98080b3c release stopped at staging-prepare with \"partial candidate\nledger is not an exact source prefix\". tools/migrate.py's applied-ledger\ncheck would refuse the same reorder in production. 0783 applied nowhere.\n\nSame shape and fix as #1464 (0757 -> 0763) and #1500 (0769/0770 -> 0785/0786).\n0798 reserved via tools/reserve-migration.py. The file moves unchanged (same\nbytes); the only other edit repoints the local-deals-store test at the new\npath.\n\nCo-Authored-By: Claude Opus 5.5 <fixture-author@example.invalid>",
       "messageHeadline": "Renumber the deal-timeline lease read migration 0783 -> 0798 so the l\u2026",
       "oid": "2dcc0fd51c5139dca1d2e648a7e7392e5e1c1a6e"
     }
