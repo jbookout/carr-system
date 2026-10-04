@@ -3221,6 +3221,47 @@ class GitHubApiRetry(unittest.TestCase):
         self.assertNotIn(token, str(ctx.exception))
         self.assertIn("HTTP 401", str(ctx.exception))
 
+    def test_fine_grained_tokens_are_redacted_without_environment_credentials(self):
+        token = "github" + "_pat_" + ("A" * 82)
+        for suffix in ("", "." * 150 + "\n"):
+            with self.subTest(crosses_cutoff=bool(suffix)):
+                fail = (1, "", f"Authorization: token {token}\n{suffix}HTTP 401\n")
+                with mock.patch.object(rp.subprocess, "run", side_effect=self._gh(fail, fail, fail)), \
+                        mock.patch.object(rp.time, "sleep"):
+                    with self.assertRaises(rp.Blocked) as ctx:
+                        rp.GitHub("o/r", {}).api(self.PATH)
+                self.assertNotIn("A" * 10, ctx.exception.detail)
+                self.assertNotIn("github" + "_pat_", ctx.exception.detail)
+                self.assertIn("[REDACTED]", ctx.exception.detail)
+                self.assertIn("HTTP 401", ctx.exception.detail)
+
+
+class GitHubDiagnosticPersistence(Base):
+    def test_fine_grained_tokens_never_reach_console_or_blocked_records(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        pipe = self.fx.pipeline(FakeRunner())
+        pipe.github_factory = lambda repo: rp.GitHub(repo, {})
+        output = []
+        pipe.out = output.append
+        token = "github" + "_pat_" + ("A" * 82)
+        real_run = rp.subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[0] == "gh":
+                return subprocess.CompletedProcess(argv, 1, "", f"Authorization: token {token}\nHTTP 401\n")
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run), \
+                mock.patch.object(rp.time, "sleep"):
+            self.assertEqual(pipe.tick(["worker"]), 0)
+        record = self.fx.records()[-1]
+        self.assertEqual(record["status"], "blocked")
+        self.assertEqual(record["reason"], "github_unreadable")
+        for diagnostic in ("\n".join(output), json.dumps(record)):
+            self.assertNotIn(token, diagnostic)
+            self.assertIn("[REDACTED]", diagnostic)
+            self.assertIn("HTTP 401", diagnostic)
+
 
 class Report(Base):
     def test_report_lists_what_shipped(self):
