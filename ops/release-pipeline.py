@@ -370,6 +370,12 @@ def expand(p: str) -> Path:
     return Path(os.path.expanduser(p))
 
 
+def lane_repo_dir(cfg: dict, lane: str, repo: Path) -> Path:
+    """The checkout a lane releases from: this repository for the worker,
+    the configured app checkout for the app."""
+    return repo if lane == "worker" else expand(cfg[lane]["repo_path"])
+
+
 def kill_switch(cfg: dict, lane: str | None = None) -> str | None:
     """Why this run must not proceed, or None. Checked before any command."""
     if cfg.get("enabled") is not True:
@@ -387,6 +393,10 @@ class Store:
         self.root = root
         self.state_path = root / "state.json"
         self.records_path = root / "releases.jsonl"
+
+    def release_worktree(self, lane: str, sha: str) -> Path:
+        """Where a lane's release of `sha` checks out; a failure keeps it."""
+        return self.root / "worktrees" / f"{lane}-{sha[:12]}"
 
     def load(self) -> dict:
         try:
@@ -1592,10 +1602,7 @@ class Pipeline:
         lane_state = state.setdefault(lane, {})
         sha = base = ""
         try:
-            if lane == "worker":
-                repo_dir = self.repo
-            else:
-                repo_dir = expand(lane_cfg["repo_path"])
+            repo_dir = lane_repo_dir(self.cfg, lane, self.repo)
             self.git("fetch", "--quiet", "origin", "main", cwd=repo_dir)
             sha = self.git("rev-parse", "origin/main", cwd=repo_dir)
             base = self.last_released(state, lane, lane_cfg)
@@ -1836,7 +1843,7 @@ class Pipeline:
                  f"({ev['verifier_evidence']}); test={ev['test_evidence']}")
         self.dry_tolerant("unattended credentials", lambda: self.unattended_preflight(lane_cfg), None)
 
-        wt = self.store.root / "worktrees" / f"worker-{sha[:12]}"
+        wt = self.store.release_worktree("worker", sha)
         mcp = wt / "mcp-server"
         py = str(wt / ".venv/bin/python")
         budget = ["--performance-budget-ref", lane_cfg["performance_budget_ref"],
@@ -2126,7 +2133,7 @@ class Pipeline:
                                 {"prs": [], "pre_pipeline_prs": [], "verifier_evidence": "<approval>"})
         self.out(f"  evidence: PRs {rev['prs']} approved; head approval {rev['verifier_evidence']}")
         self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
-        wt = self.store.root / "worktrees" / f"app-{sha[:12]}"
+        wt = self.store.release_worktree("app", sha)
         self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
         self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600,
@@ -2479,23 +2486,41 @@ def report(store: Store, day: str) -> str:
     return "\n".join(lines)
 
 
-def clear_failed(store: Store, lane: str, sha: str, reason: str) -> str:
+def clear_failed(store: Store, lane: str, sha: str, reason: str, *, repo_dir: Path) -> str:
     """The one sanctioned way to let a failed SHA be attempted again (after a
     fix outside the repository, such as a restored credential). A fix merged to
-    main needs none of this: the new SHA is attempted on its own."""
+    main needs none of this: the new SHA is attempted on its own.
+
+    The failed run kept its worktree for diagnosis, and add_worktree refuses
+    an existing one, so the retry would burn the SHA again. The kept worktree
+    is moved aside (never deleted) and `repo_dir`'s worktree list pruned."""
     state = store.load()
     lane_state = state.get(lane) or {}
     if not lane_state.get("failed_sha"):
         return f"release-pipeline[{lane}]: nothing to clear"
     if lane_state["failed_sha"] != sha:
         raise SystemExit(f"release-pipeline[{lane}]: failed SHA is {lane_state['failed_sha']}, not {sha}")
+    kept = store.release_worktree(lane, sha)
+    moved = None
+    if kept.exists():
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        moved = store.root / "worktrees-cleared" / f"{kept.name}-{stamp}"
+        moved.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(kept, moved)
+        proc = subprocess.run(["git", "-C", str(repo_dir), "worktree", "prune"], env=child_env(),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            raise SystemExit(f"release-pipeline[{lane}]: moved {kept} to {moved}, but `git -C {repo_dir} "
+                             f"worktree prune` failed: {proc.stderr.strip()[:300]}; failure NOT cleared")
     previous = {k: lane_state.get(k) for k in ("failed_sha", "failed_step", "failed_at")}
     lane_state.update({"failed_sha": None, "failed_step": None, "failed_at": None})
     state[lane] = lane_state
     store.save(state)
     store.record({"lane": lane, "sha": sha, "status": "failure_cleared", "reason": reason, **{
-        "cleared_" + k: v for k, v in previous.items()}})
-    return f"release-pipeline[{lane}]: cleared failed {sha[:12]} ({previous['failed_step']}); next tick retries it"
+        "cleared_" + k: v for k, v in previous.items()}, **({"cleared_worktree": str(moved)} if moved else {})})
+    retired = f"; kept worktree moved to {moved}" if moved else ""
+    return (f"release-pipeline[{lane}]: cleared failed {sha[:12]} ({previous['failed_step']}){retired}; "
+            "next tick retries it")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2514,7 +2539,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.lane or len(args.lane) != 1 or not args.sha or not args.reason:
             ap.error("clear-failed needs exactly one --lane, --sha and --reason")
         print(clear_failed(Store(REPO / cfg.get("state_dir", "out/release-pipeline")),
-                           args.lane[0], args.sha, args.reason))
+                           args.lane[0], args.sha, args.reason, repo_dir=lane_repo_dir(cfg, args.lane[0], REPO)))
         return 0
     if args.command == "report":
         print(report(Store(REPO / cfg.get("state_dir", "out/release-pipeline")), args.date))
