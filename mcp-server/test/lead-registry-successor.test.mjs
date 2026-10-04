@@ -4,13 +4,13 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { TOOLS } from '../src/tools.js';
 import { assertRegisteredOperation, SCAC_MUTATION_REGISTRY_VERSION } from '../src/mutation-registry.js';
-import { frozenInventory, boundInventoryRows, assertCurrentSourceInventoryMatchesFixture } from '../../ops/scac-mutation-inventory.mjs';
+import { CURRENT_REGISTRY_VERSION, frozenInventory, boundInventoryRows, assertCurrentSourceInventoryMatchesFixture } from '../../ops/scac-mutation-inventory.mjs';
 
 test('lead successor preserves delivered Observatory v105 and admits both contracts', async () => {
   const v105 = readFileSync(new URL('../src/scac-mutation-registry.v105.generated.js', import.meta.url));
   assert.equal(createHash('sha256').update(v105).digest('hex'), 'b9f4d0cf0a92e8ac1ab32409d5e5aaad767dd2f20d2a40fbf24e5eb6d60fd9d8');
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v106');
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, 'scac-mutation-registry.v106'), true);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, CURRENT_REGISTRY_VERSION);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const predecessor = frozenInventory('scac-mutation-registry.v105');
   const successor = frozenInventory('scac-mutation-registry.v106');
   for (const operation of ['ask-jev', 'read-room-latest']) {

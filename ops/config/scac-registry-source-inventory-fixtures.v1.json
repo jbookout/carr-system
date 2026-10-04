@@ -87986,8 +87986,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "898d9621d7460f533184dd366b774a80b7a25a141c0b29cbd80bdb358727625a",
-          "handler_digest": "898d9621d7460f533184dd366b774a80b7a25a141c0b29cbd80bdb358727625a",
+          "schema_digest": "ce919c71a29e6254d339cd7d5a740cd734c1f8abc669d3a96dd7183fde3fdc66",
+          "handler_digest": "ce919c71a29e6254d339cd7d5a740cd734c1f8abc669d3a96dd7183fde3fdc66",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -88051,7 +88051,7 @@
         }
       ],
       "expected_count": 1108,
-      "expected_sha256": "fb83a263a546da97cae0ebc72a18a08cb4dd922d43ab09794ae253e93bbf3af4",
+      "expected_sha256": "5823bcc8d2cafb47d034ba2367bab7cc1f793a2983102e529e9a7efaa6f4d936",
       "reason": "Carry the reviewed source-only administrative rows forward to relationship v107 and bind tools/migrate.py to the relationship atomic group. No ingress or authority contract changes in this review."
     }
   }

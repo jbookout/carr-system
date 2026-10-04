@@ -630,6 +630,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0811_lead_stage_automation.sql",
         "0812_lead_automation_scac_successor.sql",
     ),
+    (
+        "0819_relationship_deal_links.sql",
+        "0820_relationship_scac_successor.sql",
+    ),
 )
 
 FORBIDDEN_MIGRATION_FILENAMES = frozenset({
