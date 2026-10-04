@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -27,7 +28,8 @@ EVIDENCE = {
     "branches": frozenset({"branch_idle"}),
 }
 # An unreadable evidence source cannot prove the findings it feeds have cleared.
-EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment"})
+EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment", "rate_limited"})
+RATE_LIMIT = re.compile(r"API rate limit|secondary rate limit", re.I)
 RELEASE_LANE = re.compile(r"^release-pipeline\[([^\]]+)\]: (.*)$")
 # Lines that end a lane's tick (ops/release-pipeline.py run_lane). Anything else the
 # lane prints, such as a failed loop filing after BLOCKED, never replaces its outcome.
@@ -384,6 +386,14 @@ def reconcile(root, config, found, effects, now, complete=True):
             if existing["status"] != "done":
                 extras.append(finding("action_error", action_key, "prior action intent is unresolved; inspect before retry", config))
             continue
+        # A cached finding is only a candidate. A refused fresh predicate has
+        # executed no effect and must not consume the once-only action slot.
+        try:
+            if not effects.prepare(action, f):
+                continue
+        except Exception as exc:
+            extras.append(finding("action_error", action_key, str(exc), config))
+            continue
         intent = {"key": action_key, "action": action, "status": "intent", "at": stamp(now)}
         append(actions_path, intent)
         actions[action_key] = intent
@@ -430,7 +440,12 @@ PR_FIELDS = "number,headRefOid,headRefName,updatedAt,isDraft,mergeable,comments,
 
 def collect_pr(repo, number, config):
     pr = json.loads(command(["gh", "pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS], config))
-    # gh pr's JSON fields omit queue membership; query the provider's queue entry.
+    pr["repo"] = repo
+    # gh pr's JSON fields omit queue membership. Only a repository that uses
+    # GitHub's merge queue can have an entry, so others skip the query.
+    pr["mergeQueueEntry"] = None
+    if repo not in config.get("github_merge_queue_repositories", []):
+        return pr
     owner, name = repo.split("/")
     query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeQueueEntry{id}}}}"
     queued = json.loads(command(["gh", "api", "graphql", "-f", "query=" + query,
@@ -439,16 +454,100 @@ def collect_pr(repo, number, config):
     if queued.get("errors"):
         raise RuntimeError(json.dumps(queued["errors"]))
     pr["mergeQueueEntry"] = queued["data"]["repository"]["pullRequest"]["mergeQueueEntry"]
-    pr["repo"] = repo
     return pr
 
 
-def collect(root, config):
+def settled(pr):
+    """Known mergeability and completed checks permit the longer cache interval."""
+    checks = pr.get("statusCheckRollup") or []
+    return bool(checks) and pr.get("mergeable") in {"MERGEABLE", "CONFLICTING"} and all(
+        (c.get("status", "COMPLETED") == "COMPLETED" and c.get("conclusion") in
+         {"SUCCESS", "SKIPPED", "NEUTRAL", "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"})
+        or c.get("state") in {"SUCCESS", "FAILURE", "ERROR"}
+        for c in checks)
+
+
+def read_pr_cache(path):
+    """Optimization data is disposable; malformed entries never blind evidence."""
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(cache, dict):
+        return {}
+    valid = {}
+    for key, entry in cache.items():
+        try:
+            pr = entry["pr"]
+            version = entry["version"]
+            collected = entry["collected_at"]
+            if (not isinstance(pr, dict) or not isinstance(version, list) or len(version) != 2
+                    or not isinstance(collected, (int, float)) or isinstance(collected, bool)
+                    or not math.isfinite(collected) or collected < 0
+                    or not isinstance(pr["number"], int) or isinstance(pr["number"], bool) or pr["number"] <= 0
+                    or not isinstance(pr["repo"], str) or key != f"{pr['repo']}#{pr['number']}"
+                    or not isinstance(pr["headRefOid"], str) or not re.fullmatch(r"[0-9a-f]{40}", pr["headRefOid"])
+                    or not isinstance(pr["updatedAt"], str)
+                    or version != [pr["headRefOid"], pr["updatedAt"]]
+                    or not isinstance(pr["isDraft"], bool)
+                    or pr["mergeable"] not in {"UNKNOWN", "MERGEABLE", "CONFLICTING"}):
+                continue
+            epoch(pr["updatedAt"])
+            for field in ("comments", "reviews", "commits", "statusCheckRollup"):
+                if not isinstance(pr[field], list) or not all(isinstance(row, dict) for row in pr[field]):
+                    raise ValueError("invalid PR snapshot rows")
+            for row in pr["comments"] + pr["reviews"]:
+                if (not isinstance(row.get("body", ""), str)
+                        or not isinstance(row.get("state", ""), str)):
+                    raise ValueError("invalid review body or state")
+                epoch(row.get("submittedAt") or row.get("createdAt") or pr["updatedAt"])
+                reviewed_head(row)
+            for row in pr["commits"]:
+                epoch(row["committedDate"])
+            for row in pr["statusCheckRollup"]:
+                if any(not isinstance(row[field], str) for field in ("status", "conclusion", "state")
+                       if field in row and row[field] is not None):
+                    raise ValueError("invalid check state")
+            valid[key] = entry
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            continue
+    return valid
+
+
+def rate_limit_reason(config, original):
+    try:
+        resources = json.loads(command(["gh", "api", "rate_limit"], config))["resources"]
+        if not isinstance(resources, dict):
+            raise ValueError("resources must be a mapping")
+        relevant = {k: r for k, r in resources.items() if k in {"core", "graphql"}}
+        if not relevant:
+            raise ValueError("no core or graphql diagnostic")
+        for resource in relevant.values():
+            if not isinstance(resource, dict) or any(
+                    not isinstance(resource[field], int) or isinstance(resource[field], bool) or resource[field] < 0
+                    for field in ("remaining", "used", "limit", "reset")):
+                raise ValueError("invalid resource fields")
+        spent = {k: r for k, r in relevant.items() if r["remaining"] == 0}
+        resets = "; ".join(f"{k} {r['used']}/{r['limit']} resets {stamp(r['reset'])}"
+                           for k, r in sorted(spent.items()))
+        return str(original) + ("; exhausted allowance: " + resets if resets else "; primary allowances not exhausted")
+    except Exception as exc:
+        return f"{original}; rate-limit diagnostic unreadable: {exc}"
+
+
+def collect(root, config, now=None):
+    now = time.time() if now is None else now
     facts = {"jobs": [], "prs": [], "logs": [], "branches": [], "errors": [], "queue": ""}
-    missing = {}
+    missing, limited = {}, {}
     def error(subject, exc, evidence):
         blinds = EVIDENCE[evidence]
-        if isinstance(exc, MissingTool):
+        if RATE_LIMIT.search(str(exc)):
+            # One exhausted allowance is one scan-level finding, not one per PR.
+            if not limited:
+                limited["github"] = {"kind": "rate_limited", "source": "github",
+                                     "reason": rate_limit_reason(config, exc),
+                                     "blinds": EVIDENCE["prs"] | EVIDENCE["branches"]}
+        elif isinstance(exc, MissingTool):
             # One absent tool is one environment defect, however many sources needed it.
             entry = missing.setdefault(exc.tool, {"kind": "environment", "source": exc.tool,
                                                   "reason": str(exc), "blinds": set()})
@@ -478,17 +577,42 @@ def collect(root, config):
             facts["queue"] = queue.read_text()
         except OSError as exc:
             error("merge queue", exc, "merge_queue")
+    # Each PR's GraphQL snapshot is reused while the REST listing shows the same
+    # head and updated_at, bounded by an age limit for changes that bump neither.
+    cache_path = path_at(root, config["paths"]["pr_cache"])
+    cache = read_pr_cache(cache_path)
+    t = config["thresholds"]
     for repo in config["repositories"]:
+        if limited:
+            facts["prs"].extend(v["pr"] for k, v in cache.items() if k.startswith(repo + "#"))
+            continue  # Stop provider reads; all skipped evidence is blinded.
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100"], config))
+            # Closed PRs leave the cache; an unlisted repository keeps its entries.
+            listed = {f"{repo}#{pr['number']}" for page in pages for pr in page}
+            cache = {k: v for k, v in cache.items() if k in listed or not k.startswith(repo + "#")}
             for page in pages:
                 for pr in page:
+                    key, version = f"{repo}#{pr['number']}", [pr["head"]["sha"], pr["updated_at"]]
+                    entry = cache.get(key)
+                    if entry and (limited or (entry["version"] == version and now - entry["collected_at"] <
+                                              t["pr_cache_seconds" if settled(entry["pr"]) else "pr_cache_pending_seconds"])):
+                        facts["prs"].append(entry["pr"])  # Rate-limited: keep the previous state.
+                        continue
+                    if limited:
+                        continue  # Never collected; the rate_limited finding blinds its kinds.
                     try:
-                        facts["prs"].append(collect_pr(repo, pr["number"], config))
+                        cache[key] = {"version": version, "collected_at": now,
+                                      "pr": collect_pr(repo, pr["number"], config)}
+                        facts["prs"].append(cache[key]["pr"])
                     except Exception as exc:
                         error(f"{repo}#{pr['number']}", exc, "prs")
+                        if limited and entry:
+                            facts["prs"].append(entry["pr"])
         except Exception as exc:
             error(repo + " PRs", exc, "prs")
+        if limited:
+            continue
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
@@ -509,7 +633,14 @@ def collect(root, config):
                                   "tail": tail(log, config["thresholds"]["log_tail_bytes"])})
         except OSError as exc:
             error(str(log), exc, kind + "_log")
-    facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in missing.values())
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        staged = cache_path.with_suffix(".tmp")
+        staged.write_text(json.dumps(cache, separators=(",", ":")))
+        staged.replace(cache_path)
+    except OSError:
+        pass  # A lost cache only costs the next scan a full collection.
+    facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in [*missing.values(), *limited.values()])
     # A successful restarted job supersedes the killed attempt's expected exit.
     recovered = {j.get("root_id") for j in facts["jobs"] if j.get("restart_count", 0) and j.get("exit_code") == 0}
     for job in facts["jobs"]:
@@ -670,16 +801,19 @@ class Effects:
                               "--results", str(self.root / "out/watchdog" / (name + ".result.jsonl")),
                               "send", name, brief, "--fresh", *(["--stream-output"] if c["fixer"]["stream_output"] else [])], tree, job_id=name)
 
+    def prepare(self, action, f):
+        """Validate candidates before reconciliation reserves a non-repeatable effect."""
+        if action == "restart_once":
+            return True
+        fresh = collect_pr(f["repo"], f["pr"], self.config)
+        if fresh["headRefOid"] != f["head"]:
+            return False
+        candidates = detect({"prs": [fresh]}, self.config, time.time())
+        return any(x["kind"] == f["kind"] for x in candidates)
+
     def act(self, action, f):
         if action == "restart_once":
             return self.restart(f)
-        # Re-read head/review/CI/queue membership immediately before a PR effect.
-        fresh = collect_pr(f["repo"], f["pr"], self.config)
-        if fresh["headRefOid"] != f["head"]:
-            raise RuntimeError("head changed; obsolete action refused")
-        candidates = detect({"prs": [fresh]}, self.config, time.time())
-        if not any(x["kind"] == f["kind"] for x in candidates):
-            raise RuntimeError("PR action predicate changed; effect refused")
         return self.enqueue(f) if action == "enqueue" else self.fix(f)
 
 
@@ -706,11 +840,14 @@ def scan(root, config, config_path=None):
                             "previous_status": prior_runs.get("scan", {}).get("status")})
             effects = Effects(root, config)
             effects.config_path = Path(config_path or SOURCE / "ops/config/job-watchdog.json").resolve()
-            facts = collect(root, config)
+            facts = collect(root, config, now)
             found = reconcile(root, config, detect(facts, config, now), effects, now)
             append(ledger, {"key": "scan", "status": "completed", "at": stamp(),
                             "findings": len(found), "collection_errors": len(facts["errors"])})
             print(digest(root, config))
             return 1 if facts["errors"] or any(f["kind"] in {"action_error", "record_error"} for f in found) else 0
     except BlockingIOError:
-        return 0  # Another scan owns the entire interval's effects.
+        # Another scan owns the entire interval's effects; say so instead of vanishing.
+        append(path_at(root, config["paths"]["scan_ledger"]),
+               {"key": "scan_skipped", "status": "skipped", "at": stamp(), "reason": "another scan holds the scan lock"})
+        return 0

@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { registeredOperation } from '../src/mutation-registry.js';
-import { frozenInventory } from '../../ops/scac-mutation-inventory.mjs';
+import { CURRENT_REGISTRY_VERSION, frozenInventory } from '../../ops/scac-mutation-inventory.mjs';
 
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const read = name => readFileSync(resolve(root, name), 'utf8');
@@ -42,6 +42,7 @@ test('Codex session read has its own sealed successor', () => {
   assert.equal(registeredOperation('list-my-codex-sessions').schema_digest,
     frozenInventory('scac-mutation-registry.v97')
       .find(row => row.ingress_key === 'mcp-tool:list-my-codex-sessions').schema_digest);
+  assert.match(read('mcp-server/src/mutation-registry.js'), new RegExp(CURRENT_REGISTRY_VERSION.replaceAll(".", "\\.") + "\\.generated\\.js"));
 });
 
 // Both branches advanced the registry: Observatory must follow the delivered Jev cap seal.
@@ -69,19 +70,23 @@ test('Observatory successor has an unshared migration number at the end of main'
 });
 
 
-test('relationship attribution follows Observatory without rewriting its sealed read contract', () => {
-  const predecessor = frozenInventory('scac-mutation-registry.v105');
-  const successor = frozenInventory('scac-mutation-registry.v106');
-  assert.deepEqual(successor.find(row => row.ingress_key === 'mcp-tool:read-room-latest'),
-    predecessor.find(row => row.ingress_key === 'mcp-tool:read-room-latest'));
+test('relationship attribution follows lead automation without rewriting its sealed contracts', () => {
+  const predecessor = frozenInventory('scac-mutation-registry.v106');
+  const successor = frozenInventory('scac-mutation-registry.v107');
+  for (const key of ['mcp-tool:read-room-latest', 'mcp-tool:advance-leads', 'mcp-tool:approve-lead-draft'])
+    assert.deepEqual(successor.find(row => row.ingress_key === key),
+      predecessor.find(row => row.ingress_key === key));
   assert.notEqual(successor.find(row => row.ingress_key === 'mcp-tool:link-parties').schema_digest,
     predecessor.find(row => row.ingress_key === 'mcp-tool:link-parties').schema_digest);
   const names = readdirSync(resolve(root, 'migrations')).sort();
-  const successorName = '0810_relationship_scac_successor.sql';
+  const successorName = '0820_relationship_scac_successor.sql';
   assert.deepEqual(names.filter(name => /_relationship_scac_successor[.]sql$/.test(name)), [successorName]);
+  assert.ok(successorName > '0812_lead_automation_scac_successor.sql');
   const sql = read(`migrations/${successorName}`);
-  assert.match(sql, /filename='0807_observatory_room_read_scac_successor[.]sql' and sha256='[0-9a-f]{64}'/);
-  assert.match(sql, /filename='0809_relationship_deal_links[.]sql' and sha256='[0-9a-f]{64}'/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry[.]v106[.]generated[.]js/);
-  assert.match(read('tools/migrate.py'), /"0809_relationship_deal_links[.]sql", "0810_relationship_scac_successor[.]sql"/);
+  assert.match(sql, /filename='0812_lead_automation_scac_successor[.]sql' and sha256='[0-9a-f]{64}'/);
+  assert.match(sql, /filename='0819_relationship_deal_links[.]sql' and sha256='[0-9a-f]{64}'/);
+  assert.match(sql, /scac_mutation_registration_v106/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry[.]v107[.]generated[.]js/);
+  assert.match(read('tools/migrate.py'),
+    /"0819_relationship_deal_links[.]sql",\n\s+"0820_relationship_scac_successor[.]sql"/);
 });

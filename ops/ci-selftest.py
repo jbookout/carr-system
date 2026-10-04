@@ -1372,11 +1372,15 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
 def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     """PR1121's strict migration job was killed at 20 minutes, while its
     separate exact-head DB acceptance succeeded after 23m51s. Allow at least
-    40 minutes including setup and post-CI acceptance, without relaxing the
-    other groups' budgets. PR1493 also exhausted its separate 25-minute lane.
+    30 minutes including setup, without relaxing the other groups' budgets.
     Both workflows run the canonical migration class; its budget must also
     cover the separate database lane. Read the actual job/matrix wiring,
     so an unused budget cannot pass.
+
+    The database lane runs that class and then its own acceptance programs.
+    On 2026-10-04 it routinely took 22-24 minutes, and six branches
+    (PR 1470's run 37182226032 among them) were cancelled at a 25-minute cap
+    after every check had passed. It needs the same headroom.
     """
     job = _hosted_workflow()["jobs"]["classes"]
     groups = job["strategy"]["matrix"]["classes"]
@@ -1389,14 +1393,17 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     migration_budget, other_budget = map(int, budgets.groups())
     database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
     database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
-    check("database acceptance has bounded headroom over its observed 25-minute timeout",
-          isinstance(database_budget, int) and 35 <= database_budget <= 45, database_budget)
+    check("database acceptance declares a finite job budget",
+          isinstance(database_budget, int) and database_budget > 0, database_budget)
     check("hosted migration budget covers the database lane budget",
           isinstance(database_budget, int) and migration_budget >= database_budget > 0,
           {"migration_minutes": migration_budget, "database_minutes": database_budget})
+    bounded_headroom = range(30, 36)
+    check("database lane has bounded headroom over its observed 24-minute run",
+          database_budget in bounded_headroom, database_budget)
     migration = [migration_budget for group in groups if group == "migration"]
-    check("migration job retains bounded headroom for the complete database lane",
-          len(migration) == 1 and 35 <= migration[0] <= 45, migration)
+    check("migration job has bounded headroom over the observed 24-minute run",
+          len(migration) == 1 and migration[0] in bounded_headroom, migration)
     other = [other_budget for group in groups if group != "migration"]
     check("other class groups retain their 20-minute budgets",
           len(other) == 2 and all(budget == 20 for budget in other), other)

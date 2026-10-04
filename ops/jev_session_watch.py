@@ -1324,7 +1324,8 @@ def inspect_tool_event(tool_name, tool_input, output, exit_code, task_text, repo
     except Exception as exc:
         answer, bodies, status = {}, {}, "unavailable"
         results.append(_result("boundary_judgment", "unavailable", None, True,
-                               {"advice": "Jev boundary judgment unavailable; inspect this result manually"}))
+                               {"reason": getattr(exc, "reason", "inspection_error"),
+                                "advice": "Jev boundary judgment unavailable; inspect this result manually"}))
     if status == "answered":
         if "instructs" in questions:
             p = _noul_value(answer, "instructs")

@@ -1,9 +1,10 @@
+import { CURRENT_REGISTRY_VERSION } from "../../ops/scac-mutation-inventory.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { frozenInventory, renderConfirmMergeRegistrySql, renderRuntimeProjection,
   CONFIRM_MERGE_V102_DB_CATALOG_BASELINE } from "../../ops/scac-mutation-inventory.mjs";
-import { registeredOperation } from "../src/mutation-registry.js";
+import { registeredOperation, SCAC_MUTATION_REGISTRY_VERSION } from "../src/mutation-registry.js";
 
 test("confirm-merge v102 changes only its source contract and preserves v101 history", () => {
   const before = frozenInventory("scac-mutation-registry.v101");
@@ -18,6 +19,7 @@ test("confirm-merge v102 changes only its source contract and preserves v101 his
         principal_mode: "server_verified_human" });
     }
   }
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, CURRENT_REGISTRY_VERSION);
   assert.equal(registeredOperation("confirm-merge").human_only, true);
   assert.equal(readFileSync(new URL("../src/scac-mutation-registry.v102.generated.js", import.meta.url), "utf8"),
     renderRuntimeProjection(after, { version: "scac-mutation-registry.v102",

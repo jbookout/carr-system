@@ -128,7 +128,7 @@ jobs:
     # their separate database acceptance passed. Preserve measured headroom
     # and cover that lane's declared budget without extending other groups.
     # zsh setup retains its own short deadline below.
-    timeout-minutes: ${{ matrix.classes == 'migration' && 40 || 20 }}
+    timeout-minutes: ${{ matrix.classes == 'migration' && 35 || 20 }}
 
     services:
       # The migration class needs a database to apply 130 forward migrations to.

@@ -55,6 +55,11 @@ test("the cap successor changes only ask-jev's bound schema and preserves the pr
   assert.equal(changed.length, 1);
   assert.equal(changed[0].ingress_key, "mcp-tool:ask-jev");
   assert.equal(inventory.assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+  const { SCAC_MUTATION_REGISTRY_VERSION } = await import("../src/mutation-registry.js");
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, inventory.CURRENT_REGISTRY_VERSION);
+  const activeRows = inventory.boundInventoryRows(inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION));
+  assert.deepEqual(activeRows.find(row => row.ingress_key === "mcp-tool:ask-jev"),
+    newRows.find(row => row.ingress_key === "mcp-tool:ask-jev"));
 });
 
 test("budgeted cache-only misses never reserve or fetch, including a broken cache", async () => {

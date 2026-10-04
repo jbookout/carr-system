@@ -66,6 +66,14 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
+# NO CI RUN PAYS FOR JEV. ops/typesafe_client.py refuses every paid call while
+# this is set, and every hook a selftest spawns inherits it. Measured
+# 2026-10-04: selftest fixtures run from local CI and pre-push made 20-45% of
+# each day's paid Jev attempts, because a fixture that drops TYPESAFE_API_KEY
+# from its environment still reaches the credential FILE. Offline injected
+# transports are unaffected; only the real paid path is refused.
+export CARR_JEV_OFFLINE=1
+
 PY="$REPO/.venv/bin/python"
 [ -x "$PY" ] || PY=python3
 # Every gate selftest is an untrusted child: it may exercise a deliberately
