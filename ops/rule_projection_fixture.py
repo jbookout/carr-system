@@ -90,6 +90,6 @@ def seed_reviewed_rule_projection(cur, *, slug: str, title: str, rule_label: str
     # The last insert uses the actual constraint trigger, proving it observes
     # the complete projection after restoration rather than a manual refresh.
     insert_layer(*layers[-1])
-    cur.execute("set constraints scac_epoch_rule_load_layer immediate")
+    cur.execute("set constraints ops.scac_epoch_rule_load_layer immediate")
     cur.execute("set constraints all immediate")
     cur.execute("set constraints all deferred")

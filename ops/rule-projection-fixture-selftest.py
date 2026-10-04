@@ -79,7 +79,7 @@ class ProjectionFixtureTests(unittest.TestCase):
                 self.assertEqual(cur.disabled, set(), "fixture must restore every observer")
                 self.assertEqual(cur.refreshes, ["ops.rule_load_layer"],
                                  "only the final real insert should queue the expensive fingerprint")
-                self.assertIn("set constraints scac_epoch_rule_load_layer immediate", cur.queries)
+                self.assertIn("set constraints ops.scac_epoch_rule_load_layer immediate", cur.queries)
                 self.assertEqual(cur.queries[-1], "set constraints all deferred")
 
 
