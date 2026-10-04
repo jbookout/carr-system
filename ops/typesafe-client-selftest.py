@@ -49,9 +49,9 @@ _PERMISSIVE_SITE = {"caller": "*", "trigger": "selftest", "runs_in": "selftest",
                     "attribution": "session_or_job", "unattended": "allowed",
                     "hourly_budget": 10**9, "daily_budget": 10**9, "owner": "selftest",
                     "value": "selftest", "sources": ["ops/typesafe_client.py"]}
-client.load_call_sites = lambda path=None: {"hourly_paid_call_cap": 10**9,
-                                            "sites": {"*": _PERMISSIVE_SITE}}
-client.call_site = lambda caller, registry: _PERMISSIVE_SITE
+setattr(client, "load_call_sites", lambda path=None: {"hourly_paid_call_cap": 10**9,
+                                                     "sites": {"*": _PERMISSIVE_SITE}})
+setattr(client, "call_site", lambda caller, registry: _PERMISSIVE_SITE)
 for _name in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER"):
     os.environ.pop(_name, None)
 os.environ["CARR_JEV_JOB"] = "typesafe-client-selftest"

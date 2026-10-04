@@ -34,6 +34,7 @@ from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("typesafe_client_sites", REPO / "ops" / "typesafe_client.py")
+assert SPEC and SPEC.loader
 client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(client)
 REGISTRY_PATH = REPO / "ops" / "config" / "jev-call-sites.v1.json"
@@ -81,7 +82,8 @@ class Harness(unittest.TestCase):
         self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
         self.enterContext(patch.object(client, "_launch_spend_alert_worker", lambda *a: None))
         env = {k: v for k, v in os.environ.items()
-               if k not in client.SESSION_ID_ENV_KEYS + ("CARR_JEV_JOB", "XPC_SERVICE_NAME", "CARR_JEV_WORKER")}
+               if k not in client.SESSION_ID_ENV_KEYS + ("CARR_JEV_JOB", "XPC_SERVICE_NAME", "CARR_JEV_WORKER",
+                                                         "CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE")}
         self.enterContext(patch.dict(os.environ, env, clear=True))
         self.clock = self.enterContext(patch.object(client, "datetime", wraps=datetime))
         self.now(2026, 10, 4, 3, 10)
@@ -150,6 +152,15 @@ class RegistryAdmissionTests(Harness):
             self.assertEqual(caught.exception.code, "unattended_worker_off")
             self.ask("explicit brief judgment", caller="brief:w3_builder")
         self.assertEqual(len(self.requests), 1)
+
+    def test_fixture_and_ci_runs_never_pay_and_never_log(self):
+        for flag in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE"):
+            with self.subTest(flag=flag), patch.dict(os.environ, {flag: "1"}):
+                with self.assertRaises(client.JevCallRefused) as caught:
+                    self.ask("x")
+                self.assertEqual(caught.exception.code, "fixture_offline")
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.rows(), [], "fixture traffic stays out of the real call log")
 
     def test_prefix_entry_needs_a_suffix(self):
         with self.assertRaises(client.JevCallRefused):
