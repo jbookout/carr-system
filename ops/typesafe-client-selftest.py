@@ -1150,6 +1150,28 @@ with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
                 self.assertTrue(all(row['ok'] for row in rows))
 
 
+class OfflineBudgetIsolationTests(unittest.TestCase):
+    def test_ownership_fixtures_never_reserve_the_workstation_budget(self):
+        canonical_budget = os.path.join(client.CANONICAL_REPO, "out", "jev-calls.jsonl")
+        reserve = client._reserve_paid_call
+        destinations = []
+
+        def isolated_reservation(*args, **kwargs):
+            destinations.append(client.JEV_DAILY_CAP_LOG)
+            self.assertNotEqual(client.JEV_DAILY_CAP_LOG, canonical_budget,
+                                "fake transport must use a disposable quota")
+            return reserve(*args, **kwargs)
+
+        suite = unittest.TestSuite(DispatchOwnershipTests(name) for name in (
+            "test_runtime_router_preserves_explicit_transcript_owner",
+            "test_ask_discovers_exact_native_session_and_keeps_unknown_owner_unbound"))
+        result = unittest.TestResult()
+        with patch.object(client, "_reserve_paid_call", isolated_reservation):
+            suite.run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+        self.assertEqual(len(destinations), 5)
+
+
 class CredentialTests(unittest.TestCase):
     def _write(self, text):
         path = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
