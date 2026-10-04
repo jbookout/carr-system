@@ -9,9 +9,13 @@ prompts). A message is matched against them first: deterministic, no Jev call.
 TWO KINDS OF PROMPT, TWO POLICIES (2026-09-25 design ruling on #1276 review):
 
   * MACHINE ENVELOPE (ops/machine_envelope.py: a prompt that is entirely
-    complete task-notification / cross-session blocks) — compiled triggers
-    only, ZERO Jev calls. The hand-reviewed partner-prompt cues do not run
-    here: a notification's own boilerplate carries URLs and "error".
+    complete task-notification / cross-session blocks) — ZERO Jev calls and
+    NO keyword rows: neither Jev's compiled keywords nor the hand-reviewed
+    partner-prompt cues run here, because a notification's own report carries
+    every common word ("claude", "carr", URLs, "error"). Only hand-reviewed
+    structural rows about the envelope itself (ENVELOPE_SOURCES) and
+    always-on rules are delivered (R2 of the 2026-09-26 rule-delivery eval,
+    ops/rule_delivery_eval.py).
 
   * HUMAN PROMPT — compiled triggers first, then ONE BUDGETED JUDGMENT over
     every pack-layer rule that did not match. The review replayed 30 real
@@ -91,9 +95,16 @@ STATEMENT_CHARS = 4000
 SITUATION_CHARS = 20_000
 
 # Hand-reviewed row sources that are facts, not model judgments: stale rule
-# text does not invalidate them. prompt_cue rows run on human prompts only.
+# text does not invalidate them.
 REVIEWED_SOURCES = ("structural_extra", "prompt_cue")
-HUMAN_ONLY_SOURCES = ("prompt_cue",)
+# The ONLY row sources matched on a machine envelope (R2, 2026-09-26). A
+# hand-reviewed structural fact about the envelope itself ("an agent
+# finished") is the one kind of cue a notification carries. Keyword rows —
+# Jev's compiled statement words and the partner-prompt cues — are about what
+# a PERSON said; on an envelope they match the agent's own report, and the
+# rule-delivery eval measured them as 58 false positives on 18 notification
+# turns. An allowlist, so a new row source stays off envelopes until reviewed.
+ENVELOPE_SOURCES = ("structural_extra",)
 
 
 def _sibling(name):
@@ -128,10 +139,10 @@ def match(text, rows, *, human=True):
     A row's negative pattern masks its near-miss phrases out of the text
     before the positive pattern is tried, so "push notification" does not fire
     a rule about `git push` while "push" elsewhere in the same message still
-    does. Rows from HUMAN_ONLY_SOURCES are skipped unless `human`."""
+    does. Unless `human`, only rows from ENVELOPE_SOURCES are tried."""
     hits = {}
     for row in rows:
-        if not human and row.get("source") in HUMAN_ONLY_SOURCES:
+        if not human and row.get("source") not in ENVELOPE_SOURCES:
             continue
         body = text
         if row.get("negative_pattern"):
@@ -142,13 +153,15 @@ def match(text, rows, *, human=True):
     return hits
 
 
-def _matched_probability(text, entry):
-    """Jev's compile-time probability for the strongest cue present.
+def _matched_probability(text, entry, keywords):
+    """Jev's compile-time probability for the strongest cue present, among
+    `keywords` (rule_trigger_compile.prompt_keywords: the ones the row was
+    built from, so a sub-floor keyword never supplies the number).
 
     Only reports a number: whether the rule fires was already decided by
     match(), negatives included, so it is not decided a second time here."""
     best = None
-    for keyword, prob in (entry.get("triggers") or {}).get("keywords", {}).items():
+    for keyword, prob in keywords.items():
         escaped = re.escape(keyword).replace(r"\ ", r"\s+")
         if re.search(rf"(?<!\w){escaped}(?!\w)", text, re.I):
             best = prob if best is None else max(best, prob)
@@ -392,7 +405,7 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
         if rule_id not in by_id:
             continue
         if bool(entry) and rule_id not in stale and "jev_compiled" in sources:
-            prob = _matched_probability(text, entry)
+            prob = _matched_probability(text, entry, rtc.prompt_keywords(entry))
             selected[rule_id] = {"id": rule_id,
                                  "probability": rtc.SURFACE_AT if prob is None else prob,
                                  "ranking_model": None,

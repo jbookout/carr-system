@@ -2,8 +2,16 @@
 """Fail-closed R03 stage-5 settlement-sweep runner.
 
 The single-use capability supplies the three read-only descriptors this program
-accepts.  It deliberately has no manifest-path, allowlist-path, or receipt-path
+accepts for execution. It has no execution manifest-path, allowlist-path, or receipt-path
 arguments: the approved bytes must be the bytes the capability admitted.
+
+Authoring uses ``--author-template`` with repeated ``--approve-restore-path``
+literal names. It emits an unapproved v2 manifest only after full validation;
+the operator admits those bytes through the existing settlement capability.
+Restore entries bind pinned blobs and the approved observed index/worktree state.
+Execution with a nonempty restore set is held: this runner has no enforced
+writer exclusion spanning verification and restoration. Authoring and dry-run
+do not grant that missing guarantee.
 
 Without ``--execute`` this runner only obtains and validates the manifest's
 ``git clean -nd`` diff, prints the full planned sequence, and exits without
@@ -27,8 +35,12 @@ import sys
 import tempfile
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from r03_settlement_restore_set import RestoreSetRefusal, build_restore_set
+from git_env import scrubbed_env
 
-MANIFEST_SCHEMA = "carr.r03-stage5-settlement-sweep.v1"
+
+MANIFEST_SCHEMA = "carr.r03-stage5-settlement-sweep.v2"
 ALLOWLIST_SCHEMA = "carr.settlement-command-pathspec-allowlist.v1"
 RECEIPT_SCHEMA = "carr.settlement-capability-redemption.v1"
 CAPABILITY_KEY = "R03C.settlement-capability.v1"
@@ -78,14 +90,20 @@ def _sha256(body: bytes) -> str:
 
 def _clean_git_env() -> dict[str, str]:
     """Keep direct fixture execution isolated from inherited hook Git state."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    return scrubbed_env()
 
 
 def _run(argv: Sequence[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        list(argv), cwd=str(cwd), env=_clean_git_env(), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    )
+    try:
+        raw = subprocess.run(
+            list(argv), cwd=str(cwd), env=_clean_git_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SweepError(f"command failed or timed out: {argv[0]}") from exc
+    completed = subprocess.CompletedProcess(
+        raw.args, raw.returncode, raw.stdout.decode("utf-8", "surrogateescape"),
+        raw.stderr.decode("utf-8", "surrogateescape"))
     if check and completed.returncode:
         rendered = " ".join(argv)
         raise SweepError(f"command failed ({completed.returncode}): {rendered}\n{completed.stderr.strip()}")
@@ -180,10 +198,14 @@ def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     restore_paths: list[str] = []
     for index, item in enumerate(restores):
         entry = _require_mapping(item, f"manifest.restore[{index}]")
-        if set(entry) != {"path", "blob_oid"}:
+        if set(entry) != {"path", "blob_oid", "observed_state"}:
             raise SweepError(f"manifest.restore[{index}] fields are not exact")
         restore_paths.append(_relative_path(entry["path"], f"manifest.restore[{index}].path"))
         _require_oid(entry["blob_oid"], f"manifest.restore[{index}].blob_oid")
+        observed = _require_string(entry["observed_state"], f"manifest.restore[{index}].observed_state")
+        if not observed.startswith("sha256:") or len(observed) != 71 or any(
+                c not in "0123456789abcdef" for c in observed[7:]):
+            raise SweepError("restore observed state must be a SHA-256 digest")
     if len(set(restore_paths)) != len(restore_paths):
         raise SweepError("manifest.restore repeats a path")
 
@@ -281,7 +303,10 @@ def validate_allowlist(allowlist: Mapping[str, Any]) -> None:
         argv = item["argv"]
         if not isinstance(argv, list) or not argv or not all(isinstance(value, str) and value for value in argv):
             raise SweepError(f"allowlist.commands[{index}].argv is malformed")
-        if any(value in {"-x", "-X"} or (value.startswith("-") and "x" in value.lower()) for value in argv):
+        options = argv[:argv.index("--")] if "--" in argv else argv
+        if "clean" in options and any(
+                value.startswith("-") and not value.startswith("--") and "x" in value.lower()
+                for value in options[options.index("clean") + 1:]):
             raise SweepError(f"allowlist.commands[{index}] permits ignored-file cleaning")
         _relative_paths(item["pathspecs"], f"allowlist.commands[{index}].pathspecs", allow_empty=True)
 
@@ -639,6 +664,34 @@ def _stage6_readback(repository: Path, manifest: Mapping[str, Any], parsed: Mapp
     print(f"STAGE 6 closing readback passed: head={head} deleted={len(deleted)} surviving={len(surviving)}")
 
 
+def _verify_restore_state(repository: Path, manifest: Mapping[str, Any]) -> None:
+    try:
+        actual = build_restore_set(repository, manifest["pinned_origin_main"],
+                                   [entry["path"] for entry in manifest["restore"]])
+    except RestoreSetRefusal as exc:
+        raise SweepError(f"restore observed state refused: {exc}") from exc
+    if actual != manifest["restore"]:
+        raise SweepError("restore observed state differs from the authored manifest")
+
+
+def _author_manifest(repository: Path, template: Path, allowed: list[str]) -> dict[str, Any]:
+    """Produce unapproved bytes for capability admission, without mutating Git."""
+    body = template.read_bytes()
+    if len(body) > MAX_FD_BYTES:
+        raise SweepError("author template exceeds the manifest size limit")
+    manifest = _json_object(body, "author template")
+    if manifest.get("approved") is not False or manifest.get("restore") != []:
+        raise SweepError("author template must be unapproved with an empty restore set")
+    validate_manifest({**manifest, "approved": True})
+    try:
+        manifest["restore"] = build_restore_set(repository, manifest["pinned_origin_main"], allowed)
+    except RestoreSetRefusal as exc:
+        raise SweepError(f"manifest authoring refused: {exc}") from exc
+    # Validate the complete shape while keeping approval a separate operator act.
+    validate_manifest({**manifest, "approved": True})
+    return manifest
+
+
 def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, capability_receipt_fd: int,
                    execute: bool,
                    before_disposal: Callable[[], None] | None = None) -> None:
@@ -659,6 +712,7 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
     parsed["park_paths"] = _relative_paths(manifest["park"]["paths"], "manifest.park.paths", allow_empty=True)
     validate_allowlist(allowlist)
     validate_receipt(receipt, manifest_bytes)
+    _verify_restore_state(repository, manifest)
 
     # AN EMPTY PATHSPEC LIST MEANS CLEAN NOTHING, NEVER CLEAN EVERYTHING.
     # `git clean -fd --` with no pathspec removes every untracked file in the
@@ -697,6 +751,8 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
         print("  stage 5 gate: re-verify capability, approval, and production-backup preconditions")
         print(f"  stage 5 clean diff: {candidates}")
         print(f"  stage 5 restore paths: {parsed['restore_paths']}")
+        if parsed["restore_paths"]:
+            print("  PRECONDITION NOT MET -- restore execution requires enforced writer exclusion")
         print(f"  stage 5 park paths: {parsed['park_paths']}")
         print("  stage 5 branch law: ancestry safe-delete; host-confirmed squash + backup force-delete; unmerged retained")
         print("  stage 6 closing readback: pinned head, clean tree, deleted-set gone, no collateral loss")
@@ -708,6 +764,12 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
 
     if not head_is_pinned:
         raise SweepHeld(precondition)
+    # State checks cannot exclude an editor between verification and checkout.
+    # Refuse before stage 3 writes refs or archives, even for admitted bytes.
+    # No bypass or cooperative-lock assertion can enable unsafe restoration.
+    if parsed["restore_paths"]:
+        raise SweepHeld("restore execution requires enforced writer exclusion; "
+                        "authoring and dry-run remain available, repository unchanged")
     starting_branches = _branch_set(repository)
 
     if _is_canonical_or_child(repository):
@@ -721,15 +783,7 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
     if fingerprint_tree(repository) != fingerprint:
         raise SweepError("tree fingerprint changed between stage 4 and disposal")
 
-    restore_paths = parsed["restore_paths"]
-    if restore_paths:
-        restore_argv = ["git", "checkout", parsed["pinned"], "--", *restore_paths]
-        _require_allowed(allowlist, "stage5.restore", restore_argv, restore_paths)
-        _git(repository, "checkout", parsed["pinned"], "--", *restore_paths)
-        for item in manifest["restore"]:
-            actual = _git(repository, "hash-object", item["path"]).stdout.strip().lower()
-            if actual != item["blob_oid"]:
-                raise SweepError(f"restored blob differs from manifest: {item['path']}")
+    _verify_restore_state(repository, manifest)
 
     if parsed["park_paths"]:
         for pathspec in parsed["park_paths"]:
@@ -752,13 +806,27 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest-fd", type=int, required=True)
-    parser.add_argument("--allowlist-fd", type=int, required=True)
-    parser.add_argument("--capability-receipt-fd", type=int, required=True)
+    parser.add_argument("--manifest-fd", type=int)
+    parser.add_argument("--allowlist-fd", type=int)
+    parser.add_argument("--capability-receipt-fd", type=int)
     parser.add_argument("--repository", type=Path, default=Path.cwd())
     parser.add_argument("--execute", action="store_true", help="allow fixture-only destructive stage-5 operations")
+    parser.add_argument("--author-template", type=Path,
+                        help="read an unapproved v2 template; emit state-bound manifest JSON for admission")
+    parser.add_argument("--approve-restore-path", action="append", default=[],
+                        help="literal tracked path explicitly authorized for restoration (repeatable)")
     args = parser.parse_args(argv)
     try:
+        descriptors = (args.manifest_fd, args.allowlist_fd, args.capability_receipt_fd)
+        if args.author_template:
+            if args.execute or any(fd is not None for fd in descriptors):
+                raise SweepError("authoring cannot execute or accept capability descriptors")
+            authored = _author_manifest(args.repository.resolve(strict=True), args.author_template,
+                                        args.approve_restore_path)
+            print(json.dumps(authored, sort_keys=True, separators=(",", ":")))
+            return 0
+        if args.approve_restore_path or any(fd is None for fd in descriptors):
+            raise SweepError("execution requires all three capability descriptors; paths belong to authoring")
         run_settlement(
             repository=args.repository, manifest_fd=args.manifest_fd, allowlist_fd=args.allowlist_fd,
             capability_receipt_fd=args.capability_receipt_fd, execute=args.execute,
@@ -766,7 +834,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SweepHeld as exc:
         print(f"HELD: {exc}")
         return 75 if args.execute else 0
-    except SweepError as exc:
+    except (SweepError, OSError) as exc:
         print(f"ABORT: {exc}", file=sys.stderr)
         return 78
     return 0

@@ -25,6 +25,26 @@ spec.loader.exec_module(runner)
 
 
 class GrokRunTests(unittest.TestCase):
+    def test_sign_in_exit_alerts_once_without_provider_diagnostics(self):
+        with mock.patch.object(sys, "argv", ["grok-run", "--prompt", "test"]), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(runner, "preflight", side_effect=runner.PreflightError("Grok needs sign-in: run grok login", 3)), \
+                mock.patch.object(runner, "sign_in_alert", create=True) as alert, \
+                mock.patch.object(sys, "stderr", io.StringIO()) as stderr:
+            self.assertEqual(runner.main(), 3)
+            alert.assert_called_once_with()
+            self.assertEqual(stderr.getvalue().strip(), "Grok needs sign-in: run grok login")
+
+    def test_alert_failure_preserves_sign_in_exit_and_reports_failure(self):
+        with mock.patch.object(sys, "argv", ["grok-run", "--prompt", "test"]), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(runner, "preflight", side_effect=runner.PreflightError("Grok needs sign-in: run grok login", 3)), \
+                mock.patch.object(runner, "sign_in_alert", create=True, side_effect=RuntimeError("private diagnostic")), \
+                mock.patch.object(sys, "stderr", io.StringIO()) as stderr:
+            self.assertEqual(runner.main(), 3)
+            self.assertIn("alert FAILED", stderr.getvalue())
+            self.assertNotIn("private diagnostic", stderr.getvalue())
+
     def test_unattributed_hook_turns_cannot_nominate_an_earlier_answer(self):
         # Minimized from the private 2026-10-02 Grok hook-turn capture. Retain
         # response/usage boundaries; replace source prose and omit rule text.
@@ -251,7 +271,13 @@ class GrokRunTests(unittest.TestCase):
             for name in ("GROK_RUN_FAKE_NDJSON", "GROK_RUN_RECEIPT"):
                 env.pop(name, None)
             selected = [str(prompt_file) if arg == "PROMPT_FILE" else arg for arg in args]
-            run = subprocess.run(["bash", str(RUNNER), *selected], env=env,
+            launch = ["bash", str(RUNNER), *selected]
+            if not auth:
+                # The fake provider's auth refusal exercises main's contract;
+                # transports are tested separately, never against the live store.
+                harness = "import sys; sys.path.insert(0, sys.argv.pop(1)); import grok_run; grok_run.sign_in_alert=lambda:None; sys.exit(grok_run.main())"
+                launch = [sys.executable, "-c", harness, str(ROOT / "bin"), *selected]
+            run = subprocess.run(launch, env=env,
                                  capture_output=True, text=True, timeout=10)
             calls_file = scratch / "calls.jsonl"
             calls = [json.loads(line) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
@@ -301,7 +327,7 @@ class GrokRunTests(unittest.TestCase):
         run, calls = self.run_cli("--prompt", "test", installed="1.0.10", auth=False)
         self.assertEqual(run.returncode, 3)
         self.assertEqual(run.stdout, "")
-        self.assertEqual(run.stderr, "Grok needs sign-in: a human runs grok login\n")
+        self.assertEqual(run.stderr, "Grok needs sign-in: run grok login\n")
         self.assertEqual(calls[-1], ["grok", "models"])
         self.assertNotIn(["grok", "login"], calls)
 

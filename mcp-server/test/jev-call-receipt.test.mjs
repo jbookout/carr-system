@@ -46,6 +46,74 @@ const QUESTIONS = {
 };
 const ACTORS = new Map([[AGENT.slug, AGENT.id], [OTHER.slug, OTHER.id]]);
 
+test("the cap successor changes only ask-jev's bound schema and preserves the predecessor", async () => {
+  const inventory = await import("../../ops/scac-mutation-inventory.mjs");
+  const oldRows = inventory.boundInventoryRows(inventory.frozenInventory("scac-mutation-registry.v103"));
+  const newRows = inventory.boundInventoryRows(inventory.frozenInventory("scac-mutation-registry.v104"));
+  assert.equal(newRows.length, oldRows.length);
+  const changed = newRows.filter((row, i) => JSON.stringify(row) !== JSON.stringify(oldRows[i]));
+  assert.equal(changed.length, 1);
+  assert.equal(changed[0].ingress_key, "mcp-tool:ask-jev");
+  assert.equal(inventory.assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+  const { SCAC_MUTATION_REGISTRY_VERSION } = await import("../src/mutation-registry.js");
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, inventory.CURRENT_REGISTRY_VERSION);
+  const activeRows = inventory.boundInventoryRows(inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION));
+  assert.deepEqual(activeRows.find(row => row.ingress_key === "mcp-tool:ask-jev"),
+    newRows.find(row => row.ingress_key === "mcp-tool:ask-jev"));
+});
+
+test("budgeted cache-only misses never reserve or fetch, including a broken cache", async () => {
+  for (const cache of [null, { match: async () => null },
+    { match: async () => { throw new Error("broken cache"); } }]) {
+    const fetchImpl = fakeFetch([jsonResponse(200, { model: "jev-1.13.0", answers: ANSWERS })]);
+    let reservations = 0;
+    const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { cache,
+      reserveAttempt: async () => { reservations++; return { key: "k", receipt_id: "r" }; } });
+    const out = await prefetchJevAnswer(askArgs({ transport_mode: "cache_only" }), ask);
+    assert.deepEqual(out, { ok: false, error: { error: "jev_cache_miss" } });
+    assert.equal(reservations, 0);
+    assert.equal(fetchImpl.calls.length, 0);
+  }
+});
+
+test("budgeted cache-only hits are free; paid-once skips cache and never retries 429", async () => {
+  const cache = { match: async () => new Response(JSON.stringify({ model: "jev-1.13.0", answers: ANSWERS })) };
+  const fetchImpl = fakeFetch([jsonResponse(429, "throttled", { "retry-after": "0" })]);
+  let reservations = 0;
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { cache,
+    sleep: async () => assert.fail("paid-once cannot sleep for a retry"),
+    reserveAttempt: async () => { reservations++; return { key: "k", receipt_id: "r" }; } });
+  const hit = await prefetchJevAnswer(askArgs({ transport_mode: "cache_only" }), ask);
+  assert.equal(hit.result.cache_hit, true);
+  assert.equal(hit.result.usage, null);
+  assert.equal(reservations, 0);
+  const paid = await prefetchJevAnswer(askArgs({ transport_mode: "paid_once" }), ask);
+  assert.equal(paid.ok, false);
+  assert.equal(paid.error.status, 429);
+  assert.equal(reservations, 1);
+  assert.equal(fetchImpl.calls.length, 1);
+});
+
+test("invalid budgeted transport mode refuses before vendor or receipt access", async () => {
+  for (const transport_mode of [null, "unknown", 1]) {
+    const error = await rejected(() => prefetchJevAnswer(askArgs({ transport_mode }),
+      async () => assert.fail("invalid mode reached vendor")));
+    assert.equal(error.error, "jev_transport_mode_invalid");
+  }
+  assert.deepEqual(TOOLS["ask-jev"].inputSchema.properties.transport_mode,
+    { type: "string", enum: ["cache_only", "paid_once"] });
+});
+
+test("the predecessor's closed schema rejects budget modes before prefetch", async () => {
+  const { assertClosedTopLevel } = await import("../src/mutation-registry.js");
+  const schema = structuredClone(TOOLS["ask-jev"].inputSchema);
+  delete schema.properties.transport_mode;
+  for (const transport_mode of ["cache_only", "paid_once"])
+    assert.throws(() => assertClosedTopLevel("ask-jev", { inputSchema: schema },
+      askArgs({ transport_mode })), error =>
+      error.error === "unregistered_operation_fields" && error.fields[0] === "transport_mode");
+});
+
 // Mirrors migrations/0587: ops.record_jev_call_receipt (append-only,
 // server-stamped recorded_at, server-derived actor checked against the actor
 // table, prompt_sha256 iff build_advisory), ops.read_jev_call_receipts
