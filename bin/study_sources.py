@@ -234,10 +234,12 @@ def study(url, brief, day, retrieval_timeout, study_timeout, board):
     except (OSError, RuntimeError, ValueError) as error:
         # Decoder and JSON exceptions may echo rejected input; withhold it.
         reason = str(error) if isinstance(error, RuntimeError) else f"invalid source artifact ({type(error).__name__})"
-        terminal = {"status": "blocked", "reason": reason, "source": identity}
+        next_action = "Resolve the recorded failure, then rerun this source study"
+        terminal = {"status": "blocked", "reason": reason, "source": identity, "next_action": next_action}
         (folder / "terminal.json").write_text(json.dumps(terminal), encoding="utf-8")
         try:
-            board(*card, "--status", "blocked", "--note", f"{reason}; report: {report}")
+            board(*card, "--status", "blocked", "--reason", reason, "--next-action", next_action,
+                  "--note", f"{reason}; report: {report}")
         except (OSError, RuntimeError):
             print(f"BLOCKED {identity}: board unavailable; terminal status: {folder / 'terminal.json'}", file=sys.stderr)
         print(f"BLOCKED {identity}: {reason}", file=sys.stderr)

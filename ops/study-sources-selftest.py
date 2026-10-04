@@ -32,7 +32,8 @@ class StudySourcesTests(unittest.TestCase):
             if source.exists():
                 shutil.copyfile(source, self.root / name)
         self.env = dict(os.environ, PATH=str(self.root / "fake-bin") + os.pathsep + os.environ["PATH"],
-                        FAKE_EVENTS=str(self.root / "events.jsonl"), PROGRESS_BOARD_ROOT=str(self.root / "out"))
+                        FAKE_EVENTS=str(self.root / "events.jsonl"), PROGRESS_BOARD_ROOT=str(self.root / "out"),
+                        PROGRESS_BOARD_LOCAL_ONLY="1")
         (self.root / 'fake-bin/fixture_report.py').write_text(textwrap.dedent('''
             import hashlib
             import json
@@ -163,6 +164,8 @@ class StudySourcesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         card, = self.cards().values()
         self.assertEqual(card['status'], 'blocked')
+        self.assertTrue(card['blocked_reason'])
+        self.assertTrue(card['next_action'])
         self.assertIn('completion/model evidence invalid', card['note'])
         self.assertIn('report.md', card['note'])
 
