@@ -17,6 +17,7 @@ from pathlib import Path
 import psycopg
 from psycopg.types.json import Jsonb
 
+from rule_projection_fixture import seed_reviewed_rule_projection as seed_rule_projection
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 
 REPO = Path(__file__).resolve().parents[1]
@@ -124,90 +125,9 @@ def fail(message: str) -> int:
     return 1
 
 
-def uuid_for(short: str) -> str:
-    return f"{short}-0000-4000-8000-000000000018"
-
-
 def seed_reviewed_rule_projection(cur) -> None:
-    """Install the reviewed rule map so the real deferred epoch trigger can bootstrap."""
-    raw = (REPO / "ops/config/rule-enforcement-map.json").read_bytes()
-    reviewed = json.loads(raw)
-    map_digest = hashlib.sha256(raw).hexdigest()
-    scope_by_short = {
-        short: scope
-        for scope, short_ids in reviewed["active_rule_ids"].items()
-        for short in short_ids
-    }
-    joe = cur.execute(
-        """insert into public.actor(slug,kind,display_name) values ('joe','human','Joe')
-             on conflict(slug) do update set display_name=excluded.display_name
-             returning id"""
-    ).fetchone()[0]
-    document_id = cur.execute(
-        """insert into public.doctrine_document(slug,title,content_class,created_by)
-             values ('siep18-monitor-fixture','SIEP-18 monitor fixture','reference',%s)
-             returning id""",
-        (joe,),
-    ).fetchone()[0]
-    generation = cur.execute(
-        "select generation from public.doctrine_meta where id=1"
-    ).fetchone()[0]
-    cur.execute(
-        """insert into public.doctrine_snapshot(document_id,generation,snapshot_json,content_hash)
-             values (%s,%s,%s::jsonb,%s)""",
-        (
-            document_id,
-            generation,
-            json.dumps({"document": {"slug": "siep18-monitor-fixture"}, "sections": []}),
-            hashlib.sha256(b"siep18-monitor-fixture").hexdigest(),
-        ),
-    )
-    cur.execute("alter table public.rule disable trigger user")
-    try:
-        for short, scope in sorted(scope_by_short.items()):
-            cur.execute(
-                """insert into public.rule(id,statement,taught_by,status,activated_by,personal_to)
-                     values (%s,%s,%s,'active',%s,%s)""",
-                (
-                    uuid_for(short),
-                    f"SIEP-18 reviewed projection fixture {short}",
-                    joe,
-                    joe,
-                    joe if scope == "joe" else None,
-                ),
-            )
-    finally:
-        cur.execute("alter table public.rule enable trigger user")
-    for pack, contract in sorted(reviewed["rule_packs"].items()):
-        cur.execute(
-            """insert into ops.rule_pack(pack,title,description,triggers,source)
-                 values (%s,%s,%s,%s,%s)""",
-            (
-                pack,
-                contract["title"],
-                contract["description"],
-                contract["triggers"],
-                "ops/config/rule-enforcement-map.json",
-            ),
-        )
-    for short, contract in sorted(reviewed["rule_load_layers"].items()):
-        cur.execute(
-            """insert into ops.rule_load_layer
-                 (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
-                 values (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (
-                uuid_for(short),
-                short,
-                contract["load_layer"],
-                contract.get("packs", []),
-                scope_by_short[short],
-                contract.get("why"),
-                "ops/config/rule-enforcement-map.json",
-                map_digest,
-            ),
-        )
-    cur.execute("set constraints all immediate")
-    cur.execute("set constraints all deferred")
+    seed_rule_projection(cur, slug="siep18-monitor-fixture", title="SIEP-18 monitor fixture",
+                         rule_label="SIEP-18 reviewed projection fixture", uuid_tail="000000000018")
 
 
 # ── WR-000068: sourced shape forward correction (migration 0492) ─────────────

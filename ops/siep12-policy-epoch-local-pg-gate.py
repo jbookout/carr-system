@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import sys
 from pathlib import Path
 
+from rule_projection_fixture import seed_reviewed_rule_projection as seed_rule_projection
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 from scac_mutation_db_inventory import project, project_escalation, project_role_authority, summarize
 
@@ -65,67 +65,9 @@ def generated_registry_digest(version: int) -> str:
     return "sha256:" + match.group(1)
 
 
-def uuid_for(short: str) -> str:
-    return f"{short}-0000-4000-8000-000000000001"
-
-
 def seed_reviewed_rule_projection(cur) -> None:
-    raw = (REPO / "ops/config/rule-enforcement-map.json").read_bytes()
-    reviewed = json.loads(raw)
-    map_digest = hashlib.sha256(raw).hexdigest()
-    scope_by_short = {
-        short: scope
-        for scope, short_ids in reviewed["active_rule_ids"].items()
-        for short in short_ids
-    }
-    cur.execute(
-        """insert into public.actor(slug,kind,display_name) values ('joe','human','Joe')
-             on conflict(slug) do update set display_name=excluded.display_name
-             returning id"""
-    )
-    joe = cur.fetchone()[0]
-    document_id = cur.execute(
-        """insert into public.doctrine_document(slug,title,content_class,created_by)
-             values ('siep12-epoch-fixture','SIEP-12 epoch fixture','reference',%s)
-             returning id""",
-        (joe,),
-    ).fetchone()[0]
-    generation = cur.execute("select generation from public.doctrine_meta where id=1").fetchone()[0]
-    cur.execute(
-        """insert into public.doctrine_snapshot(document_id,generation,snapshot_json,content_hash)
-             values (%s,%s,%s::jsonb,%s)""",
-        (document_id, generation, json.dumps({"document": {"slug": "siep12-epoch-fixture"}, "sections": []}),
-         hashlib.sha256(b"siep12-epoch-fixture").hexdigest()),
-    )
-    cur.execute("alter table public.rule disable trigger user")
-    try:
-        for short, scope in sorted(scope_by_short.items()):
-            cur.execute(
-                """insert into public.rule(id,statement,taught_by,status,activated_by,personal_to)
-                     values (%s,%s,%s,'active',%s,%s)""",
-                (uuid_for(short), f"SIEP-12 reviewed projection fixture {short}", joe, joe,
-                 joe if scope == "joe" else None),
-            )
-    finally:
-        cur.execute("alter table public.rule enable trigger user")
-    for pack, contract in sorted(reviewed["rule_packs"].items()):
-        cur.execute(
-            """insert into ops.rule_pack(pack,title,description,triggers,source)
-                 values (%s,%s,%s,%s,%s)""",
-            (pack, contract["title"], contract["description"], contract["triggers"],
-             "ops/config/rule-enforcement-map.json"),
-        )
-    for short, contract in sorted(reviewed["rule_load_layers"].items()):
-        cur.execute(
-            """insert into ops.rule_load_layer
-                 (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
-                 values (%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (uuid_for(short), short, contract["load_layer"], contract.get("packs", []),
-             scope_by_short[short], contract.get("why"),
-             "ops/config/rule-enforcement-map.json", map_digest),
-        )
-    cur.execute("set constraints all immediate")
-    cur.execute("set constraints all deferred")
+    seed_rule_projection(cur, slug="siep12-epoch-fixture", title="SIEP-12 epoch fixture",
+                         rule_label="SIEP-12 reviewed projection fixture", uuid_tail="000000000001")
 
 
 def main() -> int:
