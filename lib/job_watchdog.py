@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -385,6 +386,14 @@ def reconcile(root, config, found, effects, now, complete=True):
             if existing["status"] != "done":
                 extras.append(finding("action_error", action_key, "prior action intent is unresolved; inspect before retry", config))
             continue
+        # A cached finding is only a candidate. A refused fresh predicate has
+        # executed no effect and must not consume the once-only action slot.
+        try:
+            if not effects.prepare(action, f):
+                continue
+        except Exception as exc:
+            extras.append(finding("action_error", action_key, str(exc), config))
+            continue
         intent = {"key": action_key, "action": action, "status": "intent", "at": stamp(now)}
         append(actions_path, intent)
         actions[action_key] = intent
@@ -449,21 +458,81 @@ def collect_pr(repo, number, config):
 
 
 def settled(pr):
-    """No pending check or mergeability: nothing will change without bumping updated_at."""
-    return pr.get("mergeable") != "UNKNOWN" and not any(
-        c.get("status", "COMPLETED") != "COMPLETED" or c.get("state") in {"PENDING", "EXPECTED"}
-        for c in pr.get("statusCheckRollup") or [])
+    """Known mergeability and completed checks permit the longer cache interval."""
+    checks = pr.get("statusCheckRollup") or []
+    return bool(checks) and pr.get("mergeable") in {"MERGEABLE", "CONFLICTING"} and all(
+        (c.get("status", "COMPLETED") == "COMPLETED" and c.get("conclusion") in
+         {"SUCCESS", "SKIPPED", "NEUTRAL", "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"})
+        or c.get("state") in {"SUCCESS", "FAILURE", "ERROR"}
+        for c in checks)
 
 
-def rate_limit_reason(config):
+def read_pr_cache(path):
+    """Optimization data is disposable; malformed entries never blind evidence."""
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(cache, dict):
+        return {}
+    valid = {}
+    for key, entry in cache.items():
+        try:
+            pr = entry["pr"]
+            version = entry["version"]
+            collected = entry["collected_at"]
+            if (not isinstance(pr, dict) or not isinstance(version, list) or len(version) != 2
+                    or not isinstance(collected, (int, float)) or isinstance(collected, bool)
+                    or not math.isfinite(collected) or collected < 0
+                    or not isinstance(pr["number"], int) or isinstance(pr["number"], bool) or pr["number"] <= 0
+                    or not isinstance(pr["repo"], str) or key != f"{pr['repo']}#{pr['number']}"
+                    or not isinstance(pr["headRefOid"], str) or not re.fullmatch(r"[0-9a-f]{40}", pr["headRefOid"])
+                    or not isinstance(pr["updatedAt"], str)
+                    or version != [pr["headRefOid"], pr["updatedAt"]]
+                    or not isinstance(pr["isDraft"], bool)
+                    or pr["mergeable"] not in {"UNKNOWN", "MERGEABLE", "CONFLICTING"}):
+                continue
+            epoch(pr["updatedAt"])
+            for field in ("comments", "reviews", "commits", "statusCheckRollup"):
+                if not isinstance(pr[field], list) or not all(isinstance(row, dict) for row in pr[field]):
+                    raise ValueError("invalid PR snapshot rows")
+            for row in pr["comments"] + pr["reviews"]:
+                if (not isinstance(row.get("body", ""), str)
+                        or not isinstance(row.get("state", ""), str)):
+                    raise ValueError("invalid review body or state")
+                epoch(row.get("submittedAt") or row.get("createdAt") or pr["updatedAt"])
+                reviewed_head(row)
+            for row in pr["commits"]:
+                epoch(row["committedDate"])
+            for row in pr["statusCheckRollup"]:
+                if any(not isinstance(row[field], str) for field in ("status", "conclusion", "state")
+                       if field in row and row[field] is not None):
+                    raise ValueError("invalid check state")
+            valid[key] = entry
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            continue
+    return valid
+
+
+def rate_limit_reason(config, original):
     try:
         resources = json.loads(command(["gh", "api", "rate_limit"], config))["resources"]
+        if not isinstance(resources, dict):
+            raise ValueError("resources must be a mapping")
+        relevant = {k: r for k, r in resources.items() if k in {"core", "graphql"}}
+        if not relevant:
+            raise ValueError("no core or graphql diagnostic")
+        for resource in relevant.values():
+            if not isinstance(resource, dict) or any(
+                    not isinstance(resource[field], int) or isinstance(resource[field], bool) or resource[field] < 0
+                    for field in ("remaining", "used", "limit", "reset")):
+                raise ValueError("invalid resource fields")
+        spent = {k: r for k, r in relevant.items() if r["remaining"] == 0}
+        resets = "; ".join(f"{k} {r['used']}/{r['limit']} resets {stamp(r['reset'])}"
+                           for k, r in sorted(spent.items()))
+        return str(original) + ("; exhausted allowance: " + resets if resets else "; primary allowances not exhausted")
     except Exception as exc:
-        return f"GitHub API rate limit exhausted; reset time unreadable: {exc}"
-    spent = {k: r for k, r in resources.items() if k in {"core", "graphql"} and r["remaining"] == 0}
-    return "GitHub API rate limit exhausted: " + "; ".join(
-        f"{k} {r['used']}/{r['limit']} resets {stamp(r['reset'])}"
-        for k, r in sorted((spent or resources).items()) if k in {"core", "graphql"})
+        return f"{original}; rate-limit diagnostic unreadable: {exc}"
 
 
 def collect(root, config, now=None):
@@ -474,9 +543,10 @@ def collect(root, config, now=None):
         blinds = EVIDENCE[evidence]
         if RATE_LIMIT.search(str(exc)):
             # One exhausted allowance is one scan-level finding, not one per PR.
-            entry = limited.setdefault("github", {"kind": "rate_limited", "source": "github",
-                                                  "reason": rate_limit_reason(config), "blinds": set()})
-            entry["blinds"] |= blinds
+            if not limited:
+                limited["github"] = {"kind": "rate_limited", "source": "github",
+                                     "reason": rate_limit_reason(config, exc),
+                                     "blinds": EVIDENCE["prs"] | EVIDENCE["branches"]}
         elif isinstance(exc, MissingTool):
             # One absent tool is one environment defect, however many sources needed it.
             entry = missing.setdefault(exc.tool, {"kind": "environment", "source": exc.tool,
@@ -510,12 +580,12 @@ def collect(root, config, now=None):
     # Each PR's GraphQL snapshot is reused while the REST listing shows the same
     # head and updated_at, bounded by an age limit for changes that bump neither.
     cache_path = path_at(root, config["paths"]["pr_cache"])
-    try:
-        cache = json.loads(cache_path.read_text())
-    except (OSError, ValueError):
-        cache = {}
+    cache = read_pr_cache(cache_path)
     t = config["thresholds"]
     for repo in config["repositories"]:
+        if limited:
+            facts["prs"].extend(v["pr"] for k, v in cache.items() if k.startswith(repo + "#"))
+            continue  # Stop provider reads; all skipped evidence is blinded.
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100"], config))
             # Closed PRs leave the cache; an unlisted repository keeps its entries.
@@ -541,6 +611,8 @@ def collect(root, config, now=None):
                             facts["prs"].append(entry["pr"])
         except Exception as exc:
             error(repo + " PRs", exc, "prs")
+        if limited:
+            continue
         try:
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
@@ -729,16 +801,19 @@ class Effects:
                               "--results", str(self.root / "out/watchdog" / (name + ".result.jsonl")),
                               "send", name, brief, "--fresh", *(["--stream-output"] if c["fixer"]["stream_output"] else [])], tree, job_id=name)
 
+    def prepare(self, action, f):
+        """Validate candidates before reconciliation reserves a non-repeatable effect."""
+        if action == "restart_once":
+            return True
+        fresh = collect_pr(f["repo"], f["pr"], self.config)
+        if fresh["headRefOid"] != f["head"]:
+            return False
+        candidates = detect({"prs": [fresh]}, self.config, time.time())
+        return any(x["kind"] == f["kind"] for x in candidates)
+
     def act(self, action, f):
         if action == "restart_once":
             return self.restart(f)
-        # Re-read head/review/CI/queue membership immediately before a PR effect.
-        fresh = collect_pr(f["repo"], f["pr"], self.config)
-        if fresh["headRefOid"] != f["head"]:
-            raise RuntimeError("head changed; obsolete action refused")
-        candidates = detect({"prs": [fresh]}, self.config, time.time())
-        if not any(x["kind"] == f["kind"] for x in candidates):
-            raise RuntimeError("PR action predicate changed; effect refused")
         return self.enqueue(f) if action == "enqueue" else self.fix(f)
 
 

@@ -222,6 +222,8 @@ class ReplayTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             def act(self, action, f):
                 return {}
             def report(self, f):
@@ -369,6 +371,8 @@ class GithubBudgetTests(unittest.TestCase):
         self.assertEqual(facts["prs"], cached["prs"], "previous PR state is kept")
 
         class Effects:
+            def prepare(self, action, f):
+                return True
             def act(self, action, f):
                 return {}
             def report(self, f):
@@ -386,6 +390,175 @@ class GithubBudgetTests(unittest.TestCase):
             self.assertEqual(self.w.scan(self.root, self.c), 0)
         rows = [json.loads(s) for s in self.w.path_at(self.root, self.c["paths"]["scan_ledger"]).read_text().splitlines()]
         self.assertEqual([(r["key"], r["status"]) for r in rows], [("scan_skipped", "skipped")])
+
+    def test_branch_limit_blinds_skipped_prs_and_preserves_prior_conflict(self):
+        other = "jbookout/doctorcre-app"
+        self.c["repositories"].append(other)
+        original = self.gh
+        def limited_branch(argv, config, cwd=None):
+            if f"repos/{self.REPO}/branches?" in argv[-1]:
+                self.calls.append(argv)
+                raise RuntimeError("API rate limit exceeded")
+            return original(argv, config, cwd)
+        self.gh = limited_branch
+        facts = self.collect(1000)
+        error = next(e for e in facts["errors"] if e["kind"] == "rate_limited")
+        self.assertTrue(self.w.EVIDENCE["prs"] <= set(error["blinds"]))
+        prior = self.w.finding("pr_conflict", other + "#7@" + "a" * 40, "conflict", self.c)
+        self.w.append(self.root / self.c["paths"]["findings"], {**prior, "reported": True, "cleared_at": None})
+        from unittest.mock import Mock
+        effects = Mock()
+        effects.report.return_value = {}
+        self.w.reconcile(self.root, self.c, self.w.detect(facts, self.c, 1000), effects, 1000)
+        self.assertIsNone(self.w.read_latest(self.root / self.c["paths"]["findings"])[prior["key"]]["cleared_at"])
+
+    def test_cached_readiness_does_not_consume_enqueue_before_ci_recovers(self):
+        from unittest.mock import patch
+        original = self.gh
+        state = ["SUCCESS"]
+        def approved(argv, config, cwd=None):
+            out = original(argv, config, cwd)
+            if argv[:3] == ["gh", "pr", "view"]:
+                pr = json.loads(out)
+                pr["comments"] = [{"body": "REVIEW: APPROVED\nReviewed-SHA: " + "a" * 40,
+                                   "createdAt": pr["updatedAt"]}]
+                pr["statusCheckRollup"] = [{"status": "IN_PROGRESS" if state[0] == "PENDING" else "COMPLETED",
+                                            "conclusion": state[0]}]
+                return json.dumps(pr)
+            return out
+        self.gh = approved
+        queue = self.root / "queue.txt"
+        queue.write_text(self.REPO + " 7 " + "a" * 40 + "\n")
+        self.assertEqual(self.w.detect(self.collect(1000), self.c, 1000), [])
+        queue.write_text("")
+        state[0] = "PENDING"
+        effects = self.w.Effects(self.root, self.c)
+        with patch.object(self.w, "command", side_effect=self.gh), patch.object(effects, "report", return_value={}):
+            stale = self.w.detect(self.w.collect(self.root, self.c, 1120), self.c, 1120)
+            self.assertEqual([f["kind"] for f in stale], ["pr_ready"])
+            self.w.reconcile(self.root, self.c, stale, effects, 1120)
+            self.assertEqual(self.w.read_latest(self.root / self.c["paths"]["actions"]), {})
+            self.assertEqual(queue.read_text(), "")
+            state[0] = "SUCCESS"
+            found = self.w.reconcile(self.root, self.c, stale, effects, 1240)
+            self.assertNotIn("action_error", [f["kind"] for f in found])
+            self.assertEqual(len(queue.read_text().splitlines()), 1)
+            actions = self.w.read_latest(self.root / self.c["paths"]["actions"])
+            self.assertEqual(actions[stale[0]["key"]]["status"], "done")
+            self.w.reconcile(self.root, self.c, stale, effects, 3000)
+            self.assertEqual(len(queue.read_text().splitlines()), 1)
+
+    def test_empty_checks_recollect_when_checks_are_created(self):
+        original = self.gh
+        empty = [True]
+        def checks(argv, config, cwd=None):
+            out = original(argv, config, cwd)
+            if empty[0] and argv[:3] == ["gh", "pr", "view"]:
+                pr = json.loads(out)
+                pr["statusCheckRollup"] = []
+                return json.dumps(pr)
+            return out
+        self.gh = checks
+        self.assertEqual(self.w.detect(self.collect(1000), self.c, 1000), [])
+        empty[0] = False
+        facts = self.collect(1360)
+        self.assertEqual(len(self.graphql_calls()), 1)
+        self.assertEqual([f["kind"] for f in self.w.detect(facts, self.c, 1360)], ["pr_ci_red"])
+
+    def test_unknown_check_result_uses_pending_interval(self):
+        original = self.gh
+        for index, rollup in enumerate(([{}], [{"status": "COMPLETED", "conclusion": None}])):
+            with self.subTest(rollup=rollup):
+                def unknown(argv, config, cwd=None):
+                    out = original(argv, config, cwd)
+                    if argv[:3] == ["gh", "pr", "view"]:
+                        pr = json.loads(out)
+                        pr["statusCheckRollup"] = rollup
+                        return json.dumps(pr)
+                    return out
+                self.gh = unknown
+                self.collect(5000 * (index + 1))
+                self.collect(5000 * (index + 1) + 360)
+                self.assertEqual(len(self.graphql_calls()), 1)
+
+    def test_invalid_cache_is_discarded_and_repaired(self):
+        cache = self.w.path_at(self.root, self.c["paths"]["pr_cache"])
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        for corrupt in ([], None, {self.REPO + "#7": {"version": ["a" * 40, self.listing[0]["updated_at"]]}},
+                        {self.REPO + "#7": {"version": ["a" * 40, self.listing[0]["updated_at"]],
+                                            "collected_at": 1000, "pr": {"mergeable": "MERGEABLE"}}}):
+            with self.subTest(corrupt=corrupt):
+                cache.write_text(json.dumps(corrupt))
+                facts = self.collect(1120)
+                self.assertEqual([p["number"] for p in facts["prs"]], [7])
+                self.assertEqual(facts["errors"], [])
+                self.assertIsInstance(json.loads(cache.read_text()), dict)
+                self.assertEqual(self.collect(1240)["prs"], facts["prs"])
+
+    def test_invalid_entry_does_not_prevent_later_pr_collection(self):
+        self.collect(1000)
+        cache = self.w.path_at(self.root, self.c["paths"]["pr_cache"])
+        contents = json.loads(cache.read_text())
+        contents[self.REPO + "#7"] = {"version": ["a" * 40, self.listing[0]["updated_at"]]}
+        cache.write_text(json.dumps(contents))
+        self.listing.append({"number": 8, "head": {"sha": "b" * 40}, "updated_at": self.listing[0]["updated_at"]})
+        facts = self.collect(1120)
+        self.assertEqual([p["number"] for p in facts["prs"]], [7, 8])
+        self.assertEqual(facts["errors"], [])
+
+    def test_invalid_nested_review_cache_is_recollected(self):
+        self.collect(1000)
+        cache = self.w.path_at(self.root, self.c["paths"]["pr_cache"])
+        contents = json.loads(cache.read_text())
+        contents[self.REPO + "#7"]["pr"]["reviews"] = [{"state": [], "body": ""}]
+        cache.write_text(json.dumps(contents))
+        facts = self.collect(1120)
+        self.assertEqual(len(self.graphql_calls()), 1)
+        self.assertEqual([f["kind"] for f in self.w.detect(facts, self.c, 1120)], ["pr_ci_red"])
+
+    def test_exhausted_allowance_is_diagnosed_once_and_stops_provider_reads(self):
+        self.c["repositories"].append("jbookout/doctorcre-app")
+        original = self.gh
+        def exhausted(argv, config, cwd=None):
+            if "pulls?" in argv[-1] or "branches?" in argv[-1]:
+                self.calls.append(argv)
+                raise RuntimeError("API rate limit exceeded")
+            return original(argv, config, cwd)
+        self.gh = exhausted
+        facts = self.collect(1000)
+        self.assertEqual(len([a for a in self.calls if a[-1] == "rate_limit"]), 1)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(facts["errors"]), 1)
+        self.assertEqual(set(facts["errors"][0]["blinds"]), self.w.EVIDENCE["prs"] | self.w.EVIDENCE["branches"])
+
+    def test_partial_rate_limit_diagnostic_never_aborts_collection(self):
+        original = self.gh
+        for resources in ({"graphql": {"remaining": 0}}, {"graphql": []},
+                          {"graphql": {"remaining": 0, "used": 1, "limit": 1, "reset": "later"}}, []):
+            with self.subTest(resources=resources):
+                def partial(argv, config, cwd=None):
+                    if argv[-1] == "rate_limit":
+                        self.calls.append(argv)
+                        return json.dumps({"resources": resources})
+                    return original(argv, config, cwd)
+                self.gh = partial
+                self.limited = True
+                facts = self.collect(1000)
+                self.assertEqual(len(facts["errors"]), 1)
+                self.assertEqual(facts["errors"][0]["kind"], "rate_limited")
+                self.assertIn("unreadable", facts["errors"][0]["reason"])
+                self.assertIn("API rate limit exceeded", facts["errors"][0]["reason"])
+
+    def test_secondary_limit_preserves_provider_retry_guidance(self):
+        original = self.gh
+        def secondary(argv, config, cwd=None):
+            if argv[:3] == ["gh", "pr", "view"]:
+                self.calls.append(argv)
+                raise RuntimeError("secondary rate limit: retry after 60 seconds")
+            return original(argv, config, cwd)
+        self.gh = secondary
+        error = self.collect(1000)["errors"][0]
+        self.assertIn("secondary rate limit: retry after 60 seconds", error["reason"])
 
 
 class RunnerTests(unittest.TestCase):
@@ -756,6 +929,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             calls = []
             def act(self, action, f):
                 self.calls.append((action, f["key"]))
@@ -779,6 +954,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             def act(self, action, f):
                 raise AssertionError("must never retry ambiguous intent")
             def report(self, f):
@@ -798,6 +975,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             calls = []
             def report(self, f):
                 self.calls.append("report")
@@ -857,6 +1036,8 @@ class StateTests(unittest.TestCase):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         class Effects:
+            def prepare(self, action, f):
+                return True
             reported = []
             def report(self, f):
                 self.reported.append(f["kind"])
