@@ -190,6 +190,19 @@ class BudgetUpgradeTests(Harness):
 
 
 class RecordingAttributionTests(Harness):
+    def test_keyless_controller_execution_does_not_invent_job_attribution(self):
+        spec = importlib.util.spec_from_file_location("keyless_controller", REPO / "tools/control-plane.py")
+        controller = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(controller)
+        workflow = {"execution": {"entrypoint": "bin/nightly.sh", "args": [], "shadow_args": []}}
+        with patch.dict(os.environ, {"CARR_JEV_JOB": "unrelated-parent"}), \
+                patch.object(controller.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            controller._execute_deterministic(workflow, {}, timeout=10, mode="shadow")
+        env = run.call_args.kwargs["env"]
+        self.assertNotIn("CARR_JEV_JOB", env)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(client._job_label())
+
     def test_controller_nightly_child_can_read_deals_without_agent_environment(self):
         self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
         spec = importlib.util.spec_from_file_location("nightly_controller", REPO / "tools/control-plane.py")
