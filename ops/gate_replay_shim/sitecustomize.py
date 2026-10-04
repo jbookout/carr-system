@@ -14,9 +14,11 @@ fresh Linux runner and on a developer Mac. Three inputs would otherwise differ:
   * THE CLOCK. One gate acts only at weekends, several compare against "the
     last 14 days", and any of them can print a date. time.time, time.time_ns,
     the no-argument forms of localtime/gmtime/ctime/strftime, and
-    datetime.now/utcnow/today plus date.today all read a pinned instant that
-    still advances with the monotonic clock, so a gate that waits on a deadline
-    cannot spin forever.
+    datetime.now/utcnow/today plus date.today read a logical fixture clock.
+    It advances on explicit sleeps, not on host scheduling or subprocess setup.
+    Otherwise a busy Mac can exhaust a gate's budget before the same fixture
+    reaches its judgment. Subprocess/thread deadlines retain host monotonic time;
+    the replay runner's independent host watchdog still kills hung gates.
   * THE NETWORK. socket connect and name resolution raise OSError, so a gate
     that would call a vendor or the record layer takes its offline path in the
     same way everywhere and in milliseconds.
@@ -37,16 +39,33 @@ _EPOCH = os.environ.get("CARR_GATE_REPLAY_EPOCH")
 if _EPOCH:
     import sys
     import time as _time
+    # These standard-library modules capture monotonic for transport deadlines.
+    # Load them before changing the clock used by gate code, so a child timeout
+    # or thread wait remains bounded even when fixture time is standing still.
+    import subprocess
+    import threading
 
     _PINNED = float(_EPOCH)
-    _MONO0 = _time.monotonic()
+    _ELAPSED = 0.0
+    _real_sleep = _time.sleep
     _real_localtime = _time.localtime
     _real_gmtime = _time.gmtime
     _real_ctime = _time.ctime
     _real_strftime = _time.strftime
 
     def _now():
-        return _PINNED + (_time.monotonic() - _MONO0)
+        return _PINNED + _ELAPSED
+
+    def _monotonic():
+        return _ELAPSED
+
+    def _monotonic_ns():
+        return int(_ELAPSED * 1e9)
+
+    def _sleep(seconds):
+        global _ELAPSED
+        _real_sleep(seconds)
+        _ELAPSED += seconds
 
     def _time_fn():
         return _now()
@@ -68,6 +87,9 @@ if _EPOCH:
 
     _time.time = _time_fn
     _time.time_ns = _time_ns_fn
+    _time.monotonic = _monotonic
+    _time.monotonic_ns = _monotonic_ns
+    _time.sleep = _sleep
     _time.localtime = _localtime
     _time.gmtime = _gmtime
     _time.ctime = _ctime
