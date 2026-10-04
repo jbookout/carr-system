@@ -429,6 +429,9 @@ class BlockingReviewTests(unittest.TestCase):
         self.assert_attributed_fix_survives_validation(
             "The corrected request now returns successfully with no error.")
 
+    def test_03_same_noun_validation_keeps_attributed_fix(self):
+        self.assert_attributed_fix_survives_validation("No bugs remain after the patch.")
+
     def test_03_body_denial_of_attributed_bug_excludes_fix(self):
         self.assert_cross_field_denial_excluded(
             "Fix suspected bug Jev flagged",

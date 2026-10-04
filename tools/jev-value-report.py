@@ -316,8 +316,12 @@ def positive_attribution(commit):
 
 
 def _denial(nouns):
-    """Regex for "no <noun>" or "not a <noun>", singular or plural."""
-    return rf"(?:no\s+(?:{nouns})s?|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?)"
+    """Regex for "no <noun>" or "not a <noun>", singular or plural.
+
+    "No bugs remain" reports the state after a fix, so it is not a denial.
+    """
+    return (rf"(?:no\s+(?:{nouns})s?\b(?!\s+(?:remain|left|anymore|any\s+more))"
+            rf"|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?)")
 
 
 def build_report(sources, start, end):
