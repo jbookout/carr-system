@@ -88,7 +88,9 @@ def main() -> int:
         # reaches gh, node, npm, jq or any other Homebrew tool without its own
         # PATH fails "No such file or directory" only under launchd, never in
         # the terminal that tested it: com.carr.job-watchdog shipped that way
-        # (#1431) and flooded every prompt with false evidence errors.
+        # (#1431) and flooded every prompt with false evidence errors. Position is
+        # deliberately unchecked: job-watchdog puts Homebrew first, the older jobs
+        # append it so every binary they already resolved keeps resolving the same.
         with open(path, "rb") as handle:
             env = plistlib.load(handle).get("EnvironmentVariables") or {}
         check(f"{path.name} declares a PATH that reaches Homebrew",
