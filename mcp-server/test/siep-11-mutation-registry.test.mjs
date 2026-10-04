@@ -3014,6 +3014,24 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
   assert.match(probe, /jsonb_build_object\('pre_v36',pre_v36,'forward_v36',forward_v36\)/);
 });
 
+test("source-only migration diagnostics preserve the sealed runtime frontier", () => {
+  const sealed = frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
+  const confirmMerge = sealed.find(row => row.ingress_key === "mcp-tool:confirm-merge");
+  assert.equal(confirmMerge.human_only, true);
+  assert.equal(confirmMerge.principal_mode, "server_verified_human");
+  const fixture = JSON.parse(fs.readFileSync(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const review = fixture.current_source_reviews[SCAC_MUTATION_REGISTRY_VERSION];
+  for (const locator of ["bin/migrate-prod.sh", "tools/migrate-prod-support.py"]) {
+    const row = review.upsert.find(row => row.source_locator === locator);
+    const previous = sealed.find(row => row.source_locator === locator);
+    assert.ok(previous, "reviewed administration script already exists in the seal");
+    const digest = sha256(fs.readFileSync(new URL(`../../${locator}`, import.meta.url), "utf8"));
+    assert.equal(row.schema_digest, digest);
+    assert.equal(row.handler_digest, digest);
+  }
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, "scac-mutation-registry.v104"), true);
   // The push toll calls the bare API; its default must follow the newest frontier.
