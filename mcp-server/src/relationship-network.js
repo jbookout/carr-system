@@ -2,22 +2,37 @@
 // No name matching, inferred employment edges, or vendor score probabilities.
 export const NETWORK_SCHEMA = 'carr-relationship-network.v1';
 export const REFERRAL_KINDS = ['referral', 'referred'];
+// The one exact party-to-deal association rule; the network snapshot and the
+// vendor directory both count from it. Sources: evidence on every live vendor
+// row for a party, and referral deals attached to a relationship, credited to
+// the referrer accepted when that deal was attached. Live client deals only.
+// A date is UTC midnight, as vendor evidence stores one, whatever the session zone.
+// recorded_at is when an attachment was written; vendor evidence carries none
+// because its own writes already clear that row's verified coverage.
+export const exactDealAssociations = `select e.party_id,e.deal_id,e.role,e.occurred_at,e.detail,e.recorded_at,d.outcome from (
+ select v.party_id,x.deal_id,x.role,x.occurred_at,x.evidence_ref detail,null::timestamptz recorded_at
+ from public.vendor v cross join lateral jsonb_to_recordset(coalesce(v.deal_evidence,'[]'::jsonb)) x(deal_id uuid,role text,occurred_at timestamptz,evidence_ref text)
+ where v.merged_into is null
+ union all
+ select r.referred_by,r.deal_id,'referred',coalesce(r.occurred_on::timestamp at time zone 'UTC',r.created_at),r.note,r.created_at from public.party_link_deal r
+) e join public.deal d on d.id=e.deal_id join public.client dc on dc.id=d.client_id and dc.merged_into is null
+ join public.party dp on dp.id=dc.party_id and dp.merged_into is null and dp.deleted_at is null`;
 export const networkStatement = `with live as (
  select p.id,p.name,p.city,p.state,p.contact_state,p.contact_state_until,
-   (coalesce(l.suppressed,false) or coalesce(l.stage='do_not_contact',false) or coalesce(v.disposition='avoid',false)) restricted,
+   -- Any role row's restriction holds the party; the display row is not the authority.
+   (exists(select 1 from public.lead rl where rl.party_id=p.id and (coalesce(rl.suppressed,false) or rl.stage='do_not_contact'))
+    or exists(select 1 from public.vendor rv where rv.party_id=p.id and rv.merged_into is null and rv.disposition='avoid')) restricted,
    v.id vendor_id,c.id client_id,l.id lead_id,
    coalesce(v.vendor_ref,c.roster_ref,l.registry_ref,p.ref) ref,
    case when v.id is not null then 'vendor' when c.id is not null then 'client' when l.id is not null then 'lead' else 'contact' end kind,
    coalesce(v.territory,p.city) territory,
    coalesce(v.verticals,case when c.vertical is not null then array[c.vertical] when l.segment is not null then array[l.segment] else array[]::text[] end) verticals,
    a.slug owner,
-   coalesce(v.offers,c.notes,l.notes) summary,
-   coalesce(v.deal_evidence,'[]'::jsonb) deal_evidence,
-   v.deal_history_verified_at
+   coalesce(v.offers,c.notes,l.notes) summary
  from public.party p
- left join lateral (select id,vendor_ref,territory,verticals,owner_id,offers,deal_evidence,deal_history_verified_at,disposition from public.vendor v where v.party_id=p.id and v.merged_into is null order by v.id limit 1) v on true
+ left join lateral (select id,vendor_ref,territory,verticals,owner_id,offers from public.vendor v where v.party_id=p.id and v.merged_into is null order by v.id limit 1) v on true
  left join lateral (select id,roster_ref,vertical,owner_id,notes from public.client c where c.party_id=p.id and c.merged_into is null order by c.id limit 1) c on true
- left join lateral (select id,registry_ref,segment,owner_id,notes,suppressed,stage from public.lead l where l.party_id=p.id order by l.id limit 1) l on true
+ left join lateral (select id,registry_ref,segment,owner_id,notes from public.lead l where l.party_id=p.id order by l.id limit 1) l on true
  left join public.actor a on a.id=coalesce(v.owner_id,c.owner_id,l.owner_id)
  where p.merged_into is null and p.deleted_at is null
 ), links as (
@@ -27,13 +42,7 @@ export const networkStatement = `with live as (
  select d.id,d.name,d.outcome,d.phase,d.city,c.party_id,c.vertical,d.owner
  from public.deal d join public.client c on c.id=d.client_id and c.merged_into is null join live p on p.id=c.party_id
 ), associations as (
- select p.id party_id,e.deal_id,e.role,e.occurred_at,e.evidence_ref detail from live p
- cross join lateral jsonb_to_recordset(p.deal_evidence) e(deal_id uuid,role text,occurred_at timestamptz,evidence_ref text)
- join deals d on d.id=e.deal_id
- union
- select coalesce(l.via_party,l.from_party),r.deal_id,'referred',coalesce(l.occurred_on::timestamptz,l.created_at),r.note
- from links l join public.party_link_deal r on r.link_id=l.id join deals d on d.id=r.deal_id and d.party_id=l.to_party
- where l.kind in ('referral','referred')
+ select a.party_id,a.deal_id,a.role,a.occurred_at,a.detail from (${exactDealAssociations}) a join live p on p.id=a.party_id
 ), nodes as (
  select jsonb_build_object('id','party:'||p.id,'record_id',coalesce(p.vendor_id,p.client_id,p.lead_id,p.id),'ref',p.ref,'name',p.name,'kind',p.kind,
  'territory',p.territory,'verticals',p.verticals,'owner',p.owner,'summary',p.summary,'contact_state',p.contact_state,'contact_state_until',p.contact_state_until,'restricted',p.restricted) item
@@ -67,8 +76,9 @@ export function projectNetwork(snapshot, observedAt) {
   const suggestions = snapshot.edges.filter(edge => edge.kind === 'can_introduce' && edge.detail?.trim()
     && nodes.has(edge.from) && nodes.has(edge.to) && (!edge.via || nodes.has(edge.via))
     && [edge.from,edge.to,edge.via].filter(Boolean).every(id=>!held(nodes.get(id),observedAt))
+    // Endpoint order records direction, not whether the two have been connected.
     && !snapshot.edges.some(other=> ['introduced','intro','intro_received','intro_requested'].includes(other.kind)
-      && other.from===edge.from && other.to===edge.to))
+      && [other.from,other.to].sort().join() === [edge.from,edge.to].sort().join()))
     .sort((a,b)=>String(b.when||'').localeCompare(String(a.when||'')) || a.id.localeCompare(b.id))
     .map(edge=>({id:edge.id,from:edge.from,to:edge.to,via:edge.via,reason:edge.summary || edge.detail.slice(0,180),detail:edge.detail,when:edge.when}));
   return {schema:NETWORK_SCHEMA,observed_at:observedAt,valid_until:new Date(Date.parse(observedAt)+60000).toISOString(),...snapshot,
@@ -76,11 +86,16 @@ export function projectNetwork(snapshot, observedAt) {
 }
 
 // Add exact deal attribution to an existing relationship without replacing it.
-export async function bindReferralDeal(client, actor, args, ends, kind, linkId) {
+// The row keeps the referrer the caller resolved from the locked relationship
+// and the caller's date (else the relationship's), so later backfills on the
+// shared relationship never move an already recorded deal.
+export async function bindReferralDeal(client, actor, args, ends, kind, link) {
   if (args.deal_id == null) return null;
   if (!REFERRAL_KINDS.includes(kind) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.deal_id) || typeof args.note !== 'string' || !args.note.trim()) throw Object.assign(new Error('referral_deal_invalid'),{code:'referral_deal_invalid'});
   const found = await client.query(`select d.id from public.deal d join public.client c on c.id=d.client_id and c.merged_into is null join public.party p on p.id=c.party_id and p.merged_into is null and p.deleted_at is null where d.id=$1::uuid and p.id=$2::uuid`,[args.deal_id,ends.to_party]);
   if (!found.rows.length) throw Object.assign(new Error('referral_deal_target_mismatch'),{code:'referral_deal_target_mismatch'});
-  const result = await client.query(`insert into public.party_link_deal(link_id,deal_id,created_by,note) values($1,$2,$3,$4) on conflict do nothing returning deal_id`,[linkId,args.deal_id,actor.id,args.note.trim()]);
-  return result.rows[0]?.deal_id || null;
+  const result = await client.query(`insert into public.party_link_deal(link_id,deal_id,created_by,note,referred_by,occurred_on)
+    values($1,$2,$3,$4,$5,coalesce($6::date,(select occurred_on from public.party_link where id=$1))) on conflict do nothing returning deal_id,referred_by`,
+    [link.id,args.deal_id,actor.id,args.note.trim(),link.referred_by,link.occurred_on]);
+  return result.rows[0] || null;
 }

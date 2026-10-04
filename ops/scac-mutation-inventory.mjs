@@ -19938,7 +19938,7 @@ export function renderRelationshipRegistrySql(rows, predecessorSql = null) {
   const preflight = `do $relationship_v105_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Relationship v105 requires exact applied predecessor'; end if;\n` +
-    `  if not exists(select 1 from public.schema_migrations where filename='0796_relationship_deal_links.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0796_relationship_deal_links.sql"), "utf8"))}') then\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='0805_relationship_deal_links.sql' and sha256='${sha256(readFileSync(resolve(REPO_ROOT, "migrations/0805_relationship_deal_links.sql"), "utf8"))}') then\n` +
     `    raise exception 'Relationship v105 requires exact relationship migration'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V104_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
@@ -21053,7 +21053,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v105.generated.js"] =
     renderRuntimeProjection(v105Rows, { version: REGISTRY_V105_VERSION,
       dbCatalogBaseline: RELATIONSHIP_V105_DB_CATALOG_BASELINE });
-  artifacts["migrations/0797_relationship_scac_successor.sql"] =
+  artifacts["migrations/0806_relationship_scac_successor.sql"] =
     renderRelationshipRegistrySql(v105Rows, artifacts["migrations/0787_jev_cap_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -22104,7 +22104,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v105.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V105_VERSION,
         dbCatalogBaseline: RELATIONSHIP_V105_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0797_relationship_scac_successor.sql"), renderRelationshipRegistrySql(rows));
+    await writeFile(resolve("migrations/0806_relationship_scac_successor.sql"), renderRelationshipRegistrySql(rows));
     process.stdout.write("Relationship v105 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), REGISTRY_V105_VERSION);

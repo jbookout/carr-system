@@ -84289,13 +84289,13 @@
           "schema_digest": "0ffb8c8c7ab89cbb729eba73afa67c6b9ac0cba84bdbe5e17a15b99e5e827c5a"
         },
         "external-admin:tools/migrate.py": {
-          "schema_digest": "bc71ccb19bdf422ba6d0e1b013fc5b78e705a467df7a6a70fca20fb010eb75fb",
-          "handler_digest": "bc71ccb19bdf422ba6d0e1b013fc5b78e705a467df7a6a70fca20fb010eb75fb"
+          "schema_digest": "62ce2f1ff3a3756e6757b7ad9e0de261278007f723925d29e7fb0a3ff2473d11",
+          "handler_digest": "62ce2f1ff3a3756e6757b7ad9e0de261278007f723925d29e7fb0a3ff2473d11"
         }
       },
       "source_digest_replacements": {},
       "expected_count": 1085,
-      "expected_sha256": "08dba85e1f94f6537aa9b1c129aa21ffa825e8cd05c1879aecc328ecd0139ddb",
+      "expected_sha256": "84037c6002193684a4f3429373484db96e8f1c6cd708b35b40d52ead0a29eb5f",
       "reason": "W14 admits exact referral deal attribution and binds its atomic migration pair; prior authority flags remain sealed."
     }
   ],
@@ -87072,7 +87072,7 @@
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "78c6931e8eac1f4c82f6ec723797e8cf9a1271af84a0023f1cb3e8c493e6f051",
+      "expected_sha256": "38583277371869afee6ba9faa04186203ea02af27a17486f4d5bb98a18a47226",
       "reason": "Carry the credential-rotation and Dell migration source reviews into the relationship successor. Existing external-admin source digests change without changing their authority contracts or historical seals."
     }
   }

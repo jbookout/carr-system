@@ -1289,7 +1289,7 @@ if [ "$JEV_CAP_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]
 fi
 
 RELATIONSHIP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0797_relationship_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0806_relationship_scac_successor.sql')" \
   2>/dev/null)"
 case "$RELATIONSHIP_REGISTRY_APPLIED" in
   t|f) ;;

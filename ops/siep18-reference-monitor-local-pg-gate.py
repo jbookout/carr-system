@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0797 seals exact referral attribution as v105 after the capped Worker v104.
+# 0806 seals exact referral attribution as v105 after the capped Worker v104.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v105"
 LIVE_REGISTRY_ORDINAL = 105
@@ -35,7 +35,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0787_jev_cap_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0797_relationship_scac_successor.sql"
+    "migrations/0806_relationship_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

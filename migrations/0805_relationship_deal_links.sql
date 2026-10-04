@@ -1,8 +1,13 @@
 -- Exact referral attribution: one recorded relationship may send several deals.
 -- Existing graph edges never imply that every deal for a practice was referred.
+-- Each row keeps the referrer and date accepted when that deal was attached, so
+-- a later broker or date backfill on the shared relationship never rewrites the
+-- attribution of a deal recorded before it.
 create table public.party_link_deal (
   link_id uuid not null references public.party_link(id),
   deal_id uuid not null references public.deal(id),
+  referred_by uuid not null references public.party(id),
+  occurred_on date,
   note text not null check(length(trim(note)) > 0),
   created_at timestamptz not null default now(),
   created_by uuid not null references public.actor(id),
