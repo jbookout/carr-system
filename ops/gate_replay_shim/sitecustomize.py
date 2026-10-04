@@ -14,12 +14,11 @@ fresh Linux runner and on a developer Mac. Three inputs would otherwise differ:
   * THE CLOCK. One gate acts only at weekends, several compare against "the
     last 14 days", and any of them can print a date. time.time, time.time_ns,
     the no-argument forms of localtime/gmtime/ctime/strftime, and
-    datetime.now/utcnow/today plus date.today all read a pinned instant that
-    advances with process CPU time. Deadline clocks use the same CPU clock:
-    host scheduling and offline subprocess waits cannot choose a different
-    budget branch under load. CPU work still exhausts a gate's budget. The
-    parent replay runner retains its real wall-clock invocation timeout, so
-    a blocked or sleeping gate still fails rather than hanging CI.
+    datetime.now/utcnow/today plus date.today use a logical clock. Each clock
+    read advances one millisecond and explicit sleeps advance their requested
+    duration. Host scheduling cannot spend a fixture's deadline budget. The
+    parent's invocation timeout and stdlib blocking waits retain real time,
+    so a hung gate still fails rather than spinning forever.
   * THE NETWORK. socket connect and name resolution raise OSError, so a gate
     that would call a vendor or the record layer takes its offline path in the
     same way everywhere and in milliseconds.
@@ -40,20 +39,42 @@ _EPOCH = os.environ.get("CARR_GATE_REPLAY_EPOCH")
 if _EPOCH:
     import sys
     import time as _time
+    # Capture real deadline clocks before replacing the application clock.
+    # Blocking waits must not depend on replay clock reads.
+    import subprocess as _subprocess
+    import threading as _threading
+    import queue as _queue
+    import concurrent.futures._base as _futures_base
+    from types import SimpleNamespace as _SimpleNamespace
+
+    # Futures dereferences its time module during iteration instead of capturing
+    # a function at import, as queue/threading/subprocess do. Give its deadlines
+    # a private real clock; application imports still see the logical clock.
+    setattr(_futures_base, "time", _SimpleNamespace(monotonic=_time.monotonic))
 
     _PINNED = float(_EPOCH)
-    # This offline harness owns the simulated clock; production hooks retain
-    # wall-clock budgets. Keep the parent's subprocess timeout outside it.
-    _time.monotonic = _time.process_time
-    _time.monotonic_ns = _time.process_time_ns
-    _MONO0 = _time.monotonic()
+    _elapsed = 0.0
+    _real_sleep = _time.sleep
     _real_localtime = _time.localtime
     _real_gmtime = _time.gmtime
     _real_ctime = _time.ctime
     _real_strftime = _time.strftime
 
+    def _monotonic():
+        global _elapsed
+        _elapsed += 0.001
+        return _elapsed
+
+    def _monotonic_ns():
+        return int(_monotonic() * 1e9)
+
+    def _sleep(seconds):
+        global _elapsed
+        _real_sleep(seconds)
+        _elapsed += seconds
+
     def _now():
-        return _PINNED + (_time.monotonic() - _MONO0)
+        return _PINNED + _monotonic()
 
     def _time_fn():
         return _now()
@@ -75,6 +96,9 @@ if _EPOCH:
 
     _time.time = _time_fn
     _time.time_ns = _time_ns_fn
+    _time.monotonic = _monotonic
+    _time.monotonic_ns = _monotonic_ns
+    _time.sleep = _sleep
     _time.localtime = _localtime
     _time.gmtime = _gmtime
     _time.ctime = _ctime
