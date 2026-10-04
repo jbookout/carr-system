@@ -71,6 +71,15 @@ renamed = (base - {"migrations/0787_c.sql"}) | {"migrations/0787_c.sql"}
 v = mog.violations(base, renamed | {"migrations/0790_x.sql", "migrations/0791_y.sql"})
 check("several additions all above the maximum pass", v == [], repr(v))
 
+v = mog.violations(base, base | {"migrations/0786a_interstitial.sql"})
+check("a lettered interstitial slot below the maximum is refused",
+      [n for n, _ in v] == ["migrations/0786a_interstitial.sql"], repr(v))
+
+v = mog.violations(base | {"migrations/0790a_x.sql"},
+                   base | {"migrations/0790a_x.sql", "migrations/0790_y.sql"})
+check("a lettered slot on the base raises the maximum to its number",
+      [n for n, _ in v] == ["migrations/0790_y.sql"], repr(v))
+
 v = mog.violations(base, base)
 check("a change adding no migration passes", v == [], repr(v))
 

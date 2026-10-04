@@ -51,18 +51,22 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
-import re
 import subprocess
 import sys
 from typing import Iterable, Mapping
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "tools"))
+# The one slot grammar the allocator and the runner share, so a lettered
+# interstitial slot (0532a_...) is a migration here exactly as it is there.
+from migration_number_contract import SLOT_RE  # noqa: E402
+
 MIGRATIONS_DIR = "migrations"
-MIGRATION_RE = re.compile(r"^migrations/(\d{4})_[a-z0-9_]+\.sql$")
 
 
 def number(path: str) -> int | None:
-    m = MIGRATION_RE.match(path)
+    directory, _, name = path.rpartition("/")
+    m = SLOT_RE.match(name) if directory == MIGRATIONS_DIR else None
     return int(m.group(1)) if m else None
 
 
