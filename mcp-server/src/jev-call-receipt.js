@@ -298,23 +298,24 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
           ? "timeout" : "network", "", key);
       }
       try {
+        const failedBody = response.ok ? "" : await response.text().catch(() => "");
+        // Billing takes precedence over retry classification, including 429.
+        if (!response.ok && (response.status === 402 ||
+            /billing|insufficient[_ -]*(?:credit|fund)|credit[_ -]*(?:exhaust|balance)|payment required/i.test(failedBody))) {
+          try { await billingHold(); }
+          catch { refuseJevSpend("jev_spend_authority_unavailable", null); }
+          throw upstreamFailure(response.status, "http_status", failedBody, key);
+        }
         if (transport_mode !== "paid_once" && response.status === 429 && attempt < MAX_429_RETRIES) {
           const wait = retryAfterMs(response);
           if (deadline - now() - wait >= MIN_ATTEMPT_MS) {
             clearTimeout(timer);
-            await response.text().catch(() => "");
             await sleep(wait);
             continue;
           }
         }
-        if (!response.ok) {
-          const text = await response.text().catch(() => "");
-          if (response.status === 402 || /billing|insufficient[_ -]*(?:credit|fund)|credit[_ -]*(?:exhaust|balance)|payment required/i.test(text)) {
-            try { await billingHold(); }
-            catch { refuseJevSpend("jev_spend_authority_unavailable", null); }
-          }
-          throw upstreamFailure(response.status, "http_status", text, key);
-        }
+        if (!response.ok)
+          throw upstreamFailure(response.status, "http_status", failedBody, key);
         let parsed;
         try { parsed = await response.json(); }
         catch { throw upstreamFailure(response.status, controller.signal.aborted ? "timeout" : "invalid_json", "", key); }

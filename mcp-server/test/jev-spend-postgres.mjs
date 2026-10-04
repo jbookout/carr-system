@@ -75,7 +75,7 @@ test('old untagged attempts are conservatively charged to every site', async () 
 });
 
 test('402 or billing error stops every site for 1 hour through one durable marker', async () => {
-  for (const [status, body] of [[402, 'out of credit'], [403, 'insufficient_credit']]) {
+  for (const [status, body] of [[402, 'out of credit'], [403, 'insufficient_credit'], [429, 'billing account suspended']]) {
     await pool.query('truncate tool_call');
     let sent = 0;
     const c = await pool.connect();

@@ -1,3 +1,4 @@
+import { unpackJevState } from "../src/jev-spend-authority.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -25,7 +26,7 @@ function close(actual, expected, epsilon = 1e-9) {
 function labelOracle(fixture) {
   const bySituation = new Map(fixture.cases.map(c => [c.situation, c.candidates]));
   return async request => {
-    const candidates = bySituation.get(request.state.situation) || [];
+    const candidates = bySituation.get(unpackJevState(request.state).state.situation) || [];
     const answers = {};
     for (const [key, q] of Object.entries(request.questions)) {
       const hit = candidates.find(x => q.instructions.includes(`"${x.title}" in document "${x.doc_slug}"`));
@@ -220,4 +221,21 @@ test("no new file is a script entrypoint, so the sealed source inventory does no
   for (const path of ["evals/retrieval/jev-rerank-eval.mjs", "mcp-server/src/jev-rerank.js",
     "mcp-server/src/doctrine-taxonomy-snapshot.v1.js"])
     assert.equal(isScriptEntrypoint(path, false, readFileSync(resolve(REPO, path), "utf8")), false, path);
+});
+
+
+test('the Python bridge strips transport attribution and keeps replay keys stable', async () => {
+  const captured = [];
+  const result = { model: 'fake', answers: {}, usage: { input_tokens: 1, output_tokens: 0 } };
+  const bridge = pythonJevBridge({ spawn: (cmd, args, opts) => {
+    captured.push(JSON.parse(opts.input));
+    return { status: 0, stdout: JSON.stringify({ ok: true, latency_ms: 0, result }) };
+  } });
+  const req = session => ({ state: { input: { situation: 'x' }, jev_attribution: {
+    caller: 'worker.rerank', session_id: session, unattended: false } }, questions: {}, model: 'fake' });
+  await bridge(req('first'));
+  assert.deepEqual(captured[0].state, { situation: 'x' });
+  const recording = {};
+  await recordingAsk(async () => result, recording)(req('first'));
+  assert.deepEqual(await replayAsk(recording)(req('second')), result);
 });

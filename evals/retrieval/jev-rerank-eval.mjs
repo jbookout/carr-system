@@ -27,6 +27,7 @@
 // isScriptEntrypoint in ops/scac-mutation-inventory.mjs). LIVE_COMMAND below
 // is the one way to run it.
 
+import { unpackJevState } from "../../mcp-server/src/jev-spend-authority.js";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -85,9 +86,13 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
+function semanticRequest(request) {
+  return { state: unpackJevState(request.state).state, questions: request.questions,
+    model: request.model ?? null };
+}
+
 function requestKey(request) {
-  return createHash("sha256").update(canonical({ state: request.state, questions: request.questions,
-    model: request.model ?? null })).digest("hex");
+  return createHash("sha256").update(canonical(semanticRequest(request))).digest("hex");
 }
 
 export function recordingAsk(ask, recording) {
@@ -119,13 +124,11 @@ const PYTHON_BRIDGE = [
   "    print(json.dumps({'ok': False, 'error': str(err)}))",
 ].join("\n");
 
-// The live door: ops/typesafe_client.ask, the one way CARR calls Jev. It holds
-// the credential, writes the receipt the spend guard counts, and refuses by
-// name when ~/.config/carr/typesafe.env is absent. Latency is measured inside
-// Python around ask(), so interpreter start-up is not billed to Jev.
+// ops/typesafe_client.ask uses the attributed, budgeted Worker transport.
+// Latency is measured in Python around ask(), excluding interpreter start-up.
 export function pythonJevBridge({ repo = REPO, spawn = spawnSync, python = "python3" } = {}) {
   return async request => {
-    const run = spawn(python, ["-c", PYTHON_BRIDGE], { cwd: repo, input: JSON.stringify(request),
+    const run = spawn(python, ["-c", PYTHON_BRIDGE], { cwd: repo, input: JSON.stringify(semanticRequest(request)),
       encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 180000 });
     if (run.error) throw run.error;
     if (run.status !== 0) throw new Error(`jev bridge exited ${run.status}: ${String(run.stderr || "").slice(-400)}`);

@@ -344,7 +344,7 @@ export function stageTree({
   const target = join(base, "mcp-server", "src");
   mkdirSync(target, { recursive: true });
   cpSync(SRC, target, { recursive: true });
-  // THE TWO FILES src IMPORTS FROM OUTSIDE ITSELF. The staged tools.js is a real
+  // Dependencies src imports from outside itself. The staged tools.js is a real
   // module graph and will not load without them; they are copied rather than
   // stubbed so the dispatch under test is the dispatch that ships.
   cpSync(join(REPO, "mcp-server", "continuity-reference-manifest.mjs"),
@@ -370,6 +370,8 @@ export function stageTree({
     writeFileSync(path, `${readFileSync(path, "utf8")}\n// ${fixtureEdit}\n`);
   }
   mkdirSync(join(base, "ops", "config"), { recursive: true });
+  for (const name of ["jev-call-sites.v1.json", "jev-cost-guard.v1.json"])
+    cpSync(join(REPO, "ops", "config", name), join(base, "ops", "config", name));
   cpSync(join(REPO, ...ENVIRONMENT_MANIFEST), join(base, ...ENVIRONMENT_MANIFEST));
   if (environmentEdit !== null) {
     const path = join(base, ...ENVIRONMENT_MANIFEST);
