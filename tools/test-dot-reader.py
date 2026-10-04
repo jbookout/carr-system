@@ -441,7 +441,7 @@ class DotReader(unittest.TestCase):
 
 
     def test_release_abandon_fixture_isolates_cluster_roles(self):
-        spec = importlib.util.spec_from_file_location("release_abandon", ROOT / "ops/release-abandon-selftest.py")
+        spec = importlib.util.spec_from_file_location("release_abandon", ROOT / "ops/release-abandon-local-pg-gate.py")
         abandon = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(abandon)
         password = secrets.token_urlsafe(32)
@@ -590,7 +590,7 @@ class DotReader(unittest.TestCase):
 
 class ReleaseAbandonFixture(unittest.TestCase):
     def setUp(self):
-        spec = importlib.util.spec_from_file_location("release_abandon", ROOT / "ops/release-abandon-selftest.py")
+        spec = importlib.util.spec_from_file_location("release_abandon", ROOT / "ops/release-abandon-local-pg-gate.py")
         self.abandon = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.abandon)
 
@@ -673,7 +673,7 @@ class ReleaseAbandonFixture(unittest.TestCase):
             return run(args, **kwargs)
 
         try:
-            with patch.dict(os.environ, {"CARR_CI_DATABASE_URL": "host=127.0.0.1"}), \
+            with patch.dict(os.environ, {"DATABASE_URL": "host=127.0.0.1"}), \
                  patch.object(tempfile, "tempdir", "/tmp"), \
                  patch.object(subprocess, "run", side_effect=fail_stop), \
                  patch.object(self.abandon, "legacy_approval_receipt_refusal"), \

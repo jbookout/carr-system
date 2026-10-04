@@ -782,6 +782,17 @@ def _test_shaped_files(tree=None):
     return found
 
 
+def _selftest_collection_patterns() -> list[str]:
+    ci = CI.read_text()
+    patterns: list[str] = []
+    for m in re.finditer(r"for t in ([^;]+); do", ci):
+        # Shell tokens only. A loop over "$eligible" or a line continuation
+        # contributes nothing to expand, and must not reach Path.glob.
+        patterns += [tok for tok in m.group(1).split()
+                     if re.fullmatch(r"[A-Za-z0-9_./*?\[\]-]+", tok)]
+    return patterns
+
+
 def test_every_test_file_in_the_tree_is_collected():
     """A test the collector's glob does not match is not a passing test — it is
     no test at all, and it sits in the tree looking exactly like coverage.
@@ -810,13 +821,7 @@ def test_every_test_file_in_the_tree_is_collected():
     fails here instead of going quiet. The ci.sh side is still derived from
     ci.sh's source rather than restated here, because a copy of the globs would
     be a second contract to keep in sync, which is the same failure again."""
-    ci = (REPO / "ops" / "ci.sh").read_text()
-    patterns: list[str] = []
-    for m in re.finditer(r"for t in ([^;]+); do", ci):
-        # Shell tokens only. A loop over "$eligible" or a line continuation
-        # contributes nothing to expand, and must not reach Path.glob.
-        patterns += [tok for tok in m.group(1).split()
-                     if re.fullmatch(r"[A-Za-z0-9_./*?\[\]-]+", tok)]
+    patterns = _selftest_collection_patterns()
     check("ci.sh's selftest collection globs are readable from source",
           len(patterns) >= 2, f"found: {patterns}")
     if not patterns:
@@ -1462,6 +1467,24 @@ if mode == "retry-failed" and len(calls) == 3:
               all("zsh" in args for args in calls if "install" in args))
 
 
+def test_release_database_proof_runs_in_migration_class():
+    """The real release proof must use DB admission, outside the short gate pool."""
+    proofs = [path for path in (REPO / "ops").glob("release-abandon-*.py")
+              if "def legacy_approval_receipt_refusal(" in path.read_text()]
+    check("one executable release database proof exists", len(proofs) == 1, proofs)
+    if len(proofs) != 1:
+        return
+    proof = proofs[0]
+    collection = _selftest_collection_patterns()
+    pooled = {path for pattern in collection for path in REPO.glob(pattern)}
+    check("the release database proof is outside the short selftest pool",
+          proof not in pooled, proof.relative_to(REPO))
+    db_proofs = {path for path in (REPO / "ops").glob("*-gate.py")
+                 if re.search(r"^# ci: db-gate", path.read_text(), re.M)}
+    check("the migration class discovers the release database proof",
+          proof in db_proofs, proof.relative_to(REPO))
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -1479,6 +1502,7 @@ def main():
                test_no_env_claims_a_production_hostname,
                test_mypy_pin_acceptance_is_narrow,
                test_every_test_file_in_the_tree_is_collected,
+               test_release_database_proof_runs_in_migration_class,
                test_the_walk_prunes_named_roots_only,
                test_a_failing_gates_output_is_printed_whole_when_it_is_short,
                test_a_long_failing_gate_log_is_tailed_and_still_redacted,

@@ -100,7 +100,9 @@ def main() -> int:
           'git_bytes("archive", "--format=tar"' in ledger_impl
           and 'git("show", f"{sha}:migrations/{filename}")' not in ledger_impl)
 
-    tested_sha = "HEAD"
+    # Resolve the source once: a commit during this suite must not turn a
+    # same-revision determinism check into a comparison of different trees.
+    tested_sha = git("rev-parse", "HEAD").strip()
     first = build("--sha", tested_sha)
     second = build("--sha", tested_sha)
 
@@ -171,7 +173,7 @@ def main() -> int:
 
     # 2. the digest belongs to the commit, not the checkout
     dirty = bool(git("status", "--porcelain").strip())
-    head_sha = git("rev-parse", tested_sha).strip()
+    head_sha = tested_sha
     by_sha = build("--sha", head_sha)
     check("2. tested SHA and its explicit SHA digest identically"
           + (" (working tree is dirty, which is the interesting case)" if dirty else ""),

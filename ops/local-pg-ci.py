@@ -301,8 +301,9 @@ def refuse_hosted_execution() -> None:
 
 
 def scrub_cloud_environment(source: Mapping[str, str]) -> dict[str, str]:
-    """Build the minimal nonsecret environment needed by local tools."""
+    """Keep local tool inputs and explicit offline replay; remove credentials."""
     allowed = {
+        "CARR_JEV_OFFLINE_REPLAY",
         "HOME",
         "LANG",
         "LC_ALL",

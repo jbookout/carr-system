@@ -415,6 +415,22 @@ if command.startswith("crash "):
     raise RuntimeError("mini gate fell over")
 if command.startswith("hang "):
     time.sleep(30)
+if command.startswith("budget "):
+    import subprocess
+    started = time.monotonic()
+    if command.endswith("host-delay"):
+        subprocess.run([sys.executable, "-c", "import time; time.sleep(0.25)"], check=True)
+    elif command.endswith("fixture-wait"):
+        time.sleep(0.25)
+    elif command.endswith("child-timeout"):
+        try:
+            subprocess.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.25)
+        except subprocess.TimeoutExpired:
+            sys.exit(0)
+        sys.exit(2)
+    if time.monotonic() - started >= 0.2:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "MINI GATE time budget exhausted"}}))
+    sys.exit(0)
 if command.startswith("failopen "):
     with open(os.environ["CARR_HOOK_GUARD_LOG"], "a") as fh:
         fh.write("mini-gate ALLOW(internal-error) KeyError: 'x'\\n")
@@ -567,6 +583,17 @@ try:
 
     again = run(repo, fixtures_dir, manifest)
     check("two runs produce the identical snapshot", GR.snapshot_rows(again.results) == snapshot)
+
+    write_fixtures(fixtures_dir, ["budget host-delay", "budget fixture-wait", "budget child-timeout"])
+    timing = run(repo, fixtures_dir, manifest)
+    timed = verdicts(timing)
+    check("host scheduling and child setup do not consume the fixture clock budget",
+          timed["budget host-delay"].verdict == "allow", timed["budget host-delay"].row)
+    check("explicit fixture waits still consume the clock budget",
+          timed["budget fixture-wait"].verdict == "announce", timed["budget fixture-wait"].row)
+    check("subprocess deadlines still use elapsed host time",
+          timed["budget child-timeout"].verdict == "allow", timed["budget child-timeout"].row)
+    write_fixtures(fixtures_dir, COMMANDS)
 
     comment_only = mini_repo(work, BEHAVIOUR_DENY_RM,
                              extra="# covered by ops/fixtures/real-replay/bash-commands.jsonl replay\n"

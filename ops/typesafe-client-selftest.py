@@ -5,6 +5,8 @@ NOTHING HERE REACHES THE NETWORK. Every request is served by an injected
 opener, so this suite runs on a GitHub runner with no credential, no allowlist
 entry and no spend. A test that needed the live service would be a test CI
 could not run.
+Offline transport fixtures must also own temporary paid-call accounting; a
+mocked HTTP response must never reserve capacity in the machine's live ledger.
 
 The load-bearing case is test_module_is_a_library_and_must_stay_one. The client
 is safe to import from anywhere precisely because it is not a script
@@ -1051,6 +1053,11 @@ class LibraryShapeTests(unittest.TestCase):
 
 
 class DispatchOwnershipTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.quota_log = root / 'quota.jsonl'
+        self.enterContext(patch.object(client, 'JEV_DAILY_CAP_LOG', str(self.quota_log)))
+
     def test_tests_never_reserve_against_the_canonical_daily_cap(self):
         canonical = os.path.join(client.CANONICAL_REPO, "out")
         self.assertNotEqual(os.path.commonpath([os.path.abspath(client.JEV_DAILY_CAP_LOG), canonical]),
@@ -1088,7 +1095,7 @@ import importlib.util, io, json, sys
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('standalone_client', sys.argv[1])
 client = importlib.util.module_from_spec(spec); spec.loader.exec_module(client)
-client.JEV_DAILY_CAP_LOG = sys.argv[2]
+client.JEV_DAILY_CAP_LOG = sys.argv[3]
 class Response(io.StringIO):
     status = 200
     def __init__(self):
@@ -1100,7 +1107,7 @@ with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
                api_key='offline', cache_ttl_seconds=0, calls_log=sys.argv[2])
 """
             result = subprocess.run([__import__('sys').executable, '-c', code,
-                                     str(MODULE_PATH.resolve()), str(log)],
+                                     str(MODULE_PATH.resolve()), str(log), str(self.quota_log)],
                 cwd=directory, env={**os.environ, "CODEX_THREAD_ID": session,
                                     "CARR_JEV_TRANSCRIPT_PATH": str(transcript)},
                 capture_output=True, text=True, timeout=10)

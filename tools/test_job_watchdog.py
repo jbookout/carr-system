@@ -587,6 +587,51 @@ class StateTests(unittest.TestCase):
                 effects.restart({"job": job})
             self.assertEqual([call.args[1] for call in kill.call_args_list], [signal.SIGTERM, signal.SIGKILL])
 
+    def test_process_group_permission_refusal_is_not_proof_of_exit(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        with patch.object(w.os, "killpg", side_effect=[PermissionError(), ProcessLookupError()]):
+            self.assertTrue(w.process_group_alive(42))
+            self.assertFalse(w.process_group_alive(42))
+
+    def test_restart_polls_past_a_transient_permission_refusal(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        import signal
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        with tempfile.TemporaryDirectory() as directory:
+            effects = w.Effects(Path(directory), c)
+            job = {"id": "old", "pid": 42, "pgid": 42, "process_identity": "old",
+                   "command": ["true"], "card": "test", "cwd": directory}
+            with patch.object(w, "process_identity", return_value="old"), \
+                 patch.object(w.os, "getpgid", return_value=42), \
+                 patch.object(w.os, "killpg", side_effect=[None, PermissionError(),
+                     ProcessLookupError(), ProcessLookupError(), ProcessLookupError()]) as kill, \
+                 patch.object(effects, "launch", return_value={"job_id": "replacement"}) as launch:
+                self.assertEqual(effects.restart({"job": job}), {"job_id": "replacement"})
+            self.assertEqual(kill.call_args_list[0].args, (42, signal.SIGTERM))
+            self.assertTrue(all(call.args == (42, 0) for call in kill.call_args_list[1:]))
+            launch.assert_called_once()
+
+    def test_restart_never_overlaps_an_inaccessible_group(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["thresholds"]["kill_grace_seconds"] = 0
+        def inaccessible(pgid, signum):
+            if signum == 0:
+                raise PermissionError()
+        with tempfile.TemporaryDirectory() as directory:
+            effects = w.Effects(Path(directory), c)
+            job = {"id": "old", "pid": 42, "pgid": 42, "process_identity": "old"}
+            with patch.object(w, "process_identity", return_value="old"), \
+                 patch.object(w.os, "getpgid", return_value=42), \
+                 patch.object(w.os, "killpg", side_effect=inaccessible), \
+                 patch.object(effects, "launch") as launch:
+                with self.assertRaisesRegex(RuntimeError, "group still present"):
+                    effects.restart({"job": job})
+            launch.assert_not_called()
+
     def test_action_failure_is_reported_on_board_and_to_record_same_scan(self):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
