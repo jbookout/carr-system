@@ -3,10 +3,19 @@ import assert from "node:assert/strict";
 import { ToolError, executeRegisteredTool, TOOLS } from "../src/tools.js";
 import { callTool } from "../src/mcp.js";
 import fs from "node:fs";
-import { answerDistribution, canonicalJson, canonicalSha256, jevAskBinding, modelIsPinned,
+import { answerDistribution, canonicalJson, canonicalSha256, jevAskBinding as productionJevAskBinding, modelIsPinned,
   prefetchJevAnswer, PROBABILITY_SUM_TOLERANCE, reserveJevCallAttempt, sha256Hex }
   from "../src/jev-call-receipt.js";
 
+// Offline transport tests inject a fake authority; production never gets this.
+function jevAskBinding(env, fetchImpl, options = {}) {
+  return productionJevAskBinding(env, fetchImpl, {
+    reserveAttempt: async () => ({ key: "offline-k", receipt_id: "offline-r" }),
+    billingHold: async () => {}, ...options,
+  });
+}
+const SPEND_STATS = { day_used: 0, hour_used: 0, site_day: 0, site_hour: 0,
+  resets_day: "2026-10-05T00:00:00Z", resets_hour: "2026-10-04T23:00:00Z", hold_until: null };
 const AGENT = { id: "10000000-0000-0000-0000-000000000031", slug: "joe", human: true, via: "test" };
 const OTHER = { id: "10000000-0000-0000-0000-000000000032", slug: "dell", human: true, via: "test" };
 const KEY = "ts_test_key_do_not_leak_4f1c9e";
@@ -141,9 +150,10 @@ class JevReceiptFake {
       if (!call || call.verb !== "ask-jev-attempt" || call.actor_id !== params[1] ||
           call.response.receipt_id !== params[2] || call.response.cache_hit !== false)
         return { rows: [] };
-      call.response = JSON.parse(params[3]);
+      call.response = { ...call.response, ...JSON.parse(params[3]) };
       return { rows: [{ idempotency_key: params[0] }] };
     }
+    if (sql.includes("as day_used")) return { rows: [SPEND_STATS] };
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [{}] };
     if (sql.startsWith("select request_hash, response")) {
       const row = this.toolCalls.get(params[0]);
@@ -238,7 +248,8 @@ function askArgs(overrides = {}) {
     idempotency_key: `9a000000-0000-4000-8000-${String(keySeq).padStart(12, "0")}`,
     session_id: "session-abc",
     purpose: "call",
-    state: { plan: "ship it" },
+    state: { input: { plan: "ship it" }, jev_attribution: { caller: "jev_deal_read",
+      session_id: "session-abc", job_id: null, unattended: false } },
     questions: QUESTIONS,
     ...overrides,
   };
@@ -496,7 +507,7 @@ test("jevAskBinding posts {state, model, questions} with bearer auth and a user 
   const fetchImpl = fakeFetch([jsonResponse(200, { model: "jev-1.14.0", answers: ANSWERS, usage: { n: 1 } })]);
   const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep: async () => {} });
   const out = await ask({ state: { a: 1 }, model: "jev-latest", questions: QUESTIONS });
-  assert.deepEqual(out, { model: "jev-1.14.0", answers: ANSWERS, usage: { n: 1 } });
+  assert.deepEqual(out, { model: "jev-1.14.0", answers: ANSWERS, usage: { n: 1 }, attempt: { key: 'offline-k', receipt_id: 'offline-r' } });
   assert.equal(fetchImpl.calls.length, 1);
   const { url, init } = fetchImpl.calls[0];
   assert.equal(url, "https://api.typesafe.ai/v1/systemone");
@@ -756,6 +767,7 @@ test("attempt reservation rolls back if its ledger write fails", async () => {
     calls.push(sql);
     if (sql.includes("record_jev_call_receipt")) return { rows: [{ receipt_id: "attempt-row" }] };
     if (sql.includes("insert into tool_call")) throw new Error("ledger unavailable");
+    if (sql.includes("as day_used")) return { rows: [SPEND_STATS] };
     return { rows: [] };
   } };
   await assert.rejects(reserveJevCallAttempt(client, AGENT, askArgs()), /ledger unavailable/);
@@ -795,4 +807,12 @@ test("upstream rejection leaves a linked pending attempt without crediting an an
   });
   assert.deepEqual(read.receipts, []);
   assert.equal(client.toolCalls.get(client.rows[0].idempotency_key).response.cache_hit, false);
+});
+
+
+test('attribution is stripped from state before the vendor sees any prompt', async () => {
+  const fake = fakeJevAsk();
+  await prefetchJevAnswer(askArgs(), fake);
+  assert.deepEqual(fake.calls[0].state, { plan: "ship it" });
+  assert.equal(JSON.stringify(fake.calls[0]).includes('jev_attribution'), false);
 });

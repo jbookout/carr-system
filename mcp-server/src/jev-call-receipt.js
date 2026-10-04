@@ -24,15 +24,11 @@
 //     append-only triggers are enabled right now. A disable-then-re-enable
 //     between two polls is not seen.
 //
-// THE VENDOR CALL HAPPENS OUTSIDE THE WRITER TRANSACTION. mcp.js validates an
-// ask-jev request and calls Jev (prefetchJevAnswer) BEFORE it connects the
-// writer pool or opens a transaction, then hands the result to the handler as
-// client.jevPrefetched. The handler only appends the receipt, in a short
-// transaction; it never calls the vendor. On an envelope replay the prefetched
-// answer is discarded and the stored response returned. Break-glass
-// (local-verb.mjs) calls executeRegisteredTool directly with no prefetched
-// answer, so that door refuses as jev_proxy_unconfigured instead of reading a
-// key locally.
+// Admission commits an attributed attempt under the shared spend lock before
+// vendor fetch. The vendor call runs outside a transaction. The answer then
+// commits in the envelope transaction and settles that attempt without losing
+// its site metadata. Envelope replays and cache hits do not consume capacity.
+// The break-glass path has no vendor binding and refuses paid calls.
 //
 // THREE VERBS, ONE STORE (migrations/0587_jev_call_receipt.sql):
 //   ask-jev                            write: record the Worker's Jev call, return answers
@@ -44,6 +40,7 @@
 // in an error. An upstream error body is truncated and scrubbed of the key
 // string before it can reach a ToolError.
 
+import { checkJevSpend, unpackJevState, refuseJevSpend } from "./jev-spend-authority.js";
 import requestContract from "./jev-request-contract.v1.json" with { type: "json" };
 import { ToolError as LeafToolError } from "./tool-error.js";
 import { judgeBinding, providerFor } from "./judge-provider.js";
@@ -234,6 +231,7 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   const budgetMs = options.budgetMs ?? TOTAL_BUDGET_MS;
   const cache = options.cache ?? (typeof caches !== "undefined" ? caches.default : null);
   const reserveAttempt = options.reserveAttempt;
+  const billingHold = options.billingHold;
   const cacheKeyFor = async body =>
     new Request(`https://jev-cache-v2.invalid/${await sha256Hex(`${key}\n${body}`)}`);
   const jevAsk = async function ({ state, model, questions, transport_mode }) {
@@ -255,20 +253,28 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
       } catch { /* A broken cache must not hide the vendor's answer. */ }
     }
     // A cache probe never reserves or spends, even when caching is unavailable.
-    // The capped client reserves locally before selecting paid_once; that mode
-    // skips cache reads and permits exactly one vendor attempt.
+    // paid_once skips cache reads and retries; every paid attempt still
+    // reserves from the Worker ledger.
     if (transport_mode === "cache_only")
       throw new LeafToolError({ error: "jev_cache_miss" });
-    let reservedAttempt;
-    if (reserveAttempt) {
-      try { reservedAttempt = await reserveAttempt(); }
-      catch { throw new LeafToolError({ error: "jev_receipt_store_unavailable" }); }
-      if (typeof reservedAttempt?.key !== "string" || !reservedAttempt.key ||
-          typeof reservedAttempt?.receipt_id !== "string" || !reservedAttempt.receipt_id)
-        throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
-    }
+    if (!reserveAttempt || !billingHold)
+      refuseJevSpend("jev_spend_authority_unavailable", null);
+    const reserve = async () => {
+      let attempt;
+      try { attempt = await reserveAttempt(); }
+      catch (error) {
+        if (error instanceof LeafToolError) throw error;
+        refuseJevSpend("jev_receipt_store_unavailable", null);
+      }
+      if (typeof attempt?.key !== "string" || !attempt.key ||
+          typeof attempt?.receipt_id !== "string" || !attempt.receipt_id)
+        refuseJevSpend("jev_receipt_store_unavailable", null);
+      return attempt;
+    };
+    let reservedAttempt = await reserve();
     const deadline = now() + budgetMs;
     for (let attempt = 0; ; attempt++) {
+      if (attempt > 0) reservedAttempt = await reserve();
       const remaining = deadline - now();
       if (remaining <= 0) throw upstreamFailure(null, "timeout", "", key);
       const controller = new AbortController();
@@ -303,6 +309,10 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
         }
         if (!response.ok) {
           const text = await response.text().catch(() => "");
+          if (response.status === 402 || /billing|insufficient[_ -]*(?:credit|fund)|credit[_ -]*(?:exhaust|balance)|payment required/i.test(text)) {
+            try { await billingHold(); }
+            catch { refuseJevSpend("jev_spend_authority_unavailable", null); }
+          }
           throw upstreamFailure(response.status, "http_status", text, key);
         }
         let parsed;
@@ -347,6 +357,7 @@ export async function reserveJevCallAttempt(client, actor, args) {
   const key = `jev-attempt:${crypto.randomUUID()}`;
   await client.query("begin");
   try {
+    const site = await checkJevSpend(client, unpackJevState(args.state).attribution);
     const row = (await client.query(
       `select r.receipt_id from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
       [args.session_id, "call", Object.keys(questions).sort(compareCodePoints), facets,
@@ -354,12 +365,13 @@ export async function reserveJevCallAttempt(client, actor, args) {
         await canonicalSha256(questions), await canonicalSha256({}), null,
         JSON.stringify({}), null, actor.id, actor.slug, key],
     )).rows[0];
-    if (!row?.receipt_id) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
+    if (!row?.receipt_id) refuseJevSpend("jev_receipt_store_unavailable", null);
     await client.query(
-      `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response)
-       values ($1,'ask-jev-attempt',$2,$3,$4)`,
+      `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, created_at)
+       values ($1,'ask-jev-attempt',$2,$3,$4,clock_timestamp())`,
       [key, actor.id, await sha256Hex(key),
-        JSON.stringify({ receipt_id: row.receipt_id, cache_hit: false })],
+        JSON.stringify({ receipt_id: row.receipt_id, cache_hit: false,
+          jev_site: site.caller, jev_caller: unpackJevState(args.state).attribution.caller })],
     );
     await client.query("commit");
     return { key, receipt_id: row.receipt_id };
@@ -406,7 +418,7 @@ export function validateAskJevArgs(args, ToolError = LeafToolError) {
     throw new ToolError({ error: "jev_transport_mode_invalid" });
   if (!JEV_PURPOSES.includes(args.purpose))
     throw new ToolError({ error: "jev_purpose_invalid", allowed: [...JEV_PURPOSES] });
-  const state = args.state;
+  const { state } = unpackJevState(args.state);
   if (typeof state !== "string" && !isPlainObject(state))
     throw new ToolError({ error: "jev_state_invalid", hint: "state must be a string or an object" });
   const stateJson = canonicalJson(state);
@@ -495,7 +507,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
           if (!row?.receipt_id) throw new ToolError({ error: "jev_call_receipt_refused" });
           if (answered.attempt) {
             const settlement = await c.query(
-              `update tool_call set response = $4::jsonb
+              `update tool_call set response = response || $4::jsonb
                 where idempotency_key = $1 and verb = 'ask-jev-attempt'
                   and actor_id = $2 and response->>'receipt_id' = $3
                   and response->>'cache_hit' = 'false'

@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-"""Offline tests for the Jev call-site registry, budgets and quiet cap notices.
+"""Offline registry, attribution and caller-inventory regressions.
 
-NOTHING HERE REACHES THE NETWORK OR SENDS MAIL. Paid transports are an
-injected urlopen, the cap counter lives in a temporary directory, and the
-alarm sinks run through the CARR_JEV_ALERT_SINK dry-run seam.
-
-What this suite holds (2026-10-04 system-wide Jev audit):
-  * a paid call needs a registered site, that site's attribution, and room in
-    its own and the global hourly budget; every refusal happens before any
-    transport, is logged once, and never counts as a paid attempt;
-  * the hourly cap is real and resets on the hour;
-  * a reached cap surfaces ONE line per session per cap window, with the reset;
-  * the alarm mail names its failure (mail_unconfigured) instead of a bare
-    CalledProcessError, and tests never send mail;
-  * every source file that can make a paid call is in the registry, and every
-    registry entry names files that exist (the CI guard against a new burner).
+Vendor/Worker transports and receipt destinations are injected fixtures.
+Universal budgets and billing hold are tested by jev-spend-authority-selftest.py
+against disposable PostgreSQL and by the Worker's fake-vendor unit tests.
 """
 
 from __future__ import annotations
@@ -89,7 +78,13 @@ class Harness(unittest.TestCase):
             self.requests.append(request)
             return FakeResponse(json.dumps(ANSWER).encode())
         self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
-        self.enterContext(patch.object(client, "_launch_spend_alert_worker", lambda *a: None))
+        def worker(state, questions, **options):
+            request = client.urllib.request.Request(client.ENDPOINT, data=json.dumps({
+                "state": state, "questions": questions, "model": options["model"]}).encode())
+            with client.urllib.request.urlopen(request, timeout=options["timeout"]) as response:
+                answer = json.load(response)
+            return {**answer, "server_receipt": {"receipt_id": "offline-worker"}}, None
+        self.enterContext(patch.object(client, "server_ask", worker))
         env = {k: v for k, v in os.environ.items()
                if k not in client.SESSION_ID_ENV_KEYS + ("CARR_JEV_JOB", "XPC_SERVICE_NAME", "CARR_JEV_WORKER",
                                                          "CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE")}
@@ -113,80 +108,6 @@ class Harness(unittest.TestCase):
         if not self.log.exists():
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines() if line.strip()]
-
-
-class WildcardBudgetTests(Harness):
-    def test_suffixes_share_hourly_daily_budget_pause_and_health(self):
-        self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
-        for hour in range(4):
-            self.now(2026, 10, 4, hour, 10)
-            for suffix in range(10):
-                self.ask(f"{hour}-{suffix}", caller=f"adhoc:probe{hour}-{suffix}")
-            with self.assertRaises(client.JevCallRefused):
-                self.ask("extra", caller=f"adhoc:extra{hour}")
-            self.assertIsNotNone(client.active_pause(sites=["adhoc:another"]))
-        self.now(2026, 10, 4, 4, 10)
-        with self.assertRaises(client.JevCallRefused) as caught:
-            self.ask("new hour", caller="adhoc:new")
-        self.assertEqual(caught.exception.code, "site_daily_budget")
-        self.assertEqual(len(self.requests), 40)
-        health = client.spend_by_site_health()
-        self.assertIn("WARN", health)
-        self.assertIn("adhoc:*=40/40", health)
-        self.assertNotIn("/?", health)
-        self.assertTrue(any(row.get("caller") == "adhoc:probe0-0" for row in self.rows()))
-
-
-class BudgetUpgradeTests(Harness):
-    def seed_receipts(self, count, caller="adhoc:legacy"):
-        self.log.write_text("".join(json.dumps({"ts": "2026-10-04T03:01:00Z",
-                                               "caller": caller, "cache_hit": False}) + "\n"
-                                    for _ in range(count)))
-
-    def test_existing_daily_counter_upgrade_preserves_hour_and_wildcard_usage(self):
-        self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
-        self.seed_receipts(200)
-        with client.sqlite3.connect(client._cap_db_path()) as db:
-            db.execute("CREATE TABLE daily_cap (day TEXT PRIMARY KEY, attempts INTEGER, notified INTEGER)")
-            db.execute("INSERT INTO daily_cap VALUES ('2026-10-04',200,0)")
-        with self.assertRaises(client.JevCallRefused) as caught:
-            self.ask("attempt 201", caller="adhoc:new")
-        self.assertEqual(caught.exception.code, "hourly_paid_call_cap")
-        self.assertEqual(self.requests, [])
-        health = client.spend_by_site_health()
-        self.assertIn("200/1000 paid attempts", health)
-        self.assertIn("this hour 200/200", health)
-        self.assertIn("adhoc:*=200/40", health)
-
-    def test_receipt_rebuild_seeds_once_and_excludes_free_or_refused_calls(self):
-        self.write_registry([site("hook_site", hourly_budget=3, daily_budget=3)])
-        self.seed_receipts(2, "hook_site")
-        with self.log.open("a") as fh:
-            for extra in ({"cache_hit": True}, {"error": "unattributed_call"}):
-                fh.write(json.dumps({"ts": "2026-10-04T03:01:00Z", "caller": "hook_site",
-                                     "cache_hit": False, **extra}) + "\n")
-        self.ask("third")
-        for _ in range(2):
-            with self.assertRaises(client.JevCallRefused):
-                self.ask("fourth")
-        self.assertEqual(len(self.requests), 1)
-        health = client.spend_by_site_health()
-        self.assertIn("3/1000 paid attempts", health)
-        self.assertIn("this hour 3/100", health)
-        self.assertIn("hook_site=3/3", health)
-
-    def test_legacy_counter_without_receipts_is_conservatively_attributed(self):
-        self.write_registry([site("hook_site", hourly_budget=3, daily_budget=3)])
-        with client.sqlite3.connect(client._cap_db_path()) as db:
-            db.execute("CREATE TABLE daily_cap (day TEXT PRIMARY KEY, attempts INTEGER, notified INTEGER)")
-            db.execute("INSERT INTO daily_cap VALUES ('2026-10-04',3,0)")
-        with self.assertRaises(client.JevCallRefused):
-            self.ask("unknown past attempts still consume site budget")
-        self.assertEqual(self.requests, [])
-        health = client.spend_by_site_health()
-        self.assertIn("this hour 3/100", health)
-        self.assertIn("hook_site=3/3", health)
-        self.assertIn("unattributed=3", health)
 
 
 class RecordingAttributionTests(Harness):
@@ -341,145 +262,6 @@ class RegistryAdmissionTests(Harness):
                             opener=lambda request, timeout=None: FakeResponse(json.dumps(ANSWER).encode()),
                             calls_log=str(self.log), cache_ttl_seconds=0)
         self.assertEqual(result["model"], "jev-1.13.0")
-
-
-class BudgetTests(Harness):
-    def test_global_hourly_cap_holds_and_resets_on_the_hour(self):
-        self.write_registry([site("hook_site", hourly_budget=50, daily_budget=500)], hourly=3)
-        for i in range(3):
-            self.ask(f"a{i}")
-        with self.assertRaises(client.JevCallRefused) as caught:
-            self.ask("over")
-        self.assertEqual(caught.exception.code, "hourly_paid_call_cap")
-        self.assertEqual(caught.exception.resets_at, "2026-10-04T04:00:00Z")
-        self.assertEqual(len(self.requests), 3)
-        self.now(2026, 10, 4, 4, 0)
-        self.ask("next hour")
-        self.assertEqual(len(self.requests), 4)
-
-    def test_site_hourly_and_daily_budgets_hold(self):
-        self.write_registry([site("hook_site", hourly_budget=2, daily_budget=3),
-                             site("job_site", attribution="session_or_job")], hourly=100)
-        self.ask("1")
-        self.ask("2")
-        with self.assertRaises(client.JevCallRefused) as caught:
-            self.ask("3")
-        self.assertEqual(caught.exception.code, "site_hourly_budget")
-        self.ask("other site keeps working", caller="job_site")
-        self.now(2026, 10, 4, 5, 0)
-        self.ask("3")
-        with self.assertRaises(client.JevCallRefused) as caught:
-            self.ask("4")
-        self.assertEqual(caught.exception.code, "site_daily_budget")
-        self.assertEqual(caught.exception.resets_at, "2026-10-05T00:00:00Z")
-        self.assertEqual(len(self.requests), 4)
-
-    def test_budget_refusal_is_logged_once_per_window(self):
-        self.write_registry([site("hook_site", hourly_budget=1, daily_budget=10)], hourly=100)
-        self.ask("1")
-        for _ in range(4):
-            with self.assertRaises(client.JevCallRefused):
-                self.ask("2")
-        self.assertEqual(len([r for r in self.rows() if r.get("error") == "site_hourly_budget"]), 1)
-
-    def test_daily_cap_still_applies_above_site_budgets(self):
-        with patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=1):
-            self.ask("1")
-            with self.assertRaisesRegex(client.TypeSafeError, "daily paid call cap"):
-                self.ask("2")
-
-
-class QuietNoticeTests(Harness):
-    def test_cap_reached_surfaces_one_line_per_session_per_window(self):
-        self.write_registry([site("hook_site")], hourly=1)
-        self.ask("1")
-        with self.assertRaises(client.JevCallRefused):
-            self.ask("2")
-        pause = client.active_pause()
-        self.assertEqual(pause["scope"], "hourly_paid_call_cap")
-        first = client.pause_notice("sess-A")
-        self.assertIn("04:00", first)
-        self.assertIn("paused", first.lower())
-        self.assertIsNone(client.pause_notice("sess-A"))
-        self.assertIsNotNone(client.pause_notice("sess-B"), "each session hears it once")
-        self.now(2026, 10, 4, 4, 1)
-        self.assertIsNone(client.active_pause())
-        self.assertIsNone(client.pause_notice("sess-A"))
-
-    def test_daily_cap_pause_names_utc_midnight(self):
-        with patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=1):
-            self.ask("1")
-            with self.assertRaises(client.TypeSafeError):
-                self.ask("2")
-            pause = client.active_pause()
-        self.assertEqual(pause, {"scope": "daily_paid_call_cap", "resets_at": "2026-10-05T00:00:00Z"})
-
-    def test_site_budget_pause_is_scoped_to_the_named_sites(self):
-        self.write_registry([site("hook_site", hourly_budget=1, daily_budget=10),
-                             site("job_site", attribution="session_or_job")], hourly=100)
-        self.ask("1")
-        with self.assertRaises(client.JevCallRefused):
-            self.ask("2")
-        self.assertIsNone(client.active_pause())
-        self.assertEqual(client.active_pause(sites=["hook_site"])["scope"], "site_hourly_budget")
-        self.assertIsNone(client.active_pause(sites=["job_site"]))
-
-
-class SpendHealthTests(Harness):
-    def test_health_line_reports_spend_by_site_with_bound_action(self):
-        self.write_registry([site("hook_site", daily_budget=2, hourly_budget=2),
-                             site("job_site", attribution="session_or_job")], hourly=100)
-        self.ask("1")
-        self.ask("2")
-        self.ask("3", caller="job_site")
-        line = client.spend_by_site_health()
-        self.assertTrue(line.startswith("WARN jev spend by site"), line)
-        self.assertIn("hook_site=2/2", line)
-        self.assertIn("job_site=1/500", line)
-        self.assertIn("owner orchestrator", line)
-        self.assertIn("ops/config/jev-call-sites.v1.json", line)
-
-    def test_canonical_health_prints_the_site_spend_row(self):
-        source = (REPO / "tools" / "health-check.py").read_text(encoding="utf-8")
-        self.assertIn("client.spend_by_site_health()", source)
-        self.assertIn('_red("jev_site_budget"', source)
-
-    def test_health_line_is_ok_when_every_site_is_inside_budget(self):
-        self.ask("1")
-        self.assertTrue(client.spend_by_site_health().startswith("OK jev spend by site"))
-
-
-class AlarmMailTests(unittest.TestCase):
-    def test_missing_mail_credential_is_named_not_called_process_error(self):
-        with patch.object(client, "GMAIL_ENV_PATH", "/nonexistent/gmail.env"), \
-                patch.dict(os.environ, {"CARR_GMAIL_USER": "", "CARR_GMAIL_APP_PASSWORD": "",
-                                        "CARR_JEV_ALERT_SINK": ""}), \
-                patch.object(client.subprocess, "run") as run:
-            with self.assertRaises(client.AlarmSinkError) as caught:
-                client._email_spend_alert({"message": "m", "threshold": 50})
-        self.assertEqual(str(caught.exception), "mail_unconfigured")
-        run.assert_not_called()
-
-    def test_failed_handover_reports_a_category_from_its_stderr(self):
-        failure = subprocess.CalledProcessError(1, ["gmail-handover"], stderr="login refused: (535)")
-        with tempfile.NamedTemporaryFile() as env_file, \
-                patch.object(client, "GMAIL_ENV_PATH", env_file.name), \
-                patch.dict(os.environ, {"CARR_JEV_ALERT_SINK": ""}), \
-                patch.object(client.subprocess, "run", side_effect=failure):
-            with self.assertRaises(client.AlarmSinkError) as caught:
-                client._email_spend_alert({"message": "m", "threshold": 50})
-        self.assertEqual(str(caught.exception), "mail_auth_refused")
-
-    def test_dry_run_seam_records_both_sinks_and_sends_nothing(self):
-        with tempfile.TemporaryDirectory() as root:
-            sink = Path(root) / "alerts.jsonl"
-            with patch.dict(os.environ, CARR_JEV_ALERT_SINK=f"dry-run:{sink}"), \
-                    patch.object(client.subprocess, "run") as run:
-                client._emit_spend_alert({"message": "m", "threshold": 80})
-                client._email_spend_alert({"message": "m", "threshold": 80})
-            run.assert_not_called()
-            rows = [json.loads(line) for line in sink.read_text().splitlines()]
-        self.assertEqual([r["sink"] for r in rows], ["notification", "mail"])
 
 
 class ChangeTollsDedupeTests(unittest.TestCase):
@@ -659,42 +441,6 @@ class ChangeTollsDedupeTests(unittest.TestCase):
         self.assertEqual(len(self.asked), 2)
 
 
-class WorkerBreakerTests(Harness):
-    def worker(self, failures):
-        calls = []
-
-        def runner(argv, **kwargs):
-            mode = json.loads(argv[3]).get("transport_mode")
-            calls.append(mode)
-            if mode == "cache_only":
-                return subprocess.CompletedProcess(argv, 1, "", '{"error":"jev_cache_miss"}')
-            if failures:
-                return subprocess.CompletedProcess(argv, 1, "", '{"error":"jev_upstream_failed"}')
-            return subprocess.CompletedProcess(argv, 0, json.dumps({**ANSWER, "ok": True,
-                                                                    "receipt_id": "w"}), "")
-        return calls, runner
-
-    def ask_worker(self, text, runner):
-        with patch.object(client, "read_api_key", return_value="offline-fixture"), \
-                patch.dict(os.environ, CARR_JEV_IN_HOOK="0"):
-            return client.ask(text, {"q": client.noul("Fixture")}, calls_log=str(self.log),
-                              cache_ttl_seconds=0, caller="hook_site", session_id="sess-1",
-                              server_runner=runner)
-
-    def test_a_failing_worker_is_paid_once_then_skipped_for_the_breaker_window(self):
-        calls, runner = self.worker(failures=True)
-        self.ask_worker("one", runner)
-        self.assertEqual(calls.count("paid_once"), 1)
-        self.ask_worker("two", runner)
-        self.ask_worker("three", runner)
-        self.assertEqual(calls.count("paid_once"), 1, "breaker open: no doomed Worker attempts")
-        day = "2026-10-04"
-        db = client.sqlite3.connect(str(self.log) + ".daily-cap.sqlite3")
-        attempts = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone()[0]
-        db.close()
-        self.assertEqual(attempts, 4, "one doomed Worker try, then one reservation per call")
-
-
 # Files that make up the transport itself, or call it only through a site
 # that is registered. Anything else that reaches a paid call must be listed.
 INFRASTRUCTURE = {"ops/typesafe_client.py", "ops/jev_judge.py", "tools/judge/interface.py"}
@@ -755,9 +501,8 @@ class RegistryCoverageTests(unittest.TestCase):
         registry = client.load_call_sites(REGISTRY_PATH)
         self.assertLessEqual(registry["hourly_paid_call_cap"] * 24,
                              client.JEV_COST_CONFIG["daily_paid_call_cap"] * 24)
-        total = sum(e["daily_budget"] for e in registry["sites"].values())
-        self.assertLessEqual(total, client.JEV_COST_CONFIG["daily_paid_call_cap"],
-                             "site daily budgets must fit inside the global daily cap")
+        self.assertLessEqual(client.JEV_COST_CONFIG["daily_paid_call_cap"], 1000,
+                             "global capacity is shared across site allocations")
 
     def test_every_paid_call_source_is_registered(self):
         registry = client.load_call_sites(REGISTRY_PATH)

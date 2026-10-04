@@ -39,9 +39,7 @@ test("read endpoint is exact and returns registered durable card readback", asyn
 });
 
 test("current endpoint is a fixed authenticated collection read with no browser filters", async () => {
-  const advisory = { schema: "jev_c13_decision_queue_advisory/v1", status: "unavailable", reason: "jev_unavailable", items: [] };
-  const { controller, calls } = subject({ needsJoeAdvisoryFn: async () => advisory,
-    callToolFn: async (_env, actor, name, args, profile) => {
+  const { controller, calls } = subject({ callToolFn: async (_env, actor, name, args, profile) => {
     calls.push({ actor, name, args, profile });
     return { ok: true, items: [{ human_ref: REF, state: "captured", source: { freshness: "current" } }] };
   } });
@@ -49,50 +47,38 @@ test("current endpoint is a fixed authenticated collection read with no browser 
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.deepEqual(body.data.items, [{ human_ref: REF, state: "captured", source: { freshness: "current" } }]);
-  assert.deepEqual({ ...body.data.advisory, read_elapsed_ms: undefined }, { ...advisory, read_elapsed_ms: undefined });
-  assert.ok(Number.isInteger(body.data.advisory.read_elapsed_ms));
+  assert.equal(body.data.advisory, undefined);
   assert.deepEqual(calls, [{ actor: ACTOR, name: "current-work-requests", args: {}, profile: "full" }]);
   const withQuery = await controller.fetch(request("/api/system-work/current?state=ready"), {}, {}, ACTOR, SESSION);
   assert.equal(withQuery.status, 200, "query parameters cannot select collection scope");
 });
 
-test("Jev failure does not change the canonical queue or fail its read", async () => {
+test("queue read preserves source order without optional annotation", async () => {
   const canonical = { ok: true, items: [{ human_ref: REF, title: "Keep the source order", state: "ready" }] };
-  const { controller } = subject({ callToolFn: async () => canonical,
-    needsJoeAdvisoryFn: async () => { throw Error("vendor failure"); } });
+  const { controller } = subject({ callToolFn: async () => canonical });
   const response = await controller.fetch(request("/api/system-work/current"), {}, {}, ACTOR, SESSION);
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.deepEqual(body.data.items, canonical.items);
-  assert.equal(body.data.advisory.status, "unavailable");
+  assert.equal(body.data.advisory, undefined);
   assert.deepEqual(canonical, { ok: true, items: [{ human_ref: REF, title: "Keep the source order", state: "ready" }] });
 });
 
-test("slow advice returns the queue promptly while its receipted call completes", async () => {
-  let finishCall;
-  const completed = new Promise(resolve => { finishCall = resolve; });
-  const waits = [];
+test("current queue never pays for annotation, even with a vendor key", async () => {
   const calls = [];
   const controller = createProgram6RoutineController({
-    advisoryDeadlineMs: 5,
-    callToolFn: async (_env, _actor, name, args) => {
-      calls.push({ name, args });
-      if (name === "ask-jev") return completed;
-      return { ok: true, items: [{ human_ref: REF, title: "Queue", state: "ready" }] };
+    callToolFn: async (_env, _actor, name) => {
+      calls.push(name);
+      if (name === "ask-jev") assert.fail("queue read spent on Jev");
+      return { ok: true, items: [{ human_ref: REF, state: "ready" }] };
     },
-    needsJoeAdvisoryFn: async (_queue, { askJev }) => askJev({
-      model: "jev-1.13.0", state: {}, questions: { q: { type: "noul", question: "Check" } },
-    }),
   });
   const response = await controller.fetch(request("/api/system-work/current"),
-    { TYPESAFE_API_KEY: "offline" }, { waitUntil: promise => waits.push(promise) }, ACTOR, SESSION);
+    { TYPESAFE_API_KEY: "offline" }, {}, ACTOR, SESSION);
   const body = await response.json();
-  assert.equal(body.data.advisory.status, "unavailable");
-  assert.equal(calls[1].name, "ask-jev");
-  assert.equal(calls[1].args.purpose, "call");
-  assert.equal(waits.length, 1);
-  finishCall({ model: "jev-1.13.0", answers: {} });
-  await waits[0];
+  assert.equal(response.status, 200);
+  assert.equal(body.data.advisory, undefined);
+  assert.deepEqual(calls, ["current-work-requests"]);
 });
 
 test("report route admits only the capture material and never a caller-selected verb or authority", async () => {
