@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { docActivityEntry, docActivityTools } from '../src/doc-activity.js';
 import { TOOLS, executeRegisteredTool } from '../src/tools.js';
 import { connectionRouteForTool } from '../src/mcp.js';
-import { frozenInventory } from '../../ops/scac-mutation-inventory.mjs';
+import { CURRENT_REGISTRY_VERSION, frozenInventory } from '../../ops/scac-mutation-inventory.mjs';
 import { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } from '../src/mutation-registry.js';
 const tools = docActivityTools({ ToolError: class extends Error { constructor(p) { super(p.error); this.payload = p; } } });
 const actor = { slug: 'joe', human: true };
@@ -40,7 +40,7 @@ test('activity successor adds only its reader and preserves every historical sou
   const after = frozenInventory('scac-mutation-registry.v107');
   assert.equal(after.length, before.length + 1);
   assert.deepEqual(after.filter(row => row.ingress_key !== 'mcp-tool:read-doc-activity'), before);
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v107');
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, CURRENT_REGISTRY_VERSION);
   const entry = registeredOperation('read-doc-activity');
   assert.equal(entry.write, false);
   assert.equal(after.find(row => row.ingress_key === entry.ingress_key).principal_mode, 'authenticated_registered_principal');
