@@ -31,5 +31,5 @@ test('audited automation preserves the exact v106 delivered seal', () => {
   assert.equal(createHash('sha256').update(runtime).digest('hex'),'7553d82d4f4b6cb889b4d4b50fea3ea6c4b76af74b074824430d51842ef0d1b1');
   assert.equal(createHash('sha256').update(migration).digest('hex'),'2013b4ec0a6cfbb1f9fc0c2e29307e95ad3b7c49960435cf21a49382425ec507');
   const runner=readFileSync(new URL('../../tools/migrate.py',import.meta.url),'utf8');
-  assert.equal((runner.match(/"0813_automation_reason_undo_archive_invoice.sql",\s*"0814_automation_undo_scac_successor.sql"/g)||[]).length,2);
+  assert.equal((runner.match(/"0822_automation_reason_undo_archive_invoice.sql",\s*"0823_automation_undo_scac_successor.sql"/g)||[]).length,2);
 });
