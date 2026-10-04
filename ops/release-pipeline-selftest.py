@@ -455,7 +455,9 @@ class Batching(Base):
                                        "--release-key", "r-2026-09-30-01"])
         self.assertIs(kwargs["start_new_session"], True)
         self.assertIs(kwargs["stdin"], rp.subprocess.DEVNULL)
-        self.assertEqual(set(kwargs["env"]) - {"HOME", "PATH", "LANG"}, set())
+        self.assertEqual(set(kwargs["env"]) - {"HOME", "PATH", "LANG", "CARR_JEV_JOB"}, set())
+        self.assertEqual(kwargs["env"]["CARR_JEV_JOB"], "release-pipeline.slice-marker",
+                         "the detached marker's paid Jev calls are attributed to this job")
         run.assert_not_called()
         started.wait.assert_not_called()
         started.communicate.assert_not_called()
@@ -2286,7 +2288,8 @@ class Robustness(Base):
         sha = self.fx.commit({"migrations/0600_x.sql": "select 1;"})
         verbs: list = []
         self.fx.pipeline(FakeRunner(fail_at="staging-prepare"), verbs=verbs).tick(["worker"])
-        rp.clear_failed(rp.Store(self.fx.repo / "out/release-pipeline"), "worker", sha, "retry")
+        rp.clear_failed(rp.Store(self.fx.repo / "out/release-pipeline"), "worker", sha, "retry",
+                        repo_dir=self.fx.repo)
         self.fx.pipeline(FakeRunner(pending=1, fail_at="upload"), verbs=verbs).tick(["worker"])
         turns = [a for v, a in verbs if v == "add-room-turn"]
         self.assertEqual(len(turns), 2)
@@ -2325,13 +2328,227 @@ class Robustness(Base):
         self.fx.pipeline(FakeRunner(fail_at="upload")).tick(["worker"])
         store = rp.Store(self.fx.repo / "out/release-pipeline")
         with self.assertRaises(SystemExit):
-            rp.clear_failed(store, "worker", "0" * 40, "wrong sha")
-        rp.clear_failed(store, "worker", sha, "credential restored")
+            rp.clear_failed(store, "worker", "0" * 40, "wrong sha", repo_dir=self.fx.repo)
+        msg = rp.clear_failed(store, "worker", sha, "credential restored", repo_dir=self.fx.repo)
+        self.assertEqual(msg, f"release-pipeline[worker]: cleared failed {sha[:12]} (upload); next tick retries it")
         self.assertEqual(self.fx.records()[-1]["status"], "failure_cleared")
+        self.assertNotIn("cleared_worktree", self.fx.records()[-1])
+        self.assertFalse((store.root / "worktrees-cleared").exists())
         live = {"sha": self.fx.base}
         runner = FakeRunner(live=live)
         self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
         self.assertEqual(self.fx.state()["worker"]["last_released_sha"], sha)
+
+    def test_clear_failed_retires_the_kept_diagnosis_worktree(self):
+        # 2026-10-04, twice: the failed run's worktree stayed for diagnosis,
+        # so the retry clear-failed allowed burned the SHA again at
+        # "<wt> already exists". Clearing moves it aside (never deletes it).
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.fx.pipeline(FakeRunner(fail_at="upload")).tick(["worker"])
+        store = rp.Store(self.fx.repo / "out/release-pipeline")
+        kept = store.release_worktree("worker", sha)
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        git(self.fx.repo, "worktree", "add", "--detach", str(kept), sha)
+        (kept / "diagnosis.log").write_text("evidence")
+        msg = rp.clear_failed(store, "worker", sha, "credential restored", repo_dir=self.fx.repo)
+        self.assertFalse(kept.exists())
+        moved = [p for p in (store.root / "worktrees-cleared").iterdir()]
+        self.assertEqual(len(moved), 1)
+        self.assertTrue(moved[0].name.startswith(f"worker-{sha[:12]}-"))
+        self.assertEqual((moved[0] / "diagnosis.log").read_text(), "evidence")
+        self.assertIn(str(moved[0]), msg)
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["cleared_worktree"]), ("failure_cleared", str(moved[0])))
+        # Pruned: the old path is no longer a registered worktree.
+        self.assertNotIn(str(kept), git(self.fx.repo, "worktree", "list", "--porcelain"))
+        live = {"sha": self.fx.base}
+        runner = FakeRunner(live=live)
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertIn("worktree", runner.names())
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], sha)
+        # And a real `git worktree add` at the same path now succeeds.
+        git(self.fx.repo, "worktree", "add", "--detach", str(kept), sha)
+
+
+class ClearFailedRetirement(Base):
+    def setUp(self):
+        super().setUp()
+        self.sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        self.store = rp.Store(self.fx.repo / "out/release-pipeline")
+        self.store.save({"worker": {"failed_sha": self.sha, "failed_step": "upload"}})
+        self.kept = self.store.release_worktree("worker", self.sha)
+        self.kept.parent.mkdir(parents=True, exist_ok=True)
+        git(self.fx.repo, "worktree", "add", "--detach", str(self.kept), self.sha)
+        (self.kept / "diagnosis.log").write_text("evidence")
+
+    def clear(self):
+        return rp.clear_failed(self.store, "worker", self.sha, "repair verified", repo_dir=self.fx.repo)
+
+    def assert_retry_available(self):
+        self.assertIsNone(self.store.load()["worker"]["failed_sha"])
+        moved = Path(self.store.records()[-1]["cleared_worktree"])
+        self.assertEqual((moved / "diagnosis.log").read_text(), "evidence")
+        git(self.fx.repo, "worktree", "add", "--detach", str(self.kept), self.sha)
+
+    def test_clear_resumes_after_prune_failure(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                return subprocess.CompletedProcess(argv, 7, "", "injected prune failure")
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaises(SystemExit):
+                self.clear()
+        self.assertFalse(self.kept.exists())
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        self.assert_retry_available()
+
+    def test_new_failed_sha_does_not_reuse_an_older_retirement(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                return subprocess.CompletedProcess(argv, 7, "", "injected prune failure")
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaises(SystemExit):
+                self.clear()
+        old_archive = next((self.store.root / "worktrees-cleared").iterdir())
+        self.sha = self.fx.commit({"mcp-server/src/a.js": "2"})
+        state = self.store.load()
+        state["worker"]["failed_sha"] = self.sha
+        self.store.save(state)
+        self.kept = self.store.release_worktree("worker", self.sha)
+        git(self.fx.repo, "worktree", "add", "--detach", str(self.kept), self.sha)
+        (self.kept / "diagnosis.log").write_text("evidence")
+        self.clear()
+        self.assert_retry_available()
+        self.assertEqual((old_archive / "diagnosis.log").read_text(), "evidence")
+
+    def test_clear_resumes_after_prune_timeout(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                raise subprocess.TimeoutExpired(argv, 300)
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_resumes_after_interruption_between_rename_and_prune(self):
+        original = os.rename
+
+        def rename(src, dst):
+            original(src, dst)
+            raise OSError("injected interruption after rename")
+
+        with mock.patch.object(rp.os, "rename", side_effect=rename):
+            with self.assertRaises(OSError):
+                self.clear()
+        self.assertFalse(self.kept.exists())
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_preserves_a_locked_diagnosis_worktree(self):
+        git(self.fx.repo, "worktree", "lock", "--reason", "diagnosis in progress", str(self.kept))
+        before = self.store.load()
+        with self.assertRaisesRegex(SystemExit, "locked"):
+            self.clear()
+        self.assertEqual(self.store.load(), before)
+        self.assertEqual((self.kept / "diagnosis.log").read_text(), "evidence")
+        self.assertFalse((self.store.root / "worktrees-cleared").exists())
+        self.assertEqual(self.store.records(), [])
+        git(self.fx.repo, "worktree", "unlock", str(self.kept))
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_refuses_successful_prune_that_retains_registration(self):
+        original = subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaisesRegex(SystemExit, "still registered"):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.assertEqual(self.store.records(), [])
+        self.clear()
+        self.assert_retry_available()
+
+    def test_clear_refuses_while_tick_lock_is_held(self):
+        before = self.store.load()
+        with rp.single_run_lock(self.store.root) as held:
+            self.assertTrue(held)
+            with self.assertRaisesRegex(SystemExit, "another run holds the lock"):
+                self.clear()
+        self.assertEqual(self.store.load(), before)
+        self.assertEqual((self.kept / "diagnosis.log").read_text(), "evidence")
+        self.assertEqual(self.store.records(), [])
+
+    def test_concurrent_clearance_cannot_start_a_retry_during_rename(self):
+        original = os.rename
+        competing = False
+
+        def rename(src, dst):
+            nonlocal competing
+            # The competing clearance must fail before it can clear the SHA
+            # and allow a tick to create a new worktree at the original path.
+            if not competing:
+                competing = True
+                with self.assertRaisesRegex(SystemExit, "another run holds the lock"):
+                    self.clear()
+            original(src, dst)
+
+        with mock.patch.object(rp.os, "rename", side_effect=rename):
+            self.clear()
+        self.assert_retry_available()
+
+    def test_tick_cannot_update_another_lane_during_prune(self):
+        state = self.store.load()
+        state["app"] = {"last_released_sha": self.fx.base}
+        self.store.save(state)
+        original = subprocess.run
+        runner = FakeRunner()
+        pipe = self.fx.pipeline(runner)
+        output: list[str] = []
+        pipe.out = output.append
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["worktree", "prune"]:
+                self.assertEqual(pipe.tick(["worker", "app"]), 0)
+                self.assertTrue(any("another run holds the lock" in line for line in output))
+                self.assertEqual(runner.calls, [])
+            return original(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            self.clear()
+        self.assertEqual(self.store.load()["app"], state["app"])
+        self.assert_retry_available()
+
+    def test_clear_keeps_lock_until_receipt_is_written(self):
+        original = self.store.record
+
+        def record(row):
+            with self.assertRaisesRegex(SystemExit, "another run holds the lock"):
+                self.clear()
+            original(row)
+
+        with mock.patch.object(self.store, "record", side_effect=record):
+            self.clear()
+        self.assert_retry_available()
 
 
 class Blockers(Base):
@@ -2824,7 +3041,7 @@ class DeployCredential(unittest.TestCase):
                 self.assertEqual(paused_pipe.tick([lane]), 0)
                 self.assertEqual(paused.calls, [])
                 self.assertEqual(self.fx.state()[lane]["failed_sha"], sha)
-                rp.clear_failed(store, lane, sha, "credential restored and verified")
+                rp.clear_failed(store, lane, sha, "credential restored and verified", repo_dir=self.fx.repo)
                 live = {"sha": self.fx.base}
                 runner = FakeRunner(live=live)
                 pipe = self.pipeline(runner, app=lane == "app")
@@ -2878,7 +3095,8 @@ class DeployCredential(unittest.TestCase):
         for cmd in commands:
             self.assertEqual(cmd[cmd.index("--sha") + 1], sha)
             rp.clear_failed(store, cmd[cmd.index("--lane") + 1],
-                            cmd[cmd.index("--sha") + 1], cmd[cmd.index("--reason") + 1])
+                            cmd[cmd.index("--sha") + 1], cmd[cmd.index("--reason") + 1],
+                            repo_dir=self.fx.repo)
 
         worker_live = {"sha": self.fx.base}
         runner = FakeRunner(live=worker_live)
@@ -3168,6 +3386,99 @@ class SchemaSnapshotSupersede(Base):
             self._followup(runner)
         self.assertNotIn("gh-pr-list", runner.names())
         self.assertEqual(runner.closed, [])
+
+
+class GitHubApiRetry(unittest.TestCase):
+    """A transient `gh api` failure is retried twice (5s, then 15s) before the
+    lane blocks, and the block says why: the tail of gh's stderr. Four Worker
+    blocks on 2026-10-04 were one-off gh failures that succeeded seconds later."""
+
+    PATH = "repos/o/r/issues/1504/comments?per_page=100"
+
+    def _gh(self, *results):
+        calls = iter(results)
+
+        def run(argv, **kw):
+            rc, out, err = next(calls)
+            return subprocess.CompletedProcess(argv, rc, out, err)
+        return run
+
+    def test_two_failures_then_success_returns_the_data(self):
+        fail = (1, "", "error connecting to api.github.com\n")
+        with mock.patch.object(rp.subprocess, "run",
+                               side_effect=self._gh(fail, fail, (0, '{"ok": 1}', ""))) as run, \
+                mock.patch.object(rp.time, "sleep") as sleep:
+            data = rp.GitHub("o/r", {}).api(self.PATH)
+        self.assertEqual(data, {"ok": 1})
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 15])
+
+    def test_three_failures_block_with_the_stderr_tail(self):
+        noise = "x" * 500
+        fail = (1, "", f"{noise}\nHTTP 502: Bad Gateway (https://api.github.com/repos/o/r)\n")
+        with mock.patch.object(rp.subprocess, "run", side_effect=self._gh(fail, fail, fail)) as run, \
+                mock.patch.object(rp.time, "sleep"):
+            with self.assertRaises(rp.Blocked) as ctx:
+                rp.GitHub("o/r", {}).api(self.PATH)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(ctx.exception.reason, "github_unreadable")
+        msg = str(ctx.exception)
+        self.assertIn("exited 1", msg)
+        self.assertIn("after 3 attempts", msg)
+        self.assertIn("HTTP 502: Bad Gateway", msg)
+        self.assertNotIn("\n", msg)
+        self.assertLess(len(msg), 400)
+
+    def test_the_stderr_tail_is_redacted(self):
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        fail = (1, "", f"Authorization: token {token}\nHTTP 401\n")
+        with mock.patch.object(rp.subprocess, "run", side_effect=self._gh(fail, fail, fail)), \
+                mock.patch.object(rp.time, "sleep"):
+            with self.assertRaises(rp.Blocked) as ctx:
+                rp.GitHub("o/r", {"GH_TOKEN": token}).api(self.PATH)
+        self.assertNotIn(token, str(ctx.exception))
+        self.assertIn("HTTP 401", str(ctx.exception))
+
+    def test_fine_grained_tokens_are_redacted_without_environment_credentials(self):
+        token = "github" + "_pat_" + ("A" * 82)
+        for suffix in ("", "." * 150 + "\n"):
+            with self.subTest(crosses_cutoff=bool(suffix)):
+                fail = (1, "", f"Authorization: token {token}\n{suffix}HTTP 401\n")
+                with mock.patch.object(rp.subprocess, "run", side_effect=self._gh(fail, fail, fail)), \
+                        mock.patch.object(rp.time, "sleep"):
+                    with self.assertRaises(rp.Blocked) as ctx:
+                        rp.GitHub("o/r", {}).api(self.PATH)
+                self.assertNotIn("A" * 10, ctx.exception.detail)
+                self.assertNotIn("github" + "_pat_", ctx.exception.detail)
+                self.assertIn("[REDACTED]", ctx.exception.detail)
+                self.assertIn("HTTP 401", ctx.exception.detail)
+
+
+class GitHubDiagnosticPersistence(Base):
+    def test_fine_grained_tokens_never_reach_console_or_blocked_records(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        pipe = self.fx.pipeline(FakeRunner())
+        pipe.github_factory = lambda repo: rp.GitHub(repo, {})
+        output = []
+        pipe.out = output.append
+        token = "github" + "_pat_" + ("A" * 82)
+        real_run = rp.subprocess.run
+
+        def run(argv, **kwargs):
+            if argv[0] == "gh":
+                return subprocess.CompletedProcess(argv, 1, "", f"Authorization: token {token}\nHTTP 401\n")
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(rp.subprocess, "run", side_effect=run), \
+                mock.patch.object(rp.time, "sleep"):
+            self.assertEqual(pipe.tick(["worker"]), 0)
+        record = self.fx.records()[-1]
+        self.assertEqual(record["status"], "blocked")
+        self.assertEqual(record["reason"], "github_unreadable")
+        for diagnostic in ("\n".join(output), json.dumps(record)):
+            self.assertNotIn(token, diagnostic)
+            self.assertIn("[REDACTED]", diagnostic)
+            self.assertIn("HTTP 401", diagnostic)
 
 
 class Report(Base):

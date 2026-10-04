@@ -407,8 +407,10 @@ finally:
     reader_release.touch()
     aout, aerr = a.communicate(timeout=10)
 check("concurrent dry/live capture cannot acknowledge another read",
-      a.returncode == 1 and b.returncode == 75
-      and "another capture is still reading" in b.stderr and "source=eventkit" not in aout)
+      a.returncode == 1 and "read did not finish" in aerr
+      and b.returncode == 75 and "another capture is still reading" in b.stderr
+      and "source=eventkit" not in aout,
+      f"first={a.returncode}, second={b.returncode}; {aerr.strip()}; {b.stderr.strip()}")
 
 # A timed-out reader completes during the next invocation. Its private exit/dump
 # must never promote the next reader, which has not completed at all.

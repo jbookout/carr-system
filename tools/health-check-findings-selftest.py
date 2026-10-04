@@ -581,6 +581,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
+                  _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
@@ -650,6 +651,21 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                 self.assertTrue(finding["hard_error"])
                 self.assertIn(error, finding["detail"])
 
+    def test_a_site_over_its_jev_budget_fails_health(self):
+        import io, contextlib
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: ("WARN jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+                                             " · over budget: jev_handoff=81/80")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertEqual([f["key"] for f in ns["_FINDINGS"]], ["jev_site_budget"])
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: "OK jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 0)
+
     def test_grok_failure_remains_a_finding_with_healthy_paid_cap(self):
         ns = self.namespace()
         ns["_grok_session_row"] = lambda: ("FAIL fixture Grok session", 1)
@@ -715,12 +731,19 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
 
     def test_loader_errors_are_contained_in_canonical_health_and_cli(self):
         import io, contextlib, importlib.util, runpy, sys
-        from unittest.mock import patch
+        from unittest.mock import Mock, patch
         original = importlib.util.spec_from_file_location
         def fail_cap_loader(name, *args, **kwargs):
             if name == "jev_cap_client":
                 raise ImportError("fixture missing client configuration")
-            return original(name, *args, **kwargs)
+            spec = original(name, *args, **kwargs)
+            if name == "jev_site_client":
+                # This CLI section also reads site budgets. Keep that independent
+                # observation healthy instead of consulting the machine's cap log.
+                spec.loader = Mock(exec_module=lambda client: setattr(
+                    client, "spend_by_site_health",
+                    lambda: "OK jev spend by site — fixture"))
+            return spec
         with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
             ns = self.namespace()
             with contextlib.redirect_stdout(io.StringIO()) as out:
