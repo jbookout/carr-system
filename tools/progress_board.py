@@ -1536,12 +1536,13 @@ def refresh_and_publish(project: str) -> None:
                          f"Retry: tools/progress_board.py render {project} --publish")
 
 
-def mutate(project: str, change: Callable[[dict[str, Any]], None]) -> None:
+def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> None:
     """Read, change and write one board as a single locked transaction, then
     refresh and publish it."""
     with board_lock(project):
         state = read_state(project)
-        change(state)
+        if change(state) is False:
+            return
         state["updated_at"] = stamp()
         write_json(state)
     refresh_and_publish(project)
@@ -1859,7 +1860,16 @@ def command_init(args: argparse.Namespace) -> None:
 
 
 def command_task(args: argparse.Namespace) -> None:
-    mutate(args.project, lambda state: update_task(state, args))
+    expected = json.loads(args.expected_task) if args.expected_task is not None else None
+    if args.expected_task is not None and not isinstance(expected, dict):
+        raise SystemExit("--expected-task must be a task object")
+    def change(state):
+        if expected is not None and any(
+                state.get("tasks", {}).get(args.task_id, {}).get(key) != value
+                for key, value in expected.items()):
+            return False
+        update_task(state, args)
+    mutate(args.project, change)
 
 
 def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
@@ -1915,6 +1925,8 @@ def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
         task.pop("completed_at", None)
     if args.health is not None:
         task["health"] = args.health
+    if args.lane is not None:
+        task["lane"] = None if args.lane == "status" else args.lane
     if args.reason is not None:
         if args.status in RETIRED_STATUSES or (args.status is None and is_retired(task)):
             task["reason"] = args.reason.strip()
@@ -2034,6 +2046,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--reason", help="why the task is blocked (required with blocked), or why it failed or was superseded (required for those)")
     task.add_argument("--next-action", dest="next_action", help="what unblocks it (required with blocked)")
+    task.add_argument("--lane", choices=("status", "needs-joe"))
+    task.add_argument("--expected-task", help="update only if these task fields still match this JSON object")
     task.add_argument("--note")
     task.add_argument("--evidence")
     task.add_argument("--delivery-target", choices=("worker", "app", "workstation", "database", "manual"),

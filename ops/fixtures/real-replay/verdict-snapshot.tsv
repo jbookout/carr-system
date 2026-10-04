@@ -1226,3 +1226,4 @@ weekend-quiet-gate.py	PreToolUse[PushNotification|mcp__.*__(send_message|create_
 weekend-quiet-gate.py	PreToolUse[PushNotification|mcp__.*__(send_message|create_draft|update_draft)]	scenarios:5c0000000001@saturday-unattended	deny	WEEKEND QUIET — refused. It is Saturday, and weekends are off for both partners (rule <hex>). Joe and Dell do not work them, and neither of 
 write-effect-check.py	PostToolUse[Bash]	(all)	counts	allow=320
 write-effect-check.py	PreToolUse[Bash]	(all)	counts	allow=320
+job-watchdog-digest.py	UserPromptSubmit	(all)	counts	allow=6
