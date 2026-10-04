@@ -426,9 +426,9 @@ class Store:
         self.state_path = root / "state.json"
         self.records_path = root / "releases.jsonl"
 
-    def release_worktree(self, lane: str, sha: str) -> Path:
+    def release_worktree(self, lane: str, sha: str, attempt: str = "") -> Path:
         """Where a lane's release of `sha` checks out; a failure keeps it."""
-        return self.root / "worktrees" / f"{lane}-{sha[:12]}"
+        return self.root / "worktrees" / (f"{lane}-{sha[:12]}" + (f"-{attempt}" if attempt else ""))
 
     def load(self) -> dict:
         try:
@@ -439,14 +439,22 @@ class Store:
     def save(self, state: dict) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = self.state_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(state, indent=2, sort_keys=True) + "\n")
+            fh.flush(); os.fsync(fh.fileno())
         os.replace(tmp, self.state_path)
+        directory = os.open(self.root, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def record(self, row: dict) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         row = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **row}
         with open(self.records_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
+            fh.flush(); os.fsync(fh.fileno())
 
     def records(self) -> list[dict]:
         try:
@@ -850,6 +858,8 @@ class Pipeline:
         return outcome
 
     def git(self, *args: str, cwd: Path | None = None, trim_output: bool = True) -> str:
+        if args and args[0] == "fetch":
+            args = ("fetch", "--no-write-fetch-head", "--refmap=", *args[1:])
         proc = subprocess.run(["git", "-C", str(cwd or self.repo), *args], env=self.env,
                               stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
         if proc.returncode != 0:
@@ -1708,7 +1718,14 @@ class Pipeline:
         # ledger permits ONE retry of the existing resumable prepare command.
         # Every review, CI, health and promotion guard still runs on that retry.
         if previous is not None and digest != previous:
-            _clear_failed_locked(self.store, lane, sha, "staging ledger evidence changed", repo_dir=repo_dir)
+            rejection["staging_recovery_pending"] = True
+            self.store.save(state)
+        if rejection.get("staging_recovery_pending"):
+            try:
+                _clear_failed_locked(self.store, lane, sha, "staging ledger evidence changed", repo_dir=repo_dir)
+            except (SystemExit, OSError, subprocess.SubprocessError):
+                self.out(f"release-pipeline[{lane}]: retirement incomplete; resume on bounded reconciliation")
+                return
             state.clear(); state.update(self.store.load())
 
     def remember_rejection(self, state: dict, lane: str, base: str, sha: str, reason: str) -> dict:
@@ -1745,8 +1762,13 @@ class Pipeline:
         candidate = ""
         try:
             repo_dir = lane_repo_dir(self.cfg, lane, self.repo)
-            self.git("fetch", "--quiet", "origin", "main", cwd=repo_dir)
-            sha = self.git("rev-parse", "origin/main", cwd=repo_dir)
+            # Read and fetch an immutable main object, without writing any
+            # remote-tracking ref or another session's FETCH_HEAD.
+            remote = self.git("ls-remote", "--exit-code", "origin", "refs/heads/main", cwd=repo_dir).split()
+            if len(remote) != 2 or not SHA_RE.fullmatch(remote[0]) or remote[1] != "refs/heads/main":
+                raise Blocked("github_unreadable", "remote main has no exact SHA acknowledgement")
+            sha = remote[0]
+            self.git("fetch", "--quiet", "origin", sha, cwd=repo_dir)
             candidate = sha
             base = self.last_released(state, lane, lane_cfg)
             if sha == base:
@@ -1934,6 +1956,11 @@ class Pipeline:
         state.setdefault(lane, {}).update({
             "failed_sha": sha, "failed_step": step,
             "failed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
+        owned = [wt for _, wt in self.worktrees if wt.name.startswith(f"{lane}-{sha[:12]}-")]
+        if owned:
+            state[lane]["failed_worktree"] = str(owned[-1])
+        else:
+            state[lane].pop("failed_worktree", None)
         if step == "staging-prepare":
             digest = None
             try:
@@ -1945,6 +1972,7 @@ class Pipeline:
             if digest is not None:
                 rejection["staging_ledger_digest"] = digest
             self.store.save(state)
+        self.store.save(state)
         attempt = int((state[lane].get("dispatches") or {}).get(sha, 0)) + 1
         extra: dict[str, Any] = {}
         if capability:
@@ -2005,7 +2033,7 @@ class Pipeline:
                  f"({ev['verifier_evidence']}); test={ev['test_evidence']}")
         self.dry_tolerant("unattended credentials", lambda: self.unattended_preflight(lane_cfg), None)
 
-        wt = self.store.release_worktree("worker", sha)
+        wt = self.store.release_worktree("worker", sha, self.run_id)
         mcp = wt / "mcp-server"
         py = str(wt / ".venv/bin/python")
         budget = ["--performance-budget-ref", lane_cfg["performance_budget_ref"],
@@ -2295,7 +2323,7 @@ class Pipeline:
                                 {"prs": [], "pre_pipeline_prs": [], "verifier_evidence": "<approval>"})
         self.out(f"  evidence: PRs {rev['prs']} approved; head approval {rev['verifier_evidence']}")
         self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
-        wt = self.store.release_worktree("app", sha)
+        wt = self.store.release_worktree("app", sha, self.run_id)
         self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
         self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600,
@@ -2655,7 +2683,12 @@ def worktree_registration(repo_dir: Path, path: Path) -> list[str] | None:
                           capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         raise SystemExit(f"release-pipeline: cannot inspect worktree registrations in {repo_dir}: "
-                         f"{proc.stderr.strip()[:300]}; failure NOT cleared")
+                         f"exit {proc.returncode}; failure NOT cleared")
+    entries = [entry.split("\0") for entry in proc.stdout.split("\0\0") if entry]
+    if not entries or any(not fields[0].startswith("worktree ") or
+            not any(field.startswith("HEAD ") and SHA_RE.fullmatch(field[5:])
+                    for field in fields) for fields in entries):
+        raise SystemExit("release-pipeline: incomplete registration read; failure NOT cleared")
     for entry in proc.stdout.split("\0\0"):
         fields = entry.split("\0")
         if fields[0] == f"worktree {path.resolve()}":
@@ -2687,40 +2720,64 @@ def _clear_failed_locked(store: Store, lane: str, sha: str, reason: str, *, repo
         return f"release-pipeline[{lane}]: nothing to clear"
     if lane_state["failed_sha"] != sha:
         raise SystemExit(f"release-pipeline[{lane}]: failed SHA is {lane_state['failed_sha']}, not {sha}")
-    kept = store.release_worktree(lane, sha)
+    kept = Path(lane_state.get("failed_worktree") or store.release_worktree(lane, sha))
+    if kept.parent.resolve() != (store.root / "worktrees").resolve() or kept.is_symlink() or not (
+            kept.name == f"{lane}-{sha[:12]}" or
+            re.fullmatch(rf"{lane}-{sha[:12]}-[0-9]{{8}}T[0-9]{{6}}Z-[0-9a-f]{{6}}", kept.name)):
+        raise SystemExit("release-pipeline: failed worktree identity mismatch; failure NOT cleared")
     registration = worktree_registration(repo_dir, kept)
     if registration and any(f == "locked" or f.startswith("locked ") for f in registration):
         raise SystemExit(f"release-pipeline[{lane}]: {kept} is locked; failure NOT cleared")
+    if (registration and (f"HEAD {sha}" not in registration or "detached" not in registration)) or (
+            kept.exists() and registration is None):
+        raise SystemExit("release-pipeline: worktree identity mismatch; failure NOT cleared")
     retirement = lane_state.get("failed_worktree_retirement")
-    moved = Path(retirement["path"]) if retirement and retirement["sha"] == sha else None
+    if retirement and retirement["sha"] != sha:
+        retirement = None  # retain the older archive; this failure owns a new intent
+    moved = Path(retirement["path"]) if retirement and retirement.get("path") else None
+    if moved is not None and (moved.parent.resolve() != (store.root / "worktrees-cleared").resolve()
+                             or moved.is_symlink() or not moved.name.startswith(kept.name + "-")):
+        raise SystemExit("release-pipeline: retirement identity mismatch; failure NOT cleared")
+    if retirement is None:
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        moved = (store.root / "worktrees-cleared" / f"{kept.name}-{stamp}-{uuid.uuid4().hex}") if kept.exists() else None
+        retirement = {"sha": sha, "path": str(moved) if moved else None,
+                      "id": uuid.uuid4().hex, "phase": "intent"}
+        lane_state["failed_worktree_retirement"] = retirement
+        state[lane] = lane_state
+        store.save(state)  # durable intent BEFORE rename or registration removal
     if kept.exists():
-        if moved is None:
-            stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            moved = store.root / "worktrees-cleared" / f"{kept.name}-{stamp}-{uuid.uuid4().hex}"
-            # Write intent before moving: interruption on either side of the
-            # rename must leave enough state to resume the same retirement.
-            lane_state["failed_worktree_retirement"] = {"sha": sha, "path": str(moved)}
-            state[lane] = lane_state
-            store.save(state)
+        if moved is None or moved.exists():
+            raise SystemExit("release-pipeline: archive collision; failure NOT cleared")
         moved.parent.mkdir(parents=True, exist_ok=True)
         os.rename(kept, moved)
-    if moved is not None or registration is not None:
-        proc = subprocess.run(["git", "-C", str(repo_dir), "worktree", "prune"], env=child_env(),
+    if moved is not None and not moved.is_dir():
+        raise SystemExit("release-pipeline: retained diagnosis missing; failure NOT cleared")
+    retirement["phase"] = "renamed"
+    store.save(state)
+    if registration is not None:
+        # The original directory is absent now. Git removes ONLY this exact
+        # registration, leaving the archive and unrelated missing trees intact.
+        proc = subprocess.run(["git", "-C", str(repo_dir), "worktree", "remove", str(kept)], env=child_env(),
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
-            raise SystemExit(f"release-pipeline[{lane}]: retiring {kept}: `git -C {repo_dir} "
-                             f"worktree prune` failed: {proc.stderr.strip()[:300]}; failure NOT cleared")
-        if worktree_registration(repo_dir, kept) is not None:
-            raise SystemExit(f"release-pipeline[{lane}]: {kept} is still registered after prune; "
+            raise SystemExit(f"release-pipeline[{lane}]: registration removal failed (exit {proc.returncode}); "
                              "failure NOT cleared")
-    previous = {k: lane_state.get(k) for k in ("failed_sha", "failed_step", "failed_at")}
-    lane_state.update({"failed_sha": None, "failed_step": None, "failed_at": None})
-    lane_state.pop("failed_worktree_retirement", None)
-    lane_state.pop("rejection", None)
-    state[lane] = lane_state
+    if worktree_registration(repo_dir, kept) is not None:
+        raise SystemExit(f"release-pipeline[{lane}]: {kept} is still registered; failure NOT cleared")
+    retirement["phase"] = "registration_removed"
+    retirement.setdefault("id", uuid.uuid4().hex)
     store.save(state)
-    store.record({"lane": lane, "sha": sha, "status": "failure_cleared", "reason": reason, **{
-        "cleared_" + k: v for k, v in previous.items()}, **({"cleared_worktree": str(moved)} if moved else {})})
+    previous = {k: lane_state.get(k) for k in ("failed_sha", "failed_step", "failed_at")}
+    receipt_id = retirement.setdefault("id", uuid.uuid4().hex)
+    if not any(row.get("retirement_id") == receipt_id for row in store.records()):
+        store.record({"lane": lane, "sha": sha, "status": "failure_cleared", "reason": reason,
+            "retirement_id": receipt_id, **{"cleared_" + k: v for k, v in previous.items()},
+            **({"cleared_worktree": str(moved)} if moved else {})})
+    lane_state.update({"failed_sha": None, "failed_step": None, "failed_at": None})
+    for field in ("failed_worktree_retirement", "failed_worktree", "rejection"):
+        lane_state.pop(field, None)
+    store.save(state)
     retired = f"; kept worktree moved to {moved}" if moved else ""
     return (f"release-pipeline[{lane}]: cleared failed {sha[:12]} ({previous['failed_step']}){retired}; "
             "next tick retries it")

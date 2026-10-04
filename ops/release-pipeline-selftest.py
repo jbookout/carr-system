@@ -455,6 +455,27 @@ class RejectionReconciliation(Base):
                 self.assertNotIn("private-error-canary", self.pipe.store.state_path.read_text())
                 self.assertNotIn("private-error-canary", self.pipe.store.records_path.read_text())
 
+    def test_staging_recovery_resumes_interrupted_retirement(self):
+        self.gh.approve_all = True
+        self.runner.fail_at = "staging-prepare"
+        ledger = {"candidate": "fixture", "ledger": "before"}
+        self.pipe.staging_ledger = lambda: dict(ledger)
+        self.pipe.tick(["worker"])
+        kept = Path(self.fx.state()["worker"]["failed_worktree"])
+        git(self.fx.repo, "worktree", "add", "--detach", str(kept), self.sha)
+        self.clock += self.pipe.REJECTION_RECHECK_SECONDS
+        ledger["ledger"] = "reconciled"
+        rename = rp.os.rename
+        def interrupted(src, dst):
+            rename(src, dst)
+            raise OSError("interrupted after rename")
+        with mock.patch.object(rp.os, "rename", side_effect=interrupted):
+            self.pipe.tick(["worker"])
+        self.clock += self.pipe.REJECTION_RECHECK_SECONDS
+        self.pipe.tick(["worker"])
+        self.assertEqual(self.runner.names().count("staging-prepare"), 2)
+        self.assertIsNone(rp.worktree_registration(self.fx.repo, kept))
+
     def test_fingerprint_sink_keeps_no_body_or_exception_canaries(self):
         secret = "invented-client-identifier-canary"
         original = self.gh.pr_for_commit
@@ -2503,7 +2524,7 @@ class Robustness(Base):
         sha = self.fx.commit({"mcp-server/src/a.js": "1"})
         self.fx.pipeline(FakeRunner(fail_at="upload")).tick(["worker"])
         store = rp.Store(self.fx.repo / "out/release-pipeline")
-        kept = store.release_worktree("worker", sha)
+        kept = Path(store.load()["worker"].get("failed_worktree") or store.release_worktree("worker", sha))
         kept.parent.mkdir(parents=True, exist_ok=True)
         git(self.fx.repo, "worktree", "add", "--detach", str(kept), sha)
         (kept / "diagnosis.log").write_text("evidence")
@@ -2547,12 +2568,114 @@ class ClearFailedRetirement(Base):
         self.assertEqual((moved / "diagnosis.log").read_text(), "evidence")
         git(self.fx.repo, "worktree", "add", "--detach", str(self.kept), self.sha)
 
-    def test_clear_resumes_after_prune_failure(self):
+    def test_retirement_does_not_prune_an_unrelated_missing_registration(self):
+        unrelated = self.fx.tmp / "unrelated"
+        git(self.fx.repo, "worktree", "add", "--detach", str(unrelated), self.sha)
+        unrelated.rename(self.fx.tmp / "unrelated-diagnosis")
+        self.clear()
+        self.assertIsNotNone(rp.worktree_registration(self.fx.repo, unrelated))
+        self.assert_retry_available()
+
+    def test_wrong_head_worktree_is_not_retired(self):
+        git(self.kept, "checkout", "--detach", self.fx.base)
+        with self.assertRaisesRegex(SystemExit, "identity"):
+            self.clear()
+        self.assertTrue(self.kept.exists())
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+
+    def test_unregistered_active_directory_is_untouched(self):
+        git(self.fx.repo, "worktree", "remove", "--force", str(self.kept))
+        self.kept.mkdir(); (self.kept / "unrelated.txt").write_text("owned by another operation")
+        with self.assertRaisesRegex(SystemExit, "identity"):
+            self.clear()
+        self.assertEqual((self.kept / "unrelated.txt").read_text(), "owned by another operation")
+
+    def test_attempt_worktrees_do_not_collide_with_retained_diagnosis(self):
+        self.store.save({})
+        runner = FakeRunner(fail_at="upload")
+        pipe = self.fx.pipeline(runner)
+        pipe.tick(["worker"])
+        path1 = Path(pipe.store.load()["worker"]["failed_worktree"])
+        self.assertIn(pipe.run_id, path1.name)
+        self.assertNotEqual(path1, self.kept)
+        self.assertTrue(self.kept.exists())
+
+    def test_first_failure_save_binds_owned_attempt_worktree(self):
+        self.store.save({})
+        pipe = self.fx.pipeline(FakeRunner(fail_at="staging-prepare"))
+        save = pipe.store.save
+        def checked(state):
+            lane = state.get("worker", {})
+            if lane.get("failed_sha"):
+                self.assertEqual(lane.get("failed_worktree"),
+                    str(pipe.store.release_worktree("worker", self.sha, pipe.run_id)))
+            save(state)
+        with mock.patch.object(pipe.store, "save", side_effect=checked):
+            pipe.tick(["worker"])
+
+    def test_release_fetch_does_not_mutate_shared_remote_refs_or_fetch_head(self):
+        git(self.fx.repo, "update-ref", "refs/remotes/origin/main", self.fx.base)
+        fetch_head = self.fx.repo / ".git/FETCH_HEAD"
+        fetch_head.write_text("another session's fetch evidence\n")
+        pipe = self.fx.pipeline(FakeRunner(), github=FakeGitHub(approve_all=False))
+        pipe.tick(["worker"])
+        self.assertEqual(git(self.fx.repo, "rev-parse", "origin/main"), self.fx.base)
+        self.assertEqual(fetch_head.read_text(), "another session's fetch evidence\n")
+
+    def test_retirement_resume_does_not_repeat_registration_removal_or_receipt(self):
+        record = self.store.record
+        def interrupted(row):
+            record(row)
+            raise OSError("lost acknowledgement after durable receipt")
+        with mock.patch.object(self.store, "record", side_effect=interrupted):
+            with self.assertRaises(OSError):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        self.assertEqual(len(self.store.records()), 1)
+        self.assert_retry_available()
+
+    def test_registration_result_fault_matrix_preserves_failure_and_evidence(self):
+        original = rp.subprocess.run
+        for rc, output in [(0, ""), (0, "worktree partial\0\0"),
+                (0, "worktree /unknown\0HEAD invalid\0\0"), (7, "")]:
+            with self.subTest(rc=rc, output=output):
+                def run(argv, **kwargs):
+                    if argv[-3:] == ["list", "--porcelain", "-z"]:
+                        return subprocess.CompletedProcess(argv, rc, output, "secret-error-canary")
+                    return original(argv, **kwargs)
+                with mock.patch.object(rp.subprocess, "run", side_effect=run):
+                    with self.assertRaises(SystemExit) as refusal:
+                        self.clear()
+                self.assertNotIn("secret-error-canary", str(refusal.exception))
+                self.assertTrue(self.kept.exists())
+                self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+
+    def test_malformed_registration_after_rename_never_clears_failure(self):
+        archive = self.store.root / "worktrees-cleared" / (self.kept.name + "-retained")
+        archive.parent.mkdir(parents=True)
+        os.rename(self.kept, archive)
+        state = self.store.load()
+        state["worker"]["failed_worktree_retirement"] = {"sha": self.sha, "path": str(archive)}
+        self.store.save(state)
+        original = rp.subprocess.run
+        def run(argv, **kwargs):
+            if argv[-3:] == ["list", "--porcelain", "-z"]:
+                return subprocess.CompletedProcess(argv, 0, "worktree /unknown\0HEAD invalid\0\0", "")
+            return original(argv, **kwargs)
+        with mock.patch.object(rp.subprocess, "run", side_effect=run):
+            with self.assertRaises(SystemExit):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.assertEqual(self.store.records(), [])
+        self.assertTrue(archive.is_dir())
+
+    def test_clear_resumes_after_registration_removal_failure(self):
         original = subprocess.run
 
         def run(argv, **kwargs):
-            if argv[-2:] == ["worktree", "prune"]:
-                return subprocess.CompletedProcess(argv, 7, "", "injected prune failure")
+            if argv[-3:-1] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(argv, 7, "", "injected registration failure")
             return original(argv, **kwargs)
 
         with mock.patch.object(rp.subprocess, "run", side_effect=run):
@@ -2567,8 +2690,8 @@ class ClearFailedRetirement(Base):
         original = subprocess.run
 
         def run(argv, **kwargs):
-            if argv[-2:] == ["worktree", "prune"]:
-                return subprocess.CompletedProcess(argv, 7, "", "injected prune failure")
+            if argv[-3:-1] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(argv, 7, "", "injected registration failure")
             return original(argv, **kwargs)
 
         with mock.patch.object(rp.subprocess, "run", side_effect=run):
@@ -2586,11 +2709,11 @@ class ClearFailedRetirement(Base):
         self.assert_retry_available()
         self.assertEqual((old_archive / "diagnosis.log").read_text(), "evidence")
 
-    def test_clear_resumes_after_prune_timeout(self):
+    def test_clear_resumes_after_registration_removal_timeout(self):
         original = subprocess.run
 
         def run(argv, **kwargs):
-            if argv[-2:] == ["worktree", "prune"]:
+            if argv[-3:-1] == ["worktree", "remove"]:
                 raise subprocess.TimeoutExpired(argv, 300)
             return original(argv, **kwargs)
 
@@ -2601,7 +2724,7 @@ class ClearFailedRetirement(Base):
         self.clear()
         self.assert_retry_available()
 
-    def test_clear_resumes_after_interruption_between_rename_and_prune(self):
+    def test_clear_resumes_after_interruption_between_rename_and_registration_removal(self):
         original = os.rename
 
         def rename(src, dst):
@@ -2629,11 +2752,11 @@ class ClearFailedRetirement(Base):
         self.clear()
         self.assert_retry_available()
 
-    def test_clear_refuses_successful_prune_that_retains_registration(self):
+    def test_clear_refuses_successful_removal_that_retains_registration(self):
         original = subprocess.run
 
         def run(argv, **kwargs):
-            if argv[-2:] == ["worktree", "prune"]:
+            if argv[-3:-1] == ["worktree", "remove"]:
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return original(argv, **kwargs)
 
@@ -2673,7 +2796,7 @@ class ClearFailedRetirement(Base):
             self.clear()
         self.assert_retry_available()
 
-    def test_tick_cannot_update_another_lane_during_prune(self):
+    def test_tick_cannot_update_another_lane_during_registration_removal(self):
         state = self.store.load()
         state["app"] = {"last_released_sha": self.fx.base}
         self.store.save(state)
@@ -2684,7 +2807,7 @@ class ClearFailedRetirement(Base):
         pipe.out = output.append
 
         def run(argv, **kwargs):
-            if argv[-2:] == ["worktree", "prune"]:
+            if argv[-3:-1] == ["worktree", "remove"]:
                 self.assertEqual(pipe.tick(["worker", "app"]), 0)
                 self.assertTrue(any("another run holds the lock" in line for line in output))
                 self.assertEqual(runner.calls, [])
