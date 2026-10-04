@@ -3432,6 +3432,20 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   assert.match(migration, /'workflow_entrypoint'/);
 });
 
+test("census writer installation documentation preserves an inventory-readable launchd definition", () => {
+  const source = fs.readFileSync(new URL(
+    "../../ops/launchd/com.carr.workflow-census-writer.plist", import.meta.url), "utf8");
+  const plist = parsePlistXml(source);
+  assert.equal(plist.Label, "com.carr.workflow-census-writer");
+  assert.deepEqual(plist.ProgramArguments, [
+    "/bin/zsh", "{{REPO}}/bin/run-scheduled.sh", "workflow-census-writer", "launchd.run",
+    "{{REPO}}/.venv/bin/python", "{{REPO}}/ops/workflow-census-writer.py",
+  ]);
+  assert.deepEqual(plist.StartCalendarInterval, { Hour: 4, Minute: 10 });
+  assert.equal(plist.RunAtLoad, false);
+  assert.match(source, /<!--[\s\S]*?\.\/\.venv\/bin\/python ops\/config-as-code\.py install[\s\S]*?-->/);
+});
+
 test("launchd physical-authority catalogs are bidirectionally closed and source-exact", () => {
   const launchdPaths = fs.readdirSync(new URL("../../ops/launchd/", import.meta.url))
     .filter(name => name.endsWith(".plist")).map(name => `ops/launchd/${name}`).sort();

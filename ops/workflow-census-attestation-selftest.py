@@ -749,7 +749,8 @@ def main() -> int:
         # Installation uses the same primary-only policy and activation checks as other agents.
         recipe = (REPO / "ops" / "launchd" / "com.carr.workflow-census-writer.plist").read_text()
         check("census writer installation delegates to the canonical installer",
-              "./.venv/bin/python ops/config-as-code.py install --apply" in recipe
+              "./.venv/bin/python ops/config-as-code.py install" in recipe
+              and "apply option" in recipe
               and "launchctl bootstrap" not in recipe and 'sed "s|{{REPO}}|' not in recipe)
         keys, writer.subprocess.run = scripted(
             *[_Proc(0, json.dumps({"ok": True, "seq": 1, "row_hash": "1" * 64}))] * writer.ATTEMPTS)
