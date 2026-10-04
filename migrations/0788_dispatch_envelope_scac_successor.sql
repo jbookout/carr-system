@@ -2,8 +2,8 @@
 do $dispatch_envelope_v105_preflight$
 declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
-  if not exists(select 1 from public.schema_migrations where filename='0773_jev_cap_scac_successor.sql' and sha256='b02e1cb7220a7109fa36511de6006f2f2d3859f1d9923e3cff31f5eb4650b3fb') then
-    raise exception 'Dispatch envelope v105 requires exact applied 0773'; end if;
+  if not exists(select 1 from public.schema_migrations where filename='0787_jev_cap_scac_successor.sql' and sha256='125557a059796ad9be94580e26b4f3c22101cd2193cea13931ca8e9a52bfe666') then
+    raise exception 'Dispatch envelope v105 requires exact applied 0787'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v104';
   if v.registry_digest is distinct from 'sha256:1c07f71f0e640610e413506b3b31e59e611c30cf1997255b7720ba393b8cdd35' or v.entry_count<>2619
     or v.source_entry_count<>1085 or v.entry_set_digest is distinct from 'sha256:80bedc0cbd2971979c4698327a92ffa68e16e9974bdcdfef3b0e54c28ae36064'

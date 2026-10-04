@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0783 seals dispatch replay keys as v105 and retains the v104 cap contract as history.
+# 0788 seals dispatch replay keys as v105 and retains the v104 cap contract as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v105"
 LIVE_REGISTRY_ORDINAL = 105
@@ -32,10 +32,10 @@ SEALED_PREDECESSOR_DIGEST = (
 )
 SEALED_PREDECESSOR_ENTRY_COUNTS = (2619, 1085)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0773_jev_cap_scac_successor.sql"
+    "migrations/0787_jev_cap_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0783_dispatch_envelope_scac_successor.sql"
+    "migrations/0788_dispatch_envelope_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

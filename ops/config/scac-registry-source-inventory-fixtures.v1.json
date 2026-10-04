@@ -87005,11 +87005,34 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "handler_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "d521f73c2d7a32e7a464c774c8c50b5e2488e7a78d32864805dbec64c9e1baad",
-      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v104. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged."
+      "expected_sha256": "0abfa16c3295bb472da24a14028adb88d5e15aa18cd629b562951ba0b65dbe40",
+      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v104. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged. Release fix-forward: retain the reviewed migration runner atomic group for the renamed find-rule pair 0785/0786; same authority contract and unchanged historical seals."
     },
     "scac-mutation-registry.v105": {
       "base_version": "v105",
@@ -87059,11 +87082,34 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "handler_digest": "63f25941c34f3bd4df19ad630830618f5b3af53a5dd7aeee624e2b3b87ceff0c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ],
       "expected_count": 1085,
-      "expected_sha256": "ad202c3f66517641b62ff09f22b1b2b25a97332c0eb05363e17c2df03d126e85",
-      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v105. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged."
+      "expected_sha256": "712d8791b96494fb21ce6218c43eac3e3a694574b6c09c2c0040fb12ab284bfb",
+      "reason": "Carry the credential-rotation and Dell migration receipt source reviews forward to v105. Only existing external-admin rows are re-digested; ingress and authority contracts and all historical seals remain unchanged. Release fix-forward: retain the reviewed migration runner atomic group for the renamed find-rule pair 0785/0786; same authority contract and unchanged historical seals."
     }
   }
 }

@@ -3,6 +3,8 @@
 
 import ast
 import hashlib
+import importlib.util
+import psycopg
 import json
 import os
 import re
@@ -766,7 +768,7 @@ assert "SCAC_VERSION_COUNT=102" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=101" in GENERATOR
 assert "ops.scac_mutation_catalog_v102_current()" in GENERATOR
 assert 'scac-mutation-registry.v102.generated.js' in GENERATOR
-assert "0770_find_rule_scac_successor.sql" in GENERATOR
+assert "0786_find_rule_scac_successor.sql" in GENERATOR
 assert "FIND_RULE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=103" in GENERATOR
 assert "SCAC_VERSION_COUNT=103" in GENERATOR
@@ -775,7 +777,7 @@ assert "ops.scac_mutation_catalog_v103_current()" in GENERATOR
 assert 'scac-mutation-registry.v103.generated.js' in GENERATOR
 assert '"scac-mutation-registry.v102"' in registry_gate
 assert '"scac-mutation-registry.v103"' in registry_gate
-assert "0773_jev_cap_scac_successor.sql" in GENERATOR
+assert "0787_jev_cap_scac_successor.sql" in GENERATOR
 assert "JEV_CAP_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=104" in GENERATOR
 assert "SCAC_VERSION_COUNT=104" in GENERATOR
@@ -784,7 +786,7 @@ assert "ops.scac_mutation_catalog_v104_current()" in GENERATOR
 assert 'scac-mutation-registry.v104.generated.js' in GENERATOR
 assert '"scac-mutation-registry.v104"' in registry_gate
 
-assert "0783_dispatch_envelope_scac_successor.sql" in GENERATOR
+assert "0788_dispatch_envelope_scac_successor.sql" in GENERATOR
 assert "DISPATCH_ENVELOPE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=105" in GENERATOR
 assert "SCAC_VERSION_COUNT=105" in GENERATOR
@@ -818,8 +820,8 @@ predecessor_seal = json.loads(subprocess.run(
     """], cwd=ROOT, capture_output=True, text=True, check=True).stdout)
 assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
     predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
-assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0773_jev_cap_scac_successor.sql"
-assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0783_dispatch_envelope_scac_successor.sql"
+assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0787_jev_cap_scac_successor.sql"
+assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0788_dispatch_envelope_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR
@@ -1073,6 +1075,75 @@ assert retained_digest != tampered_digest
 immutable_full_set = "sha256:" + hashlib.sha256(retained_digest.encode()).hexdigest()
 attacker_rewritten_header = "sha256:" + hashlib.sha256(tampered_digest.encode()).hexdigest()
 assert attacker_rewritten_header != immutable_full_set
+
+def per_entry_query(source: str) -> str:
+    end = source.rfind("e.entry_digest is distinct from")
+    start = source.rfind("exists(", 0, end) + len("exists(")
+    assert end >= 0 and start >= len("exists(")
+    depth = 1
+    for position in range(start, len(source)):
+        depth += (source[position] == "(") - (source[position] == ")")
+        if depth == 0:
+            return source[start:position]
+    raise AssertionError("registry per-entry validation is not balanced")
+
+
+def check_repeated_contract_validation() -> None:
+    spec = importlib.util.spec_from_file_location("abandon_fixture", ROOT / "ops/release-abandon-selftest.py")
+    assert spec and spec.loader
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    canonical = SNAPSHOT[SNAPSHOT.index("CREATE FUNCTION ops.scac_canonical_json("):]
+    canonical = canonical[:canonical.index("end $$;") + len("end $$;")]
+    queries = [per_entry_query(source) for source in (GENERATOR, SNAPSHOT)]
+    with fixture.isolated_ci_database("host=127.0.0.1") as dsn:
+        with psycopg.connect(dsn, autocommit=True) as connection:
+            raw_snapshot = (ROOT / "db/schema.sql").read_bytes().decode("utf-8")
+            start = raw_snapshot.index("    CONSTRAINT scac_mutation_registry_entry_ingress_key_check")
+            end = raw_snapshot.index("\n    CONSTRAINT", start + 1)
+            constraint = raw_snapshot[start:end].rstrip(",")
+            connection.execute("create table public.ingress_probe (ingress_key text," + constraint + ")")
+            connection.execute("insert into public.ingress_probe values ('mcp-tool:valid')")
+            for control in ("\r", "\n", "\t"):
+                try:
+                    connection.execute("insert into public.ingress_probe values (%s)", ("mcp-tool:invalid" + control,))
+                except psycopg.errors.CheckViolation:
+                    pass
+                else:
+                    raise AssertionError(f"snapshot ingress constraint accepted {control!r}")
+            connection.execute("create extension pgcrypto; create schema ops")
+            connection.execute("create table ops.scac_mutation_registry_entry (entry_digest text, contract jsonb)")
+            connection.execute(canonical)
+            connection.execute("alter function ops.scac_canonical_json(jsonb) rename to canonical_under_test")
+            connection.execute("create sequence ops.canonical_calls")
+            connection.execute("""create function ops.scac_canonical_json(value jsonb) returns text
+                language plpgsql volatile as $$ begin
+                  perform nextval('ops.canonical_calls');
+                  return ops.canonical_under_test(value);
+                end $$""")
+            connection.execute("""insert into ops.scac_mutation_registry_entry
+                select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(value),'UTF8'),'sha256'),'hex'),value
+                from (values ('{"n":1}'::jsonb), ('{"n":2}'::jsonb)) contracts(value), generate_series(1,40)""")
+            for query in queries:
+                connection.execute("select setval('ops.canonical_calls',1,false)")
+                result = connection.execute("select exists(" + query + ")").fetchone()
+                assert result == (False,), "valid duplicate contracts must retain their hashes"
+                calls = connection.execute("select last_value from ops.canonical_calls").fetchone()
+                assert calls and calls[0] <= 4, f"repeated contracts were canonicalized {calls} times"
+            # JSONB equality treats 1 and 1.0 alike, but their canonical text
+            # differs. A reused digest must never conceal either this scale
+            # change or any other changed contract.
+            for contract in ('{"n":1.0}', '{"n":9}'):
+                connection.execute("""insert into ops.scac_mutation_registry_entry
+                    select entry_digest,%s::jsonb from ops.scac_mutation_registry_entry
+                    where contract='{"n":1}'::jsonb limit 1""", (contract,))
+                for query in queries:
+                    assert connection.execute("select exists(" + query + ")").fetchone() == (True,), \
+                        "a changed contract sharing an existing digest was hidden"
+                connection.execute("delete from ops.scac_mutation_registry_entry where contract::text=%s::jsonb::text", (contract,))
+
+
+check_repeated_contract_validation()
 
 print("schema snapshot registry seeds: public-qualified and rebuild-safe")
 

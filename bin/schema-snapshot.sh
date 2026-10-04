@@ -1264,7 +1264,7 @@ if [ "$CONFIRM_MERGE_REGISTRY_APPLIED" = t ] && [ "$WHATS_NEW_REGISTRY_APPLIED" 
 fi
 
 FIND_RULE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0770_find_rule_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0786_find_rule_scac_successor.sql')" \
   2>/dev/null)"
 case "$FIND_RULE_REGISTRY_APPLIED" in
   t|f) ;;
@@ -1277,7 +1277,7 @@ fi
 
 
 JEV_CAP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0773_jev_cap_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0787_jev_cap_scac_successor.sql')" \
   2>/dev/null)"
 case "$JEV_CAP_REGISTRY_APPLIED" in
   t|f) ;;
@@ -1289,7 +1289,7 @@ if [ "$JEV_CAP_REGISTRY_APPLIED" = t ] && [ "$FIND_RULE_REGISTRY_APPLIED" != t ]
 fi
 
 DISPATCH_ENVELOPE_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0783_dispatch_envelope_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0788_dispatch_envelope_scac_successor.sql')" \
   2>/dev/null)"
 case "$DISPATCH_ENVELOPE_REGISTRY_APPLIED" in
   t|f) ;;
@@ -3850,9 +3850,15 @@ begin
      not (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='${SCAC_EXPECTED_CURRENT_CATALOG}'
             from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v${SCAC_CURRENT_NUMBER}') or
      not ${SCAC_CURRENT_CATALOG_FUNCTION} or
-     exists(select 1 from ops.scac_mutation_registry_entry e
+     exists(with contracts as materialized (
+       -- Preserve exact serialized pairs, including numeric scale. Materialize
+       -- before hashing so repeated immutable versions do not repeat the work.
+       select distinct entry_digest collate "C" as entry_digest,
+         contract::text collate "C" as contract_json
+       from ops.scac_mutation_registry_entry)
+       select 1 from contracts e
        where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
-         convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')) then
+         convert_to(ops.scac_canonical_json(e.contract_json::jsonb),'UTF8'),'sha256'),'hex')) then
     raise exception 'restored SCAC registry failed exact historical, current, or per-entry contract seals';
   end if;
 end

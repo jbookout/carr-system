@@ -25,12 +25,15 @@ What is pinned, one test class each:
 """
 from __future__ import annotations
 
+import atexit
+import functools
 import importlib.util
 import json
 import os
 import re
 import subprocess
 import shlex
+import shutil
 import sys
 import tempfile
 import unittest
@@ -229,23 +232,31 @@ class FakeGitHub:
 
 
 class Fixture:
-    def __init__(self, tmp: Path):
+    def __init__(self, tmp: Path, *, seed: Fixture | None = None):
         self.tmp = tmp
         self.slice_marks: list[tuple[str, str]] = []
         self.origin = tmp / "origin.git"
         self.repo = tmp / "repo"
-        git(tmp, "init", "--bare", "-b", "main", str(self.origin))
-        git(tmp, "clone", str(self.origin), str(self.repo))
-        # Machine state is not history, exactly as the real checkout's
-        # .gitignore has it. Without this, commit()'s `git add -A` swept the
-        # stub `.venv/bin/python` (written below) into every test's first
-        # post-base commit, so a commit meant to be docs-only was no longer
-        # canary-ignored; and it swept the pipeline's own out/release-pipeline
-        # state into any commit made after a tick.
-        (self.repo / ".git" / "info" / "exclude").write_text(".venv\nout/\n")
-        git(self.repo, "config", "user.email", "t@example.invalid")
-        git(self.repo, "config", "user.name", "t")
-        self.base = self.commit({"README.md": "x"})
+        if seed is None:
+            git(tmp, "init", "--bare", "-b", "main", str(self.origin))
+            git(tmp, "clone", str(self.origin), str(self.repo))
+            # Machine state is not history, exactly as the real checkout's
+            # .gitignore has it. Without this, commit()'s `git add -A` swept the
+            # stub `.venv/bin/python` (written below) into every test's first
+            # post-base commit, so a commit meant to be docs-only was no longer
+            # canary-ignored; and it swept the pipeline's own out/release-pipeline
+            # state into any commit made after a tick.
+            (self.repo / ".git" / "info" / "exclude").write_text(".venv\nout/\n")
+            git(self.repo, "config", "user.email", "t@example.invalid")
+            git(self.repo, "config", "user.name", "t")
+            self.base = self.commit({"README.md": "x"})
+        else:
+            # Copy a pristine committed repository and bare origin, then bind
+            # this copy to its own origin. Each test still mutates real Git.
+            shutil.copytree(seed.origin, self.origin)
+            shutil.copytree(seed.repo, self.repo)
+            git(self.repo, "remote", "set-url", "origin", str(self.origin))
+            self.base = seed.base
         self.cred = tmp / "cred"
         self.cred.mkdir()
         (self.cred / "db.env").write_text(
@@ -308,13 +319,41 @@ class Fixture:
         return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
 
 
+@functools.cache
+def pristine_fixture() -> Fixture:
+    directory = tempfile.TemporaryDirectory()
+    atexit.register(directory.cleanup)
+    return Fixture(Path(directory.name))
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.fx = Fixture(Path(self._tmp.name))
+        self.fx = Fixture(Path(self._tmp.name), seed=pristine_fixture())
 
     def tearDown(self):
         self._tmp.cleanup()
+
+
+class FixtureIsolation(unittest.TestCase):
+    def test_pristine_seed_copies_keep_separate_histories_and_origins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("seed", "first", "second"):
+                (root / name).mkdir()
+            seed = Fixture(root / "seed")
+            first = Fixture(root / "first", seed=seed)
+            second = Fixture(root / "second", seed=seed)
+            first.commit({"only-first.txt": "first fixture"})
+            self.assertEqual(git(second.repo, "rev-parse", "HEAD"), seed.base)
+            self.assertEqual(git(seed.repo, "rev-parse", "HEAD"), seed.base)
+            self.assertFalse((second.repo / "only-first.txt").exists())
+            second.commit({"only-second.txt": "second fixture"})
+            self.assertFalse((first.repo / "only-second.txt").exists())
+            for fixture in (first, second):
+                self.assertEqual(git(fixture.repo, "remote", "get-url", "origin"), str(fixture.origin))
+                self.assertEqual(git(fixture.origin, "rev-parse", "main"),
+                                 git(fixture.repo, "rev-parse", "HEAD"))
 
 
 class Classification(unittest.TestCase):
@@ -1274,7 +1313,7 @@ class VerifierIsNotMaker(unittest.TestCase):
 
     def test_comment_text_cannot_name_the_verifier(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fx = Fixture(Path(tmp))
+            fx = Fixture(Path(tmp), seed=pristine_fixture())
             sha = fx.commit({"mcp-server/src/a.js": "1"})
             n = FakeGitHub().pr_number(sha)
             gh = FakeGitHub(comments={n: [approve(n, body=f"APPROVE\nReviewed-SHA: {pr_head(n)}\nVerifier: joe")]})
@@ -1293,7 +1332,7 @@ class VerifierIsNotMaker(unittest.TestCase):
 
     def test_upload_binds_the_verifier_and_its_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fx = Fixture(Path(tmp))
+            fx = Fixture(Path(tmp), seed=pristine_fixture())
             fx.commit({"mcp-server/src/a.js": "1"})
             live = {"sha": fx.base}
             runner = FakeRunner(live=live)
@@ -1306,7 +1345,7 @@ class VerifierIsNotMaker(unittest.TestCase):
 
     def test_a_merge_without_independent_review_is_blocked_not_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            fx = Fixture(Path(tmp))
+            fx = Fixture(Path(tmp), seed=pristine_fixture())
             fx.commit({"mcp-server/src/a.js": "1"})
             runner = FakeRunner()
             self.assertEqual(fx.pipeline(runner, github=FakeGitHub(approve_all=False)).tick(["worker"]), 0)
@@ -1637,7 +1676,7 @@ class FixForward(Base):
                  "unicodé.js", "-dash.js")
         for name in names:
             with self.subTest(name=repr(name)), tempfile.TemporaryDirectory() as td:
-                self.fx = Fixture(Path(td))
+                self.fx = Fixture(Path(td), seed=pristine_fixture())
                 self.nums = {}
                 b, nb = self.land({name: "defect", "mcp-server/src/a.js": "old"})
                 f, nf = self.land({name: "fixed", "mcp-server/src/a.js": "unrelated improvement"})
@@ -2670,7 +2709,7 @@ class DeployCredential(unittest.TestCase):
         self.home = tmp / "home"
         self.cred = self.home / ".config" / "carr"
         self.cred.mkdir(parents=True)
-        self.fx = Fixture(tmp)
+        self.fx = Fixture(tmp, seed=pristine_fixture())
         for name in ("db.env", "mcp-tokens.env"):
             (self.cred / name).write_text((self.fx.cred / name).read_text())
         self._home = mock.patch.dict(os.environ, {"HOME": str(self.home)})
