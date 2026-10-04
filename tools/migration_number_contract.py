@@ -238,7 +238,7 @@ def allocate_registry_successor(main_versions: Iterable[int]) -> tuple[int, int]
     return predecessor, predecessor + 1
 
 
-def validate_integration_union(main: dict[str, str], candidate: dict[str, str]) -> None:
+def validate_integration_union(main: dict[str, str] | dict[str, bytes], candidate: dict[str, str] | dict[str, bytes]) -> None:
     """Compare immutable main hashes/bytes before checking the union's ordering."""
     for name, content in main.items():
         if candidate.get(name) != content:

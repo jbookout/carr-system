@@ -406,7 +406,11 @@ def run_local_ci(
             f"disposable cluster on this machine, not a problem with yours. "
             f"Re-run on a free port: ./run.sh local-db-ci --class {ci_class} --port {port + 8}")
     integration_source = None
+    integration_port = port + 1
     if integration_base is not None:
+        validate_port(integration_port)
+        if not port_is_available(integration_port):
+            raise LocalPGRefusal("integration proof needs an available adjacent port; select another --port")
         sys.path.insert(0, str(repo / "tools"))
         from integration_candidate import validate_candidate
         try:
@@ -417,6 +421,8 @@ def run_local_ci(
     command_runner = runner or SubprocessRunner()
     root = Path(tempfile.mkdtemp(prefix="carr-local-pg-ci."))
     data = root / "data"
+    integration_data = root / "integration-data"
+    integration_started = False
     clean_env = scrub_cloud_environment(os.environ)
     clean_env["LC_ALL"] = "C"
     dsn = f"postgres://carr_ci@127.0.0.1:{port}/carr_ci"
@@ -558,15 +564,19 @@ def run_local_ci(
             )
             return 78
         if integration_base is not None:
-            # Restore current main into a separate disposable database, then
-            # forward the candidate and execute real consumers on that union.
-            # The ordinary canonical lane below still uses a fresh database.
+            # Cluster-global roles require an independent cluster, not just a
+            # database name. Preserve the canonical lane's fresh-role baseline.
+            # Restore current main, forward the candidate and prove consumers.
             from integration_candidate import git, validate_candidate
             schema = root / "integration-main-schema.sql"
             schema.write_bytes(git(repo, "show", f"{integration_base}:db/schema.sql"))
-            integration_dsn = f"postgres://carr_ci@127.0.0.1:{port}/carr_ci_integration"
+            integration_dsn = f"postgres://carr_ci@127.0.0.1:{integration_port}/carr_ci_integration"
+            integration_started = True
             integration_commands: tuple[tuple[str, list[str | Path]], ...] = (
-                ("create", [binaries.createdb, "-h", "127.0.0.1", "-p", str(port), "-U", "carr_ci", "carr_ci_integration"]),
+                ("init", [binaries.initdb, "-D", integration_data, "-U", "carr_ci", "--auth=trust", "--encoding=UTF8", "--no-locale"]),
+                ("start", [binaries.pg_ctl, "-D", integration_data, "-l", root / "integration-postgres.log", "-o", f"-h 127.0.0.1 -p {integration_port}", "-w", "start"]),
+                ("create", [binaries.createdb, "-h", "127.0.0.1", "-p", str(integration_port), "-U", "carr_ci", "carr_ci_integration"]),
+                ("role", [binaries.psql, integration_dsn, "-v", "ON_ERROR_STOP=1", "-q", "-c", "create role neondb_owner;"]),
                 ("restore", [binaries.psql, integration_dsn, "-v", "ON_ERROR_STOP=1", "-q", "-f", schema]),
             )
             for stage, command in integration_commands:
@@ -911,6 +921,14 @@ def run_local_ci(
                         "passed on disposable PostgreSQL"
                     )
     finally:
+        if integration_started:
+            stopped_integration = command_runner.run(
+                [binaries.pg_ctl, "-D", integration_data, "-m", "fast", "-w", "stop"],
+                env=clean_env, cwd=repo, capture=True,
+            )
+            if stopped_integration.returncode and exit_code == 0:
+                print("local-db-ci: integration PostgreSQL teardown failed", file=sys.stderr)
+                exit_code = stopped_integration.returncode
         if start_attempted:
             stopped = command_runner.run(
                 [binaries.pg_ctl, "-D", data, "-m", "fast", "-w", "stop"],
@@ -940,13 +958,14 @@ def main() -> int:
         help="migration is the fast DB lane; strict runs every canonical class locally",
     )
     parser.add_argument("--port", type=int, default=55432)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--export-candidate",
         type=Path,
         metavar="ARTIFACT_DIR",
         help="manual hosted-only PG17 candidate export and independent restore",
     )
-    parser.add_argument("--integration-base", help="exact current-main SHA for restore/forward/consumer union proof")
+    mode.add_argument("--integration-base", help="exact current-main SHA for restore/forward/consumer union proof")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     try:

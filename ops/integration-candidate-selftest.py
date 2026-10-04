@@ -6,6 +6,7 @@ from contextlib import redirect_stdout, redirect_stderr
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
@@ -73,6 +74,23 @@ v=p['registry_successor']
         integration.check_generated_write(self.repo,target,target.read_bytes(),self.base)
         for path,data in [(target,b'edited'),(self.repo/'mcp-server/src/scac-mutation-registry.v99.generated.js',b'wrong')]:
             with self.assertRaises(MigrationNumberError): integration.check_generated_write(self.repo,path,data,self.base)
+    def test_inventory_write_caller_preserves_sealed_bytes_and_sanitizes_errors(self):
+        (self.repo/'ops').mkdir(); (self.repo/'tools').mkdir()
+        for name in ['integration_candidate.py','migration_number_contract.py']:
+            shutil.copyfile(REPO/'tools'/name,self.repo/'tools'/name)
+        for name in ['git_env.py','integration-generation.mjs']:
+            shutil.copyfile(REPO/'ops'/name,self.repo/'ops'/name)
+        target=self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js'
+        original=target.read_bytes()
+        script="import {writeIntegratedArtifact} from './ops/integration-generation.mjs'; await writeIntegratedArtifact(process.argv[1],process.argv[2]);"
+        def call(content):
+            return subprocess.run(['node','--input-type=module','-e',script,str(target),content],cwd=self.repo,env=self.env,capture_output=True,text=True)
+        self.assertEqual(call(original.decode()).returncode,0)
+        refusal=call('private-canary-123')
+        self.assertNotEqual(refusal.returncode,0)
+        self.assertNotIn('private-canary-123',refusal.stdout+refusal.stderr)
+        self.assertEqual(target.read_bytes(),original)
+
     def test_empty_zero_refusal_nonzero_partial_exception_and_acknowledgement(self):
         for code in ['pass','print("private-canary-123");raise SystemExit(75)', 'raise SystemExit(2)',
                      'open("migrations/0749_only.sql","w").write("partial")','raise Exception("private-canary-123")']:
@@ -127,6 +145,11 @@ class RestoreForwardTests(unittest.TestCase):
         consumers=[i for i,a in enumerate(self.events) if a[-1].endswith(('find-rule-supersedes.test.mjs','catch-me-up-writer-route.test.mjs'))]
         canonical=next(i for i,a in enumerate(self.events) if str(REPO/'ops/ci.sh') in a)
         self.assertLess(restore,forward);self.assertEqual(len(consumers),2)
+        # Database names do not isolate cluster-global roles created by migrations.
+        self.assertEqual(sum(a[0]=='/fake/initdb' for a in self.events),2)
+        self.assertIn(':55433/',self.envs[forward]['DATABASE_URL'])
+        self.assertIn(':55432/',self.envs[canonical]['CARR_CI_DATABASE_URL'])
+        self.assertEqual(sum(a[0]=='/fake/pg_ctl' and a[-1]=='stop' for a in self.events),2)
         self.assertTrue(all(forward<i<canonical for i in consumers))
         self.assertTrue(all('CANARY_TOKEN' not in env for env in self.envs))
     def test_restore_forward_or_consumer_failure_stops_and_disposes(self):

@@ -215,9 +215,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base')
     parser.add_argument('--pending', action='append', default=[])
-    parser.add_argument('--check-write', type=Path)
-    parser.add_argument('--verify', action='store_true')
-    parser.add_argument('--regenerate', help='JSON argv for the source renderer consuming the allocation')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--check-write', type=Path)
+    mode.add_argument('--verify', action='store_true')
+    mode.add_argument('--regenerate', help='JSON argv for the source renderer consuming the allocation')
     parser.add_argument('--receipt', type=Path)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
