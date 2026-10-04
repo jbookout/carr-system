@@ -42,7 +42,7 @@ function fakeFetch(responses) {
 const ANSWERS = { q1: { noul: 0.82 }, q2: { choice: "b", probabilities: { a: 0.1, b: 0.9 } } };
 const QUESTIONS = {
   q1: { type: "noul", instructions: "Is the plan sound?" },
-  q2: { type: "choice", instructions: "Which option?", choices: ["a", "b"] },
+  q2: { type: "choice", instructions: "Which option?", criteria: { a: "A", b: "B" } },
 };
 const ACTORS = new Map([[AGENT.slug, AGENT.id], [OTHER.slug, OTHER.id]]);
 
