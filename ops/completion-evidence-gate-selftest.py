@@ -656,6 +656,14 @@ def f05_rule_contract_binder_is_a_write():
     return passed
 
 
+def automation_undo_writes_are_exact():
+    writes = all(mod.is_write_action(name) for name in ('undo-lead-move', 'undo-invoice-close'))
+    reads = any(mod.is_write_action(name) for name in ('undo-history', 'invoice-close-queue', 'lead-stage-preview'))
+    passed = writes and not reads
+    print(f"{'PASS' if passed else 'FAIL'}  automation undo writes classify exactly; history and previews remain reads")
+    return passed
+
+
 def registry_prefix_coverage():
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -1022,6 +1030,7 @@ def main():
     outcomes.append(evaluate_artifact_deletion_is_a_write())
     outcomes.append(cre_lifecycle_writes_are_writes())
     outcomes.append(f05_rule_contract_binder_is_a_write())
+    outcomes.append(automation_undo_writes_are_exact())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
     outcomes.append(r03_notification_classification())

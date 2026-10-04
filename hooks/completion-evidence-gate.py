@@ -186,6 +186,8 @@ WRITE_ACTION_EXACT = {
     "claude-record-event",   # append-only Claude lifecycle receipt
     "codex-checkpoint",      # durable semantic checkpoint write
     "codex-record-event",    # append-only native lifecycle receipt
+    "undo-lead-move",        # restores a stage and appends the partner's audit entry
+    "undo-invoice-close",    # restores deal phase/date and appends an audit entry
     "adjudicate-incident",   # partner judgment on an operational incident — severity, owner,
                               # duplicate-of. Same reasoning as its investigation sibling below:
                               # "adjudicate" stays an exact entry rather than becoming a prefix,
