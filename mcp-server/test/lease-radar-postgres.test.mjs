@@ -21,7 +21,7 @@ test('real PostgreSQL projection covers horizon, missing dates, tombstones, hold
       const table=schema.match(new RegExp(`CREATE TABLE public.${name} \\([\\s\\S]*?\\n\\);`))?.[0];assert.ok(table,name);await c.query(table);
     }
     await c.query('create role carr_reader; grant usage on schema public to carr_reader;');
-    await c.query(readFileSync(new URL('../../migrations/0788_lease_radar_read.sql',import.meta.url),'utf8'));
+    await c.query(readFileSync(new URL('../../migrations/0814_lease_radar_read.sql',import.meta.url),'utf8'));
     await c.query("insert into actor(id,slug,display_name,kind) values ($1,'joe','Demo Broker','human')",[id(1)]);
     await c.query("insert into client_status(slug,label,sort) values ('past_client','Past client',1),('active_deal','Active deal',2)");
     for(let n=1;n<=9;n++){
@@ -80,7 +80,7 @@ test('database horizon changes both reported coverage and membership, including 
       const table=schema.match(new RegExp(`CREATE TABLE public.${name} \\([\\s\\S]*?\\n\\);`))?.[0];assert.ok(table,name);await c.query(table);
     }
     await c.query('create role carr_reader; grant usage on schema public to carr_reader;');
-    const migration=readFileSync(new URL('../../migrations/0788_lease_radar_read.sql',import.meta.url),'utf8');
+    const migration=readFileSync(new URL('../../migrations/0814_lease_radar_read.sql',import.meta.url),'utf8');
     await c.query(migration);
     await c.query("insert into actor(id,slug,display_name,kind) values ($1,'joe','Demo Broker','human')",[id(1)]);
     await c.query("insert into party(id,name,kind,created_by,updated_by) values ($1,'Demo Practice','person',$2,$2)",[id(11),id(1)]);
