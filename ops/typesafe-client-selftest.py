@@ -40,6 +40,21 @@ SPEC = importlib.util.spec_from_file_location("typesafe_client", MODULE_PATH)
 assert SPEC and SPEC.loader
 client = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(client)
+# The call-site registry, attribution and fixture refusal are exercised by
+# ops/jev-call-sites-selftest.py. This suite tests the transport beneath them,
+# so every fixture caller is admitted as a budget-free scheduled job. Bound on
+# this suite's private module copy, not as module patches: a nested TestSuite
+# run (OfflineBudgetIsolationTests) runs module cleanups and would stop them.
+_PERMISSIVE_SITE = {"caller": "*", "trigger": "selftest", "runs_in": "selftest",
+                    "attribution": "session_or_job", "unattended": "allowed",
+                    "hourly_budget": 10**9, "daily_budget": 10**9, "owner": "selftest",
+                    "value": "selftest", "sources": ["ops/typesafe_client.py"]}
+client.load_call_sites = lambda path=None: {"hourly_paid_call_cap": 10**9,
+                                            "sites": {"*": _PERMISSIVE_SITE}}
+client.call_site = lambda caller, registry: _PERMISSIVE_SITE
+for _name in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER"):
+    os.environ.pop(_name, None)
+os.environ["CARR_JEV_JOB"] = "typesafe-client-selftest"
 REAL_ALERT_SINK = client._emit_spend_alert
 REAL_MAIL_SINK = getattr(client, "_email_spend_alert", None)
 _CAP_ROOT = tempfile.TemporaryDirectory()
@@ -493,11 +508,15 @@ class DailyCapMailTests(unittest.TestCase):
             self.assertEqual(command[2:4], ["--to", "joe"])
             self.assertEqual(kwargs["timeout"], 35)
             self.assertTrue(kwargs["check"])
-            self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+            # stderr is read for a fixed failure category, never logged raw.
+            self.assertEqual(kwargs["stderr"], subprocess.PIPE)
             with patch.object(os.sys, "argv", command[1:]), patch.object(handover, "creds", return_value=("fixture@example.invalid", "fixture")), patch.object(handover.smtplib, "SMTP", FakeSMTP), patch("sys.stdout", io.StringIO()):
                 handover.main()
         alert = {"message": "Jev daily cap 50% · 5/10 paid calls", "threshold": 50}
-        with patch.dict(handover.ALLOWED, joe="self-config@carr.us"), patch.object(client.subprocess, "run", run):
+        with tempfile.NamedTemporaryFile() as configured, \
+                patch.object(client, "GMAIL_ENV_PATH", configured.name), \
+                patch.dict(os.environ, {client.ALERT_SINK_ENV: ""}), \
+                patch.dict(handover.ALLOWED, joe="self-config@carr.us"), patch.object(client.subprocess, "run", run):
             REAL_MAIL_SINK(alert)
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["To"], "self-config@carr.us")
@@ -1097,7 +1116,8 @@ class Response(io.StringIO):
             'usage':{'input_tokens':20,'output_tokens':6}}))
 with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
     client.ask('state', {'architecture_or_design':client.noul('judge design')},
-               api_key='offline', cache_ttl_seconds=0, calls_log=sys.argv[2])
+               api_key='offline', cache_ttl_seconds=0, calls_log=sys.argv[2],
+               caller='adhoc:standalone-owner-fixture')
 """
             result = subprocess.run([__import__('sys').executable, '-c', code,
                                      str(MODULE_PATH.resolve()), str(log)],

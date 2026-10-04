@@ -91,6 +91,7 @@ interface below:
 import json
 import math
 import os
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -140,8 +141,16 @@ def _client():
     return module
 
 
+def _calling_module():
+    """The file name (no extension) of the code that called judge()."""
+    try:
+        return os.path.splitext(os.path.basename(sys._getframe(2).f_code.co_filename))[0]
+    except (AttributeError, ValueError):
+        return "unknown"
+
+
 def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
-          retries=None, deadline=None, model=None):
+          retries=None, deadline=None, model=None, caller=None):
     """Ask every question in `questions` about ONE subject, in one request.
 
     `subject` is a mapping describing the single thing being judged — a diff, a
@@ -172,7 +181,11 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
         if model is not None:
             extra["model"] = model
         if hasattr(tsc, "JUDGE_CACHE_TTL_SECONDS"):
-            extra.update(caller="jev_judge", cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
+            # The call site is the module that asked, not this wrapper: every
+            # judge() caller used to log as "jev_judge", which hid 95% of paid
+            # calls behind one name. ops/config/jev-call-sites.v1.json keys on it.
+            extra.update(caller=caller or _calling_module(),
+                         cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
         answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key, **extra)
     except Exception as exc:  # deliberately broad: see JudgeUnavailable
         raise JudgeUnavailable(f"{type(exc).__name__}: {exc}") from None

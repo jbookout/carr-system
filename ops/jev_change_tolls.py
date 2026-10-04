@@ -30,15 +30,22 @@ being authoritative here would cost a correct change that could not ship.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import subprocess
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIMEOUT_SECONDS = 60.0
 VERIFY_AT = 0.60   # a check worth RUNNING is a lower bar than a remedy worth printing
 WARN_AT = 0.55
+# ONE PAID QUESTION PER DISTINCT DIFF PER DAY (2026-10-04 Jev audit). pre-push
+# asks owed() for the advisory and again inside verify(), and a branch is
+# usually pushed several times with the same diff; each was a fresh paid call.
+CACHE_PATH = os.path.join(REPO, "out", "jev-change-tolls-cache.json")
+CACHE_TTL_SECONDS = 24 * 3600
 
 # Every toll below was paid late or missed at least once, and each names the
 # concrete remedy rather than the principle, because a session reading this
@@ -311,14 +318,43 @@ def verify(state=None, *, floor=None, client=None, api_key=None, repo=REPO):
     return failures
 
 
+def _answers(tsc, state, api_key, cached):
+    """The tolls' answers for this diff, from the per-diff cache when allowed."""
+    key = hashlib.sha256(json.dumps({"change": state, "tolls": sorted(TOLLS)}, sort_keys=True,
+                                    default=str).encode("utf-8")).hexdigest()
+    now = time.time()
+    entries = {}
+    if cached:
+        try:
+            with open(CACHE_PATH, encoding="utf-8") as fh:
+                entries = json.load(fh)
+        except (OSError, ValueError):
+            entries = {}
+        hit = entries.get(key) if isinstance(entries, dict) else None
+        if isinstance(hit, dict) and isinstance(hit.get("answers"), dict) \
+                and now - float(hit.get("at", 0)) < CACHE_TTL_SECONDS:
+            return hit["answers"]
+    questions = {name: tsc.noul(text) for name, (text, _) in TOLLS.items()}
+    answers = tsc.ask({"change": state}, questions, timeout=TIMEOUT_SECONDS,
+                      api_key=api_key).get("answers") or {}
+    if cached:
+        try:
+            kept = {k: v for k, v in (entries if isinstance(entries, dict) else {}).items()
+                    if isinstance(v, dict) and now - float(v.get("at", 0)) < CACHE_TTL_SECONDS}
+            kept[key] = {"at": now, "answers": answers}
+            os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+            with open(CACHE_PATH, "w", encoding="utf-8") as fh:
+                json.dump(kept, fh)
+        except (OSError, TypeError, ValueError):
+            pass  # a cache that cannot be written only costs the next push a call
+    return answers
+
+
 def owed(state=None, *, client=None, api_key=None, floor=WARN_AT):
     tsc = client or _client()
     state = state if state is not None else change()
-    questions = {name: tsc.noul(text) for name, (text, _) in TOLLS.items()}
-    answer = tsc.ask({"change": state}, questions, timeout=TIMEOUT_SECONDS,
-                     api_key=api_key)
     out = []
-    for name, body in (answer.get("answers") or {}).items():
+    for name, body in _answers(tsc, state, api_key, cached=client is None).items():
         probability = float(body.get(body.get("type"), 0.0))
         if probability >= floor:
             out.append((probability, name, TOLLS[name][1]))

@@ -74,7 +74,7 @@ from contextlib import closing
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 from pathlib import Path
 from functools import partial
@@ -167,6 +167,121 @@ RATE_LIMIT_RETRIES = 3
 
 class TypeSafeError(RuntimeError):
     """Any failure reaching or being understood by the service."""
+
+
+class JevCallRefused(TypeSafeError):
+    """A paid call this client declined before any transport ran.
+
+    `code` is one of REFUSAL_CODES. A refusal is never billable, so it is
+    excluded from the daily-cap seed. `resets_at` is the UTC instant a budget
+    refusal lifts (None for policy refusals, which do not lift on a clock).
+    """
+
+    def __init__(self, message, *, code, site=None, scope=None, resets_at=None):
+        super().__init__(message)
+        self.code = code
+        self.site = site
+        self.scope = scope
+        self.resets_at = resets_at
+
+
+# THE CALL-SITE REGISTRY (2026-10-04 system-wide audit). Four point-fixes in
+# three days each caught one burner after the money was spent, because any
+# code path could reach the vendor and the only bound was one shared daily
+# counter. Now a paid call needs a registered site, the attribution that site
+# declares, and room in the site's own hourly and daily budget, beneath a
+# global hourly cap. All four are checked before any transport and before
+# the daily reservation, fail closed, and are logged without being paid.
+JEV_CALL_SITES_PATH = os.path.join(REPO, "ops", "config", "jev-call-sites.v1.json")
+BUDGET_REFUSALS = ("hourly_paid_call_cap", "site_hourly_budget", "site_daily_budget")
+POLICY_REFUSALS = ("fixture_offline", "unregistered_caller", "unattributed_call", "unattended_worker_off",
+                   "call_site_registry_invalid")
+REFUSAL_CODES = ("daily_paid_call_cap",) + BUDGET_REFUSALS + POLICY_REFUSALS
+ATTRIBUTIONS = ("session", "session_or_job")
+UNATTENDED_POLICIES = ("off", "allowed")
+_SITE_FIELDS = {"caller", "trigger", "runs_in", "attribution", "unattended",
+                "hourly_budget", "daily_budget", "owner", "value", "sources"}
+
+
+def load_call_sites(path=None):
+    """The validated registry: {"hourly_paid_call_cap": int, "sites": {caller: entry}}.
+
+    Raises TypeSafeError on any malformed entry: an unreadable registry admits
+    nothing, which is the fail-closed direction.
+    """
+    try:
+        with open(path or JEV_CALL_SITES_PATH, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise TypeSafeError(f"Jev call-site registry unreadable ({type(exc).__name__})") from None
+    if not isinstance(raw, dict) or raw.get("schema") != "carr-jev-call-sites/v1":
+        raise TypeSafeError("Jev call-site registry has the wrong schema")
+    cap = raw.get("hourly_paid_call_cap")
+    if type(cap) is not int or cap < 0:
+        raise TypeSafeError("Jev call-site registry needs an integer hourly_paid_call_cap")
+    sites = {}
+    for entry in raw.get("sites") or []:
+        if not isinstance(entry, dict) or set(entry) != _SITE_FIELDS:
+            raise TypeSafeError(f"Jev call-site entry has the wrong fields: {entry!r:.120}")
+        caller = entry["caller"]
+        if not isinstance(caller, str) or not re.fullmatch(r"[a-z0-9_.:-]+\*?", caller):
+            raise TypeSafeError(f"Jev call-site caller is not a plain name: {caller!r}")
+        if caller in sites:
+            raise TypeSafeError(f"Jev call-site caller registered twice: {caller}")
+        if entry["attribution"] not in ATTRIBUTIONS or entry["unattended"] not in UNATTENDED_POLICIES:
+            raise TypeSafeError(f"Jev call-site {caller} has an unknown attribution or unattended policy")
+        for budget in ("hourly_budget", "daily_budget"):
+            if type(entry[budget]) is not int or entry[budget] < 0:
+                raise TypeSafeError(f"Jev call-site {caller} needs an integer {budget}")
+        if entry["hourly_budget"] > entry["daily_budget"]:
+            raise TypeSafeError(f"Jev call-site {caller} hourly budget exceeds its daily budget")
+        for text in ("trigger", "runs_in", "owner", "value"):
+            if not isinstance(entry[text], str) or not entry[text].strip():
+                raise TypeSafeError(f"Jev call-site {caller} needs a {text}")
+        if not isinstance(entry["sources"], list) or not entry["sources"] or not all(
+                isinstance(s, str) and s for s in entry["sources"]):
+            raise TypeSafeError(f"Jev call-site {caller} needs its source files")
+        sites[caller] = entry
+    return {"hourly_paid_call_cap": cap, "sites": sites}
+
+
+def call_site(caller, registry):
+    """The registry entry for `caller`: an exact name, else a `prefix:*` entry."""
+    sites = registry["sites"]
+    if caller in sites:
+        return sites[caller]
+    for name, entry in sites.items():
+        if name.endswith("*") and isinstance(caller, str) and caller.startswith(name[:-1]) \
+                and len(caller) > len(name) - 1:
+            return entry
+    return None
+
+
+def _job_label():
+    """A scheduled job's own label: CARR_JEV_JOB, or launchd's com.carr.* service name."""
+    label = (os.environ.get("CARR_JEV_JOB") or "").strip()
+    if label:
+        return label
+    service = (os.environ.get("XPC_SERVICE_NAME") or "").strip()
+    return service if service.startswith("com.carr.") else None
+
+
+def _unattended():
+    """The orchestrator's explicit marker for an unattended worker's environment."""
+    return os.environ.get("CARR_JEV_WORKER", "").strip().lower() == "off"
+
+
+def _truthy_env(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _fixture_offline():
+    """Selftests and CI fixtures never pay. ops/ci.sh exports CARR_JEV_OFFLINE and
+    its gates class exports CARR_HOOK_FIXTURE; a hook a selftest spawns inherits
+    both. Measured 2026-10-04: a fixture prompt seen in three or more sessions
+    accounted for 20-45% of each day's paid attempts, because a selftest that
+    drops TYPESAFE_API_KEY from its environment still reaches the key FILE."""
+    return _truthy_env("CARR_JEV_OFFLINE") or _truthy_env("CARR_HOOK_FIXTURE")
 
 
 def read_api_key(path=KEY_PATH):
@@ -677,6 +792,7 @@ def _append_call_receipt(questions, facets, result, log_path, *, caller=None,
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "session": dispatch_binding[0] if dispatch_binding else session or _session_id(),
             "human_turn_id": dispatch_binding[1] if dispatch_binding else None,
+            "job": _job_label(),
             "question_ids_sha256": [hashlib.sha256(qid.encode("utf-8")).hexdigest()
                                     for qid in sorted(questions)],
             "caller": caller,
@@ -738,7 +854,7 @@ def _logged_attempt_rows(log_path, day):
                     raise TypeSafeError("Jev unavailable: daily cap accounting has invalid seed fields")
                 if (stamp.astimezone(timezone.utc).strftime("%Y-%m-%d") == day
                         and not row.get("cache_hit")
-                        and row.get("error") != "daily_paid_call_cap"):
+                        and row.get("error") not in REFUSAL_CODES):
                     yield row
     except FileNotFoundError:
         pass
@@ -839,12 +955,37 @@ def _claim_spend_alerts(db, log_path, day, previous, allowed, cap, caller):
         return []
 
 
+class AlarmSinkError(RuntimeError):
+    """A named alarm-delivery failure. str() is a fixed category, never raw output."""
+
+
+# bin/gmail-handover.py's own credential file. Read for existence only: the
+# alarm worker never opens it, so no credential crosses into this process.
+GMAIL_ENV_PATH = os.path.expanduser("~/.config/carr/gmail.env")
+# DRY-RUN SEAM. CARR_JEV_ALERT_SINK=dry-run:<path> appends each alarm, tagged
+# with the sink it would have used, to <path> and sends nothing. Tests use it;
+# so can an operator rehearsing the alarm.
+ALERT_SINK_ENV = "CARR_JEV_ALERT_SINK"
+
+
+def _dry_run_sink(alert, sink):
+    target = os.environ.get(ALERT_SINK_ENV, "")
+    if not target.startswith("dry-run:"):
+        return False
+    with open(target[len("dry-run:"):], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"sink": sink, "threshold": alert.get("threshold"),
+                             "message": alert.get("message")}) + "\n")
+    return True
+
+
 def _emit_spend_alert(alert):
     """Reuse cutover-watch/version-sentinel's local macOS notification path.
 
     Runs in the detached delivery process, with a bounded wait.
     No prompt, answer or credential crosses into the notification.
     """
+    if _dry_run_sink(alert, "notification"):
+        return
     message = alert["message"].replace("\\", "\\\\").replace('"', '\\"')
     message = message.replace("\n", " ").replace("\r", " ")
     subprocess.run(["/usr/bin/osascript", "-e",
@@ -854,12 +995,35 @@ def _emit_spend_alert(alert):
 
 
 def _email_spend_alert(alert):
-    """Use the existing self-mail command; it owns recipient and credentials."""
-    subprocess.run([sys.executable, os.path.join(REPO, "bin", "gmail-handover.py"),
-                    "--to", "joe", "--subject", "Jev spend alarm",
-                    "--body", alert["message"]],
-                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL, timeout=35, check=True)
+    """Use the existing self-mail command; it owns recipient and credentials.
+
+    2026-10-04: every threshold mail failed as a bare CalledProcessError because
+    this machine has no ~/.config/carr/gmail.env, so the command exited with
+    "no credential" into a discarded stderr. The precondition is now checked
+    first and every failure carries a fixed category the health line can name.
+    """
+    if _dry_run_sink(alert, "mail"):
+        return
+    if not (os.environ.get("CARR_GMAIL_USER") and os.environ.get("CARR_GMAIL_APP_PASSWORD")) \
+            and not os.path.isfile(GMAIL_ENV_PATH):
+        raise AlarmSinkError("mail_unconfigured")
+    try:
+        subprocess.run([sys.executable, os.path.join(REPO, "bin", "gmail-handover.py"),
+                        "--to", "joe", "--subject", "Jev spend alarm",
+                        "--body", alert["message"]],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, text=True, timeout=35, check=True)
+    except subprocess.CalledProcessError as exc:
+        text = exc.stderr or ""
+        for marker, category in (("no credential", "mail_unconfigured"),
+                                 ("missing CARR_GMAIL_USER", "mail_unconfigured"),
+                                 ("login refused", "mail_auth_refused"),
+                                 ("REFUSED", "mail_recipient_refused")):
+            if marker in text:
+                raise AlarmSinkError(category) from None
+        raise AlarmSinkError(f"mail_exit_{exc.returncode}") from None
+    except subprocess.TimeoutExpired:
+        raise AlarmSinkError("mail_timeout") from None
 
 
 def _deliver_pending_spend_alerts(path, day):
@@ -902,6 +1066,8 @@ def _deliver_pending_spend_alerts(path, day):
             mail_error = None
             try:
                 _email_spend_alert(json.loads(row[0]))
+            except AlarmSinkError as exc:
+                mail_error = str(exc)
             except Exception as exc:
                 mail_error = type(exc).__name__
             with closing(sqlite3.connect(path, timeout=1)) as db, db:
@@ -948,7 +1114,9 @@ PAID_CAP_ACTION = ("on breach: notify Joe at 50%/80%/100% via macOS notification
                    "reduce top caller/session demand; pending/failed macOS alarms recover on next "
                    "reservation, at most three attempts (stale lease after 30s); inspect "
                    "notification sink if exhausted; inspect self-mail sink and confirm inbox "
-                   "on mail failure or unconfirmed submission "
+                   "on mail failure or unconfirmed submission; errors=mail_unconfigured means "
+                   "Joe creates ~/.config/carr/gmail.env on this machine (setup in "
+                   "bin/gmail-handover.py) "
                    "· verify next UTC day below 50% "
                    "· auto-clear at UTC rollover")
 
@@ -995,37 +1163,182 @@ def paid_cap_health(*, now=None):
         return f"UNKNOWN jev paid cap — {type(exc).__name__} · {PAID_CAP_ACTION}"
 
 
-def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256):
+def _cap_db_path():
+    return os.fspath(JEV_DAILY_CAP_LOG) + ".daily-cap.sqlite3"
+
+
+def _windows(now):
+    """(day, hour key, next hour ISO, next UTC midnight ISO) for one instant."""
+    now = now.astimezone(timezone.utc)
+    hour = now.replace(minute=0, second=0, microsecond=0)
+    midnight = hour.replace(hour=0)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return (now.strftime("%Y-%m-%d"), hour.strftime("%Y-%m-%dT%H"),
+            (hour + timedelta(hours=1)).strftime(fmt), (midnight + timedelta(days=1)).strftime(fmt))
+
+
+_BUDGET_TABLES = (
+    "CREATE TABLE IF NOT EXISTS site_usage (day TEXT, hour TEXT, site TEXT, "
+    "count INTEGER NOT NULL, PRIMARY KEY(day,hour,site))",
+    # One refusal row per (code, site, session, window) reaches the call log;
+    # the rest are counted here, so a refused burner cannot flood the log.
+    "CREATE TABLE IF NOT EXISTS refusal_log (window TEXT PRIMARY KEY, count INTEGER NOT NULL)",
+    # Active budget pauses, read by hooks to say so once instead of per call.
+    "CREATE TABLE IF NOT EXISTS budget_pause (scope TEXT, site TEXT, resets_at TEXT, "
+    "PRIMARY KEY(scope,site,resets_at))",
+    "CREATE TABLE IF NOT EXISTS pause_notice (session TEXT, scope TEXT, resets_at TEXT, "
+    "PRIMARY KEY(session,scope,resets_at))",
+)
+
+
+def _budget_tables(db):
+    for statement in _BUDGET_TABLES:
+        db.execute(statement)
+
+
+def _record_refusal(questions, facets, caller, question_kind, prompt_sha256, code, session, now=None):
+    """Log a refusal once per code/site/session/hour; count every one."""
+    _, hour, _, _ = _windows(now or datetime.now(timezone.utc))
+    window = json.dumps([code, caller, session or "", hour])
+    first = True
+    try:
+        with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db, db:
+            _budget_tables(db)
+            first = db.execute("INSERT OR IGNORE INTO refusal_log VALUES (?,1)", (window,)).rowcount == 1
+            if not first:
+                db.execute("UPDATE refusal_log SET count=count+1 WHERE window=?", (window,))
+    except (OSError, sqlite3.Error):
+        pass  # A refusal still refuses when its bookkeeping cannot be written.
+    if first:
+        _append_call_receipt(questions, facets, None, JEV_DAILY_CAP_LOG, caller=caller,
+                             question_kind=question_kind, prompt_sha256=prompt_sha256,
+                             ok=False, error=code, session=session)
+
+
+# WORKER BREAKER. On 2026-10-04 the Worker's own vendor call failed
+# (vendor_failed_at_worker) on every attempt, and each call then reserved a
+# SECOND slot for the direct fallback: 1,185 of that day's 2,775 counted
+# attempts were doomed Worker tries. One failure opens the breaker for this
+# long; while open, a cache miss goes straight to the direct route.
+WORKER_BREAKER_SECONDS = 15 * 60
+
+
+def _worker_breaker_open():
+    try:
+        with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS worker_breaker (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
+            row = db.execute("SELECT until FROM worker_breaker WHERE id=1").fetchone()
+    except (OSError, sqlite3.Error):
+        return False
+    return bool(row) and row[0] > time.time()
+
+
+def _trip_worker_breaker():
+    try:
+        with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db, db:
+            db.execute("CREATE TABLE IF NOT EXISTS worker_breaker (id INTEGER PRIMARY KEY, until REAL NOT NULL)")
+            db.execute("INSERT OR REPLACE INTO worker_breaker VALUES (1, ?)",
+                       (time.time() + WORKER_BREAKER_SECONDS,))
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def _admit_paid_call(caller, session, questions, facets, question_kind, prompt_sha256):
+    """The registry gate, before any transport: the site entry, or JevCallRefused.
+
+    Ordered questions, each a deterministic predicate:
+      1. is this a fixture or CI run?             -> refuse, unlogged (never real traffic)
+      2. is the registry readable and valid?      -> else refuse everything
+      3. is `caller` a registered site?           -> else unregistered_caller
+      4. does the call carry the site's attribution (a session, or for
+         session_or_job sites a session or a scheduled job's label)?
+                                                  -> else unattributed_call
+      5. is this an unattended worker, and does the site stay off there?
+                                                  -> unattended_worker_off
+    """
+    if _fixture_offline():
+        raise JevCallRefused("Jev unavailable: fixture or CI run (CARR_JEV_OFFLINE/CARR_HOOK_FIXTURE)",
+                             code="fixture_offline", site=caller)
+    code = None
+    entry = None
+    try:
+        registry = load_call_sites()
+    except TypeSafeError:
+        code = "call_site_registry_invalid"
+    else:
+        entry = call_site(caller, registry)
+        if entry is None:
+            code = "unregistered_caller"
+        elif not session and not (entry["attribution"] == "session_or_job" and _job_label()):
+            code = "unattributed_call"
+        elif _unattended() and entry["unattended"] == "off":
+            code = "unattended_worker_off"
+    if code:
+        _record_refusal(questions, facets, caller, question_kind, prompt_sha256, code, session)
+        raise JevCallRefused(f"Jev unavailable: {code} ({caller})", code=code, site=caller)
+    return registry, entry
+
+
+def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
+                       registry=None, site=None):
     """Atomically reserve one transport attempt across processes and worktrees.
 
     The small counter lives beside the canonical call log, not inside a session.
     Reservations are never refunded: uncertain delivery can have been billable.
     Cache hits reach neither this function nor the transport. Storage failure
     uses the same TypeSafeError outage contract, so hooks retain their fallback.
+
+    Four budgets, checked in one transaction in this order: the global daily
+    cap, the global hourly cap, the site's daily budget, the site's hourly
+    budget. 2026-10-04's 300-475 calls an hour overnight ran under an "hourly
+    cap" that #1502's own review had removed again; this one is the counter.
     """
     log_path = JEV_DAILY_CAP_LOG
     cap = _daily_cap_limit()
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now = datetime.now(timezone.utc)
+    day, hour, next_hour, next_day = _windows(now)
     notice = False
     alerts = []
+    refused = None
     try:
         os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
-        db = sqlite3.connect(os.fspath(log_path) + ".daily-cap.sqlite3", timeout=1.0)
+        db = sqlite3.connect(_cap_db_path(), timeout=1.0)
         try:
             db.execute("CREATE TABLE IF NOT EXISTS daily_cap "
                        "(day TEXT PRIMARY KEY, attempts INTEGER NOT NULL, notified INTEGER NOT NULL)")
+            _budget_tables(db)
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT attempts, notified FROM daily_cap WHERE day=?", (day,)).fetchone()
             if row is None:
                 row = (_logged_attempts(log_path, day), 0)
                 db.execute("DELETE FROM daily_cap WHERE day < ?", (day,))
                 db.execute("INSERT INTO daily_cap VALUES (?,?,0)", (day, row[0]))
+                db.execute("DELETE FROM site_usage WHERE day < ?", (day,))
+                db.execute("DELETE FROM budget_pause WHERE resets_at <= ?", (now.strftime("%Y-%m-%dT%H:%M:%SZ"),))
             allowed = row[0] < cap
-            if allowed:
-                db.execute("UPDATE daily_cap SET attempts=attempts+1 WHERE day=?", (day,))
-            elif not row[1]:
+            if not allowed and not row[1]:
                 notice = True
                 db.execute("UPDATE daily_cap SET notified=1 WHERE day=?", (day,))
+            if allowed and registry is not None and site is not None:
+                hour_used = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE hour=?",
+                                       (hour,)).fetchone()[0]
+                site_day = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE day=? AND site=?",
+                                      (day, caller)).fetchone()[0]
+                site_hour = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE hour=? AND site=?",
+                                       (hour, caller)).fetchone()[0]
+                if hour_used >= registry["hourly_paid_call_cap"]:
+                    refused = ("hourly_paid_call_cap", "*", next_hour)
+                elif site_day >= site["daily_budget"]:
+                    refused = ("site_daily_budget", caller, next_day)
+                elif site_hour >= site["hourly_budget"]:
+                    refused = ("site_hourly_budget", caller, next_hour)
+                if refused:
+                    allowed = False
+                    db.execute("INSERT OR IGNORE INTO budget_pause VALUES (?,?,?)", refused)
+            if allowed:
+                db.execute("UPDATE daily_cap SET attempts=attempts+1 WHERE day=?", (day,))
+                db.execute("INSERT INTO site_usage VALUES (?,?,?,1) ON CONFLICT(day,hour,site) "
+                           "DO UPDATE SET count=count+1", (day, hour, caller))
             alerts = _claim_spend_alerts(db, log_path, day, row[0], allowed, cap, caller)
             db.commit()
         finally:
@@ -1033,12 +1346,140 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256):
     except (OSError, sqlite3.Error) as exc:
         raise TypeSafeError(f"Jev unavailable: daily cap accounting failed ({type(exc).__name__})") from None
     _dispatch_spend_alerts(alerts)
+    if refused:
+        scope, _, resets_at = refused
+        _record_refusal(questions, facets, caller, question_kind, prompt_sha256, scope,
+                        _session_id(), now=now)
+        raise JevCallRefused(f"Jev unavailable: {scope} reached ({caller}); resets {resets_at}",
+                             code=scope, site=caller, scope=scope, resets_at=resets_at)
     if notice:
         _append_call_receipt(questions, facets, None, log_path, caller=caller,
                              question_kind=question_kind, prompt_sha256=prompt_sha256,
                              ok=False, error="daily_paid_call_cap")
     if not allowed:
-        raise TypeSafeError(f"Jev unavailable: daily paid call cap reached ({cap}, UTC {day})")
+        raise JevCallRefused(f"Jev unavailable: daily paid call cap reached ({cap}, UTC {day})",
+                             code="daily_paid_call_cap", site=caller, scope="daily_paid_call_cap",
+                             resets_at=next_day)
+
+
+def active_pause(*, sites=None, now=None):
+    """The budget pause in force now, as {"scope", "resets_at"}, or None.
+
+    Global pauses (daily cap, hourly cap) always count; a site budget pause
+    counts only for the named `sites`. Read-only; never raises.
+    """
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    day, _, _, next_day = _windows(now)
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    path = Path(_cap_db_path())
+    if not path.exists():
+        return None
+    try:
+        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            row = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone()
+            if row and row[0] >= _daily_cap_limit():
+                return {"scope": "daily_paid_call_cap", "resets_at": next_day}
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='budget_pause'").fetchone():
+                return None
+            names = ["*"] + list(sites or [])
+            marks = ",".join("?" * len(names))
+            found = db.execute(f"SELECT scope,resets_at FROM budget_pause WHERE resets_at > ? "
+                               f"AND site IN ({marks}) ORDER BY resets_at DESC LIMIT 1",
+                               (stamp, *names)).fetchone()
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error, TypeSafeError):
+        return None
+    return {"scope": found[0], "resets_at": found[1]} if found else None
+
+
+PAUSE_WORDS = {"daily_paid_call_cap": "daily paid-call cap",
+               "hourly_paid_call_cap": "hourly paid-call cap",
+               "site_daily_budget": "this check's daily budget",
+               "site_hourly_budget": "this check's hourly budget"}
+
+
+def pause_notice(session, *, sites=None, now=None):
+    """ONE line per session per pause window, then None until the next window.
+
+    Hooks call this instead of printing "[jev ...] unavailable" on every tool
+    call and Stop while a cap holds. A missing session gets no line at all.
+    """
+    pause = active_pause(sites=sites, now=now)
+    if not pause or not session:
+        return None
+    try:
+        with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db, db:
+            _budget_tables(db)
+            fresh = db.execute("INSERT OR IGNORE INTO pause_notice VALUES (?,?,?)",
+                               (str(session), pause["scope"], pause["resets_at"])).rowcount == 1
+    except (OSError, sqlite3.Error):
+        return None
+    if not fresh:
+        return None
+    resumes = pause["resets_at"].replace("T", " ").replace(":00Z", " UTC")
+    return (f"[jev] paused: {PAUSE_WORDS.get(pause['scope'], pause['scope'])} reached; "
+            f"resumes {resumes}. Jev checks are skipped until then; this is said once.")
+
+
+def outage_notice(session, *, now=None):
+    """ONE line per session per UTC hour while Jev is unavailable for any
+    reason other than a budget pause (vendor down, credits exhausted)."""
+    if not session:
+        return None
+    _, hour, _, _ = _windows(now or datetime.now(timezone.utc))
+    try:
+        with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db, db:
+            _budget_tables(db)
+            fresh = db.execute("INSERT OR IGNORE INTO pause_notice VALUES (?,?,?)",
+                               (str(session), "outage", hour)).rowcount == 1
+    except (OSError, sqlite3.Error):
+        return None
+    if not fresh:
+        return None
+    return ("[jev] unavailable this hour (vendor or account outage, not a cap); "
+            "Jev checks are skipped and this is said once per hour.")
+
+
+SITE_SPEND_ACTION = ("on breach (a site at its daily budget, or the day past 50% of the cap): "
+                     "owner orchestrator · remediation cut the top site's trigger to its judgment "
+                     "point or lower its budget in ops/config/jev-call-sites.v1.json · verify "
+                     "next UTC day every site under budget · auto-clear at UTC rollover")
+
+
+def spend_by_site_health(*, now=None):
+    """Today's paid attempts per registered site against its budget, one line."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    day, hour, _, _ = _windows(now)
+    try:
+        registry = load_call_sites()
+        cap = _daily_cap_limit()
+        usage, hour_used, total = {}, 0, 0
+        path = Path(_cap_db_path())
+        if path.exists():
+            db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+            try:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='site_usage'").fetchone():
+                    usage = dict(db.execute("SELECT site, SUM(count) FROM site_usage WHERE day=? "
+                                            "GROUP BY site", (day,)).fetchall())
+                    hour_used = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE hour=?",
+                                           (hour,)).fetchone()[0]
+                row = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone() \
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='daily_cap'").fetchone() else None
+                total = row[0] if row else 0
+            finally:
+                db.close()
+        over = [name for name, used in usage.items()
+                if name in registry["sites"] and used >= registry["sites"][name]["daily_budget"]]
+        status = "WARN" if over or total * 100 >= cap * 50 else "OK"
+        parts = [f"{name}={used}/{registry['sites'][name]['daily_budget'] if name in registry['sites'] else '?'}"
+                 for name, used in sorted(usage.items(), key=lambda kv: (-kv[1], kv[0]))]
+        return (f"{status} jev spend by site — UTC {day} · {total}/{cap} paid attempts · this hour "
+                f"{hour_used}/{registry['hourly_paid_call_cap']} · {' '.join(parts) or 'no site spend'}"
+                f"{' · over budget: ' + ','.join(sorted(over)) if over else ''} · {SITE_SPEND_ACTION}")
+    except (OSError, sqlite3.Error, TypeSafeError) as exc:
+        return f"UNKNOWN jev spend by site — {type(exc).__name__} · {SITE_SPEND_ACTION}"
 
 
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
@@ -1139,6 +1580,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     server_error = None
     reservation_error = None
     dispatch_binding = _dispatch_binding(transcript_path, session_id)
+    registry = site = None
+    if opener is None:
+        registry, site = _admit_paid_call(caller, dispatch_binding[0], questions, facets,
+                                          question_kind, prompt_sha256)
     started = time.monotonic()
     in_hook = os.environ.get(IN_HOOK_ENV) == "1" and purpose != "build_advisory"
     if opener is None and api_key is None and not in_hook and work_class != "app_runtime":
@@ -1154,9 +1599,14 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             timeout=server_deadline - time.monotonic(), transport_mode="cache_only", runner=server_runner)
         if served is not None and served.get("cache_hit") is not True:
             raise TypeSafeError("Jev unavailable: Worker cache-only contract violated")
-        if served is None and server_error == "cache_miss":
+        if served is None and server_error == "cache_miss" and _worker_breaker_open():
+            # The Worker's own vendor call has been failing: go direct with ONE
+            # reservation instead of paying a doomed Worker attempt first.
+            server_error = "worker_breaker_open"
+        elif served is None and server_error == "cache_miss":
             try:
-                _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256)
+                _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
+                                   registry, site)
             except TypeSafeError as error:
                 # A free direct-cache answer may still exist after a Worker
                 # cache miss. No transport may run if this reservation failed.
@@ -1170,6 +1620,8 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                     session_id=dispatch_binding[0] or "unbound",
                     timeout=remaining, transport_mode="paid_once", runner=server_runner)
                 if served is None:
+                    if server_error == "vendor_failed_at_worker":
+                        _trip_worker_breaker()
                     _append_call_receipt(questions, facets, None, calls_log, dispatch_binding=dispatch_binding, caller=caller,
                         question_kind=question_kind, prompt_sha256=prompt_sha256,
                         ok=False, error=server_error, server_error=server_error, session=session_id)
@@ -1244,7 +1696,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             attempt_timeout = min(timeout, remaining)
         if opener is None:
             _reserve_paid_call(questions, facets, caller,
-                               question_kind, prompt_sha256)
+                               question_kind, prompt_sha256, registry, site)
             # Accounting can wait on another worker's transaction. Preserve
             # the caller's absolute deadline before starting any transport.
             if deadline is not None:

@@ -30,6 +30,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "jev-supervisor.py")
 
 
+# A worker running this suite inherits CARR_JEV_WORKER=off, which turns the
+# whole hook off; the suite drives the attended path unless a test sets it.
+os.environ.pop("CARR_JEV_WORKER", None)
+
+
 def load(mode):
     os.environ["CARR_JEV_SUPERVISOR"] = mode
     spec = importlib.util.spec_from_file_location("jev_supervisor_under_test", HOOK)
@@ -734,6 +739,92 @@ class RemainingReviewTests(unittest.TestCase):
                 self.assertEqual(len(self.client.calls), 1)
                 self.assertIn("instructs", self.client.calls[0][1])
                 self.assertIn("planted_instruction", advisory)
+
+
+class QuietUnavailabilityTests(unittest.TestCase):
+    """A reached cap is said ONCE per session per cap window, with the reset
+    time, instead of "[jev ...] unavailable" on every tool call and Stop
+    (2026-10-04: the 3,000 daily cap held from 07:21Z and every later tool call
+    in every session printed the same unavailable line)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+        self.hook = load("advise")
+        self.fake = FakeLibs()
+        self.notices = []
+        self.pause = {"scope": "daily_paid_call_cap", "resets_at": "2026-10-05T00:00:00Z"}
+        said = set()
+
+        def pause_notice(session, sites=None):
+            key = (session, self.pause and self.pause["resets_at"])
+            if not self.pause or key in said:
+                return None
+            said.add(key)
+            return "[jev] paused: daily paid-call cap reached; resumes 2026-10-05 00:00 UTC."
+
+        def outage_notice(session):
+            key = ("outage", session)
+            if key in said:
+                return None
+            said.add(key)
+            return "[jev] unavailable this hour; Jev checks are skipped and this is said once."
+
+        self.client = SimpleNamespace(active_pause=lambda sites=None: self.pause,
+                                      pause_notice=pause_notice, outage_notice=outage_notice)
+        self.hook._lib = lambda name: self.client if name == "typesafe_client" else self.fake(name)
+        self.hook._git_root = lambda cwd: self.dir
+        self.enterContext(mock.patch.dict(os.environ, {"CARR_JEV_FACT_BOUNDARY": "off",
+                                                       "CARR_JEV_WORKER": ""}))
+
+    def failing(self, session="s1"):
+        return {"hook_event_name": "PostToolUse", "session_id": session, "cwd": self.dir,
+                "tool_name": "Bash", "tool_input": {"command": "python3 calc.py"},
+                "tool_response": {"stdout": "", "exit_code": 1, "stderr": "boom"}}
+
+    def unavailable(self, *args, **kwargs):
+        self.hook  # noqa: B018 - keeps the fixture's shape obvious
+        return [result("boundary_judgment", "unavailable",
+                       "Jev boundary judgment unavailable; inspect this result manually")]
+
+    def test_cap_pause_is_one_line_per_session_per_window(self):
+        self.fake_inspect()
+        _, first = run_main(self.hook, self.failing())
+        self.assertIn("paused", first)
+        self.assertIn("00:00 UTC", first)
+        self.assertNotIn("[jev boundary_judgment] unavailable", first)
+        for _ in range(3):
+            self.assertEqual(run_main(self.hook, self.failing()), (0, ""))
+        _, other = run_main(self.hook, self.failing("s2"))
+        self.assertIn("paused", other, "each session hears it once")
+
+    def test_an_outage_without_a_cap_is_also_said_once(self):
+        self.pause = None
+        self.fake_inspect()
+        _, first = run_main(self.hook, self.failing())
+        self.assertIn("unavailable this hour", first)
+        self.assertEqual(run_main(self.hook, self.failing()), (0, ""))
+
+    def test_real_verdicts_still_print_while_paused(self):
+        self.fake_inspect(extra=[result("triage_failure", "code_bug", "the bug is in calc.py")])
+        _, out = run_main(self.hook, self.failing())
+        self.assertIn("code_bug", out)
+
+    def test_unattended_worker_runs_no_supervisor_check(self):
+        with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "off"}):
+            self.assertEqual(run_main(self.hook, self.failing()), (0, ""))
+        self.assertEqual(self.fake.calls, [])
+
+    def fake_inspect(self, extra=()):
+        original = self.fake.__call__
+
+        def libs(name):
+            ns = original(name)
+            if name == "jev_session_watch":
+                ns.inspect_tool_event = lambda *a, **k: self.unavailable() + list(extra)
+            return ns
+        self.hook._lib = lambda name: self.client if name == "typesafe_client" else libs(name)
 
 
 if __name__ == "__main__":

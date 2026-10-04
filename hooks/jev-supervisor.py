@@ -439,12 +439,42 @@ def judgment_point(event, payload):
     return False
 
 
+# The paid sites this hook dispatches, for a site-budget pause.
+SUPERVISOR_SITES = ("jev_session_watch", "jev_done_checks", "jev_fact_boundary")
+
+
+def _quiet_unavailable(results, session):
+    """Advisory lines, with every "unavailable" collapsed to at most one line.
+
+    While a cap or site budget holds, the client's pause_notice says so once
+    per session per window with the reset time. Any other outage is said once
+    per session per hour. Real verdicts always print. When the notice store
+    cannot be read the old per-call lines are kept, so a broken store never
+    hides an outage.
+    """
+    unavailable = [r for r in results if str(r.get("verdict")) == "unavailable"]
+    if not unavailable:
+        return [_line(r) for r in results]
+    try:
+        client = _lib("typesafe_client")
+        notice = (client.pause_notice(session, sites=SUPERVISOR_SITES)
+                  if client.active_pause(sites=SUPERVISOR_SITES) else client.outage_notice(session))
+    except Exception:
+        return [_line(r) for r in results]
+    lines = [_line(r) for r in results if str(r.get("verdict")) != "unavailable"]
+    return ([notice] if notice else []) + lines
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
     except Exception:
         return 0
     if not isinstance(payload, dict) or MODE == "off" or payload.get("session_id") == "selftest":
+        return 0
+    # Every check this hook dispatches is registered unattended=off in
+    # ops/config/jev-call-sites.v1.json; nobody reads an advisory in a worker.
+    if os.environ.get("CARR_JEV_WORKER", "").strip().lower() == "off":
         return 0
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
     if event == "Stop" and payload.get("stop_hook_active"):
@@ -464,7 +494,7 @@ def main():
         return 0
     if MODE != "advise":
         return 0
-    lines = [_line(r) for r in run.results if _notable(r)]
+    lines = _quiet_unavailable([r for r in run.results if _notable(r)], payload.get("session_id"))
     if not lines:
         return 0
     text = "\n".join(lines[:4])
