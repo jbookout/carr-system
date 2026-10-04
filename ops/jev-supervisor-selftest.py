@@ -786,8 +786,10 @@ class QuietUnavailabilityTests(unittest.TestCase):
 
     def unavailable(self, *args, **kwargs):
         self.hook  # noqa: B018 - keeps the fixture's shape obvious
-        return [result("boundary_judgment", "unavailable",
-                       "Jev boundary judgment unavailable; inspect this result manually")]
+        row = result("boundary_judgment", "unavailable",
+                     "Jev boundary judgment unavailable; inspect this result manually")
+        row["detail"]["reason"] = "vendor_unavailable"
+        return [row]
 
     def test_notice_storage_failure_retains_unavailable_advisory(self):
         # Load the real client, not this class's notice fake.
@@ -804,6 +806,27 @@ class QuietUnavailabilityTests(unittest.TestCase):
                 self.assertIn("unavailable", lines[0])
                 with mock.patch.object(live, "active_pause", return_value=self.pause):
                     self.assertEqual(len(self.hook._quiet_unavailable(self.unavailable(), "s1")), 1)
+
+    def test_local_failures_keep_manual_warning_after_real_outage_notice(self):
+        spec = importlib.util.spec_from_file_location("healthy_notice_client", os.path.join(REPO, "ops/typesafe_client.py"))
+        live = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(live)
+        self.hook._lib = lambda name: live
+        with mock.patch.object(live, "JEV_DAILY_CAP_LOG", os.path.join(self.dir, "calls.jsonl")):
+            with live.sqlite3.connect(live._cap_db_path()) as db:
+                db.execute("CREATE TABLE daily_cap (day TEXT PRIMARY KEY, attempts INTEGER, notified INTEGER)")
+                live._budget_tables(db)
+            self.assertIsNotNone(live.outage_notice("s1"))
+            for reason in ("inspection_error", "time_budget_exhausted", "unattended_worker_off"):
+                with self.subTest(reason=reason):
+                    run = self.hook.Run()
+                    run.receipt_path = os.path.join(self.dir, "boundary.jsonl")
+                    run._unavailable("inspect_tool_event", reason)
+                    for _ in range(2):
+                        lines = self.hook._quiet_unavailable(run.results, "s1")
+                        self.assertEqual(len(lines), 1)
+                        self.assertIn(reason, lines[0])
+                        self.assertIn("inspect boundary manually", lines[0])
 
     def test_cap_pause_is_one_line_per_session_per_window(self):
         self.fake_inspect()

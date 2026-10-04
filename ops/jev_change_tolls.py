@@ -332,12 +332,16 @@ def _answers(tsc, state, api_key, cached):
     """Bind answers to the question payload and file contents; claim before paying.
 
     The stable lock file covers lookup, request and atomic replacement across
-    processes. It also preserves different-key writes. Lock failure propagates
-    before transport instead of silently paying without a claim.
+    processes. Acquisition and transport share a deadline; a paused peer makes
+    this advisory unavailable before transport, without paying without a claim.
     """
     questions = {name: tsc.noul(text) for name, (text, _) in TOLLS.items()}
+    deadline = time.monotonic() + TIMEOUT_SECONDS
     def request():
-        return tsc.ask({"change": state}, questions, timeout=TIMEOUT_SECONDS,
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Jev toll judgment unavailable: request deadline exhausted")
+        return tsc.ask({"change": state}, questions, timeout=remaining,
                        api_key=api_key).get("answers") or {}
     if not cached:
         return request()
@@ -346,7 +350,15 @@ def _answers(tsc, state, api_key, cached):
     directory = os.path.dirname(os.path.abspath(CACHE_PATH))
     os.makedirs(directory, exist_ok=True)
     with open(CACHE_PATH + ".lock", "a", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Jev toll cache lock unavailable: request deadline exhausted") from None
+                time.sleep(min(0.05, remaining))
         now = time.time()
         try:
             with open(CACHE_PATH, encoding="utf-8") as fh:

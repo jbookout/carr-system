@@ -137,7 +137,97 @@ class WildcardBudgetTests(Harness):
         self.assertTrue(any(row.get("caller") == "adhoc:probe0-0" for row in self.rows()))
 
 
+class BudgetUpgradeTests(Harness):
+    def seed_receipts(self, count, caller="adhoc:legacy"):
+        self.log.write_text("".join(json.dumps({"ts": "2026-10-04T03:01:00Z",
+                                               "caller": caller, "cache_hit": False}) + "\n"
+                                    for _ in range(count)))
+
+    def test_existing_daily_counter_upgrade_preserves_hour_and_wildcard_usage(self):
+        self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
+        self.seed_receipts(200)
+        with client.sqlite3.connect(client._cap_db_path()) as db:
+            db.execute("CREATE TABLE daily_cap (day TEXT PRIMARY KEY, attempts INTEGER, notified INTEGER)")
+            db.execute("INSERT INTO daily_cap VALUES ('2026-10-04',200,0)")
+        with self.assertRaises(client.JevCallRefused) as caught:
+            self.ask("attempt 201", caller="adhoc:new")
+        self.assertEqual(caught.exception.code, "hourly_paid_call_cap")
+        self.assertEqual(self.requests, [])
+        health = client.spend_by_site_health()
+        self.assertIn("200/1000 paid attempts", health)
+        self.assertIn("this hour 200/200", health)
+        self.assertIn("adhoc:*=200/40", health)
+
+    def test_receipt_rebuild_seeds_once_and_excludes_free_or_refused_calls(self):
+        self.write_registry([site("hook_site", hourly_budget=3, daily_budget=3)])
+        self.seed_receipts(2, "hook_site")
+        with self.log.open("a") as fh:
+            for extra in ({"cache_hit": True}, {"error": "unattributed_call"}):
+                fh.write(json.dumps({"ts": "2026-10-04T03:01:00Z", "caller": "hook_site",
+                                     "cache_hit": False, **extra}) + "\n")
+        self.ask("third")
+        for _ in range(2):
+            with self.assertRaises(client.JevCallRefused):
+                self.ask("fourth")
+        self.assertEqual(len(self.requests), 1)
+        health = client.spend_by_site_health()
+        self.assertIn("3/1000 paid attempts", health)
+        self.assertIn("this hour 3/100", health)
+        self.assertIn("hook_site=3/3", health)
+
+    def test_legacy_counter_without_receipts_is_conservatively_attributed(self):
+        self.write_registry([site("hook_site", hourly_budget=3, daily_budget=3)])
+        with client.sqlite3.connect(client._cap_db_path()) as db:
+            db.execute("CREATE TABLE daily_cap (day TEXT PRIMARY KEY, attempts INTEGER, notified INTEGER)")
+            db.execute("INSERT INTO daily_cap VALUES ('2026-10-04',3,0)")
+        with self.assertRaises(client.JevCallRefused):
+            self.ask("unknown past attempts still consume site budget")
+        self.assertEqual(self.requests, [])
+        health = client.spend_by_site_health()
+        self.assertIn("this hour 3/100", health)
+        self.assertIn("hook_site=3/3", health)
+        self.assertIn("unattributed=3", health)
+
+
 class RecordingAttributionTests(Harness):
+    def test_controller_nightly_child_can_read_deals_without_agent_environment(self):
+        self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
+        spec = importlib.util.spec_from_file_location("nightly_controller", REPO / "tools/control-plane.py")
+        controller = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(controller)
+        manifest = json.loads(controller.MANIFEST_PATH.read_text())
+        workflow = next(w for w in manifest["workflows"] if w["key"] == "nightly-record-layer")
+        with patch.object(controller.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            controller._execute_deterministic(workflow, {"scheduled_for": "2026-10-04T03:00:00Z"},
+                                              timeout=10, mode="live")
+        env = run.call_args.kwargs["env"]
+        self.assertFalse(any(key in env for key in client.SESSION_ID_ENV_KEYS))
+        with patch.dict(os.environ, env, clear=True):
+            _, entry = client._admit_paid_call("jev_deal_read", None, {}, [], None, None)
+            self.assertEqual(entry["caller"], "jev_deal_read")
+            self.assertEqual(client._job_label(), "nightly-record-layer")
+            spec = importlib.util.spec_from_file_location("jev_deal_read", REPO / "ops/jev_deal_read.py")
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            bundle = {"has_evidence": True, "evidence_chars": 900, "name": "Fixture deal",
+                      "client": "Fixture practice", "phase": "research", "deal_type": "startup",
+                      "segment": "Dental", "city": "Fixture city", "owner": "fixture",
+                      "next_step": "Review terms", "next_step_due": None,
+                      "status_narrative": "Terms discussed", "history": [], "days_since_record_touched": 1}
+            answers = {"movement": {"type": "score", "score": 1.0, "confidence": 0.9},
+                       "waiting_on": {"type": "choice", "choice": "client", "confidence": 0.9},
+                       "silence_is_bad": {"type": "noul", "noul": 0.1}}
+            def opener(request, timeout=None):
+                self.requests.append(request)
+                return FakeResponse(json.dumps({**ANSWER, "answers": answers}).encode())
+            with patch.object(reader, "ts", client), patch.object(client.urllib.request, "urlopen", opener), \
+                    patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "deal-cache.json"),
+                               calls_log=str(self.log)):
+                reading = reader.read_deal(bundle, api_key="offline-fixture")
+            self.assertTrue(reading["judged"], reading.get("reason"))
+            self.assertEqual(len(self.requests), 1)
+            self.assertEqual(self.rows()[-1]["job"], "nightly-record-layer")
+
     def test_quill_post_call_checks_work_without_agent_environment(self):
         self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
         self.enterContext(patch.dict(os.environ, {"XPC_SERVICE_NAME": "com.digimata.quill"}))
@@ -457,6 +547,37 @@ class ChangeTollsDedupeTests(unittest.TestCase):
         self.assertEqual(answers[0], answers[1])
         self.assertEqual(len(self.asked), 1)
 
+    def test_paused_cache_peer_returns_unavailable_before_request_deadline(self):
+        ctx = multiprocessing.get_context("fork")
+        state = {"files": ["hooks/x.py"]}
+        self.tolls.owed(state)
+        for candidate in (state, {"files": ["hooks/y.py"]}):
+            with self.subTest(state=candidate), patch.object(self.tolls, "TIMEOUT_SECONDS", 0.15):
+                results = ctx.Queue()
+                def invoke():
+                    try:
+                        self.tolls.owed(candidate)
+                    except TimeoutError as exc:
+                        results.put(str(exc))
+                    else:
+                        results.put("unexpected success")
+                with open(self.tolls.CACHE_PATH + ".lock", "a") as lock:
+                    self.tolls.fcntl.flock(lock, self.tolls.fcntl.LOCK_EX)
+                    worker = ctx.Process(target=invoke)
+                    worker.start()
+                    try:
+                        worker.join(0.8)
+                        self.assertFalse(worker.is_alive(), "a paused peer must not hang the push hook")
+                        self.assertIn("cache lock unavailable", results.get(timeout=1))
+                    finally:
+                        self.tolls.fcntl.flock(lock, self.tolls.fcntl.LOCK_UN)
+                        worker.join(2)
+                        if worker.is_alive():
+                            worker.terminate()
+                            worker.join(2)
+                        results.close()
+        self.assertEqual(len(self.asked), 1, "lock failure must not pay without a claim")
+
     def test_separate_processes_share_one_cache_claim(self):
         ctx = multiprocessing.get_context("fork")
         count, start = ctx.Value("i", 0), ctx.Event()
@@ -582,17 +703,41 @@ def paid_call_sources():
             tree = ast.parse(text)
         except SyntaxError:
             continue
+        paid_methods = {"ask", "_ask_jev", "judge", "server_ask"}
+        imported = {alias.asname or alias.name
+                    for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                    and (node.module or "").split(".")[-1] in {"typesafe_client", "jev_judge"}
+                    for alias in node.names if alias.name in paid_methods}
         for node in ast.walk(tree):
             # Over-inclusive on purpose: any .ask()/.judge()/.server_ask() call in
             # a file that loads the client or the judge counts as a paid path.
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in ("ask", "_ask_jev", "judge", "server_ask")):
+            if (isinstance(node, ast.Call) and
+                    ((isinstance(node.func, ast.Attribute) and node.func.attr in paid_methods) or
+                     (isinstance(node.func, ast.Name) and node.func.id in imported))):
                 found.add(rel)
                 break
     return found
 
 
 class RegistryCoverageTests(unittest.TestCase):
+    def test_scan_covers_paid_imports_and_aliases_without_counting_unrelated_names(self):
+        examples = {
+            "attribute.py": "import typesafe_client as ts\nts.ask({}, {})",
+            "direct.py": "from typesafe_client import ask, noul\nask({}, {'q': noul('fixture')})",
+            "alias.py": "from ops.typesafe_client import ask as paid\npaid({}, {})",
+            "judge.py": "from jev_judge import judge\njudge({}, {})",
+            "judge_alias.py": "from ops.jev_judge import judge as assess\nassess({}, {})",
+            "server_alias.py": "from typesafe_client import server_ask as remote\nremote({}, {})",
+            "unused.py": "from typesafe_client import ask\nvalue = 1",
+            "unrelated.py": "from other import ask\nfrom typesafe_client import noul\nask('fixture')",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            for name, source in examples.items():
+                Path(root, name).write_text(source)
+            with patch.dict(globals(), REPO=Path(root)), patch.object(
+                    subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "\n".join(examples), "")):
+                self.assertEqual(paid_call_sources(), set(examples) - {"unused.py", "unrelated.py"})
+
     def test_production_registry_is_valid(self):
         registry = client.load_call_sites(REGISTRY_PATH)
         self.assertLessEqual(registry["hourly_paid_call_cap"] * 24,

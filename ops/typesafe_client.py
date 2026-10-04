@@ -1180,6 +1180,7 @@ def _windows(now):
 _BUDGET_TABLES = (
     "CREATE TABLE IF NOT EXISTS site_usage (day TEXT, hour TEXT, site TEXT, "
     "count INTEGER NOT NULL, PRIMARY KEY(day,hour,site))",
+    "CREATE TABLE IF NOT EXISTS budget_seed (day TEXT PRIMARY KEY)",
     # One refusal row per (code, site, session, window) reaches the call log;
     # the rest are counted here, so a refused burner cannot flood the log.
     "CREATE TABLE IF NOT EXISTS refusal_log (window TEXT PRIMARY KEY, count INTEGER NOT NULL)",
@@ -1194,6 +1195,50 @@ _BUDGET_TABLES = (
 def _budget_tables(db):
     for statement in _BUDGET_TABLES:
         db.execute(statement)
+
+
+UNATTRIBUTED_SITE = "__unattributed__"
+
+
+def _seed_site_usage(db, log_path, day, hour, registry):
+    """Upgrade/rebuild once under the reservation lock, retaining paid evidence.
+
+    Receipts use the existing validated seed parser. Existing reservations may
+    exceed receipts (a process can die before appending one), so neither the
+    daily counter nor a site bucket is reduced. Unattributed usage consumes
+    every site's allowance; an unknown time consumes the current hour too.
+    """
+    if db.execute("SELECT 1 FROM budget_seed WHERE day=?", (day,)).fetchone():
+        return
+    buckets = {}
+    for receipt in _logged_attempt_rows(log_path, day):
+        stamp = datetime.fromisoformat(receipt["ts"].replace("Z", "+00:00"))
+        name = receipt.get("caller")
+        entry = call_site(name, registry) if registry else None
+        identity = entry["caller"] if entry else UNATTRIBUTED_SITE
+        key = (_windows(stamp)[1], identity)
+        buckets[key] = buckets.get(key, 0) + 1
+    # Normalize concrete wildcard buckets before comparing them with receipts.
+    for name, bucket_hour, count in db.execute(
+            "SELECT site,hour,count FROM site_usage WHERE day=?", (day,)).fetchall():
+        entry = call_site(name, registry) if registry else None
+        identity = entry["caller"] if entry else UNATTRIBUTED_SITE
+        if identity != name:
+            db.execute("DELETE FROM site_usage WHERE day=? AND hour=? AND site=?", (day, bucket_hour, name))
+            db.execute("INSERT INTO site_usage VALUES (?,?,?,?) ON CONFLICT(day,hour,site) "
+                       "DO UPDATE SET count=count+excluded.count", (day, bucket_hour, identity, count))
+    for (bucket_hour, identity), count in buckets.items():
+        db.execute("INSERT INTO site_usage VALUES (?,?,?,?) ON CONFLICT(day,hour,site) "
+                   "DO UPDATE SET count=MAX(count,excluded.count)", (day, bucket_hour, identity, count))
+    recorded = db.execute("SELECT COALESCE(SUM(count),0) FROM site_usage WHERE day=?", (day,)).fetchone()[0]
+    row = db.execute("SELECT attempts FROM daily_cap WHERE day=?", (day,)).fetchone()
+    total = max(row[0] if row else 0, recorded)
+    if total > recorded:
+        db.execute("INSERT INTO site_usage VALUES (?,?,?,?) ON CONFLICT(day,hour,site) "
+                   "DO UPDATE SET count=count+excluded.count", (day, hour, UNATTRIBUTED_SITE, total - recorded))
+    db.execute("INSERT INTO daily_cap VALUES (?,?,0) ON CONFLICT(day) "
+               "DO UPDATE SET attempts=MAX(attempts,excluded.attempts)", (day, total))
+    db.execute("INSERT INTO budget_seed VALUES (?)", (day,))
 
 
 def _record_refusal(questions, facets, caller, question_kind, prompt_sha256, code, session, now=None):
@@ -1328,13 +1373,12 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
                        "(day TEXT PRIMARY KEY, attempts INTEGER NOT NULL, notified INTEGER NOT NULL)")
             _budget_tables(db)
             db.execute("BEGIN IMMEDIATE")
+            _seed_site_usage(db, log_path, day, hour, registry)
             row = db.execute("SELECT attempts, notified FROM daily_cap WHERE day=?", (day,)).fetchone()
-            if row is None:
-                row = (_logged_attempts(log_path, day), 0)
-                db.execute("DELETE FROM daily_cap WHERE day < ?", (day,))
-                db.execute("INSERT INTO daily_cap VALUES (?,?,0)", (day, row[0]))
-                db.execute("DELETE FROM site_usage WHERE day < ?", (day,))
-                db.execute("DELETE FROM budget_pause WHERE resets_at <= ?", (now.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+            db.execute("DELETE FROM daily_cap WHERE day < ?", (day,))
+            db.execute("DELETE FROM site_usage WHERE day < ?", (day,))
+            db.execute("DELETE FROM budget_seed WHERE day < ?", (day,))
+            db.execute("DELETE FROM budget_pause WHERE resets_at <= ?", (now.strftime("%Y-%m-%dT%H:%M:%SZ"),))
             allowed = row[0] < cap
             if not allowed and not row[1]:
                 notice = True
@@ -1345,7 +1389,8 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
                 # Include concrete names written before wildcard accounting was fixed.
                 rows = db.execute("SELECT site,hour,count FROM site_usage WHERE day=?", (day,)).fetchall()
                 matched = [(h, n) for name, h, n in rows
-                           if (call_site(name, registry) or {}).get("caller", name) == site_id]
+                           if name == UNATTRIBUTED_SITE or
+                           (call_site(name, registry) or {}).get("caller", name) == site_id]
                 site_day = sum(n for _, n in matched)
                 site_hour = sum(n for h, n in matched if h == hour)
                 if hour_used >= registry["hourly_paid_call_cap"]:
@@ -1500,6 +1545,10 @@ def spend_by_site_health(*, now=None):
             identity = (call_site(name, registry) or {}).get("caller", name)
             grouped[identity] = grouped.get(identity, 0) + used
         usage = grouped
+        unattributed = usage.pop(UNATTRIBUTED_SITE, 0)
+        if unattributed:
+            usage = {name: usage.get(name, 0) + unattributed for name in registry["sites"]} | {
+                name: used for name, used in usage.items() if name not in registry["sites"]}
         over = [name for name, used in usage.items()
                 if name in registry["sites"] and used >= registry["sites"][name]["daily_budget"]]
         status = "WARN" if over or total * 100 >= cap * 50 else "OK"
@@ -1507,6 +1556,7 @@ def spend_by_site_health(*, now=None):
                  for name, used in sorted(usage.items(), key=lambda kv: (-kv[1], kv[0]))]
         return (f"{status} jev spend by site — UTC {day} · {total}/{cap} paid attempts · this hour "
                 f"{hour_used}/{registry['hourly_paid_call_cap']} · {' '.join(parts) or 'no site spend'}"
+                f"{' · unattributed=' + str(unattributed) + ' charged to each site' if unattributed else ''}"
                 f"{' · over budget: ' + ','.join(sorted(over)) if over else ''} · {SITE_SPEND_ACTION}")
     except (OSError, sqlite3.Error, TypeSafeError) as exc:
         return f"UNKNOWN jev spend by site — {type(exc).__name__} · {SITE_SPEND_ACTION}"

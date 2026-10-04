@@ -176,7 +176,8 @@ class Run:
     def _unavailable(self, name, reason):
         self.results.append({"check": "boundary_judgment", "verdict": "unavailable",
                              "confidence": None, "escalate": True,
-                             "detail": {"advice": f"{name} unavailable ({reason}); inspect boundary manually"}})
+                             "detail": {"reason": reason,
+                                        "advice": f"{name} unavailable ({reason}); inspect boundary manually"}})
         receipt = {"schema": "jev-boundary-decision/v1", "family": name,
                    "status": "unavailable", "reason": reason, "questions": [],
                    "triggers": [], "outcomes": [{"check": "boundary_judgment",
@@ -447,15 +448,20 @@ SUPERVISOR_SITES = ("jev_session_watch", "jev_done_checks", "jev_fact_boundary")
 
 
 def _quiet_unavailable(results, session):
-    """Advisory lines, with every "unavailable" collapsed to at most one line.
+    """Collapse typed vendor/budget outages; retain local and policy failures.
 
     While a cap or site budget holds, the client's pause_notice says so once
-    per session per window with the reset time. Any other outage is said once
-    per session per hour. Real verdicts always print. When the notice store
+    per session per window with the reset time. Typed vendor outages are said
+    once per session per hour. Local/policy failures and verdicts always print. When the notice store
     cannot be read the old per-call lines are kept, so a broken store never
     hides an outage.
     """
-    unavailable = [r for r in results if str(r.get("verdict")) == "unavailable"]
+    def collapsible(result):
+        return (result.get("verdict") == "unavailable" and
+                (result.get("detail") or {}).get("reason") in
+                {"vendor_unavailable", "daily_paid_call_cap", "hourly_paid_call_cap",
+                 "site_daily_budget", "site_hourly_budget"})
+    unavailable = [r for r in results if collapsible(r)]
     if not unavailable:
         return [_line(r) for r in results]
     try:
@@ -464,7 +470,7 @@ def _quiet_unavailable(results, session):
                   if client.active_pause(sites=SUPERVISOR_SITES) else client.outage_notice(session))
     except Exception:
         return [_line(r) for r in results]
-    lines = [_line(r) for r in results if str(r.get("verdict")) != "unavailable"]
+    lines = [_line(r) for r in results if not collapsible(r)]
     return ([notice] if notice else []) + lines
 
 
