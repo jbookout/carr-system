@@ -56,45 +56,60 @@ print("decision")
 base = {"migrations/0785_a.sql", "migrations/0786_b.sql", "migrations/0787_c.sql",
         "migrations/README.md"}
 
-v = mog.violations(base, base | {"migrations/0788_new.sql"})
+v = mog.violations(base, base, base | {"migrations/0788_new.sql"})
 check("an addition above the base maximum passes", v == [], repr(v))
 
-v = mog.violations(base, base | {"migrations/0783_deal_timeline_lease_read.sql"})
+v = mog.violations(base, base, base | {"migrations/0783_deal_timeline_lease_read.sql"})
 check("the 2026-10-03 incident (0783 under 0787) is refused",
-      [n for n, _ in v] == ["migrations/0783_deal_timeline_lease_read.sql"], repr(v))
+      v == ["migrations/0783_deal_timeline_lease_read.sql"], repr(v))
 
-v = mog.violations(base, base | {"migrations/0787_other.sql"})
+v = mog.violations(base, base, base | {"migrations/0787_other.sql"})
 check("an addition EQUAL to the base maximum is refused (strictly greater)",
-      [n for n, _ in v] == ["migrations/0787_other.sql"], repr(v))
+      v == ["migrations/0787_other.sql"], repr(v))
 
 renamed = (base - {"migrations/0787_c.sql"}) | {"migrations/0787_c.sql"}
-v = mog.violations(base, renamed | {"migrations/0790_x.sql", "migrations/0791_y.sql"})
+v = mog.violations(base, base, renamed | {"migrations/0790_x.sql", "migrations/0791_y.sql"})
 check("several additions all above the maximum pass", v == [], repr(v))
 
-v = mog.violations(base, base | {"migrations/0786a_interstitial.sql"})
+v = mog.violations(base, base, base | {"migrations/0786a_interstitial.sql"})
 check("a lettered interstitial slot below the maximum is refused",
-      [n for n, _ in v] == ["migrations/0786a_interstitial.sql"], repr(v))
+      v == ["migrations/0786a_interstitial.sql"], repr(v))
 
-v = mog.violations(base | {"migrations/0790a_x.sql"},
+v = mog.violations(base | {"migrations/0790a_x.sql"}, base | {"migrations/0790a_x.sql"},
                    base | {"migrations/0790a_x.sql", "migrations/0790_y.sql"})
 check("a lettered slot on the base raises the maximum to its number",
-      [n for n, _ in v] == ["migrations/0790_y.sql"], repr(v))
+      v == ["migrations/0790_y.sql"], repr(v))
 
-v = mog.violations(base, base)
+v = mog.violations(base, base, base)
 check("a change adding no migration passes", v == [], repr(v))
 
-v = mog.violations(base, base | {"migrations/notes.md", "migrations/0100_x.txt"})
+v = mog.violations(base, base, base | {"migrations/notes.md", "migrations/0100_x.txt"})
 check("non-migration files under migrations/ are ignored", v == [], repr(v))
 
-v = mog.violations(base, base - {"migrations/0786_b.sql"})
+v = mog.violations(base, base, base - {"migrations/0786_b.sql"})
 check("a deletion is not this gate's concern", v == [], repr(v))
 
 dup = base | {"migrations/0169_one.sql", "migrations/0169_two.sql"}
-v = mog.violations(dup, dup | {"migrations/0800_z.sql"})
+v = mog.violations(dup, dup, dup | {"migrations/0800_z.sql"})
 check("frozen historical duplicate prefixes on the base do not fire", v == [], repr(v))
 
-v = mog.violations(set(), {"migrations/0001_init.sql"})
+v = mog.violations(set(), set(), {"migrations/0001_init.sql"})
 check("an empty base admits any first migration", v == [], repr(v))
+
+# A branch merely behind a main that renamed or deleted a migration after the
+# fork still carries the old file. It never added it, so it must not count —
+# the 2026-10-04 review replay (--base 5afd700b --head 179741a1) refused 0783.
+fork = base | {"migrations/0783_deal_timeline_lease_read.sql"}
+moved = base | {"migrations/0800_deal_timeline_lease_read.sql"}
+v = mog.violations(moved, fork, fork)
+check("main renaming a migration after the fork does not fire on a stale branch",
+      v == [], repr(v))
+v = mog.violations(base - {"migrations/0786_b.sql"}, base, base)
+check("main deleting a migration after the fork does not fire on a stale branch",
+      v == [], repr(v))
+v = mog.violations(moved, fork, fork | {"migrations/0788_mine.sql"})
+check("a stale branch's own addition is still judged against the base maximum",
+      v == ["migrations/0788_mine.sql"], repr(v))
 
 check("the reported maximum is the base maximum",
       mog.highest_number(base) == 787, repr(mog.highest_number(base)))
@@ -173,6 +188,29 @@ with tempfile.TemporaryDirectory() as tmp:
     git(repo, "checkout", "-q", "main")
     r = run_gate(repo, "--base", "main")
     check("a run on the base itself passes", r.returncode == 0, r.stdout + r.stderr)
+
+    # A branch that forked, added nothing, and fell behind a main that renamed
+    # one migration and deleted another. HEAD is the branch itself, not a merge
+    # ref — the local `ops/ci.sh --only gates` and workflow_dispatch shape.
+    git(repo, "checkout", "-q", "-b", "stale")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "mv", "migrations/0788_other.sql", "migrations/0791_other.sql")
+    git(repo, "commit", "-q", "-m", "renumber on main")
+    r = run_gate(repo, "--base", "main", "--head", "stale")
+    check("a stale branch behind a main-side rename passes", r.returncode == 0,
+          r.stdout + r.stderr)
+    git(repo, "rm", "-q", "migrations/0785_a.sql")
+    git(repo, "commit", "-q", "-m", "delete on main")
+    r = run_gate(repo, "--base", "main", "--head", "stale")
+    check("a stale branch behind a main-side deletion passes", r.returncode == 0,
+          r.stdout + r.stderr)
+    git(repo, "checkout", "-q", "stale")
+    add(repo, "migrations/0790_mine.sql", "stale branch mints under main's 0791")
+    r = run_gate(repo, "--base", "main", "--head", "stale")
+    check("the stale branch's own number under main's maximum still fails",
+          r.returncode == 1 and "0790_mine.sql" in r.stderr
+          and "0788_other.sql" not in r.stderr, r.stdout + r.stderr)
+    git(repo, "checkout", "-q", "main")
 
     # A base that cannot be read is NOT a pass.
     r = run_gate(repo, "--base", "origin/does-not-exist")

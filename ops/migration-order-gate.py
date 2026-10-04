@@ -34,10 +34,19 @@ against the NEW main. A PR that fell behind therefore turns red at exactly the
 moment it would otherwise have merged a stale number.
 
 WHAT COUNTS AS ADDED: migration filenames present in HEAD's tree and absent
-from the base tree. That is a set difference of trees, not a diff range, so it
-is exact on a merge ref, on an updated branch, and on a branch that is merely
-behind (main's own files are in both trees and never count). A rename counts
-as the new name, which is how a fix forward passes.
+from BOTH the merge-base tree and the base tree. Measuring against the merge
+base is what keeps a branch that is merely behind from owning main's later
+moves: when main renames or deletes a migration after the fork, the old name is
+still in HEAD's tree but also in the merge base, so it never counts. On a merge
+ref or an updated branch the merge base is the base tip, so the two trees agree.
+A rename on the branch counts as the new name, which is how a fix forward
+passes.
+
+DELIBERATELY STRICTER THAN THE RELEASE INVARIANT. The pipeline only needs an
+added number above what staging and production have APPLIED, and main's
+maximum may not have applied anywhere yet. This gate still refuses any number
+at or below main's maximum, because it cannot read what is applied (below), so
+a PR that would in fact have been harmless must renumber too.
 
 Exit 0 clean · 1 an added migration is not above the base maximum · 2 the base
 could not be read, which is not a pass.
@@ -75,13 +84,20 @@ def highest_number(paths: Iterable[str]) -> int | None:
     return max(nums) if nums else None
 
 
-def violations(base_paths: set[str], head_paths: set[str]) -> list[tuple[str, int]]:
+def added(base_paths: set[str], fork_paths: set[str], head_paths: set[str]) -> dict[str, int]:
+    """Migrations the change itself adds (in HEAD, in neither the fork nor the
+    base), each with its number."""
+    found = {p: number(p) for p in sorted(head_paths - fork_paths - base_paths)}
+    return {p: n for p, n in found.items() if n is not None}
+
+
+def violations(base_paths: set[str], fork_paths: set[str],
+               head_paths: set[str]) -> list[str]:
     """Added migrations whose number is not strictly above the base maximum."""
     ceiling = highest_number(base_paths)
     if ceiling is None:
         return []
-    added = sorted(p for p in head_paths - base_paths if number(p) is not None)
-    return [(p, ceiling) for p in added if (number(p) or 0) <= ceiling]
+    return [p for p, n in added(base_paths, fork_paths, head_paths).items() if n <= ceiling]
 
 
 def default_base(environ: Mapping[str, str]) -> str:
@@ -115,23 +131,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         head_paths = tree_paths(repo, args.head)
+        fork = subprocess.run(["git", "merge-base", base, args.head], cwd=repo,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        fork_paths = tree_paths(repo, fork)
     except subprocess.CalledProcessError as exc:
-        print(f"migration-order-gate: cannot read migrations/ at {args.head!r}: "
-              f"{(exc.stderr or '').strip()}", file=sys.stderr)
+        print(f"migration-order-gate: cannot read migrations/ at {args.head!r} or its "
+              f"merge base with {base!r}: {(exc.stderr or '').strip()}", file=sys.stderr)
         return 2
 
-    bad = violations(base_paths, head_paths)
+    bad = violations(base_paths, fork_paths, head_paths)
     ceiling = highest_number(base_paths)
     if not bad:
-        added = len([p for p in head_paths - base_paths if number(p) is not None])
-        print(f"migration-order-gate: OK — {added} added migration(s), all above "
+        count = len(added(base_paths, fork_paths, head_paths))
+        print(f"migration-order-gate: OK — {count} added migration(s), all above "
               f"{base}'s highest ({ceiling:04d})" if ceiling is not None
               else "migration-order-gate: OK — base has no migrations")
         return 0
 
     print(f"migration-order-gate: REFUSED — {len(bad)} added migration(s) not above "
           f"{base}'s highest number {ceiling:04d}:", file=sys.stderr)
-    for path, _ in bad:
+    for path in bad:
         print(f"  {path}", file=sys.stderr)
     print(
         "  The release pipeline applies migrations in filename order and requires the\n"
