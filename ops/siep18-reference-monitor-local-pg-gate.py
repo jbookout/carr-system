@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0787 installs the capped Worker contract v104 and seals rule lookup v103 as history.
+# 0812 installs lead automation v106 and seals the delivered Observatory read v105 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v104"
-LIVE_REGISTRY_ORDINAL = 104
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v103"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v106"
+LIVE_REGISTRY_ORDINAL = 106
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v105"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:6560a285ebd4a71d9ed3b63b644f13e06d0f1ccbddadf174d990f4f2453434b7"
+    "sha256:14d1471cbb6810e06d3159487ef71def90bbc8f948277e9a08310b005b505b3f"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2615, 1085)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2624, 1086)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0786_find_rule_scac_successor.sql"
+    "migrations/0807_observatory_room_read_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0787_jev_cap_scac_successor.sql"
+    "migrations/0812_lead_automation_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

@@ -158,6 +158,20 @@ def _jev_paid_cap_row():
                 "verify rerun health · auto-clear on successful read")
 
 
+def _jev_site_spend_row():
+    """Today's paid Jev attempts per registered call site, against its budget."""
+    try:
+        client_path = os.path.join(REPO_ROOT, "ops", "typesafe_client.py")
+        spec = importlib.util.spec_from_file_location("jev_site_client", client_path)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        return client.spend_by_site_health()
+    except Exception as exc:
+        return (f"UNKNOWN jev spend by site — {type(exc).__name__} · on breach: "
+                "owner orchestrator · remediation restore ops/config/jev-call-sites.v1.json "
+                "or the cap reader · verify rerun health · auto-clear on successful read")
+
+
 def _grok_session_row():
     try:
         sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
@@ -1325,6 +1339,10 @@ def _canonical_health():
         for _subject, _count in re.findall(r"(pending|failed)=(\d+)", _cap_line):
             if int(_count):
                 rc = _red("jev_spend_alert", _cap_line, subject=_subject, count=int(_count))
+        _site_line = _jev_site_spend_row()
+        print("  " + _site_line)
+        if " over budget: " in _site_line or _site_line.startswith("UNKNOWN"):
+            rc = _red("jev_site_budget", _site_line, hard_error=_site_line.startswith("UNKNOWN"))
     try:
         snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session") else _canonical_snapshot()
     except Exception as exc:
