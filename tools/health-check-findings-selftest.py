@@ -581,6 +581,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
+                  _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
@@ -650,6 +651,21 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                 self.assertTrue(finding["hard_error"])
                 self.assertIn(error, finding["detail"])
 
+    def test_a_site_over_its_jev_budget_fails_health(self):
+        import io, contextlib
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: ("WARN jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+                                             " · over budget: jev_handoff=81/80")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertEqual([f["key"] for f in ns["_FINDINGS"]], ["jev_site_budget"])
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: "OK jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 0)
+
     def test_grok_failure_remains_a_finding_with_healthy_paid_cap(self):
         ns = self.namespace()
         ns["_grok_session_row"] = lambda: ("FAIL fixture Grok session", 1)
@@ -718,7 +734,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         from unittest.mock import patch
         original = importlib.util.spec_from_file_location
         def fail_cap_loader(name, *args, **kwargs):
-            if name == "jev_cap_client":
+            if name in ("jev_cap_client", "jev_site_client"):
                 raise ImportError("fixture missing client configuration")
             return original(name, *args, **kwargs)
         with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
@@ -735,7 +751,10 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
             self.assertEqual(exited.exception.code, 1)
             self.assertIn("UNKNOWN jev paid cap", narrow.getvalue())
             self.assertIn("ImportError", narrow.getvalue())
-            [finding] = json.loads(findings.read_text())["findings"]
+            rows = json.loads(findings.read_text())["findings"]
+            self.assertEqual({row["key"] for row in rows}, {"jev_paid_cap", "jev_site_budget"})
+            self.assertTrue(all(row["hard_error"] for row in rows))
+            [finding] = [row for row in rows if row["key"] == "jev_paid_cap"]
             self.assertEqual(finding["key"], "jev_paid_cap")
             self.assertTrue(finding["hard_error"])
 
