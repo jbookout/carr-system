@@ -627,6 +627,17 @@ class HandoffTests(unittest.TestCase):
 
 
 class StopBoundaryBatchTests(unittest.TestCase):
+    def test_stop_unavailability_preserves_typed_reason_for_notice_policy(self):
+        for reason in ("vendor_unavailable", "site_hourly_budget", "inspection_error"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                error = RuntimeError("fixture unavailable")
+                error.reason = reason
+                results = jdc.inspect_stop_boundary(
+                    "All tests pass.", {"test_output": "OK", "test_exit_code": 0}, "", "repair app",
+                    "session-reason", client=FakeClient, judge_module=FakeJudge(error=error),
+                    state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+                self.assertEqual(results[0]["detail"]["reason"], reason)
+
     def test_same_claim_is_rejudged_after_passing_evidence_becomes_failing(self):
         with tempfile.TemporaryDirectory() as tmp:
             judge = FakeJudge({

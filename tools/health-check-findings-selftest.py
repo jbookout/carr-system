@@ -581,6 +581,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
+                  _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
@@ -649,6 +650,21 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                 self.assertEqual(finding["key"], "grok_session")
                 self.assertTrue(finding["hard_error"])
                 self.assertIn(error, finding["detail"])
+
+    def test_a_site_over_its_jev_budget_fails_health(self):
+        import io, contextlib
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: ("WARN jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+                                             " · over budget: jev_handoff=81/80")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertEqual([f["key"] for f in ns["_FINDINGS"]], ["jev_site_budget"])
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: "OK jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 0)
 
     def test_grok_failure_remains_a_finding_with_healthy_paid_cap(self):
         ns = self.namespace()

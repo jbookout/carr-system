@@ -936,10 +936,11 @@ def inspect_stop_boundary(final_message, evidence, diff_text, task_text, session
             if not all(qid in bodies for qid in questions):
                 raise ValueError("missing typed Stop answer")
             status = "answered"
-        except Exception:
+        except Exception as exc:
             answer = {}
             status = "unavailable"
             results.append(_result("stop_boundary", "unavailable",
+                                   detail={"reason": getattr(exc, "reason", "inspection_error")},
                                    advice="Jev Stop judgment unavailable; inspect the claim and diff"))
             if claim_due and failed_test:
                 results.append(_result("done_claim", "unsupported",

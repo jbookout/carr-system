@@ -28,7 +28,9 @@
         "hooks/jev-supervisor.py",
         "lib/jev_required_actions.py",
         "ops/config/rule-jev-triggers.v1.json",
-        "ops/config/jev-cost-guard.v1.json"
+        "ops/config/jev-cost-guard.v1.json",
+        "ops/config/jev-call-sites.v1.json",
+        "ops/command_precheck.py"
       ]
     },
     {
