@@ -7,19 +7,23 @@ verdicts), out/jev-required-actions-gate.jsonl, local git history, the price
 in ops/config/jev-cost-guard.v1.json, and an optional GitHub CI snapshot that
 `--fetch-ci` saves through `gh api` (REST) to out/jev-value-ci-snapshot.json.
 
-THE COUNTING RULES, each one conservative on purpose:
-  * A call is billed unless the vendor or our own cap refused it before any
-    work (HTTP 402/403/429, daily cap, network never reached). Timeouts, 5xx
-    and 400s stay in "paid" with no token count: they may have billed.
-  * Dollars are input tokens at the repo's configured rate. The config has no
-    output-token rate, so output dollars are UNKNOWN, never guessed.
-  * Value is counted only for a verdict linked to an outcome: a commit whose
-    message names Jev as the finder of what it fixes, or a gate block that
-    stopped a write. A gate that only forces another Jev call is reported but
-    is not value. Every other site prints "insufficient evidence".
-  * Avoided time is priced from measured CI history: low = one median CI
-    round per proven finding, high = one median PR's worth of CI rounds.
-    Agent tokens saved are not measured anywhere in the repo and say so.
+THE COUNTING RULES:
+  * Only billed-call receipts establish spend. Unique server_receipt_id /
+    receipt_id joins attribute those receipts to judge kinds. Unlinked judge
+    rows are observations, never extra spend or a subtraction from the hub.
+  * Typed pre-call refusals and deterministic prefilters are free. Receipts
+    with token usage are measured; other failures have unknown billing.
+  * Input dollars are measured tokens at the configured input rate. Missing,
+    unreadable or partial call evidence and unknown billing prevent complete
+    cost estimates. Output dollars and agent tokens saved are unmeasured.
+  * Positive fix-commit attribution is a proxy for value, not a causal audit:
+    Jev <finder verb> <defect noun>, or fixes <defect noun> Jev <finder verb>.
+    Inspect subject and body and reject negative/non-fix claims. Commit
+    windows use committer (delivery) timestamps, matching git log's selection.
+  * CI value proxies require a complete run_started_at window of retained
+    attempt history. Low = one median round per attributed finding; high =
+    one median PR's CI rounds. Neither is measured time saved.
+  * Fixtures require explicit provenance; missing provenance stays unknown.
 
 Usage: tools/jev-value-report.py [--days 7 | --since D --until D] [--json]
        tools/jev-value-report.py --fetch-ci [--days 14]
@@ -29,10 +33,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import statistics
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -47,16 +53,18 @@ OUTPUT_PRICE_SOURCE = ("ops/config/jev-cost-guard.v1.json carries only "
 TOKENS_SAVED_SOURCE = ("not measured: needs per-session Claude usage from transcripts, "
                        "compared across the Jev-off holdout")
 
-# Errors that prove no billable work happened.
-NOT_BILLED_CALL_ERRORS = frozenset({"HTTP 402", "HTTP 403", "HTTP 429", "daily_paid_call_cap", "network"})
-NOT_BILLED_JUDGE_ERROR = re.compile(
-    r"HTTP 40[23]|HTTP 429|billing|daily paid call cap|rate_limited|synthetic network|could not reach")
+# Shared normalization for call receipts and judge observations. Only typed
+# pre-call failures prove zero spend; transport/vendor failures are unknown.
+NO_CALL_ERROR = re.compile(
+    r"HTTP 40[23]\b|HTTP 429\b|daily[ _]paid[ _]call[ _]cap|billing_exhausted|"
+    r"(?:^|:)(?:network|auth_failed|holdout|rate_limited)$|missing[ _-]credential|"
+    r"credential.*(?:missing|cannot|not found)|cannot read.*credential|"
+    r"synthetic network|could not reach", re.I)
 
 # What each call site's question is, which decides the recommendation when
 # no outcome can be proven. mechanical: the inputs already hold the answer and
-# code can compute it. per_turn: fires on routine turns. fixture: benchmark or
-# selftest subjects billed on the live path. judgment_point: asked at a real
-# decision. Unlisted names fall into review / ad_hoc_named by name.
+# code can compute it. per_turn: fires on routine turns. judgment_point:
+# asked at a decision. Fixture classification comes only from provenance. Unlisted names fall into review / ad_hoc_named by name.
 NATURE = {
     "judge:supervise.stuck_and_drift": "mechanical",
     "judge:supervise.test_picker": "mechanical",
@@ -80,15 +88,15 @@ NATURE = {
     "jev_build_advisory": "per_turn",
     "jev_change_tolls": "per_turn",
     "legacy_unattributed": "per_turn",
-    "judge:supervise.escalation_router": "fixture",
-    "judge:supervise.effort_picker": "fixture",
-    "judge:supervise.best_of": "fixture",
-    "judge:supervise.ambiguity_stop": "fixture",
-    "judge:supervise.example_picker": "fixture",
-    "judge:supervise.context_picker": "fixture",
-    "judge:supervise.plan_split": "fixture",
-    "judge:supervise.notebook_recall": "fixture",
-    "judge:supervise.runaway_thinking": "fixture",
+    "judge:supervise.escalation_router": "judgment_point",
+    "judge:supervise.effort_picker": "judgment_point",
+    "judge:supervise.best_of": "judgment_point",
+    "judge:supervise.ambiguity_stop": "judgment_point",
+    "judge:supervise.example_picker": "judgment_point",
+    "judge:supervise.context_picker": "judgment_point",
+    "judge:supervise.plan_split": "judgment_point",
+    "judge:supervise.notebook_recall": "judgment_point",
+    "judge:supervise.runaway_thinking": "judgment_point",
     "review": "judgment_point",
     "jev_deal_read": "judgment_point",
     "ad_hoc_named": "judgment_point",
@@ -110,7 +118,7 @@ def site_for(name, judge_kind=False):
             return "review"
         if name in NATURE:
             return name
-    return "review" if REVIEWISH.search(name) else "ad_hoc_named"
+    return "review" if REVIEWISH.search(name or "") else "ad_hoc_named"
 
 
 def parse_time(value):
@@ -134,49 +142,81 @@ def _int(value):
 
 def _new_site():
     return {"attempts": 0, "cache_hits": 0, "not_billed": 0, "paid": 0, "usable": 0,
-            "unmetered_paid": 0, "input_tokens": 0, "output_tokens": 0, "wait_ms": 0,
+            "billing_unknown": 0, "input_tokens": 0,
+            "output_tokens": 0, "wait_ms": 0, "observations": 0, "observation_cache_hits": 0,
             "outcomes_verified": 0, "blocks": 0, "evidence": [],
-            "note": None}
+            "traffic_class": "unknown", "attribution_complete": True, "note": None}
 
 
-def _tally(site, *, cache_hit, not_billed, usable, tokens_in, tokens_out, wait_ms=None):
-    if cache_hit:
+def _billing(row, tokens_in):
+    if row.get("cache_hit") is True:
+        return "cache"
+    if (row.get("holdout") is True or row.get("note") == "deterministic_prefilter"
+            or NO_CALL_ERROR.search(str(row.get("error") or ""))):
+        return "not_billed"
+    return "measured" if tokens_in is not None else "unknown"
+
+
+def _fields(row, *, judge=False):
+    usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+    tokens_in, tokens_out = _int(row.get("input_tokens")), _int(row.get("output_tokens"))
+    if tokens_in is None:
+        tokens_in, tokens_out = _int(usage.get("input_tokens")), _int(usage.get("output_tokens"))
+    usable = (not row.get("error") and bool(row.get("answers")) if judge
+              else row.get("usable", row.get("ok")) is True)
+    return {"billing": _billing(row, tokens_in), "usable": usable,
+            "tokens_in": tokens_in, "tokens_out": tokens_out}
+
+
+def _call_fields(row):
+    return _fields(row)
+
+
+def _judge_fields(row):
+    return _fields(row, judge=True)
+
+
+def _tally(site, *, billing, usable, tokens_in, tokens_out):
+    if billing == "cache":
         site["cache_hits"] += 1
         return
     site["attempts"] += 1
-    site["wait_ms"] += wait_ms or 0
-    if not_billed:
+    if billing == "not_billed":
         site["not_billed"] += 1
-        return
-    site["paid"] += 1
-    site["usable"] += bool(usable)
-    if tokens_in is None:
-        site["unmetered_paid"] += 1
+    elif billing == "unknown":
+        site["billing_unknown"] += 1
     else:
+        site["paid"] += 1
+        site["usable"] += bool(usable)
         site["input_tokens"] += tokens_in
         site["output_tokens"] += tokens_out or 0
 
 
-def _call_fields(row):
-    usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
-    tokens_in = _int(row.get("input_tokens"))
-    tokens_out = _int(row.get("output_tokens"))
-    if tokens_in is None:
-        tokens_in, tokens_out = _int(usage.get("input_tokens")), _int(usage.get("output_tokens"))
-    usable = row.get("usable") if "usable" in row else row.get("ok")
-    return {"cache_hit": row.get("cache_hit") is True,
-            "not_billed": row.get("error") in NOT_BILLED_CALL_ERRORS,
-            "usable": usable is True, "tokens_in": tokens_in, "tokens_out": tokens_out}
+def _traffic(row):
+    # Explicit provenance only. A production-capable kind is not a fixture.
+    ref = row.get("subject_ref")
+    provenance = row.get("traffic_class")
+    if provenance is None and isinstance(ref, dict):
+        provenance = ref.get("traffic_class")
+        if provenance is None and ref.get("fixture") is True:
+            provenance = "fixture"
+    return provenance if provenance in ("fixture", "production") else "unknown"
 
 
-def _judge_fields(row):
-    usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
-    error = row.get("error") or ""
-    return {"cache_hit": row.get("cache_hit") is True,
-            "not_billed": bool(error) and bool(NOT_BILLED_JUDGE_ERROR.search(error)),
-            "usable": not error and bool(row.get("answers")),
-            "tokens_in": _int(usage.get("input_tokens")), "tokens_out": _int(usage.get("output_tokens")),
-            "wait_ms": _int(row.get("elapsed_ms"))}
+def _site_key(base, traffic):
+    return base if traffic == "unknown" else f"{base} [{traffic}]"
+
+
+def ci_coverage(ci, start, end):
+    if not isinstance(ci, dict):
+        return "CI history absent"
+    coverage = ci.get("coverage") or {}
+    began, ended, fetched = (parse_time(coverage.get("start")),
+                             parse_time(coverage.get("end")), parse_time(ci.get("fetched_at")))
+    if (coverage.get("complete") is not True or coverage.get("time_basis") != "run_started_at"
+            or not began or not ended or not fetched or began > start or ended < end or fetched < end):
+        return "CI coverage incomplete: snapshot does not cover this run_started_at window"
+    return None
 
 
 def baseline(ci, commits, start, end):
@@ -184,21 +224,28 @@ def baseline(ci, commits, start, end):
             "ci_rounds_per_pr_mean": None, "ci_rounds_per_pr_sd": None, "ci_failed_rounds_per_pr_mean": None,
             "prs_with_ci": 0, "merged_prs": None, "time_to_merge_hours_median": None,
             "reverts": sum(1 for c in commits if (c.get("subject") or "").startswith("Revert")),
-            "main_canary_failures": None, "holdout_n_per_arm": None}
-    if not ci:
+            "main_canary_failures": None, "holdout_n_per_arm": None,
+            "coverage_issue": ci_coverage(ci, start, end)}
+    if base["coverage_issue"]:
         return base
     runs = [r for r in ci.get("runs") or [] if in_window(r.get("run_started_at"), start, end)]
     rounds, minutes, failed = defaultdict(int), [], defaultdict(int)
+    seen = set()
     for run in runs:
+        if run.get("id") is not None:
+            key = (run["id"], run.get("run_attempt"))
+            if key in seen:
+                continue
+            seen.add(key)
         if run.get("name") != "CI" or run.get("event") != "pull_request":
             continue
-        if run.get("conclusion") not in ("success", "failure"):
+        if run.get("conclusion") not in ("success", "failure", "timed_out", "action_required", "startup_failure"):
             continue
         began, ended = parse_time(run.get("run_started_at")), parse_time(run.get("updated_at"))
-        if began and ended:
+        if began and ended and ended >= began:
             minutes.append((ended - began).total_seconds() / 60)
         rounds[run.get("head_branch")] += 1
-        failed[run.get("head_branch")] += run["conclusion"] == "failure"
+        failed[run.get("head_branch")] += run["conclusion"] != "success"
     counts = list(rounds.values())
     if minutes:
         base["ci_round_minutes_median"] = round(statistics.median(minutes), 1)
@@ -227,78 +274,113 @@ def baseline(ci, commits, start, end):
 def recommend(key, site):
     if site["outcomes_verified"]:
         return "keep"
-    nature = NATURE.get(key, "judgment_point")
-    return {"fixture": "remove", "mechanical": "replace with code",
+    nature = NATURE.get(key.split(" [", 1)[0], "judgment_point")
+    if site["traffic_class"] == "fixture":
+        return "remove"
+    return {"mechanical": "replace with code",
             "per_turn": "move to a judgment point", "gate": "move to a judgment point"
             }.get(nature, "keep (unproven; holdout decides)")
 
 
+def positive_attribution(commit):
+    """Commit-message convention: Jev <finder verb> <positive defect noun>.
+
+    Search subject and body. The message must claim a bug/gap/defect/error/
+    regression and must not say no finding, no fix, or a deferred fix. This is
+    commit-attributed evidence, not an independently verified causal outcome.
+    """
+    message = "\n".join(str(commit.get(k) or "") for k in ("subject", "body"))
+    if re.search(r"\b(?:nothing|none|no\s+(?:bug|defect|finding|issue|fix|change)|"
+                 r"not\s+(?:a\s+)?(?:bug|fixed)|defer(?:red)?|unfixed)\b", message, re.I):
+        return None
+    for match in JEV_FINDER.finditer(message):
+        claim = re.split(r"[.;\n]", message[match.end():], maxsplit=1)[0]
+        if re.search(r"\b(?:bug|gap|defect|error|regression)\b", claim, re.I):
+            return match.group(0) + claim
+        prefix = re.split(r"[.;\n]", message[:match.start()])[-1]
+        if re.search(r"\bfix(?:es|ed)?\b.*\b(?:bug|gap|defect|error|regression)\b", prefix, re.I):
+            return prefix.strip() + match.group(0) + claim
+    return None
+
+
 def build_report(sources, start, end):
     sites = defaultdict(_new_site)
-    totals, hub_calls, hub_judge = _new_site(), _new_site(), _new_site()
-    calls = sources.get("calls") or []
-    # Before the call log named its callers, jev_judge traffic landed in
-    # legacy_unattributed; judge rows from then are already billed there.
-    hub_start = min((parse_time(r.get("ts")) for r in calls
-                     if r.get("caller") == "jev_judge" and parse_time(r.get("ts"))), default=None)
-    pre_hub = 0
+    calls = [r for r in sources.get("calls") or [] if in_window(r.get("ts"), start, end)]
+    judges = [r for r in sources.get("judge") or []
+              if in_window(r.get("at"), start, end) and r.get("kind")]
+    # Only unique exact receipt IDs establish a join. Timestamps/token counts
+    # cannot tell whether a judge row came from legacy, review, hub or no call.
+    receipt_judges = defaultdict(list)
+    receipt_calls = defaultdict(int)
+    for row in judges:
+        if isinstance(row.get("receipt_id"), str) and row["receipt_id"]:
+            receipt_judges[row["receipt_id"]].append(row)
     for row in calls:
-        if not in_window(row.get("ts"), start, end):
-            continue
-        fields = _call_fields(row)
-        _tally(totals, **fields)
-        target = hub_calls if row.get("caller") == "jev_judge" else sites[site_for(row.get("caller"))]
-        _tally(target, **fields)
-    for row in sources.get("judge") or []:
-        if not in_window(row.get("at"), start, end) or not row.get("kind"):
-            continue
-        site = sites[site_for(row["kind"], judge_kind=True)]
+        if isinstance(row.get("server_receipt_id"), str) and row["server_receipt_id"]:
+            receipt_calls[row["server_receipt_id"]] += 1
+    matched = set()
+    for row in calls:
+        receipt = row.get("server_receipt_id")
+        candidates = receipt_judges.get(receipt, []) if isinstance(receipt, str) else []
+        linked = (candidates[0] if len(candidates) == 1 and receipt_calls[receipt] == 1
+                  and _judge_fields(candidates[0])["billing"] == "measured"
+                  and _call_fields(row)["billing"] == "measured" else None)
+        if linked:
+            key = site_for(linked["kind"], judge_kind=True)
+            traffic = _traffic(linked)
+            matched.add(id(linked))
+        else:
+            key = "judge:unattributed" if row.get("caller") == "jev_judge" else site_for(row.get("caller"))
+            traffic = _traffic(row)
+        site = sites[_site_key(key, traffic)]
+        site["traffic_class"] = traffic
+        _tally(site, **_call_fields(row))
+    for row in judges:
+        traffic = _traffic(row)
+        site = sites[_site_key(site_for(row["kind"], judge_kind=True), traffic)]
+        site["traffic_class"] = traffic
+        site["observations"] += 1
+        site["wait_ms"] += _int(row.get("elapsed_ms")) or 0
+        if row.get("cache_hit") is True:
+            site["observation_cache_hits"] += 1
+        if id(row) not in matched:
+            if _judge_fields(row)["billing"] in ("measured", "unknown"):
+                site["attribution_complete"] = False
+            site["note"] = "judge observations have no unique billed-call receipt link; spend stays with its receipt caller"
         ref = row.get("subject_ref")
         if row["kind"] == "post_write_task_fit" and isinstance(ref, dict) and ref.get("would_block") is True:
             site["blocks"] += 1
-        if hub_start and parse_time(row["at"]) < hub_start:
-            pre_hub += 1
-            site["wait_ms"] += _int(row.get("elapsed_ms")) or 0  # the wait was real either way
-            continue
-        fields = _judge_fields(row)
-        _tally(site, **fields)
-        _tally(hub_judge, **fields)
-    if hub_calls["attempts"]:
-        # jev-judge.jsonl names the check for only part of what the call log
-        # bills to jev_judge; the remainder is a site of its own, so the table
-        # sums to the bill instead of quietly under-reporting it.
-        residual = sites["judge:unattributed"]
-        for field in ("paid", "usable", "unmetered_paid", "input_tokens", "output_tokens"):
-            residual[field] = hub_calls[field] - hub_judge[field]
-        # The judge log counts its own deadline misses as paid-unusable while
-        # the call log may hold no row for them, so the usable difference can
-        # exceed the paid one; cap it rather than print a rate above 100%.
-        residual["usable"] = max(0, min(residual["usable"], residual["paid"]))
-        residual["note"] = "billed to jev_judge in jev-calls.jsonl with no matching check row in jev-judge.jsonl"
-    hub = {"calls_log_input_tokens": hub_calls["input_tokens"], "judge_log_input_tokens": hub_judge["input_tokens"],
-           "pre_hub_judge_rows": pre_hub}
-    gate = sites["gate:jev_required_actions"] if sources.get("gate") else None
+            site["note"] = "would_block is a judgment observation; no stopped write or avoided defect is verified"
     for row in sources.get("gate") or []:
         if in_window(row.get("ts"), start, end) and row.get("status") == "required" and row.get("missing"):
-            gate["blocks"] += 1
-    if gate is not None:
-        gate["note"] = ("each block forces a Jev call before the turn may end; the outcome is Jev "
-                        "usage itself, so it is excluded from value")
+            site = sites["gate:jev_required_actions"]
+            site["blocks"] += 1
+            site["note"] = "each block forces a Jev call before the turn may end; excluded from value"
     commits = [c for c in sources.get("commits") or [] if in_window(c.get("date"), start, end)]
     for commit in commits:
-        match = JEV_FINDER.search(commit.get("body") or "")
-        if match:
-            review = sites["review"]
-            review["outcomes_verified"] += 1
-            review["evidence"].append({"ref": commit["sha"], "quote": match.group(0)})
+        attribution = positive_attribution(commit)
+        if attribution:
+            sites["review"]["outcomes_verified"] += 1
+            sites["review"]["evidence"].append({"ref": commit["sha"], "quote": attribution,
+                                              "status": "commit_attributed"})
     base = baseline(sources.get("ci"), commits, start, end)
     price = sources.get("price") or {}
     rate_in = price.get("price_usd_per_million_input_tokens")
-    rate_in = float(rate_in) if isinstance(rate_in, (int, float)) else None
+    rate_in = (float(rate_in) if type(rate_in) in (int, float)
+               and math.isfinite(rate_in) and rate_in >= 0 else None)
+    source_status = sources.get("source_status") or {}
+    cost_status = sources.get("calls_status", "complete")
+    complete_cost = cost_status in ("complete", "empty")
+    totals = _new_site()
+    for field, value in totals.items():
+        if type(value) is int:
+            totals[field] = sum(site[field] for site in sites.values())
     round_min, rounds_pr = base["ci_round_minutes_median"], base["ci_rounds_per_pr_median"]
     for key, site in list(sites.items()) + [("total", totals)]:
-        site["usd_input"] = None if rate_in is None else site["input_tokens"] * rate_in / 1_000_000
-        site["usable_rate"] = site["usable"] / site["paid"] if site["paid"] else None
+        site["usd_input_measured"] = None if rate_in is None else site["input_tokens"] * rate_in / 1_000_000
+        site["usd_input"] = (site["usd_input_measured"] if complete_cost and not site["billing_unknown"]
+                             and site["attribution_complete"] else None)
+        site["usable_rate"] = site["usable"] / site["paid"] if complete_cost and site["paid"] else None
         verified = site["outcomes_verified"]
         site["minutes_saved"] = (None if not verified or round_min is None or rounds_pr is None
                                  else (verified * round_min, verified * rounds_pr * round_min))
@@ -306,11 +388,21 @@ def build_report(sources, start, end):
                                    else tuple(m / site["usd_input"] for m in site["minutes_saved"]))
         if key != "total":
             site["recommendation"] = recommend(key, site)
+    observed_totals = {field: totals[field] for field in
+                       ("attempts", "cache_hits", "not_billed", "paid", "usable", "billing_unknown",
+                        "input_tokens", "output_tokens")}
+    if not complete_cost:
+        for field in observed_totals:
+            totals[field] = None
     return {"window": {"start": start.isoformat(), "end": end.isoformat()},
             "price": {"usd_per_million_input": rate_in, "usd_per_million_output": None,
                       "input_source": str(price.get("price_source_url") or "absent"),
                       "output_source": OUTPUT_PRICE_SOURCE},
-            "sites": dict(sites), "totals": totals, "judge_hub": hub, "baseline": base,
+            "sites": dict(sites), "totals": totals, "observed_cost_totals": observed_totals,
+            "cost_complete": complete_cost, "baseline": base, "source_status": source_status,
+            "judge_hub": {"calls_log_input_tokens": sum(_call_fields(r)["tokens_in"] or 0 for r in calls
+                                                         if r.get("caller") == "jev_judge"),
+                          "matched_judge_rows": len(matched), "unlinked_judge_rows": len(judges) - len(matched)},
             "unreadable": sources.get("unreadable") or {}}
 
 
@@ -343,17 +435,21 @@ def render(report):
     out.append(f"  attempts {_fmt_int(totals['attempts'])} · not billed (refused/cap) {_fmt_int(totals['not_billed'])}"
                f" · paid {_fmt_int(totals['paid'])} · usable {_fmt_int(totals['usable'])}"
                f" ({'-' if rate is None else f'{rate:.0%}'}) · cache hits {_fmt_int(totals['cache_hits'])}")
-    out.append(f"  tokens in {_fmt_int(totals['input_tokens'])} · out {_fmt_int(totals['output_tokens'])}"
-               f" · paid with no token count {_fmt_int(totals['unmetered_paid'])}")
+    out.append(f"  tokens in {_fmt_int(totals['input_tokens'])} · out {_fmt_int(totals['output_tokens'])}")
     out.append(f"  dollars (input only) {_fmt_usd(totals['usd_input'])} · output dollars UNKNOWN")
+    out.append(f"  billing unknown {_fmt_int(totals['billing_unknown'])}; only measured receipts count as paid")
+    if not report["cost_complete"]:
+        out.append("  cost UNKNOWN/incomplete — billed-call source could not be fully read")
+    for path, status in sorted(report["source_status"].items()):
+        if status["status"] not in ("complete", "empty"):
+            out.append(f"  source {path}: {status['status']}")
     hub = report["judge_hub"]
-    out.append(f"  jev_judge hub: {_fmt_int(hub['calls_log_input_tokens'])} input tokens in the call log vs "
-               f"{_fmt_int(hub['judge_log_input_tokens'])} attributed by check in jev-judge.jsonl"
-               f" ({_fmt_int(hub['pre_hub_judge_rows'])} earlier check rows already billed as legacy_unattributed)")
+    out.append(f"  jev_judge hub: {hub['matched_judge_rows']} uniquely linked judge rows; "
+               f"{hub['unlinked_judge_rows']} unlinked observations (no additional spend)")
     out.append("")
     out.append("VERDICT TABLE (per call site; value counted only where linked to an outcome)")
     header = (f"  {'site':<36} {'paid':>7} {'usable':>7} {'tok in':>11} {'$ in':>8} {'wait h':>7}"
-              f" {'proven':>6} {'min saved':>11} {'min/$':>13}  recommendation")
+              f" {'attrib':>6} {'min saved':>11} {'min/$':>13}  recommendation")
     out.append(header)
     order = sorted(report["sites"].items(), key=lambda kv: (-kv[1]["input_tokens"], -kv[1]["blocks"], kv[0]))
     for key, s in order:
@@ -368,7 +464,7 @@ def render(report):
     for key, s in order:
         if s["outcomes_verified"]:
             refs = ", ".join(f"{e['ref']} (\"{e['quote']}\")" for e in s["evidence"])
-            out.append(f"  {key}: {s['outcomes_verified']} finding(s) confirmed by fix commit: {refs}")
+            out.append(f"  {key}: {s['outcomes_verified']} finding(s) attributed by fix commit: {refs}")
             if s["minutes_saved"] is None:
                 out.append(f"  {key}: minutes saved UNKNOWN — no CI history; {FETCH_HINT}")
         elif s["blocks"]:
@@ -380,7 +476,7 @@ def render(report):
     out.append("")
     out.append("MEASURED BASELINE (for value ranges and the holdout)")
     if base["ci_round_minutes_median"] is None:
-        out.append(f"  CI history absent — {FETCH_HINT}")
+        out.append(f"  {base['coverage_issue'] or 'No eligible completed CI attempts'} — {FETCH_HINT}")
     else:
         out.append(f"  median CI round {base['ci_round_minutes_median']} min · rounds per PR median "
                    f"{base['ci_rounds_per_pr_median']} mean {base['ci_rounds_per_pr_mean']:.2f}"
@@ -391,15 +487,13 @@ def render(report):
         out.append(f"  holdout n per arm to detect a {EFFECT_SHARE:.0%} change in CI rounds/PR"
                    f" (α=.05 two-sided, power .8): {base['holdout_n_per_arm']}")
     out.append("")
-    out.append("METHOD: value low = one median CI round per proven finding; high = one median PR's"
-               " CI rounds. Billed = not refused by vendor/cap; failures without token counts are"
-               " counted as paid but unpriced. Wait h = summed Jev latency recorded by jev-judge.")
-    proven = sum(s["outcomes_verified"] for s in report["sites"].values())
-    saved = [s["minutes_saved"] for s in report["sites"].values() if s["minutes_saved"]]
-    low, high = sum(p[0] for p in saved), sum(p[1] for p in saved)
-    wait = sum(s["wait_ms"] for s in report["sites"].values()) / 3_600_000
-    out.append(f"BOTTOM LINE: cost {_fmt_usd(totals['usd_input'])} input-only + output UNKNOWN,"
-               f" {_fmt_int(totals['paid'])} paid calls, {wait:.1f} h Jev wait; proven value"
+    out.append("METHOD: value is a CI-time proxy from positive fix-commit attribution, not measured time saved. "
+               "Unknown billing is unpriced. Wait h sums recorded judge latency including cache hits.")
+    proven, saved = totals["outcomes_verified"], totals["minutes_saved"]
+    low, high = saved or (0, 0)
+    wait = totals["wait_ms"] / 3_600_000
+    out.append(f"TOTAL: cost {_fmt_usd(totals['usd_input'])} input-only + output UNKNOWN,"
+               f" {_fmt_int(totals['paid'])} paid calls, {wait:.1f} h Jev wait; attributed value"
                f" {proven} finding(s) worth {'UNKNOWN' if proven and not saved else f'{low:,.0f}–{high:,.0f}'}"
                f" CI minutes; {sum(1 for s in report['sites'].values() if not s['outcomes_verified'])}"
                f" of {len(report['sites'])} sites have insufficient evidence.")
@@ -416,33 +510,42 @@ def data_root():
         return SOURCE_ROOT
 
 
-def read_jsonl(path, unreadable):
+def read_jsonl(path, unreadable, source_status):
     rows, bad = [], 0
+    status = "complete"
     try:
-        with open(path, encoding="utf-8") as handle:
+        with Path(path).open(encoding="utf-8") as handle:
             for line in handle:
+                if not line.strip():
+                    continue
                 try:
                     row = json.loads(line)
-                except ValueError:
-                    bad += line.strip() != ""
-                    continue
-                if isinstance(row, dict):
+                    if not isinstance(row, dict):
+                        raise ValueError("non-object row")
                     rows.append(row)
-    except OSError:
-        return rows
+                except ValueError:
+                    bad += 1
+    except FileNotFoundError:
+        status = "absent"
+    except (OSError, UnicodeError):
+        status = "read_failed" if not rows else "partial"
     if bad:
         unreadable[str(path)] = bad
+        status = "partial"
+    elif status == "complete" and not rows:
+        status = "empty"
+    source_status[str(path)] = {"status": status, "rows_read": len(rows), "bad_lines": bad}
     return rows
 
 
 def read_commits(root, start, end):
     ref = "origin/main"
     if subprocess.run(["git", "rev-parse", "--verify", "-q", ref], cwd=root,
-                      capture_output=True).returncode:
+                      capture_output=True, timeout=10).returncode:
         ref = "HEAD"
     text = subprocess.run(["git", "log", ref, f"--since={start.isoformat()}", f"--until={end.isoformat()}",
-                           "--format=%h%x1f%aI%x1f%s%x1f%b%x1e"], cwd=root, capture_output=True,
-                          text=True, check=True).stdout
+                           "--format=%h%x1f%cI%x1f%s%x1f%b%x1e"], cwd=root, capture_output=True,
+                          text=True, check=True, timeout=60).stdout
     commits = []
     for record in text.split("\x1e"):
         parts = record.strip("\n").split("\x1f")
@@ -452,37 +555,104 @@ def read_commits(root, start, end):
 
 
 def _gh(args):
-    return subprocess.run(args, capture_output=True, text=True, check=True, cwd=SOURCE_ROOT).stdout
+    return subprocess.run(args, capture_output=True, text=True, check=True, cwd=SOURCE_ROOT, timeout=60).stdout
+
+
+def _gh_json(gh, endpoint):
+    return json.loads(gh(["gh", "api", endpoint]))
 
 
 def fetch_ci(root, start, end, gh=_gh):
-    """Save GitHub Actions runs and closed PRs for [start, end) through gh REST.
+    """Enumerate retained runs WITHOUT search filters (no 1,000-result cap).
 
-    The runs endpoint returns at most 1000 results per filtered query, and this
-    repo runs ~300 a day, so runs are asked for one UTC day at a time.
+    Creation-date searches omit older-created reruns. Traverse all retained
+    runs instead, check total_count against distinct IDs, and hydrate each
+    eligible run's attempt endpoints. Any truncated/error result leaves the
+    previous snapshot intact. Coverage uses each attempt's run_started_at.
     """
-    jq_run = ".workflow_runs[] | {name, event, conclusion, head_branch, run_started_at, updated_at, run_attempt}"
-    lines, day = [], start.date()
-    while day < (end + timedelta(seconds=-1)).date() + timedelta(days=1):
-        lines += gh(["gh", "api", "--paginate",
-                     f"repos/{{owner}}/{{repo}}/actions/runs?per_page=100&created={day.isoformat()}",
-                     "--jq", jq_run]).splitlines()
-        day += timedelta(days=1)
-    since = start.date().isoformat()
-    pulls = gh(["gh", "api", "--paginate",
-                "repos/{owner}/{repo}/pulls?state=closed&per_page=100&sort=updated&direction=desc",
-                "--jq", f'.[] | select(.updated_at >= "{since}") | {{number, created_at, merged_at, head: .head.ref}}'])
-    snapshot = {"fetched_at": datetime.now(timezone.utc).isoformat(), "since": since,
-                "runs": [json.loads(line) for line in lines if line.strip()],
-                "pulls": [json.loads(line) for line in pulls.splitlines() if line.strip()]}
+    runs_by_id, page, expected = {}, 1, None
+    while True:
+        payload = _gh_json(gh, f"repos/{{owner}}/{{repo}}/actions/runs?page={page}&per_page=100")
+        count, batch = _int(payload.get("total_count")), payload.get("workflow_runs")
+        if count is None or not isinstance(batch, list):
+            raise ValueError("incomplete CI run listing")
+        if expected is None:
+            expected = count
+        elif expected != count:
+            raise ValueError("incomplete CI listing: total_count changed during fetch; retry")
+        if not batch:
+            break
+        for row in batch:
+            if not isinstance(row, dict) or _int(row.get("id")) is None or row["id"] in runs_by_id:
+                raise ValueError("incomplete CI listing: missing or repeated run ID")
+            runs_by_id[row["id"]] = row
+        if len(runs_by_id) == expected:
+            break
+        if len(runs_by_id) > expected:
+            raise ValueError("incomplete CI listing: inconsistent total_count")
+        page += 1
+    if len(runs_by_id) != expected:
+        raise ValueError("truncated CI history: total_count exceeds fetched run IDs")
+    runs = []
+    complete = True
+    for row in runs_by_id.values():
+        latest_start = parse_time(row.get("run_started_at"))
+        if latest_start is None:
+            raise ValueError("incomplete CI run timestamp")
+        if latest_start < start:
+            continue
+        attempts = _int(row.get("run_attempt"))
+        if not attempts:
+            raise ValueError("incomplete CI attempt count")
+        for attempt in range(1, attempts + 1):
+            detail = _gh_json(gh, f"repos/{{owner}}/{{repo}}/actions/runs/{row['id']}/attempts/{attempt}")
+            if (detail.get("id") != row["id"] or detail.get("run_attempt") != attempt
+                    or not parse_time(detail.get("run_started_at"))):
+                raise ValueError("incomplete CI attempt identity or timestamp")
+            if in_window(detail["run_started_at"], start, end):
+                if detail.get("status") != "completed" or not detail.get("conclusion"):
+                    complete = False
+                runs.append({k: detail.get(k) for k in ("id", "name", "event", "conclusion", "status",
+                                                       "head_branch", "run_started_at", "updated_at", "run_attempt")})
+    pulls, page = [], 1
+    while True:
+        batch = _gh_json(gh, "repos/{owner}/{repo}/pulls?state=closed&per_page=100"
+                             f"&sort=updated&direction=desc&page={page}")
+        if not isinstance(batch, list):
+            raise ValueError("incomplete PR history")
+        pulls.extend({k: row.get(k) for k in ("number", "created_at", "merged_at")} for row in batch
+                     if in_window(row.get("merged_at"), start, end))
+        if len(batch) < 100:
+            break
+        page += 1
+    fetched = datetime.now(timezone.utc)
+    snapshot = {"fetched_at": fetched.isoformat(),
+                "coverage": {"start": start.isoformat(), "end": end.isoformat(),
+                             "time_basis": "run_started_at", "complete": complete and fetched >= end,
+                             "retained_run_count": expected, "discovery": "unfiltered_all_retained_runs"},
+                "runs": runs, "pulls": pulls}
+    # Serialize before opening a temporary sibling. Readers always see one
+    # complete snapshot, including when serialization/write/replace fails.
+    serialized = json.dumps(snapshot)
     path = Path(root) / "out" / CI_SNAPSHOT
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(snapshot), encoding="utf-8")
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{CI_SNAPSHOT}.", delete=False) as handle:
+            temp_path = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
     return path, snapshot
 
 
 def _day(text):
-    return datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+    return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
 
 def main(argv=None):
@@ -497,29 +667,43 @@ def main(argv=None):
     parser.add_argument("--no-git", action="store_true", help="skip local git history")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    end = _day(args.until) if args.until else datetime.now(timezone.utc)
-    start = _day(args.since) if args.since else end - timedelta(days=args.days)
+    try:
+        if args.days <= 0:
+            raise ValueError("--days must be positive")
+        end = _day(args.until) if args.until else datetime.now(timezone.utc)
+        start = _day(args.since) if args.since else end - timedelta(days=args.days)
+        if start >= end:
+            raise ValueError("--since must precede --until")
+    except ValueError as exc:
+        parser.error(str(exc))
     root = Path(args.root) if args.root else data_root()
     out = root / "out"
-    unreadable = {}
+    unreadable, source_status = {}, {}
     ci = None
     if args.fetch_ci:
-        path, ci = fetch_ci(root, start, end)
+        try:
+            path, ci = fetch_ci(root, start, end)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"CI fetch failed ({type(exc).__name__}); previous snapshot preserved", file=sys.stderr)
+            return 1
         print(f"saved {len(ci['runs'])} runs and {len(ci['pulls'])} PRs to {path}", file=sys.stderr)
     else:
         snapshot = Path(args.ci_snapshot) if args.ci_snapshot else out / CI_SNAPSHOT
-        if snapshot.is_file():
+        try:
             ci = json.loads(snapshot.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            ci = None
     try:
         price = json.loads(Path(args.price_config).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         price = None
     sources = {
-        "calls": read_jsonl(out / "jev-calls.jsonl", unreadable),
-        "judge": read_jsonl(out / "jev-judge.jsonl", unreadable),
-        "gate": [row for gate in sorted(out.glob("jev-*-gate.jsonl")) for row in read_jsonl(gate, unreadable)],
+        "calls": read_jsonl(out / "jev-calls.jsonl", unreadable, source_status),
+        "judge": read_jsonl(out / "jev-judge.jsonl", unreadable, source_status),
+        "gate": [row for gate in sorted(out.glob("jev-*-gate.jsonl")) for row in read_jsonl(gate, unreadable, source_status)],
         "commits": [] if args.no_git else read_commits(root, start, end),
-        "ci": ci, "price": price, "unreadable": unreadable,
+        "ci": ci, "price": price, "unreadable": unreadable, "source_status": source_status,
+        "calls_status": source_status[str(out / "jev-calls.jsonl")]["status"],
     }
     report = build_report(sources, start, end)
     print(json.dumps(report, indent=2, default=list) if args.json else render(report))
