@@ -3014,6 +3014,24 @@ test("the v36 successor preserves the exact v35 seal and measures both catalog p
   assert.match(probe, /jsonb_build_object\('pre_v36',pre_v36,'forward_v36',forward_v36\)/);
 });
 
+test("source-only migration diagnostics preserve the sealed runtime frontier", () => {
+  const sealed = frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
+  const confirmMerge = sealed.find(row => row.ingress_key === "mcp-tool:confirm-merge");
+  assert.equal(confirmMerge.human_only, true);
+  assert.equal(confirmMerge.principal_mode, "server_verified_human");
+  const fixture = JSON.parse(fs.readFileSync(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const review = fixture.current_source_reviews[SCAC_MUTATION_REGISTRY_VERSION];
+  for (const locator of ["bin/migrate-prod.sh", "tools/migrate-prod-support.py"]) {
+    const row = review.upsert.find(row => row.source_locator === locator);
+    const previous = sealed.find(row => row.source_locator === locator);
+    assert.ok(previous, "reviewed administration script already exists in the seal");
+    const digest = sha256(fs.readFileSync(new URL(`../../${locator}`, import.meta.url), "utf8"));
+    assert.equal(row.schema_digest, digest);
+    assert.equal(row.handler_digest, digest);
+  }
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, "scac-mutation-registry.v105"), true);
   // The push toll calls the bare API; its default must follow the newest frontier.
@@ -3022,7 +3040,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 111);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0786", "0787", "0801"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0786", "0787", "0807"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 102);
   assert.equal(paths.length, 213);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
