@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execFile } from 'node:child_process';
@@ -18,6 +19,7 @@ for (const config of ['pg_config', '/opt/homebrew/opt/postgresql@17/bin/pg_confi
 test('Local Deals CI fixture provisions missing roles on a fresh cluster and preserves existing roles', {
   skip: !bin && 'PostgreSQL unavailable',
 }, async () => {
+  const releaseBudget = await acquirePostgresFixtureGroup();
   const dir = mkdtempSync('/tmp/local-deals-ci-');
   const socket = createServer();
   await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve));
@@ -54,7 +56,9 @@ test('Local Deals CI fixture provisions missing roles on a fresh cluster and pre
     await run();
     assert.deepEqual((await roles()).rows, before, 'existing role attributes are unchanged');
   } finally {
-    try { if (admin) await admin.end(); }
-    finally { if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' }); }
+    try {
+      try { if (admin) await admin.end(); }
+      finally { if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' }); }
+    } finally { await releaseBudget(); }
   }
 });

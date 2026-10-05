@@ -29,7 +29,8 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && !
   let database;
   let running = false;
   let c;
-  const releaseBudget = await acquirePostgresFixtureGroup();
+  // A provided CI cluster is owned and budgeted by its caller.
+  const releaseBudget = ciDsn ? async () => {} : await acquirePostgresFixtureGroup();
   try {
     let connection;
     if (ciDsn) {
