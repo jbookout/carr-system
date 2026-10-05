@@ -2408,6 +2408,7 @@ def command_render(args: argparse.Namespace) -> None:
         publish_board(args.project)
     if args.project == LAUNCHD_BOARD:
         poll_board_answers(args.project)
+        publish_needs_joe_local()
         # The system-wide board rides the same two-minute job, after the
         # project board so a gh outage never holds that one back. A failed
         # rebuild is logged and the last known board is published again.
@@ -2418,6 +2419,22 @@ def command_render(args: argparse.Namespace) -> None:
             if not state_path(ALL_REPOS_BOARD).exists():
                 return
         publish_board(ALL_REPOS_BOARD)
+
+
+def publish_needs_joe_local() -> None:
+    """Publish the machine-local half of governance-queue's needs_joe list.
+    A failure is logged and left for the verb to report: it marks the page
+    stale after two hours, so a dead publisher shows on Joe's list itself."""
+    import needs_joe_local
+
+    def pr_state(repo: str, number: int) -> dict[str, Any]:
+        return gh_json(["pr", "view", str(number), "--repo", repo, "--json", "state,title"])
+    try:
+        count = needs_joe_local.publish(call_verb, stable_key, pr_state,
+                                        needs_joe_local.read_source(), stamp())
+        log(f"needs-joe local page published with {count} item(s)")
+    except RuntimeError as exc:
+        log(f"needs-joe local page not published: {exc}")
 
 
 def command_poll(args: argparse.Namespace) -> None:
