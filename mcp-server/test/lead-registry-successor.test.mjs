@@ -20,7 +20,7 @@ test('audited automation migrations follow their sealed predecessor in atomic or
     const number = name.slice(0, 4);
     assert.deepEqual(names.filter(other => other.startsWith(number + '_')), [name], number + ' must not collide');
   }
-  assert.ok('0825_doc_activity_scac_successor.sql' < pair[0], 'the v107 predecessor must apply first');
+  assert.ok('0827_system_work_scac_successor.sql' < pair[0], 'the v108 predecessor must apply first');
   assert.ok(pair[0] < pair[1], 'domain changes must precede their registry seal');
   const runner = readFileSync(new URL('tools/migrate.py', root), 'utf8');
   const atomic = new RegExp('"' + pair[0].replaceAll('.', '\\.') + '",\\s*"' + pair[1].replaceAll('.', '\\.') + '"', 'g');
@@ -45,23 +45,23 @@ test('lead successor preserves delivered Observatory v105 and admits both contra
   }
 });
 
-// W3c extends the seal rather than rewriting Doc activity's delivered authority.
-test('audited automation preserves the exact v107 delivered seal', () => {
-  const runtime = readFileSync(new URL('../src/scac-mutation-registry.v107.generated.js', import.meta.url));
-  const migration = readFileSync(new URL('../../migrations/0825_doc_activity_scac_successor.sql', import.meta.url));
-  assert.equal(createHash('sha256').update(runtime).digest('hex'), 'a6ecad8a02d80d5885906ca41f17ceff35637708ccc8ce83b6f12fc5859b5610');
-  assert.equal(createHash('sha256').update(migration).digest('hex'), 'a7b87f0dd5c3e88cf9756017ac4fb8abcda41ddb460ec5a24c9282a2e73793dd');
+// W3c extends the seal rather than rewriting unfinished-work's delivered authority.
+test('audited automation preserves the exact v108 delivered seal', () => {
+  const runtime = readFileSync(new URL('../src/scac-mutation-registry.v108.generated.js', import.meta.url));
+  const migration = readFileSync(new URL('../../migrations/0827_system_work_scac_successor.sql', import.meta.url));
+  assert.equal(createHash('sha256').update(runtime).digest('hex'), 'b71eed9557ae3087e68a422a2226c5a27433b3e8b3b5f61d73c1fd20c882b456');
+  assert.equal(createHash('sha256').update(migration).digest('hex'), '5fdf0a6e85a1eebbb8fc8eecc7a516a550bb8c675b713000340b79f5f2a57f58');
 });
 
-// Disposable PostgreSQL acceptance observed this full-entry seal for the v108
+// Disposable PostgreSQL acceptance observed this full-entry seal for the v109
 // source seed. Pin both halves so resealing cannot retain a digest measured
 // before the seed changed.
 test('audited automation source binds its measured PostgreSQL full-entry seal', () => {
-  const migration = readFileSync(new URL('../../migrations/0832_automation_undo_scac_successor.sql', import.meta.url), 'utf8');
-  const seed = migration.split('$automation_undo_v108_source$')[1];
-  assert.equal(createHash('sha256').update(seed).digest('hex'), '68b76c3782e5a13c71d52b21ff8562b511f9de31a087b8ed57dea5f88419315a');
+  const migration = readFileSync(new URL('../../migrations/0842_automation_undo_scac_successor.sql', import.meta.url), 'utf8');
+  const seed = migration.split('$automation_undo_v109_source$')[1];
+  assert.equal(createHash('sha256').update(seed).digest('hex'), 'ad820409c9e13b43492c392bc32c230c2a32c980223dcd3ee0f1d34b3f493a87');
   const seals = JSON.parse(readFileSync(new URL('../../ops/config/scac-registry-full-entry-set-seals.json', import.meta.url), 'utf8'));
-  const measured = 'sha256:7793ec592ba286e306924f7ef00c8f14e935183243e96e0dcb25a3f997efa34e';
-  assert.equal(seals['scac-mutation-registry.v108'], measured);
+  const measured = 'sha256:99256624828fd9a2eae911ab1f784fa8487afebcde01410fd7940646da0fd007';
+  assert.equal(seals['scac-mutation-registry.v109'], measured);
   assert.ok(migration.includes(`v.entry_set_digest is distinct from '${measured}'`));
 });
