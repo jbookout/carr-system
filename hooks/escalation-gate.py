@@ -150,13 +150,27 @@ INTERNAL = re.compile(
 APPROVAL_REQUEST = re.compile(
     r"^(?:joe[, :]\s*)?(?:(?:do|would|will|can) you|should (?:you|joe)) "
     r"(?:not )?approve\s+|^(?:approve|do not approve|don't approve)\s+", re.I)
-ARTIFACT_NAME = r"(?!(?:the|a|an|proposed|new|this|that|which|what|how)\b)[\w-]+(?:\s+[\w-]+){0,7}"
+# A name is a noun phrase, not a question, a method or an unnamed action.
+# Apply the same grammar inside quotes and to scope qualifiers.
+NAME_START = (
+    r"(?!(?:the|a|an|proposed|new|this|that|it|them|these|those|"
+    r"use|using|choose|choosing|pick|picking|select|selecting|"
+    r"run|running|schedule|scheduling|build|building|\w+ing)\b)"
+)
+NAME_WORD = r"(?!(?:for|in|with|at|by|on|to|as)\b)[\w-]+"
+NAME_PHRASE = NAME_START + NAME_WORD + r"(?:\s+" + NAME_WORD + r"){0,7}"
+ARTIFACT_NAME = rf'''(?:{NAME_PHRASE}|"{NAME_PHRASE}"|'{NAME_PHRASE}')'''
+APPROVAL_CHOICE = re.compile(
+    r"\b(which|what|when|where|why|how|should|could|would|can|may|must|"
+    r"whether|or|instead|versus)\b", re.I)
 APPROVAL_ARTIFACT = re.compile(
-    r"(?:restor(?:e|ing)|retir(?:e|ing)|(?:restoration|retirement) of)\s+"
+    r"(?:(?:restor(?:e|ing)|retir(?:e|ing)|(?:restoration|retirement) of)\s+"
     r"(?:the\s+)?" + ARTIFACT_NAME + r"\s+rule"
     r"|(?:the\s+)?(?:proposed\s+)?" + ARTIFACT_NAME + r"\s+rule"
     r"|build(?:ing)?\s+(?:all\s+|the\s+)?" + ARTIFACT_NAME +
-    r"|(?:the\s+)?" + ARTIFACT_NAME + r"\s+(?:build|plan)", re.I)
+    r"|(?:the\s+)?" + ARTIFACT_NAME + r"\s+(?:build|plan))"
+    r"(?:\s+for\s+(?:the\s+)?" + ARTIFACT_NAME + r")?"
+    r"(?:\s+as written)?", re.I)
 
 
 def direct_approval(question):
@@ -171,7 +185,8 @@ def direct_approval(question):
                   for o in (question.get("options") or []) if isinstance(o, dict)}
         if "approve" not in labels or not labels.intersection({"don't approve", "do not approve"}):
             return False
-    return APPROVAL_ARTIFACT.fullmatch(stem) is not None
+    return (not APPROVAL_CHOICE.search(stem)
+            and APPROVAL_ARTIFACT.fullmatch(stem) is not None)
 
 
 def now():
