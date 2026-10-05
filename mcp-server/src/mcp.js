@@ -1193,6 +1193,7 @@ export async function dispatch(request, env, ctx, actor) {
               error: e,
             }),
             detail: cause.slice(0, 300),
+            error: e,
           });
           return reply({ isError: true, content: [{ type: "text", text: JSON.stringify({
             error: "unhandled_verb_failure",
@@ -1224,6 +1225,7 @@ export async function dispatch(request, env, ctx, actor) {
         error: e,
       }),
       detail,
+      error: e,
     });
     return rpcError(-32603, "internal error", detail);
   }

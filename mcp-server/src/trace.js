@@ -78,6 +78,7 @@
 
 import { neon } from "@neondatabase/serverless";
 import { logLine } from "./correlation.js";
+import { scrubError, captureRuntimeError } from './runtime-errors.js';
 
 const SERVICE_KEY = "carr-mcp";
 const DEFAULT_SEVERITY = "SEV-3"; // contained: one request failed, not the whole service —
@@ -170,8 +171,9 @@ export function incidentSignature({ serviceKey, environment, routeKey, failureCl
  * `detail` (the same short string, if any, the response already carries — this
  * never adds a NEW leak surface beyond what the caller already sent back). */
 export function incidentFactText({ routeKey, failureClass, correlationId, detail }) {
-  const base = `${routeKey} failed (${failureClass}), correlation ${correlationId}`;
-  return detail ? `${base} — ${String(detail).slice(0, 200)}` : base;
+  const safe = scrubError({ route: routeKey, message: detail });
+  const base = `${safe.route} failed (${failureClass}), correlation ${correlationId}`;
+  return detail ? `${base} — ${safe.message}` : base;
 }
 
 // ── the recorder ─────────────────────────────────────────────────────────────
@@ -233,8 +235,8 @@ export async function recordWorkerFailure(query, {
       correlation_id: correlationId || null,
       route_key: routeKey || null,
       failure_class: failureClass || null,
-      error_name: (e && e.name) || typeof e,
-      error_message: String((e && e.message) || e).slice(0, 300),
+      error_name: scrubError({ type: e?.name }).type,
+      error_message: scrubError({ type: e?.name, message: e?.message }).message,
     });
   }
 }
@@ -403,7 +405,14 @@ export function wrapNeonRows(sqlLike) {
  * scheduleFailureRecord and INTO withFailureRecording / dispatch() /
  * mcpApiHandler, exactly the "a recorder must never change a response"
  * failure this whole file exists to prevent. */
-export function scheduleFailureRecord(env, ctx, { routeKey, failureClass, detail }) {
+export function scheduleFailureRecord(env, ctx, { routeKey, failureClass, detail, error }) {
+  // JSON-RPC contains unexpected throws in an HTTP 200 response. The fetch
+  // middleware therefore cannot observe them; policy refusals stay excluded.
+  if (failureClass === 'verb_internal_error' && env?.RUNTIME_ERRORS && ctx?.waitUntil) {
+    const input = { type: error?.name, message: error?.message || detail, stack: error?.stack, route: '/mcp', release_sha: env.GIT_SHA };
+    ctx.waitUntil(captureRuntimeError(env, 'carr-worker', input)
+      .catch(() => logLine('error', 'runtime_error_capture_failed', scrubError(input))));
+  }
   if (!failureClass || !env || !env.DATABASE_URL_WRITER || !ctx || typeof ctx.waitUntil !== "function") return;
   let query;
   try {
@@ -413,8 +422,8 @@ export function scheduleFailureRecord(env, ctx, { routeKey, failureClass, detail
       correlation_id: env.CORRELATION_ID || null,
       route_key: routeKey || null,
       failure_class: failureClass || null,
-      error_name: (e && e.name) || typeof e,
-      error_message: String((e && e.message) || e).slice(0, 300),
+      error_name: scrubError({ type: e?.name }).type,
+      error_message: scrubError({ type: e?.name, message: e?.message }).message,
     });
     return;
   }
@@ -429,7 +438,7 @@ export function scheduleFailureRecord(env, ctx, { routeKey, failureClass, detail
 
 function safeRouteKey(request) {
   try {
-    return new URL(request.url).pathname || "/";
+    return scrubError({ route: new URL(request.url).pathname }).route;
   } catch {
     return "/unparseable";
   }
@@ -453,7 +462,7 @@ export function withFailureRecording(handler) {
       scheduleFailureRecord(env, ctx, {
         routeKey: safeRouteKey(request),
         failureClass: httpFailureClass(500),
-        detail: String((e && e.message) || e).slice(0, 200),
+        detail: scrubError({ type: e?.name, message: e?.message }).message,
       });
       throw e;
     }
