@@ -100,11 +100,11 @@ on:
     - cron: "20 6 * * *"
   workflow_dispatch:
 
-# A second push to the same branch cancels the first. Two runs of the same branch
-# racing tells you nothing extra and just delays the answer that matters.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # PR validation supersedes by workflow + PR. Non-PR verdicts are independent:
+  # sharing a non-cancelling group would still replace older pending runs.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -268,7 +268,7 @@ jobs:
 
   checks:
     # THE REQUIRED CONTEXT. Its name is what the ruleset requires, so it must
-    # keep reporting whatever the class jobs do: `always()` makes it run when
+    # report whatever the class jobs do: `always()` makes it run when
     # a group is red or cancelled, and the step below turns anything but
     # success into a red context. Without `always()` a failed group would
     # leave this job skipped, and a required check that never reports blocks

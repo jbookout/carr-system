@@ -386,6 +386,45 @@ with tempfile.TemporaryDirectory(prefix="gate-replay-extract2-") as tmp:
           kept)
 
 
+# A descheduled replay process must not spend its inspection budget before
+# reaching Jev. Inject host elapsed time without waiting, then exercise the
+# real supervisor's deadline branch through the logical replay clock shim.
+budget_probe = r'''
+import importlib.util, os, runpy, sys, time
+from pathlib import Path
+repo = Path(sys.argv[1])
+host_elapsed = [100.0]
+cpu_elapsed = [0.0]
+time.monotonic = lambda: host_elapsed[0]
+time.process_time = lambda: cpu_elapsed[0]
+time.process_time_ns = lambda: int(cpu_elapsed[0] * 1e9)
+os.environ["CARR_GATE_REPLAY_EPOCH"] = "1750000000"
+runpy.run_path(str(repo / "ops/gate_replay_shim/sitecustomize.py"))
+spec = importlib.util.spec_from_file_location("supervisor", repo / "hooks/jev-supervisor.py")
+hook = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hook)
+run = hook.Run(receipt_path=os.devnull)
+called = []
+def inspect_stop_boundary():
+    called.append(True)
+    return []
+host_elapsed[0] += 20.0
+run.do(inspect_stop_boundary)
+assert called, run.results
+assert not run.results, run.results
+for _ in range(int(hook.BUDGET_SECONDS / 0.001) + 1):
+    time.monotonic()
+run.do(inspect_stop_boundary)
+assert len(called) == 1, called
+assert run.results[0]["detail"]["advice"].startswith(
+    "inspect_stop_boundary unavailable (time_budget_exhausted)"), run.results
+'''
+budget_result = subprocess.run([sys.executable, "-c", budget_probe, str(REPO)],
+                       capture_output=True, text=True, timeout=10,
+                       env=git_env.fixture_env())
+check("host scheduling delays cannot exhaust the replayed Stop inspection budget",
+      budget_result.returncode == 0, budget_result.stderr)
+
 # ---------------------------------------------------------------- manifest coverage
 
 REAL_MANIFEST = GR.load_manifest()
