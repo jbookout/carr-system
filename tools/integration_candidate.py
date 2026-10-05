@@ -56,16 +56,49 @@ def require_current_base(repo: Path, base: str, *, pending_merge: bool = False) 
                 raise MigrationNumberError(f'applied artifact missing or edited during merge: {path}')
 
 
+CHAIN_PATH = 'ops/config/scac-registry-chain.json'
+CURRENT_PATH = 'mcp-server/src/scac-mutation-registry.current.generated.js'
+
+
+def main_registry_pins(repo: Path, base: str) -> list[dict]:
+    paths = git(repo, 'ls-tree', '-r', '--name-only', base, '--', CHAIN_PATH).decode().splitlines()
+    if CHAIN_PATH in paths:
+        return json.loads(git(repo, 'show', f'{base}:{CHAIN_PATH}'))['versions']
+    return [{'number': int(match.group(1)) if match else 1,
+             'artifact_sha256': hashlib.sha256(content).hexdigest()}
+            for path, content in main_snapshot(repo, base).items()
+            if (match := REGISTRY.fullmatch(path)) or path == 'mcp-server/src/scac-mutation-registry.generated.js']
+
+
+def validate_registry_history(repo: Path, base: str) -> list[dict]:
+    before = main_registry_pins(repo, base)
+    candidate = json.loads((repo / CHAIN_PATH).read_text())['versions']
+    by_number = {row['number']: row for row in candidate}
+    for pin in before:
+        row = by_number.get(pin['number'])
+        if row is None or any(row.get(key) != value for key, value in pin.items()):
+            raise MigrationNumberError('applied registry history pin was rewritten')
+    frontier = max(row['number'] for row in before)
+    added = sorted(row['number'] for row in candidate if row['number'] > frontier)
+    if added != list(range(frontier+1, frontier+1+len(added))):
+        raise MigrationNumberError('registry must be an ordered successor of current main')
+    current = candidate[-1]
+    content = (repo / CURRENT_PATH).read_bytes()
+    if hashlib.sha256(content).hexdigest() != current['artifact_sha256']:
+        raise MigrationNumberError('current runtime artifact pin drifted')
+    return before
+
+
 def allocation_plan(repo: Path, base: str, pending: list[str]) -> dict:
     snapshot = main_snapshot(repo, base)
     migrations = [Path(p).name for p in snapshot if p.startswith('migrations/')]
-    versions = [int(match.group(1)) for p in snapshot if (match := REGISTRY.fullmatch(p))]
-    predecessor, successor = allocate_registry_successor(versions)
-    predecessor_path = f'mcp-server/src/scac-mutation-registry.v{predecessor}.generated.js'
+    pins = main_registry_pins(repo, base)
+    predecessor, successor = allocate_registry_successor([row['number'] for row in pins if row['number'] != 1])
+    predecessor_pin = next(row for row in pins if row['number'] == predecessor)
     return {'schema': 'integration-allocation/v1', 'base': base,
             'migration_names': allocate_integration_successors(migrations, pending),
             'registry_predecessor': predecessor, 'registry_successor': successor,
-            'predecessor_sha256': hashlib.sha256(snapshot[predecessor_path]).hexdigest()}
+            'predecessor_sha256': predecessor_pin['artifact_sha256']}
 
 
 def validate_candidate(repo: Path, base: str) -> dict:
@@ -77,6 +110,9 @@ def validate_candidate(repo: Path, base: str) -> dict:
     candidate = {p.name: p.read_bytes() for p in (repo/'migrations').glob('*.sql')}
     validate_integration_union(migrations, candidate)
     main_versions = []
+    manifest = (repo / CHAIN_PATH).is_file()
+    if manifest:
+        main_versions = [row['number'] for row in validate_registry_history(repo, base) if row['number'] != 1]
     for p, content in main.items():
         if p.startswith('mcp-server/src/'):
             match = REGISTRY.fullmatch(p)
@@ -106,6 +142,20 @@ def check_generated_write(repo: Path, target: Path, content: bytes, base: str) -
     """Guard the actual generator sink, preserving byte-exact historical rebuilds."""
     require_current_base(repo, base, pending_merge=True)
     relative = target.resolve().relative_to(repo.resolve()).as_posix()
+    if relative == CURRENT_PATH:
+        pins = main_registry_pins(repo, base)
+        frontier = max(row['number'] for row in pins)
+        current_match = re.search(rb'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v([0-9]+)";', content)
+        if not current_match:
+            raise MigrationNumberError('current registry lacks a version')
+        number = int(current_match[1])
+        if number == frontier:
+            pin = next(row for row in pins if row['number'] == frontier)
+            if hashlib.sha256(content).hexdigest() != pin['artifact_sha256']:
+                raise MigrationNumberError('sealed main artifact cannot be resealed')
+        elif number != frontier + 1:
+            raise MigrationNumberError('current runtime must be the next registry successor')
+        return
     main = git(repo,'ls-tree','-r','--name-only',base,'--','migrations','mcp-server/src').decode().splitlines()
     if relative in main:
         if content != git(repo,'show',f'{base}:{relative}') and (relative.startswith('migrations/') or REGISTRY.fullmatch(relative) or relative=='mcp-server/src/scac-mutation-registry.generated.js'):

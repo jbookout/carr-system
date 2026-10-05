@@ -156,9 +156,6 @@ class SuccessorCommands(unittest.TestCase):
         self.write('bin/schema-snapshot.sh', source)
         return source
 
-    def receipt(self, number):
-        return dict(version=f'scac-mutation-registry.v{number}', entry_count=1000, source_count=800)
-
     def test_snapshot_symlink_and_parent_escape_refused(self):
         module = self.module()
         source = self.snapshot_fixture()
@@ -168,7 +165,7 @@ class SuccessorCommands(unittest.TestCase):
         target.unlink()
         target.symlink_to(external)
         with self.assertRaises(ValueError):
-            module.snapshot_bookkeeping(self.repo, Path('0002_seal.sql'), self.receipt(110))
+            module.validate_outputs(self.repo, ['bin/schema-snapshot.sh'])
         self.assertEqual(external.read_text(), source)
 
     def test_test_sink_symlink_refused_before_snapshot_write(self):
@@ -179,7 +176,7 @@ class SuccessorCommands(unittest.TestCase):
         (self.repo / 'ops').mkdir()
         (self.repo / 'ops/schema-snapshot-registry-seed-selftest.py').symlink_to(external)
         with self.assertRaises(ValueError):
-            module.snapshot_bookkeeping(self.repo, Path('0002_seal.sql'), self.receipt(110))
+            module.validate_outputs(self.repo, ['bin/schema-snapshot.sh', 'ops/schema-snapshot-registry-seed-selftest.py'])
         self.assertEqual((self.repo / 'bin/schema-snapshot.sh').read_text(), source)
 
     def test_same_sha_branch_switch_refuses_promotion(self):
@@ -204,27 +201,6 @@ class SuccessorCommands(unittest.TestCase):
                         module.rehome(self.repo)
                 self.assertEqual(self.head(), approved)
                 self.assertEqual(self.git('rev-parse', 'feature'), approved)
-
-    def test_two_rehomes_bind_distinct_ledger_results(self):
-        module = self.module()
-        self.snapshot_fixture()
-        module.snapshot_bookkeeping(self.repo, Path('0110_first.sql'), self.receipt(110))
-        module.snapshot_bookkeeping(self.repo, Path('0111_second.sql'), self.receipt(111))
-        psql = self.repo / 'psql'
-        psql.write_text('#!/bin/sh\ncase "$*" in *0111_second.sql*) echo f;; *) echo t;; esac\n')
-        psql.chmod(0o755)
-        source = (self.repo / 'bin/schema-snapshot.sh').read_text() + '\nprintf "%s" "$SCAC_CURRENT_NUMBER"\n'
-        result = subprocess.run(['bash', '-c', source], env={**self.env, 'PSQL': str(psql), 'REPO': str(self.repo)}, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, '110')
-
-    def test_snapshot_preserves_historical_assertions(self):
-        module = self.module()
-        self.snapshot_fixture()
-        source = 'assert "SCAC_CURRENT_NUMBER=9" in GENERATOR\nassert "SCAC_CURRENT_NUMBER=109" in GENERATOR\n'
-        self.write('ops/schema-snapshot-registry-seed-selftest.py', source)
-        module.snapshot_bookkeeping(self.repo, Path('0110_first.sql'), self.receipt(110))
-        self.assertTrue((self.repo / 'ops/schema-snapshot-registry-seed-selftest.py').read_text().startswith(source))
 
     def test_commit_has_no_unused_amend_mode(self):
         import inspect
@@ -258,5 +234,5 @@ class SuccessorCommands(unittest.TestCase):
         external.joinpath('schema-snapshot.sh').write_text('unchanged\n')
         (self.repo / 'bin').symlink_to(external, target_is_directory=True)
         with self.assertRaises(ValueError):
-            module.snapshot_bookkeeping(self.repo, Path('0002_seal.sql'), self.receipt(110))
+            module.validate_outputs(self.repo, ['bin/schema-snapshot.sh'])
         self.assertEqual(external.joinpath('schema-snapshot.sh').read_text(), 'unchanged\n')

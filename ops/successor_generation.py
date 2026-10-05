@@ -170,7 +170,7 @@ def predecessor_rows(repo, version):
 def regenerate(repo, plan, domain_paths, successor_path, predecessor_path):
     import psycopg
     validate_outputs(repo, [*JSON_ARTIFACTS, str(successor_path.relative_to(repo)),
-        f"mcp-server/src/scac-mutation-registry.v{plan['registry_successor']}.generated.js", 'mcp-server/src/scac-mutation-registry.current.generated.js', '.git/successor-runtime.json'])
+        'mcp-server/src/scac-mutation-registry.current.generated.js', '.git/successor-runtime.json'])
     with disposable_database(repo) as (dsn, env, run):
         run(["psql", dsn, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", repo / "db/schema.sql"])
         last_main = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", plan["base"], "--", "migrations"], cwd=repo, env=scrubbed_env()).decode().splitlines()
@@ -228,7 +228,7 @@ import {readFileSync,writeFileSync} from 'node:fs';
 const p=JSON.parse(readFileSync(process.argv[1],'utf8'));
 const result=appendSuccessor(p);
 if(createHash('sha256').update(result.sql).digest('hex')!==p.expectedSqlDigest) throw new Error('chain SQL differs from disposable readback');
-await writeIntegratedArtifact(result.current.path,result.runtime);
+await writeIntegratedArtifact('mcp-server/src/scac-mutation-registry.current.generated.js',result.runtime);
 writeFileSync('mcp-server/src/scac-mutation-registry.current.generated.js',result.selector);
 writeFileSync('ops/config/scac-registry-chain.json',JSON.stringify(result.chain,null,2)+'\\n');
 writeFileSync('ops/config/scac-registry-source-inventory-fixtures.v1.json',JSON.stringify(result.fixture,null,2)+'\\n');

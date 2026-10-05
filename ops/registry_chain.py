@@ -42,7 +42,7 @@ def snapshot_selection(number, chain=None):
         'SCAC_TOTAL_ENTRY_COUNT': str(sum(r['entry_count'] for r in versions)),
         'SCAC_CURRENT_ENTRY_COUNT': str(row['entry_count']),
         'SCAC_CURRENT_SOURCE_COUNT': str(row['source_count']),
-        'SCAC_CURRENT_RUNTIME': str(ROOT / row['path']),
+        'SCAC_CURRENT_RUNTIME': str(ROOT / 'mcp-server/src/scac-mutation-registry.current.generated.js'),
         'SCAC_VERSION_ARRAY': ','.join("'"+r['version']+"'" for r in versions),
         'SCAC_HISTORICAL_ARRAY': ','.join("'"+r['version']+"'" for r in historical),
         'SCAC_FULL_SET_SEAL_COUNT': str(row['number'] if spec.get('include_current_entry_set') else row['number']-1),

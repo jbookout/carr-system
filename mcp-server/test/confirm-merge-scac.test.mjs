@@ -1,7 +1,7 @@
 import { CURRENT_REGISTRY_VERSION } from "../../ops/scac-mutation-inventory.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readRegistryArtifact as readFileSync } from '../../ops/registry-history.mjs';
 import { frozenInventory, renderConfirmMergeRegistrySql, renderRuntimeProjection,
   CONFIRM_MERGE_V102_DB_CATALOG_BASELINE } from "../../ops/scac-mutation-inventory.mjs";
 import { registeredOperation, SCAC_MUTATION_REGISTRY_VERSION } from "../src/mutation-registry.js";

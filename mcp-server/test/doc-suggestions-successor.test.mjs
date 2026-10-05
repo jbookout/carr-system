@@ -2,7 +2,8 @@ import { registryChain } from '../../ops/registry-chain.mjs';
 const migrationPairs = registryChain.atomic_groups.map(group => '(' + group.map(name => '\n    '+JSON.stringify(name)+',').join('')+'\n)').join('\n');
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
+import { readRegistryArtifact as readFileSync } from '../../ops/registry-history.mjs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { registeredOperation } from '../src/mutation-registry.js';
@@ -94,7 +95,7 @@ test('relationship attribution follows the delivered system-work contract withou
   // v109 stays sealed history; a later successor may own the live selector (Joe 2026-10-05: no version pins on main).
   const live = registryChain.versions.at(-1).number;
   assert.ok(live >= 109, `live registry selector v${live} must not precede v109`);
-  assert.ok(readdirSync(resolve(root, 'mcp-server/src')).includes('scac-mutation-registry.v109.generated.js'));
+  assert.ok(registryChain.versions.some(row => row.number === 109));
   assert.match(migrationPairs,
     /"0839_relationship_deal_links[.]sql",\n\s+"0840_relationship_scac_successor[.]sql"/);
 });

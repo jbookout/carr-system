@@ -2,7 +2,8 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
+import { readRegistryArtifact as readFileSync, historicalRows } from "./registry-history.mjs";
 import { mkdir } from "node:fs/promises";
 import { writeIntegratedArtifact as writeFile } from "./integration-generation.mjs";
 import { dirname, resolve } from "node:path";
@@ -2655,42 +2656,7 @@ export function frozenInventory(version) {
     throw new Error(`unsupported source-inventory fixture schema: ${fixture.schema_version}`);
   if (fixture.source_commit !== "f422e1720f33c8f7c24cd7433f151b115ef37ee7")
     throw new Error(`unexpected source-inventory fixture provenance: ${fixture.source_commit}`);
-  const rowsByKey = new Map(fixture.base.rows.map(row => [row.ingress_key, row]));
-  let expectedCount = fixture.base.expected_count;
-  let expectedDigest = fixture.base.expected_sha256;
-  if (!fixture.base.versions.includes(targetKey)) {
-    let found = false;
-    for (const patch of fixture.patches) {
-      for (const ingressKey of patch.remove) rowsByKey.delete(ingressKey);
-      for (const row of patch.upsert) rowsByKey.set(row.ingress_key, row);
-      for (const [ingressKey, replacement] of Object.entries(patch.row_replacements || {})) {
-        const current = rowsByKey.get(ingressKey);
-        if (!current || !replacement || typeof replacement !== "object" || Array.isArray(replacement))
-          throw new Error(`${patch.version} row replacement is malformed: ${ingressKey}`);
-        rowsByKey.set(ingressKey, { ...current, ...replacement });
-      }
-      for (const [sourceLocator, sourceDigest] of Object.entries(patch.source_digest_replacements || {})) {
-        if (!/^[0-9a-f]{64}$/.test(sourceDigest))
-          throw new Error(`${patch.version} source digest replacement is malformed: ${sourceLocator}`);
-        for (const [ingressKey, row] of rowsByKey) {
-          if (row.source_locator === sourceLocator)
-            rowsByKey.set(ingressKey, { ...row, source_digest: sourceDigest });
-        }
-      }
-      expectedCount = patch.expected_count;
-      expectedDigest = patch.expected_sha256;
-      if (patch.version === targetKey) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) throw new Error(`source-inventory fixture patch missing for ${targetKey}`);
-  }
-  const rows = [...rowsByKey.values()]
-    .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
-  const observedDigest = sourceInventoryFixtureDigest(rows);
-  if (rows.length !== expectedCount || observedDigest !== expectedDigest)
-    throw new Error(`${targetKey} source-inventory fixture drifted: count ${rows.length}/${expectedCount}, sha256 ${observedDigest}/${expectedDigest}`);
+  const rows = historicalRows(Number(targetKey.slice(1)), fixture);
   return Object.freeze(rows.map(row => Object.freeze(structuredClone(row))));
 }
 

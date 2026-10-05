@@ -39,6 +39,24 @@ class CandidateTests(unittest.TestCase):
     def registry(self,v): self.write(f'mcp-server/src/scac-mutation-registry.v{v}.generated.js',f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\n')
     def commit(self):
         self.g('add','migrations','mcp-server','db'); self.g('commit','-qm','Fixture source')
+    def test_manifest_allocates_after_archived_runtime_files(self):
+        import hashlib
+        current = 'mcp-server/src/scac-mutation-registry.current.generated.js'
+        self.write(current, (self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js').read_text())
+        (self.repo/'ops/config').mkdir(parents=True)
+        pin = {'number':97,'version':'scac-mutation-registry.v97','artifact_sha256':hashlib.sha256((self.repo/current).read_bytes()).hexdigest()}
+        self.write('ops/config/scac-registry-chain.json', json.dumps({'schema':'scac-registry-chain.v1','versions':[pin]}))
+        (self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js').rename(self.root/'archived-v97')
+        self.g('add','ops/config/scac-registry-chain.json'); self.commit()
+        base = self.g('rev-parse','HEAD'); self.g('update-ref','refs/remotes/origin/main',base)
+        plan = integration.allocation_plan(self.repo,base,['0749_example.sql'])
+        self.assertEqual((plan['registry_predecessor'],plan['registry_successor']),(97,98))
+        self.assertEqual(plan['predecessor_sha256'],pin['artifact_sha256'])
+        self.assertEqual(integration.validate_candidate(self.repo,base)['registry_predecessor'],97)
+        integration.check_generated_write(self.repo,self.repo/current, f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v98";\n'.encode(),base)
+        with self.assertRaises(MigrationNumberError):
+            integration.check_generated_write(self.repo,self.repo/current,b'edited',base)
+
     def test_generation_accepts_exact_pending_main_merge_but_proof_requires_commit(self):
         self.g('checkout', '-qb', 'feature')
         self.write('migrations/0752_feature.sql', 'select 2;')

@@ -168,11 +168,10 @@ def prepare(repo, base, approved, main, conflict_paths):
             raise RehomeError("cannot identify current-main successor SQL template")
         seal_path = staging / 'migrations' / plan['migration_names'][Path(sql[0]).name]
         domains = [staging / 'migrations' / plan['migration_names'][Path(p).name] for p in pending if p != sql[0]]
-        validate_outputs(staging, [str(seal_path.relative_to(staging)), f'mcp-server/src/scac-mutation-registry.v{plan["registry_successor"]}.generated.js'])
+        validate_outputs(staging, [str(seal_path.relative_to(staging)), 'mcp-server/src/scac-mutation-registry.current.generated.js'])
         receipt = regenerate(staging, plan, domains, seal_path, staging / matches[0])
         regenerated.add('mcp-server/src/scac-mutation-registry.current.generated.js')
         regenerated.add('ops/config/scac-registry-chain.json')
-        regenerated.add(f"mcp-server/src/{receipt['version']}.generated.js")
         changed = git(staging, 'diff', '--name-only').decode().splitlines()
         untracked = git(staging, 'ls-files', '--others', '--exclude-standard').decode().splitlines()
         git(staging, 'add', '--', *sorted(set(changed + untracked)))

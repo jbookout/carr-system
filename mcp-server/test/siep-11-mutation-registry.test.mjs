@@ -1,3 +1,4 @@
+import { readRegistryArtifact } from '../../ops/registry-history.mjs';
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -217,235 +218,235 @@ import {
 } from "../src/mutation-registry.js";
 import { TOOLS } from "../src/tools.js";
 
-const migration = fs.readFileSync(
+const migration = readRegistryArtifact(
   new URL("../../migrations/0454_siep11_mutation_registry.sql", import.meta.url), "utf8");
-const generated = fs.readFileSync(
+const generated = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.generated.js", import.meta.url), "utf8");
-const generatedV2 = fs.readFileSync(
+const generatedV2 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v2.generated.js", import.meta.url), "utf8");
-const successorMigration = fs.readFileSync(
+const successorMigration = readRegistryArtifact(
   new URL("../../migrations/0455_siep12_policy_epoch.sql", import.meta.url), "utf8");
-const generatedV3 = fs.readFileSync(
+const generatedV3 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v3.generated.js", import.meta.url), "utf8");
-const v3Migration = fs.readFileSync(
+const v3Migration = readRegistryArtifact(
   new URL("../../migrations/0457_siep13_forward_mutation_registry.sql", import.meta.url), "utf8");
-const generatedV4 = fs.readFileSync(
+const generatedV4 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v4.generated.js", import.meta.url), "utf8");
-const v4Migration = fs.readFileSync(
+const v4Migration = readRegistryArtifact(
   new URL("../../migrations/0459_siep14_forward_mutation_registry.sql", import.meta.url), "utf8");
-const generatedV5 = fs.readFileSync(
+const generatedV5 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v5.generated.js", import.meta.url), "utf8");
-const v5Migration = fs.readFileSync(
+const v5Migration = readRegistryArtifact(
   new URL("../../migrations/0461_siep15_forward_mutation_registry.sql", import.meta.url), "utf8");
-const generatedV6 = fs.readFileSync(
+const generatedV6 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v6.generated.js", import.meta.url), "utf8");
-const v6Migration = fs.readFileSync(
+const v6Migration = readRegistryArtifact(
   new URL("../../migrations/0462_siep16_forward_mutation_registry.sql", import.meta.url), "utf8");
-const generatedV7 = fs.readFileSync(
+const generatedV7 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v7.generated.js", import.meta.url), "utf8");
-const v7Migration = fs.readFileSync(
+const v7Migration = readRegistryArtifact(
   new URL("../../migrations/0464_siep16_integrated_mutation_registry.sql", import.meta.url), "utf8");
-const generatedV8 = fs.readFileSync(
+const generatedV8 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v8.generated.js", import.meta.url), "utf8");
-const v8Migration = fs.readFileSync(
+const v8Migration = readRegistryArtifact(
   new URL("../../migrations/0466_siep17_forward_mutation_registry.sql", import.meta.url), "utf8");
-const generatedV9 = fs.readFileSync(
+const generatedV9 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v9.generated.js", import.meta.url), "utf8");
-const v9Migration = fs.readFileSync(
+const v9Migration = readRegistryArtifact(
   new URL("../../migrations/0468_siep18_forward_mutation_registry.sql", import.meta.url), "utf8");
-const generatedV10 = fs.readFileSync(
+const generatedV10 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v10.generated.js", import.meta.url), "utf8");
-const v10Migration = fs.readFileSync(
+const v10Migration = readRegistryArtifact(
   new URL("../../migrations/0471_source_merge_catalog_registry_successor.sql", import.meta.url), "utf8");
-const generatedV11 = fs.readFileSync(
+const generatedV11 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v11.generated.js", import.meta.url), "utf8");
-const v11Migration = fs.readFileSync(
+const v11Migration = readRegistryArtifact(
   new URL("../../migrations/0481_codex_continuity_registry_activation.sql", import.meta.url), "utf8");
-const generatedV12 = fs.readFileSync(
+const generatedV12 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v12.generated.js", import.meta.url), "utf8");
-const v12Migration = fs.readFileSync(
+const v12Migration = readRegistryArtifact(
   new URL("../../migrations/0486_claude_continuity_registry_activation.sql", import.meta.url), "utf8");
-const generatedV13 = fs.readFileSync(
+const generatedV13 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v13.generated.js", import.meta.url), "utf8");
-const v13Migration = fs.readFileSync(
+const v13Migration = readRegistryArtifact(
   new URL("../../migrations/0487_claude_startup_registry_activation.sql", import.meta.url), "utf8");
-const generatedV14 = fs.readFileSync(
+const generatedV14 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v14.generated.js", import.meta.url), "utf8");
-const v14Migration = fs.readFileSync(
+const v14Migration = readRegistryArtifact(
   new URL("../../migrations/0488_claude_actor_hydration_registry_activation.sql", import.meta.url), "utf8");
-const generatedV15 = fs.readFileSync(
+const generatedV15 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v15.generated.js", import.meta.url), "utf8");
-const v15Migration = fs.readFileSync(
+const v15Migration = readRegistryArtifact(
   new URL("../../migrations/0489_claude_config_preservation_registry_activation.sql", import.meta.url), "utf8");
-const generatedV16 = fs.readFileSync(
+const generatedV16 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v16.generated.js", import.meta.url), "utf8");
-const v16Migration = fs.readFileSync(
+const v16Migration = readRegistryArtifact(
   new URL("../../migrations/0490_codex_compaction_checkpoint_registry_activation.sql", import.meta.url), "utf8");
-const generatedV17 = fs.readFileSync(
+const generatedV17 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v17.generated.js", import.meta.url), "utf8");
-const v17Migration = fs.readFileSync(
+const v17Migration = readRegistryArtifact(
   new URL("../../migrations/0491_backup_guard_status_registry_activation.sql", import.meta.url), "utf8");
-const generatedV18 = fs.readFileSync(
+const generatedV18 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v18.generated.js", import.meta.url), "utf8");
-const v18Migration = fs.readFileSync(
+const v18Migration = readRegistryArtifact(
   new URL("../../migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql", import.meta.url), "utf8");
-const generatedV19 = fs.readFileSync(
+const generatedV19 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v19.generated.js", import.meta.url), "utf8");
-const v19Migration = fs.readFileSync(
+const v19Migration = readRegistryArtifact(
   new URL("../../migrations/0493_incident_work_request_link_scac_successor.sql", import.meta.url), "utf8");
-const generatedV20 = fs.readFileSync(
+const generatedV20 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v20.generated.js", import.meta.url), "utf8");
-const v20Migration = fs.readFileSync(
+const v20Migration = readRegistryArtifact(
   new URL("../../migrations/0494_codex_continuity_archive_registry.sql", import.meta.url), "utf8");
-const generatedV21 = fs.readFileSync(
+const generatedV21 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v21.generated.js", import.meta.url), "utf8");
-const generatedV22 = fs.readFileSync(
+const generatedV22 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v22.generated.js", import.meta.url), "utf8");
-const generatedV23 = fs.readFileSync(
+const generatedV23 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v23.generated.js", import.meta.url), "utf8");
-const v21Migration = fs.readFileSync(
+const v21Migration = readRegistryArtifact(
   new URL("../../migrations/0495_r06_hooks_correctness_scac_successor.sql", import.meta.url), "utf8");
-const v22Migration = fs.readFileSync(
+const v22Migration = readRegistryArtifact(
   new URL("../../migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql",
     import.meta.url), "utf8");
-const v24Migration = fs.readFileSync(
+const v24Migration = readRegistryArtifact(
   new URL("../../migrations/0498_f09_workflow_truth_and_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV26 = fs.readFileSync(
+const generatedV26 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v26.generated.js", import.meta.url), "utf8");
-const v26Migration = fs.readFileSync(
+const v26Migration = readRegistryArtifact(
   new URL("../../migrations/0503_gate_zero_outcome_and_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV27 = fs.readFileSync(
+const generatedV27 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v27.generated.js", import.meta.url), "utf8");
-const v27Migration = fs.readFileSync(
+const v27Migration = readRegistryArtifact(
   new URL("../../migrations/0512_foundation_assurance_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV28 = fs.readFileSync(
+const generatedV28 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v28.generated.js", import.meta.url), "utf8");
-const v28Migration = fs.readFileSync(
+const v28Migration = readRegistryArtifact(
   new URL("../../migrations/0516_deal_field_change_provenance_and_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV29 = fs.readFileSync(
+const generatedV29 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v29.generated.js", import.meta.url), "utf8");
-const v29Migration = fs.readFileSync(
+const v29Migration = readRegistryArtifact(
   new URL("../../migrations/0518_program_controller_seams_scac_successor.sql",
     import.meta.url), "utf8");
-const v29DomainMigration = fs.readFileSync(
+const v29DomainMigration = readRegistryArtifact(
   new URL("../../migrations/0517_program_controller_seams.sql", import.meta.url), "utf8");
-const generatedV30 = fs.readFileSync(
+const generatedV30 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v30.generated.js", import.meta.url), "utf8");
-const v30Migration = fs.readFileSync(
+const v30Migration = readRegistryArtifact(
   new URL("../../migrations/0522_producer_trio_scac_successor.sql", import.meta.url), "utf8");
-const generatedV31 = fs.readFileSync(
+const generatedV31 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v31.generated.js", import.meta.url), "utf8");
-const v31Migration = fs.readFileSync(
+const v31Migration = readRegistryArtifact(
   new URL("../../migrations/0524_doc_conversation_write_doors_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV32 = fs.readFileSync(
+const generatedV32 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v32.generated.js", import.meta.url), "utf8");
-const v32Migration = fs.readFileSync(
+const v32Migration = readRegistryArtifact(
   new URL("../../migrations/0526_doc_conversation_list_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV33 = fs.readFileSync(
+const generatedV33 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v33.generated.js", import.meta.url), "utf8");
-const v33Migration = fs.readFileSync(
+const v33Migration = readRegistryArtifact(
   new URL("../../migrations/0528_notification_preferences_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV34 = fs.readFileSync(
+const generatedV34 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v34.generated.js", import.meta.url), "utf8");
-const v34Migration = fs.readFileSync(
+const v34Migration = readRegistryArtifact(
   new URL("../../migrations/0530_session_identity_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV35 = fs.readFileSync(
+const generatedV35 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v35.generated.js", import.meta.url), "utf8");
-const v35Migration = fs.readFileSync(
+const v35Migration = readRegistryArtifact(
   new URL("../../migrations/0532_room_dispatch_spine_scac_successor.sql",
     import.meta.url), "utf8");
-const generatedV36 = fs.readFileSync(
+const generatedV36 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v36.generated.js", import.meta.url), "utf8");
-const generatedV37 = fs.readFileSync(
+const generatedV37 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v37.generated.js", import.meta.url), "utf8");
-const generatedV38 = fs.readFileSync(
+const generatedV38 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v38.generated.js", import.meta.url), "utf8");
-const generatedV39 = fs.readFileSync(
+const generatedV39 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v39.generated.js", import.meta.url), "utf8");
-const generatedV41 = fs.readFileSync(
+const generatedV41 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v41.generated.js", import.meta.url), "utf8");
-const generatedV49 = fs.readFileSync(
+const generatedV49 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v49.generated.js", import.meta.url), "utf8");
-const generatedV57 = fs.readFileSync(
+const generatedV57 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v57.generated.js", import.meta.url), "utf8");
-const generatedV63 = fs.readFileSync(
+const generatedV63 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v63.generated.js", import.meta.url), "utf8");
-const generatedV65 = fs.readFileSync(
+const generatedV65 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v65.generated.js", import.meta.url), "utf8");
-const generatedV69 = fs.readFileSync(
+const generatedV69 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v69.generated.js", import.meta.url), "utf8");
-const generatedV72 = fs.readFileSync(
+const generatedV72 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v72.generated.js", import.meta.url), "utf8");
-const generatedV74 = fs.readFileSync(
+const generatedV74 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v74.generated.js", import.meta.url), "utf8");
-const generatedV75 = fs.readFileSync(
+const generatedV75 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v75.generated.js", import.meta.url), "utf8");
-const generatedV76 = fs.readFileSync(
+const generatedV76 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v76.generated.js", import.meta.url), "utf8");
-const generatedV77 = fs.readFileSync(
+const generatedV77 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v77.generated.js", import.meta.url), "utf8");
-const generatedV78 = fs.readFileSync(
+const generatedV78 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v78.generated.js", import.meta.url), "utf8");
-const generatedV79 = fs.readFileSync(
+const generatedV79 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v79.generated.js", import.meta.url), "utf8");
-const generatedV80 = fs.readFileSync(
+const generatedV80 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v80.generated.js", import.meta.url), "utf8");
-const generatedV81 = fs.readFileSync(
+const generatedV81 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v81.generated.js", import.meta.url), "utf8");
-const generatedV82 = fs.readFileSync(
+const generatedV82 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v82.generated.js", import.meta.url), "utf8");
-const generatedV83 = fs.readFileSync(
+const generatedV83 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v83.generated.js", import.meta.url), "utf8");
-const generatedV84 = fs.readFileSync(
+const generatedV84 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v84.generated.js", import.meta.url), "utf8");
-const generatedV85 = fs.readFileSync(
+const generatedV85 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v85.generated.js", import.meta.url), "utf8");
-const generatedV86 = fs.readFileSync(
+const generatedV86 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v86.generated.js", import.meta.url), "utf8");
-const generatedV87 = fs.readFileSync(
+const generatedV87 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v87.generated.js", import.meta.url), "utf8");
-const generatedV88 = fs.readFileSync(
+const generatedV88 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v88.generated.js", import.meta.url), "utf8");
-const generatedV90 = fs.readFileSync(
+const generatedV90 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v90.generated.js", import.meta.url), "utf8");
-const generatedV92 = fs.readFileSync(
+const generatedV92 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v92.generated.js", import.meta.url), "utf8");
-const generatedV93 = fs.readFileSync(
+const generatedV93 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v93.generated.js", import.meta.url), "utf8");
-const generatedV94 = fs.readFileSync(
+const generatedV94 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v94.generated.js", import.meta.url), "utf8");
-const generatedV95 = fs.readFileSync(
+const generatedV95 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v95.generated.js", import.meta.url), "utf8");
-const generatedV96 = fs.readFileSync(
+const generatedV96 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v96.generated.js", import.meta.url), "utf8");
-const generatedV97 = fs.readFileSync(
+const generatedV97 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v97.generated.js", import.meta.url), "utf8");
-const generatedV98 = fs.readFileSync(
+const generatedV98 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v98.generated.js", import.meta.url), "utf8");
-const generatedV99 = fs.readFileSync(
+const generatedV99 = readRegistryArtifact(
   new URL("../src/scac-mutation-registry.v99.generated.js", import.meta.url), "utf8");
-const v25Migration = fs.readFileSync(
+const v25Migration = readRegistryArtifact(
   new URL("../../migrations/0501_scheduled_job_admission_and_scac_successor.sql",
     import.meta.url), "utf8");
-const v23Migration = fs.readFileSync(
+const v23Migration = readRegistryArtifact(
   new URL("../../migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql",
     import.meta.url), "utf8");
-const siep18MonitorMigration = fs.readFileSync(
+const siep18MonitorMigration = readRegistryArtifact(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
   "0460_siep15_device_enrollment.sql",
   "0465_siep17_token_challenge_authority.sql",
   "0467_siep18_atomic_db_monitor_grants.sql",
   "0470_source_merge_authority_projection.sql",
-].map(name => [name, fs.readFileSync(new URL(`../../migrations/${name}`, import.meta.url), "utf8")]);
+].map(name => [name, readRegistryArtifact(new URL(`../../migrations/${name}`, import.meta.url), "utf8")]);
 
 test("successor generation refuses absent or ambiguous predecessor markers", () => {
   assert.equal(replaceExactlyOnce("before marker after", "marker", "successor", "unit"),
@@ -940,7 +941,7 @@ test("v18 seals the WR68 sourced shape forward correction and preserves the v17 
   assert.equal(sha256(generatedV17), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
     "mcp-server/src/scac-mutation-registry.v17.generated.js"]);
   for (const [path, digest] of Object.entries(SOURCED_SHAPE_FORWARD_CORRECTION_WITNESS_SHA256))
-    assert.equal(sha256(fs.readFileSync(new URL(`../../${path}`, import.meta.url), "utf8")), digest, path);
+    assert.equal(sha256(readRegistryArtifact(new URL(`../../${path}`, import.meta.url), "utf8")), digest, path);
   assert.match(v18Migration,
     /0491_backup_guard_status_registry_activation[.]sql'[\s\S]+49129915fe40f41400c5fc769f82633b2da68949a29d193329fba2c6016e3913/);
   assert.match(v18Migration,
@@ -1129,7 +1130,7 @@ test("the ACTIVE runtime registry is v63, and a stale v19 import fails admission
   // schema (detail="boot", page) for the rule boot; v91 (provisional)
   // registers V5-RW02's three safe-stop run-store verbs and reseals update-deal.
   assert.equal(SCAC_MUTATION_REGISTRY_VERSION, CURRENT_REGISTRY_VERSION);
-  const v101SelectorDigest = fs.readFileSync(new URL(`../src/${CURRENT_REGISTRY_VERSION}.generated.js`, import.meta.url), "utf8").match(
+  const v101SelectorDigest = readRegistryArtifact(new URL(`../src/${CURRENT_REGISTRY_VERSION}.generated.js`, import.meta.url), "utf8").match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v101SelectorDigest);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV90.match(
@@ -1391,7 +1392,7 @@ test("the v21 frontier re-digested only source, and v63 is what the runtime now 
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v63GeneratedDigest = generatedV63.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, fs.readFileSync(new URL(`../src/${CURRENT_REGISTRY_VERSION}.generated.js`, import.meta.url), "utf8").match(
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, readRegistryArtifact(new URL(`../src/${CURRENT_REGISTRY_VERSION}.generated.js`, import.meta.url), "utf8").match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
   assert.notEqual(SCAC_MUTATION_REGISTRY_DIGEST, generatedV90.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1]);
@@ -2098,7 +2099,7 @@ test("no substitution in the v26 renderer is a no-op, which is how a shifted mir
   // ONCE, not one it finds and replaces with itself. Two such no-ops reached a
   // disposable Postgres in this slice: one emitted a duplicate function rename
   // and one emitted a duplicate revoke entry.
-  const source = fs.readFileSync(
+  const source = readRegistryArtifact(
     new URL("../../ops/scac-mutation-inventory.mjs", import.meta.url), "utf8");
   const start = source.indexOf("function renderGateZeroOutcomeAdmissionRegistrySqlFrozen(rows,");
   assert.ok(start > 0, "the v26 renderer moved; this sweep is pointed at nothing");
@@ -2274,7 +2275,7 @@ test("the v26 admission provenance is measured from the row sets and binds every
 
   // The fixture is read as bytes here, not through the module that also
   // renders the paragraph: the file on disk is the artifact a reviewer reads.
-  const fixture = JSON.parse(fs.readFileSync(
+  const fixture = JSON.parse(readRegistryArtifact(
     new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json",
       import.meta.url), "utf8"));
   const review = fixture.historical_artifact_replay_review;
@@ -2342,7 +2343,7 @@ test("the v26 admission provenance is measured from the row sets and binds every
   // The migration says the same measured thing, and the generator states no
   // count of its own in prose any more -- a comment cannot be derived, so it
   // must not carry the number that drifted.
-  const generator = fs.readFileSync(
+  const generator = readRegistryArtifact(
     new URL("../../ops/scac-mutation-inventory.mjs", import.meta.url), "utf8");
   const comments = generator.split("\n").filter(line => line.trim().startsWith("//"));
   for (const line of comments)
@@ -2368,14 +2369,14 @@ test("the Gate Zero canary agent passes only arguments the wrapper's own parser 
   // The recognised options are read OUT OF THE WRAPPER, not restated here: a
   // future option added there is covered without editing this test, and an
   // option removed there turns a plist that still passes it red.
-  const wrapper = fs.readFileSync(
+  const wrapper = readRegistryArtifact(
     new URL("../../bin/run-scheduled.sh", import.meta.url), "utf8");
   const loop = wrapper.slice(wrapper.indexOf('while [ "$#" -gt 0 ]; do'),
     wrapper.indexOf("done", wrapper.indexOf('while [ "$#" -gt 0 ]; do')));
   const recognised = [...loop.matchAll(/^\s{4}(-{1,2}[a-z-]*)\)/gm)].map(match => match[1]);
   assert.deepEqual(recognised.sort(), ["--", "--also-heartbeat", "--heartbeat-interval"]);
 
-  const plist = fs.readFileSync(
+  const plist = readRegistryArtifact(
     new URL("../../ops/launchd/com.carr.gate-zero-canary.plist", import.meta.url), "utf8");
   const start = plist.indexOf("<key>ProgramArguments</key>");
   assert.ok(start > 0);
@@ -2401,7 +2402,7 @@ test("the Gate Zero canary agent passes only arguments the wrapper's own parser 
   // And the child is a no-op: one statement, no file, no output. A canary that
   // writes something can fail at writing it, and a failed canary row says the
   // scheduler is broken about a scheduler that just proved it works.
-  const canary = fs.readFileSync(
+  const canary = readRegistryArtifact(
     new URL("../../bin/gate-zero-canary.sh", import.meta.url), "utf8");
   const statements = canary.split("\n")
     .filter(line => line.trim() && !line.startsWith("#"));
@@ -2411,7 +2412,7 @@ test("the Gate Zero canary agent passes only arguments the wrapper's own parser 
   // reads lives where a database exists: ops/gate-zero-scheduler-canary-gate.py,
   // which the migration class runs on its disposable Postgres. Its `# ci:
   // db-gate` marker is what wires it, so the marker is asserted here.
-  const gate = fs.readFileSync(
+  const gate = readRegistryArtifact(
     new URL("../../ops/gate-zero-scheduler-canary-gate.py", import.meta.url), "utf8");
   assert.match(gate, /^# ci: db-gate$/m);
   assert.match(gate, /readSchedulerCanaryEvidence/);
@@ -2571,7 +2572,7 @@ test("the v25-v30 public surfaces admit no caller input under any shape", () => 
   // export landed; the durable fix is that the LIST is now checked against the
   // module's own text, so an export added without a line in this sweep fails
   // here rather than in a reviewer's diff.
-  const generatorSource = fs.readFileSync(
+  const generatorSource = readRegistryArtifact(
     new URL("../../ops/scac-mutation-inventory.mjs", import.meta.url), "utf8");
   assert.deepEqual(
     [...generatorSource.matchAll(/^export const (\w+) =\s*\n\s*closedExport\(/gm)]
@@ -2698,7 +2699,7 @@ test("a definition-only LaunchAgent is exempt from service closure and refused i
   // reviewed definition, not a deployment. The exemption is derived from the
   // artifact -- no trigger and no load-time start means launchd has no moment
   // to fire it -- so it cannot drift away from what the file actually says.
-  const agent = fs.readFileSync(
+  const agent = readRegistryArtifact(
     new URL("../../ops/launchd/com.carr.repo-hygiene-janitor.plist", import.meta.url), "utf8");
   const plist = parsePlistXml(agent);
   assert.equal(plist.RunAtLoad, false);
@@ -2783,7 +2784,7 @@ test("the v21 successor refuses a caller-supplied predecessor or wrong projectio
 
 test("the v36 successor preserves the exact v35 seal and measures both catalog phases", () => {
   const forward = renderReadyPlanAmendmentForwardRegistrySqlClosed();
-  const domainMigration = fs.readFileSync(new URL(
+  const domainMigration = readRegistryArtifact(new URL(
     "../../migrations/0532a_canonical_ownership_lease_activation.sql", import.meta.url), "utf8");
   assert.match(forward, new RegExp(sha256(domainMigration)));
   assert.match(forward, /\('scac-mutation-registry\.v35','sha256:e8c25879fedad301f92d13d0f08d53f9b9b4098efc81baae1878b3658ae8deec',1859,870\)/);
@@ -2822,7 +2823,7 @@ test("source-only migration diagnostics preserve the sealed runtime frontier", (
   const confirmMerge = sealed.find(row => row.ingress_key === "mcp-tool:confirm-merge");
   assert.equal(confirmMerge.human_only, true);
   assert.equal(confirmMerge.principal_mode, "server_verified_human");
-  const fixture = JSON.parse(fs.readFileSync(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const fixture = JSON.parse(readRegistryArtifact(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
   const reviewVersion = Object.keys(fixture.current_source_reviews)
     .sort((left, right) => Number(left.split('.v')[1]) - Number(right.split('.v')[1])).at(-1);
   const review = fixture.current_source_reviews[reviewVersion];
@@ -2830,7 +2831,7 @@ test("source-only migration diagnostics preserve the sealed runtime frontier", (
     const row = review?.upsert.find(row => row.source_locator === locator) || sealed.find(row => row.source_locator === locator);
     const previous = sealed.find(row => row.source_locator === locator);
     assert.ok(previous, "reviewed administration script already exists in the seal");
-    const digest = sha256(fs.readFileSync(new URL(`../../${locator}`, import.meta.url), "utf8"));
+    const digest = sha256(readRegistryArtifact(new URL(`../../${locator}`, import.meta.url), "utf8"));
     assert.equal(row.schema_digest, digest);
     assert.equal(row.handler_digest, digest);
   }
@@ -2875,6 +2876,7 @@ test("the complete frontier renders when every generated target is absent", () =
       ...trackedPaths,
       "migrations/0511_foundation_assurance_minimum_outcome.sql",
       "ops/registry-chain.mjs",
+      "ops/registry-history.mjs",
       "ops/config/scac-registry-chain.json",
       "mcp-server/src/scac-mutation-registry.current.generated.js",
     ])) {
@@ -2904,7 +2906,7 @@ test("the complete frontier renders when every generated target is absent", () =
     // the whole set rather than a subset.
     assert.match(stdout, new RegExp(`\\(${frontierPaths.length} artifacts\\)`));
     for (const [target, expected] of Object.entries(frontier))
-      assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
+      assert.equal(readRegistryArtifact(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
     fs.rmSync(isolatedRoot, { recursive: true, force: true });
   }
@@ -2967,7 +2969,7 @@ test("composites expose exact reviewed edges and generic dispatch stays default 
   assert.deepEqual(registeredOperation("morning-brief").delegates_to,
     ["claim-card", "deal-room-board", "loop-board", "today-triage"]);
   assert.deepEqual(registeredOperation("call-verb").delegates_to, ["*registered_operation"]);
-  assert.match(fs.readFileSync(new URL("../src/tools.js", import.meta.url), "utf8"),
+  assert.match(readRegistryArtifact(new URL("../src/tools.js", import.meta.url), "utf8"),
     /executeRegisteredTool\(c, actor, "log-activity"/);
 });
 
@@ -3161,7 +3163,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     !row.physical_authority_refs.includes("ops.definition_only_launchd:not_deployed"));
   assert.equal(deployedLaunchd.every(row =>
     row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
-  const services = JSON.parse(fs.readFileSync(new URL("../../ops/config/services.json", import.meta.url), "utf8"));
+  const services = JSON.parse(readRegistryArtifact(new URL("../../ops/config/services.json", import.meta.url), "utf8"));
   const expectedServiceRefs = services.services.flatMap(service => service.environments
     .filter(environment => launchdPaths.includes(environment.deploy_mechanism))
     .map(environment => `${environment.deploy_mechanism}|ops.service_environment:${service.key}:${environment.environment}`));
@@ -3195,7 +3197,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     assert.ok(Object.keys(row.trigger_contract || {}).length > 0 ||
       row.trigger_contract_digest, label);
   }
-  const configAsCode = fs.readFileSync(
+  const configAsCode = readRegistryArtifact(
     new URL("../../ops/config-as-code.py", import.meta.url), "utf8");
   const definitionOnlyBlock = configAsCode.slice(
     configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
@@ -3230,7 +3232,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const scripts = new Set(discoverScriptEntrypoints());
   for (const delegate of launchd.flatMap(row => row.delegates_to).filter(value => value.startsWith("script:")))
     assert.equal(scripts.has(delegate.slice("script:".length)), true, `${delegate} must resolve`);
-  const rulesSource = fs.readFileSync(new URL("../../ops/launchd/com.carr.rules-refresh.plist", import.meta.url), "utf8");
+  const rulesSource = readRegistryArtifact(new URL("../../ops/launchd/com.carr.rules-refresh.plist", import.meta.url), "utf8");
   const reviewedPlist = parsePlistXml(rulesSource);
   const changedPlist = parsePlistXml(rulesSource.replace("<integer>8</integer>", "<integer>88</integer>"));
   assert.equal(reviewedPlist.StartCalendarInterval.length, 14);
@@ -3243,15 +3245,15 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
 test("launchd physical-authority catalogs are bidirectionally closed and source-exact", () => {
   const launchdPaths = fs.readdirSync(new URL("../../ops/launchd/", import.meta.url))
     .filter(name => name.endsWith(".plist")).map(name => `ops/launchd/${name}`).sort();
-  const services = JSON.parse(fs.readFileSync(
+  const services = JSON.parse(readRegistryArtifact(
     new URL("../../ops/config/services.json", import.meta.url), "utf8"));
-  const legacy = JSON.parse(fs.readFileSync(
+  const legacy = JSON.parse(readRegistryArtifact(
     new URL("../../ops/config/control-plane-scheduler-cutover.v1.json", import.meta.url), "utf8"));
   // The real caller derives its definition-only set from the artifacts, so this
   // test does the same rather than hard-coding a name: an agent with no trigger
   // and no load-time start is exempt from closure, and every other agent is not.
   const definitionOnly = launchdPaths.filter(path => isDefinitionOnlyLaunchd(
-    parsePlistXml(fs.readFileSync(new URL(`../../${path}`, import.meta.url), "utf8"))));
+    parsePlistXml(readRegistryArtifact(new URL(`../../${path}`, import.meta.url), "utf8"))));
   assert.deepEqual(definitionOnly, [
     "ops/launchd/com.carr.repo-hygiene-janitor.plist",
     "ops/launchd/com.carr.resource-collector.plist",
@@ -3288,7 +3290,7 @@ test("launchd physical-authority catalogs are bidirectionally closed and source-
   const legacySurface = legacy.surfaces.find(surface =>
     surface.repo_plist_relpath === "ops/launchd/com.carr.rules-refresh.plist") ||
     legacy.surfaces.find(surface => surface.scheduler_kind === "launchd");
-  const plist = parsePlistXml(fs.readFileSync(
+  const plist = parsePlistXml(readRegistryArtifact(
     new URL(`../../${legacySurface.repo_plist_relpath}`, import.meta.url), "utf8"));
   assert.doesNotThrow(() => assertLegacyLaunchdSource(legacySurface, legacySurface.repo_plist_relpath, plist));
   assert.throws(() => assertLegacyLaunchdSource(
@@ -3331,7 +3333,7 @@ test("only verb-contract changes and new write entrances hold a pull request to 
 test("the bound MCP fields are exactly what the runtime admission check compares", () => {
   // If mutation-registry.js starts comparing another field, this list must
   // grow with it, or a change the server would refuse could merge unsealed.
-  const source = fs.readFileSync(new URL("../src/mutation-registry.js", import.meta.url), "utf8");
+  const source = readRegistryArtifact(new URL("../src/mutation-registry.js", import.meta.url), "utf8");
   const body = source.slice(source.indexOf("export async function assertRegisteredOperation"));
   const actual = body.slice(body.indexOf("const actual = {"), body.indexOf("};"));
   const compared = [...actual.matchAll(/^\s+([a-z_]+):/gm)].map(match => match[1]).sort();
@@ -3385,7 +3387,7 @@ test("credential rotation source review cannot widen authority or admit an ingre
 
 
 test("Dell receipt source review binds its live bytes without changing the sealed frontier", () => {
-  const fixture = JSON.parse(fs.readFileSync(new URL(
+  const fixture = JSON.parse(readRegistryArtifact(new URL(
     "../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
   const sealed = frozenInventory("scac-mutation-registry.v103");
   const key = "external-admin:bin/migrate-dell.sh";

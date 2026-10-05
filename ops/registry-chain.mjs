@@ -39,11 +39,13 @@ export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest
     digest: `sha256:${digest({ schema_version: version, rows, db_catalog_baseline: baseline })}`,
     source_set_digest: `sha256:${digest(rows.map(row => `sha256:${digest(row)}`).sort().join(','))}`,
     catalog_digest: `sha256:${digest(baseline)}`, artifact_sha256: digest(runtime),
-    path: `mcp-server/src/${version}.generated.js`, catalog: baseline,
+    path: 'mcp-server/src/scac-mutation-registry.current.generated.js', catalog: baseline,
+    commit: execFileSync('git', ['rev-parse', 'HEAD'], {cwd: fileURLToPath(new URL('../', import.meta.url)), encoding: 'utf8'}).trim(),
     source_count: rows.length, entry_count: rows.length + ['secdef_execute', 'relation_dml', 'column_dml'].reduce((sum, key) => sum + baseline[key].count, 0),
     migration: `migrations/${migration}`, entry_set_digest: entrySetDigest,
     atomic_pair: [...domains.map(item => basename(item.filename)), migration], strict_atomic: true,
     dependencies: [basename(predecessor.migration), ...domains.map(item => basename(item.filename))],
+    snapshot: {include_current_entry_set: true, catalog_function: `ops.scac_mutation_catalog_v${number}_current()`},
   };
   const template = readFileSync(new URL('../' + predecessor.migration, import.meta.url), 'utf8');
   if (digest(template) !== predecessor.migration_sha256) throw new Error('predecessor migration pin drifted');
@@ -72,7 +74,7 @@ export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest
     expected_count: rows.length, expected_sha256: createHash('sha256').update(JSON.stringify(rows)).digest('hex') });
   const seals = Object.fromEntries(chain.versions.filter(row => row.entry_set_digest).map(row => [row.version, row.entry_set_digest]));
   seals[version] = entrySetDigest;
-  return { current, runtime, sql, fixture, seals, selector: `export * from "./${version}.generated.js";\n`, chain: { ...chain, versions: [...chain.versions, current],
+  return { current, runtime, sql, fixture, seals, selector: runtime, chain: { ...chain, versions: [...chain.versions, current],
     atomic_groups: [...chain.atomic_groups, current.atomic_pair], strict_atomic_groups: [...chain.strict_atomic_groups, current.atomic_pair] } };
 }
 
