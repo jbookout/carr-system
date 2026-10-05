@@ -715,22 +715,6 @@ class GitHubReadPass:
                 continue
             self.seed((read_json_file(path).get("tasks") or {}).values())
 
-    def fresh_path(self) -> Path:
-        return board_dir() / ".github-pr-fresh.json"
-
-    def fresh_at(self, identity: str) -> float:
-        try:
-            return float(read_json_file(self.fresh_path()).get(identity) or 0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    def mark_fresh(self, identity: str) -> None:
-        # Kept beside the PR cache, not inside it: the cache holds GitHub's facts.
-        with board_lock("github-pr-fresh"):
-            stamps = read_json_file(self.fresh_path())
-            stamps[identity] = time.time()
-            atomic_write(self.fresh_path(), json.dumps(stamps, sort_keys=True) + "\n")
-
     def reconcile(self) -> None:
         self.saved = {identity: info for identity, info in read_json_file(self.path).items()
                       if validated_pr(info) is not None}
@@ -788,21 +772,33 @@ class GitHubReadPass:
                           "author": {"login": task.get("author") or ""}, "mergeCommit": None,
                           "statusCheckRollup": [], "comments": [], "reviewDecision": "", "mergeable": "UNKNOWN"})
 
+    def result(self, info: dict[str, Any] | None, repo: str,
+               error: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        # Raw observations are reusable; review trust belongs to the current policy.
+        if info and "_reviews" in info:
+            info = {**info, "reviewDecision": rest_review_decision(
+                info["_reviews"], {"mergeable_state": info.get("_mergeable_state")}, review_rules(repo))}
+        return info, error or (info.get("_refresh_error") if info else None)
+
+    @staticmethod
+    def matches_discovery(info: dict[str, Any] | None, raw: dict[str, Any] | None) -> bool:
+        return raw is None or (info is not None
+            and raw.get("state") == ("open" if info["state"] == "OPEN" else "closed")
+            and raw.get("updated_at") == info.get("updatedAt")
+            and (not isinstance(raw.get("head"), dict)
+                 or raw["head"].get("sha") == info.get("headRefOid")))
+
     def read(self, number: int, repo: str, raw: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
         repo = safe_repo(repo)
         identity = f"{repo}#{number}"
         self.reconcile()
         old = self.saved.get(identity)
         if old and old.get("state") == "MERGED" and not old.get("_legacy_terminal"):
-            return old, None
+            return self.result(old, repo)
         # An open PR read moments ago is reused instead of re-fetched. Every board
         # mutation renders every open PR, so one job-watchdog scan (100+ mutations)
         # spent the whole 5,000/hr REST pool in minutes on 2026-10-04. Discovery
         # rows (raw) still carry their own version evidence and are checked below.
-        window = pr_fresh_seconds()
-        if (window and raw is None and old and not old.get("_legacy_terminal")
-                and 0 <= time.time() - self.fresh_at(identity) < window):
-            return old, None
         cached = self.results.get(identity)
         if cached:
             info, error = cached
@@ -810,14 +806,24 @@ class GitHubReadPass:
                 info, error = old, None
             # Discovery rows are evidence: a different state, version or head
             # invalidates even an earlier result from this same render pass.
-            matches = (raw is None or (info is not None
-                       and raw.get("state") == ("open" if info["state"] == "OPEN" else "closed")
-                       and raw.get("updated_at") == info.get("updatedAt")
-                       and (not isinstance(raw.get("head"), dict)
-                            or raw["head"].get("sha") == info.get("headRefOid"))))
-            if matches:
-                return info, error
+            if self.matches_discovery(info, raw):
+                return self.result(info, repo, error)
+        window = pr_fresh_seconds()
+        # Payload and observation time come from the same atomic cache snapshot.
+        # A losing writer never changes the winner's time; failed refreshes miss.
+        if (window and raw is None and old and not old.get("_legacy_terminal")
+                and not old.get("_refresh_error")
+                and isinstance(old.get("_observed_at"), (int, float))
+                and 0 <= time.time() - old["_observed_at"] < window):
+            return self.result(old, repo)
         observation = self.observe()
+        observed_at = time.time()
+        discovery = raw if raw is not None else (old.get("_discovery") if old else None)
+        if old and discovery is not None and not self.matches_discovery(old, discovery):
+            hint = {key: discovery[key] for key in ("state", "updated_at", "head") if key in discovery}
+            old = self.save(identity, {**old, "_observation": observation, "_observed_at": None,
+                                      "_discovery": hint,
+                                      "_refresh_error": "PR discovery invalidated cached observation"})
         result: tuple[dict[str, Any] | None, str | None]
         try:
             # Mergeability changes with the base and CI changes independently
@@ -825,6 +831,10 @@ class GitHubReadPass:
             raw = gh_json(["api", f"repos/{repo}/pulls/{number}"], timeout=30)
             info = rest_pr(raw)
             assert isinstance(raw, dict)  # rest_pr has validated the response
+            if (discovery is not None and not self.matches_discovery(info, discovery)
+                    and str(info.get("updatedAt") or "") <= str(discovery.get("updated_at") or "")):
+                kind = "closed discovery" if discovery.get("state") == "closed" else "discovery"
+                raise RuntimeError(f"PR detail disagrees with {kind}")
             head = info["headRefOid"]
             base = f"repos/{repo}"
             if old and old.get("_legacy_terminal") and old["state"] == "MERGED":
@@ -850,6 +860,7 @@ class GitHubReadPass:
                 if reviews is None:
                     reviews = rest_rows(f"{base}/pulls/{number}/reviews")
                 info["_reviews"] = reviews
+                info["_mergeable_state"] = raw.get("mergeable_state")
                 info["reviewDecision"] = rest_review_decision(reviews, raw, review_rules(repo))
             if info["state"] == "MERGED":
                 files = rest_rows(f"{base}/pulls/{number}/files")
@@ -860,12 +871,17 @@ class GitHubReadPass:
             if validated_pr(info) is None:
                 raise RuntimeError("gh returned a malformed PR payload")
             info["_observation"] = observation
-            result = (self.save(identity, info), None)
-            self.mark_fresh(identity)
+            info["_observed_at"] = observed_at
+            result = self.result(self.save(identity, info), repo)
         except (RuntimeError, TypeError, ValueError, AttributeError, KeyError) as exc:
             self.reconcile()
             old = self.saved.get(identity) or old
-            result = (old, str(exc))
+            if old:
+                old = self.save(identity, {**old, "_observation": observation,
+                                          "_observed_at": None, "_refresh_error": str(exc)})
+                result = self.result(old, repo)
+            else:
+                result = (None, str(exc))
         self.results[identity] = result
         return result
 

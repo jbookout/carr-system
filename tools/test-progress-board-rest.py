@@ -124,6 +124,66 @@ class RestRefresh(unittest.TestCase):
         self.assertEqual(snapshot["github_sync"]["failed"][0]["card"], "a")
         self.assertIn("REST rate limited", snapshot["github_sync"]["failed"][0]["error"])
 
+    def test_freshness_and_payload_are_one_observation_during_concurrent_refresh(self):
+        now = [1000.0]
+        failing = False
+        def github(args, timeout=30):
+            if failing and "/check-runs?" in args[1]:
+                return {"check_runs": [{"name": "CI", "status": "completed", "conclusion": "failure"}]}
+            return self.github(args, timeout)
+        with patch.dict(os.environ, {"PROGRESS_BOARD_PR_FRESH_SECONDS": "120"}), \
+                patch.object(B.time, "time", side_effect=lambda: now[0]), patch.object(B, "gh_json", github):
+            B.GitHubReadPass().read(1, REPO)
+            reader = B.GitHubReadPass()
+            reconcile = reader.reconcile
+            def raced_reconcile():
+                nonlocal failing
+                reconcile()
+                failing = True
+                B.GitHubReadPass().read(1, REPO, pull())
+            now[0] = 1122.0
+            with patch.object(reader, "reconcile", side_effect=raced_reconcile):
+                info, error = reader.read(1, REPO)
+            self.assertIsNone(error)
+            self.assertEqual(B.checks_summary(info), "0 pass · 0 pending · 1 fail")
+
+    def test_losing_writer_cannot_renew_winning_observation_freshness(self):
+        now = [1000.0]
+        nested = False
+        def github(args, timeout=30):
+            nonlocal nested
+            if "/check-runs?" in args[1] and not nested:
+                nested = True
+                now[0] = 1122.0
+                B.GitHubReadPass().read(1, REPO)
+                now[0] = 1245.0
+            return self.github(args, timeout)
+        with patch.dict(os.environ, {"PROGRESS_BOARD_PR_FRESH_SECONDS": "120"}), \
+                patch.object(B.time, "time", side_effect=lambda: now[0]), patch.object(B, "gh_json", github):
+            B.GitHubReadPass().read(1, REPO)
+            calls = len(self.calls)
+            B.GitHubReadPass().read(1, REPO)
+            self.assertGreater(len(self.calls), calls, "the winner's 123-second-old evidence must refresh")
+
+    def test_failed_changed_head_refresh_survives_freshness_hits_and_new_passes(self):
+        with patch.dict(os.environ, {"PROGRESS_BOARD_PR_FRESH_SECONDS": "120"}), \
+                patch.object(B, "gh_json", self.github):
+            B.GitHubReadPass().read(1, REPO)
+            reader = B.GitHubReadPass()
+            with patch.object(B, "gh_json", side_effect=RuntimeError("timeout")):
+                changed, error = reader.read(1, REPO, pull(head={"sha": "b" * 40}))
+                self.assertEqual(error, "timeout")
+                self.assertEqual(reader.read(1, REPO)[1], "timeout")
+                self.assertEqual(B.GitHubReadPass().read(1, REPO)[1], "timeout")
+            def matching_github(args, timeout=30):
+                if args[1].endswith("/pulls/1"):
+                    return pull(head={"sha": "b" * 40})
+                return self.github(args, timeout)
+            with patch.object(B, "gh_json", matching_github):
+                recovered, error = B.GitHubReadPass().read(1, REPO)
+            self.assertIsNone(error)
+            self.assertEqual(recovered["headRefOid"], "b" * 40)
+
     def test_merged_is_immutable_but_closed_refreshes_once_per_pass(self):
         for state in ("MERGED", "CLOSED"):
             with self.subTest(state=state):
@@ -145,8 +205,8 @@ class RestRefresh(unittest.TestCase):
                         self.calls.clear()
                         B.fetch_pr(raw["number"], REPO)
                         self.assertEqual(self.calls, [])
-                    again = {k: v for k, v in again.items() if k != "_observation"}
-                    result = {k: v for k, v in result.items() if k != "_observation"}
+                    again = {k: v for k, v in again.items() if k not in {"_observation", "_observed_at"}}
+                    result = {k: v for k, v in result.items() if k not in {"_observation", "_observed_at"}}
                 self.assertEqual(again, result)
                 self.assertIsNone(error)
 
@@ -428,6 +488,27 @@ class RestRefresh(unittest.TestCase):
             self.assertEqual(B.fetch_pr(1, REPO)[0]["reviewDecision"], "APPROVED")
             rules = {"review_author_associations": ["OWNER"], "review_logins": []}
             self.assertEqual(B.fetch_pr(1, REPO)[0]["reviewDecision"], "")
+
+    def test_fresh_formal_reviews_follow_current_trust_in_same_and_new_passes(self):
+        for decision in ("APPROVED", "CHANGES_REQUESTED"):
+            with self.subTest(decision=decision):
+                number = 1 if decision == "APPROVED" else 2
+                rules = {"review_author_associations": ["COLLABORATOR"], "review_logins": []}
+                def github(args, timeout=30):
+                    if "/reviews?" in args[1]:
+                        return [{"id": 1, "user": {"login": "collaborator"},
+                                 "author_association": "COLLABORATOR", "state": decision}]
+                    return self.github(args, timeout)
+                with patch.dict(os.environ, {"PROGRESS_BOARD_PR_FRESH_SECONDS": "120"}), \
+                        patch.object(B, "gh_json", github), \
+                        patch.object(B, "review_rules", side_effect=lambda repo: rules):
+                    reader = B.GitHubReadPass()
+                    self.assertEqual(reader.read(number, REPO, pull(number))[0]["reviewDecision"], decision)
+                    calls = len(self.calls)
+                    rules = {"review_author_associations": ["OWNER"], "review_logins": []}
+                    self.assertEqual(reader.read(number, REPO)[0]["reviewDecision"], "")
+                    self.assertEqual(B.GitHubReadPass().read(number, REPO)[0]["reviewDecision"], "")
+                    self.assertEqual(len(self.calls), calls, "trust changes need no GitHub refetch")
 
 
 if __name__ == "__main__":
