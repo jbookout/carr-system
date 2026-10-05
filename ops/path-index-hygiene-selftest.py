@@ -129,6 +129,21 @@ def main() -> int:
                   not PATHS.violations([deep], vendored=vendored), failures)
             check("unlisted sibling remains subject to depth limit",
                   bool(PATHS.violations([sibling], vendored=vendored)), failures)
+            check("trailing whitespace alias receives no vendor exception",
+                  bool(PATHS.violations([deep + " "], vendored=vendored)), failures)
+            check("literal backslash alias receives no vendor exception",
+                  bool(PATHS.violations([deep.replace("skills/why", "skills\\why")],
+                                        vendored=vendored)), failures)
+            listed = subprocess.run(
+                [sys.executable, str(REPO / "ops/githooks/path-hygiene-check.py"),
+                 "--paths", deep], cwd=root, env=fixture_env(), capture_output=True, text=True)
+            check("explicit CLI paths honor staged upstream manifest",
+                  listed.returncode == 0 and not listed.stderr, failures)
+            unlisted = subprocess.run(
+                [sys.executable, str(REPO / "ops/githooks/path-hygiene-check.py"),
+                 "--paths", sibling], cwd=root, env=fixture_env(), capture_output=True, text=True)
+            check("explicit CLI paths refuse unlisted sibling",
+                  unlisted.returncode == 1 and sibling in unlisted.stderr, failures)
             check("vendor exception preserves filename checks",
                   bool(PATHS.violations(["plugins/pstack/a/b/c/report_final.md"],
                        vendored={"plugins/pstack/a/b/c/report_final.md"})), failures)

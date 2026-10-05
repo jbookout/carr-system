@@ -14,8 +14,8 @@ The mechanical boundary is intentionally narrow and explicit:
     ``_v2``, ``-v2``, ``_final`` or ``-final``. Dot-versioned machine
     contracts such as ``policy.v1.json`` are schema identifiers, not drafts.
 
-``--paths`` exists only for the hermetic selftest; ordinary use has no
-arguments and reads the staged index.
+``--paths`` accepts explicit additions for CI and the hermetic selftest;
+ordinary use has no arguments and reads the staged index.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ BAD_VERSION_NAME = re.compile(r"(?:^|[_-])(?:final|v\d+)(?:$|[_.-])", re.I)
 def violations(paths: list[str], *, vendored: set[str] | None = None) -> list[str]:
     bad = []
     for path in paths:
+        is_vendored = path in (vendored or set())
         path = path.strip().replace("\\", "/")
         if not path:
             continue
@@ -41,7 +42,7 @@ def violations(paths: list[str], *, vendored: set[str] | None = None) -> list[st
             bad.append(f"unsafe repository path: {path}")
             continue
         depth = len(parts) - 1
-        if depth > MAX_DIRECTORY_DEPTH and path not in (vendored or set()):
+        if depth > MAX_DIRECTORY_DEPTH and not is_vendored:
             bad.append(f"{path}: {depth} folder levels (maximum is {MAX_DIRECTORY_DEPTH})")
         if BAD_VERSION_NAME.search(parts[-1]):
             bad.append(f"{path}: draft/final version filename is forbidden")
@@ -125,12 +126,12 @@ def staged_paths() -> list[str]:
 
 def main(argv: list[str]) -> int:
     try:
-        paths = argv[1:] if len(argv) > 1 else staged_paths()
+        paths = argv[2:] if argv[1:2] == ["--paths"] else argv[1:] if len(argv) > 1 else staged_paths()
     except Exception as exc:  # accident-stopper must not wedge every commit
         print(f"path-hygiene-check: could not read staged paths ({exc}); allowing unchecked.",
               file=sys.stderr)
         return 0
-    bad = violations(paths, vendored=vendored_paths() if len(argv) == 1 else set())
+    bad = violations(paths, vendored=vendored_paths())
     if not bad:
         return 0
     print("\nCOMMIT REFUSED — path hygiene (rule 0e22e34a)\n", file=sys.stderr)

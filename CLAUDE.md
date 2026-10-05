@@ -78,32 +78,14 @@ expected supported state, and the migration skips Codex-specific configuration
 without creating it. A partial Codex state fails visibly instead of being
 silently treated as absent.
 
-1. Run `./bin/migrate-dell.sh --apply </dev/null` yourself. Do not hand the
-   command back to the human and do not use `AskUserQuestion` for an internal
-   choice the script already settles.
-2. A nonzero exit is a visible blocker. Read
-   `out/dell-migration-receipt.json`, report its exact failure state and log
-   paths, and stop. Do not close any migration record after a failed run.
-3. A zero exit is not sufficient by itself. Require the receipt status
-   `machine_migrated_pending_record_closeout`, then call `standing-context`.
-   Verify that the server-derived sponsor is Dell and the personal brain is
-   `dell-personal`. The old cross-check against the generated fallback headers
-   is retired with the files themselves (cutoff 2026-08-19); the counts
-   standing-context returns are the counts. Never choose a partner, tenant, or
-   capability through a caller-supplied argument. Never reconnect merely as a
-   guess.
-4. Fresh-read and close exactly Dell action-required A15
-   (`fa0e6c92-8bc7-4e42-9970-0402914d6a19`) and A17
-   (`deb4357e-801f-49f6-bc6c-4c884e3e1f7c`) through the deployed record verbs,
-   using each fresh version and a concrete verified outcome. Leave A11, A12,
-   A13, and A16 open.
-5. Run `./run.sh health </dev/null` and
-   `./.venv/bin/python ops/config-as-code.py check </dev/null`. Read A15 and
-   A17 back as closed. Only then report the migration complete to Dell in plain
-   language.
+1. Run `./bin/migrate-dell.sh --apply </dev/null` yourself. Do not hand the command back to the human and do not use `AskUserQuestion` for an internal choice the script already settles.
+2. A nonzero exit is a visible blocker. Read `out/dell-migration-receipt.json`, report its exact failure state and log paths, and stop. Do not close any migration record after a failed run.
+3. A zero exit is not sufficient by itself. Require the receipt status `machine_migrated_pending_record_closeout`, then call `standing-context`. Verify that the server-derived sponsor is Dell and the personal brain is `dell-personal`. The old cross-check against the generated fallback headers is retired with the files themselves (cutoff 2026-08-19); the counts standing-context returns are the counts. Never choose a partner, tenant, or capability through a caller-supplied argument. Never reconnect merely as a guess.
+4. Fresh-read and close exactly Dell action-required A15 (`fa0e6c92-8bc7-4e42-9970-0402914d6a19`) and A17 (`deb4357e-801f-49f6-bc6c-4c884e3e1f7c`) through the deployed record verbs, using each fresh version and a concrete verified outcome. Leave A11, A12, A13, and A16 open.
+5. Run `./run.sh health </dev/null` and `./.venv/bin/python ops/config-as-code.py check </dev/null`. Read A15 and A17 back as closed. Only then report the migration complete to Dell in plain language.
 
 ## PR design and debt
 
 Read and follow [the required PR policy](AGENTS.md#before-every-pr-design-and-debt-pass).
 
-Rigorous engineering work uses `/poteto-mode` from [pstack](plugins/pstack/skills/poteto-mode/SKILL.md).
+Rigorous engineering work uses `/poteto-mode`.
