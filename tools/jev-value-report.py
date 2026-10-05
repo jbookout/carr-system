@@ -321,7 +321,8 @@ def _denial(nouns):
     "No bugs remain" reports the state after a fix, so it is not a denial.
     """
     return (rf"(?:no\s+(?:{nouns})s?\b(?!\s+(?:remain|left|anymore|any\s+more))"
-            rf"|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?)")
+            rf"|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?"
+            rf"|did\s+not\s+(?:find|identify|confirm)\s+(?:(?:a|an|any)\s+)?(?:{nouns})s?)")
 
 
 def build_report(sources, start, end):

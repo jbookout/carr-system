@@ -309,6 +309,42 @@ class LensFaultTests(unittest.TestCase):
 
 
 class MapContentTests(unittest.TestCase):
+    def test_budget_only_change_uses_bounded_lane_with_revision_evidence(self):
+        before = json.loads((REPO / "ops/config/jev-cost-guard.v1.json").read_text())
+        before["daily_paid_call_cap"] = 1500
+        after = dict(before, daily_paid_call_cap=3000)
+        changes = [{"path": "ops/config/jev-cost-guard.v1.json", "before": before, "after": after}]
+        decision = rt.review_decision(changes, base="a" * 40, head="b" * 40,
+                                      policy_revision="c" * 40, diff_digest="sha256:" + "d" * 64)
+        self.assertEqual(decision["lane"], "tunable_scalar")
+        self.assertEqual(decision["tier"], 1)
+        self.assertEqual(decision["head"], "b" * 40)
+        self.assertEqual(decision["policy_revision"], "c" * 40)
+        self.assertEqual(decision["diff_digest"], "sha256:" + "d" * 64)
+        for changed in [dict(after, daily_paid_call_cap=True), dict(after, daily_paid_call_cap=-1),
+                        dict(after, daily_paid_call_cap=3001), dict(after, daily_paid_call_cap="3000"),
+                        dict(after, allowed_paths=["*"]), dict(after, command="new authority")]:
+            with self.subTest(after=changed):
+                changes[0]["after"] = changed
+                refused = rt.review_decision(changes, base="a" * 40, head="b" * 40,
+                                             policy_revision="c" * 40, diff_digest="sha256:" + "d" * 64)
+                self.assertEqual(refused["lane"], "review")
+                self.assertEqual(refused["tier"], 3)
+        changes[0].update(after=after, mode_changed=True)
+        self.assertEqual(rt.review_decision(changes, base="a" * 40, head="b" * 40,
+            policy_revision="c" * 40, diff_digest="sha256:" + "d" * 64)["lane"], "review")
+
+    def test_tunable_policy_and_strict_json_fail_closed(self):
+        with self.assertRaises(ValueError):
+            rt.review_decision([], base="a" * 40, head="b" * 40,
+                policy_revision="c" * 40, diff_digest="sha256:" + "d" * 64, doc={})
+        for tunables in (None, {}, ["not a field"], [{"path": "x", "field": "n", "minimum": True, "maximum": 3}]):
+            doc = dict(rt.load(), tunable_scalars=tunables)
+            self.assertTrue(rt.validate(doc))
+        for text in ('{"daily_paid_call_cap":1500,"daily_paid_call_cap":3000}', '{"cap":NaN}'):
+            with self.assertRaises(ValueError):
+                rt._strict_json(text)
+
     def test_migrations_are_never_noise(self):
         for path in ("migrations/0001_init.sql", "migrations/node_modules/x.js",
                      "migrations/vendor/a.min.js", "migrations/package-lock.json"):

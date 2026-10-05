@@ -151,6 +151,25 @@ class CostTests(unittest.TestCase):
 
 
 class ValueTests(unittest.TestCase):
+    def test_negative_investigation_and_coincident_verdict_do_not_earn_credit(self):
+        for denial in ("No bug found", "Investigation did not find a bug"):
+            with self.subTest(denial=denial):
+                report = jvr.build_report(sources(
+                    judge=[judge("build_advisory", receipt_id="coincident")],
+                    commits=[{"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                              "subject": "Fix suspected bug Jev flagged", "body": denial}]), START, END)
+                self.assertEqual(report["totals"]["outcomes_verified"], 0)
+                self.assertIsNone(report["totals"]["minutes_saved"])
+                self.assertFalse(any(s["evidence"] for s in report["sites"].values()))
+
+    def test_matching_times_without_causal_link_remain_unproven(self):
+        report = jvr.build_report(sources(judge=[judge("build_advisory")], commits=[{
+            "sha": "coincident", "date": "2026-10-01T00:00:00Z", "body": "Fix from local tests",
+        }]), START, END)
+        self.assertEqual(report["totals"]["outcomes_verified"], 0)
+        self.assertIsNone(report["totals"]["minutes_saved"])
+        self.assertIn("insufficient evidence", jvr.render(report))
+
     def test_commit_naming_jev_as_finder_is_a_verified_outcome(self):
         commits = [{"sha": "965c6991", "date": "2026-10-01T00:00:00Z",
                     "body": "Jev flagged a real bug in the re-raise condition"},
