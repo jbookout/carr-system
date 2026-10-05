@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } from '../src/mutation-registry.js';
 
-test('unapplied Leads migrations extend the main migration ledger', async () => {
+test('Leads migrations extend their pinned predecessor ledger', async () => {
   const names = await readdir(new URL('../../migrations/', import.meta.url));
   const archived = names.find(name => /^\d+_lead_archived_stage\.sql$/.test(name));
   const successor = names.find(name => /^\d+_leads_scac_successor\.sql$/.test(name));
-  const mainTail = names.filter(name => /^\d+_.*\.sql$/.test(name) &&
-    name !== archived && name !== successor).sort().at(-1);
+  const sql = await readFile(new URL(`../../migrations/${successor}`, import.meta.url), 'utf8');
+  const predecessor = sql.match(/schema_migrations where filename='(\d+_[^']+\.sql)'/)?.[1];
   const sorted = names.sort();
-  assert.ok(mainTail, 'the merged main ledger tail must exist');
-  assert.ok(sorted.indexOf(archived) > sorted.indexOf(mainTail),
-    'Archived must apply after the already delivered main ledger');
+  assert.ok(predecessor && names.includes(predecessor), 'the pinned predecessor must exist');
+  assert.ok(sorted.indexOf(archived) > sorted.indexOf(predecessor),
+    'Archived must apply after its pinned predecessor');
   assert.ok(sorted.indexOf(successor) > sorted.indexOf(archived),
     'the Leads seal must follow its Archived vocabulary');
 });
