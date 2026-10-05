@@ -3,7 +3,9 @@
 
 The check runs at the only point a bad repository path can still be refused
 without rewriting history: pre-commit.  It examines additions, copies and
-renames in the index, not the whole repository; established third-party trees
+renames in the index, not the whole repository. Pstack paths listed in its
+staged upstream manifest preserve their third-party directory depth;
+established third-party trees
 and historical filenames are not silently reclassified as a new violation.
 
 The mechanical boundary is intentionally narrow and explicit:
@@ -17,6 +19,7 @@ arguments and reads the staged index.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
@@ -27,7 +30,7 @@ MAX_DIRECTORY_DEPTH = 4
 BAD_VERSION_NAME = re.compile(r"(?:^|[_-])(?:final|v\d+)(?:$|[_.-])", re.I)
 
 
-def violations(paths: list[str]) -> list[str]:
+def violations(paths: list[str], *, vendored: set[str] | None = None) -> list[str]:
     bad = []
     for path in paths:
         path = path.strip().replace("\\", "/")
@@ -38,11 +41,46 @@ def violations(paths: list[str]) -> list[str]:
             bad.append(f"unsafe repository path: {path}")
             continue
         depth = len(parts) - 1
-        if depth > MAX_DIRECTORY_DEPTH:
+        if depth > MAX_DIRECTORY_DEPTH and path not in (vendored or set()):
             bad.append(f"{path}: {depth} folder levels (maximum is {MAX_DIRECTORY_DEPTH})")
         if BAD_VERSION_NAME.search(parts[-1]):
             bad.append(f"{path}: draft/final version filename is forbidden")
     return bad
+
+
+def vendored_paths() -> set[str]:
+    proc = subprocess.run(
+        ["git", "show", ":plugins/pstack/UPSTREAM.json"], capture_output=True,
+    )
+    if proc.returncode:
+        return set()
+    try:
+        snapshot = json.loads(proc.stdout)
+    except (ValueError, UnicodeDecodeError):
+        return set()
+    if not isinstance(snapshot, dict) or any(snapshot.get(key) != value for key, value in {
+        "repository": "https://github.com/cursor/plugins", "path": "pstack",
+        "license": "MIT", "author": "Lauren Tan",
+    }.items()):
+        return set()
+    if not re.fullmatch(r"[0-9a-f]{8,40}", str(snapshot.get("commit", ""))):
+        return set()
+    files = snapshot.get("files")
+    if not isinstance(files, list) or not files:
+        return set()
+    result: set[str] = set()
+    for row in files:
+        if not isinstance(row, dict):
+            return set()
+        path, digest = row.get("path"), row.get("sha256")
+        if not isinstance(path, str) or not isinstance(digest, str):
+            return set()
+        if any(part in ("", ".", "..") for part in path.split("/")) or "\\" in path:
+            return set()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return set()
+        result.add("plugins/pstack/" + path)
+    return result
 
 
 def staged_paths() -> list[str]:
@@ -92,7 +130,7 @@ def main(argv: list[str]) -> int:
         print(f"path-hygiene-check: could not read staged paths ({exc}); allowing unchecked.",
               file=sys.stderr)
         return 0
-    bad = violations(paths)
+    bad = violations(paths, vendored=vendored_paths() if len(argv) == 1 else set())
     if not bad:
         return 0
     print("\nCOMMIT REFUSED — path hygiene (rule 0e22e34a)\n", file=sys.stderr)

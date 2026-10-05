@@ -105,3 +105,5 @@ silently treated as absent.
 ## PR design and debt
 
 Read and follow [the required PR policy](AGENTS.md#before-every-pr-design-and-debt-pass).
+
+Rigorous engineering work uses `/poteto-mode` from [pstack](plugins/pstack/skills/poteto-mode/SKILL.md).

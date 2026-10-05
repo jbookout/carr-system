@@ -353,3 +353,5 @@ Before opening or updating any pull request, apply both skills to the diff:
 Both passes are required. Read the skill files before applying them; if either
 is unavailable, report the missing skill instead of claiming the pass.
 This section is the canonical policy for both client entry points.
+
+Rigorous engineering work uses `/poteto-mode` from [pstack](plugins/pstack/skills/poteto-mode/SKILL.md).
