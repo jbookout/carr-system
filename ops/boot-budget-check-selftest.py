@@ -110,7 +110,8 @@ def test_passes_under_budget():
                                  "core_payload": 500})
         b, surface_tokens, total, _ = boot_budget_check.measure(
             claude_md_path=claude_md, mcp_js_path=mcp_js,
-            core_fixture_path=fixture, budget_path=budget)
+            core_fixture_path=fixture, budget_path=budget,
+            agents_md_path=os.path.join(tmp, "AGENTS.md"))
         over = boot_budget_check.evaluate(b, surface_tokens, total)
         check("a modest synthetic tree passes with no overages", over == [])
     finally:
@@ -131,7 +132,8 @@ def test_synthetic_overage_fails_and_names_consolidation():
                                  "core_payload": 500})
         b, surface_tokens, total, _ = boot_budget_check.measure(
             claude_md_path=claude_md, mcp_js_path=mcp_js,
-            core_fixture_path=fixture, budget_path=budget)
+            core_fixture_path=fixture, budget_path=budget,
+            agents_md_path=os.path.join(tmp, "AGENTS.md"))
         over = boot_budget_check.evaluate(b, surface_tokens, total)
         check("a synthetic 50KB CLAUDE.md is reported over budget",
               any(name == "claude_md" for name, _, _ in over))
@@ -237,7 +239,8 @@ def test_doc_branch_measures_the_larger_served_instruction_string():
             fh.write('export const DOC_INSTRUCTIONS = "' + "d" * 4000 + '";')
         b, tokens, total, _ = boot_budget_check.measure(
             claude_md_path=claude_md, mcp_js_path=mcp_js,
-            core_fixture_path=fixture, budget_path=budget)
+            core_fixture_path=fixture, budget_path=budget,
+            agents_md_path=os.path.join(tmp, "AGENTS.md"))
         check("a Doc-only overage still fails the existing total budget",
               any(name == "TOTAL" for name, _, _ in boot_budget_check.evaluate(b, tokens, total)))
         with open(doc, "w") as fh:
@@ -292,12 +295,57 @@ def test_native_agents_growth_and_section_diagnostics():
             with contextlib.redirect_stdout(output):
                 rc = boot_budget_check.main([])
             check("enlarged native AGENTS fails with its contributing section",
-                  rc == 1 and "agents_md" in output.getvalue()
+                  rc == 1 and "agents_md contributing sections" in output.getvalue()
                   and "Enlarged assignment" in output.getvalue())
         finally:
             for key, value in originals.items():
                 setattr(boot_budget_check, key, value)
 
+
+
+POLICY = ("<!-- carr-product-first-policy:start -->\n" + "p" * 700
+          + "\n<!-- carr-product-first-policy:end -->\n")
+
+
+def native_tree(tmp, *, claude_md_bytes, agents_text, total_budget_tokens):
+    claude, mcp, fixture, budget = make_tree(
+        tmp, claude_md_bytes=claude_md_bytes, instr_chars=10, rail_chars=0,
+        current_recitation_bytes=0, pack_index_bytes=0,
+        total_budget_tokens=total_budget_tokens, sub_budgets_tokens={},
+        bytes_per_token=1.0)
+    agents = os.path.join(tmp, "AGENTS.md")
+    with open(agents, "w") as fh:
+        fh.write(agents_text)
+    return boot_budget_check.measure(
+        claude_md_path=claude, agents_md_path=agents, mcp_js_path=mcp,
+        core_fixture_path=fixture, budget_path=budget)
+
+
+def test_native_entrypoints_charge_the_larger_one_not_their_sum():
+    """Codex reads AGENTS.md; Claude reads CLAUDE.md. Neither reads both whole."""
+    with tempfile.TemporaryDirectory(prefix="boot-budget-max-") as tmp:
+        b, tokens, total, _ = native_tree(
+            tmp, claude_md_bytes=600, agents_text="a" * 600, total_budget_tokens=1000)
+        check("two moderate entrypoints whose sum exceeds the total still pass",
+              boot_budget_check.evaluate(b, tokens, total) == [])
+        check("the total charges the larger entrypoint, not the sum",
+              total == 600 + tokens["connector_instructions"])
+
+
+def test_claude_entrypoint_charges_the_injected_policy_block():
+    """SessionStart injects the AGENTS.md policy block into every Claude session."""
+    with tempfile.TemporaryDirectory(prefix="boot-budget-policy-") as tmp:
+        b, tokens, total, sizes = native_tree(
+            tmp, claude_md_bytes=500, agents_text="# Boot\n" + POLICY,
+            total_budget_tokens=1000)
+        block = len(("p" * 700).encode())
+        check("the injected policy block is measured with the hook's own extractor",
+              sizes["claude_policy_block"] == block)
+        check("Claude's charged entrypoint is CLAUDE.md plus the injected block",
+              total == 500 + block + tokens["connector_instructions"])
+        check("CLAUDE.md plus the block over the total is reported over budget",
+              any(name == "TOTAL" for name, _, _ in
+                  boot_budget_check.evaluate(b, tokens, total)))
 
 if __name__ == "__main__":
     test_passes_under_budget()
@@ -307,6 +355,8 @@ if __name__ == "__main__":
     test_doc_branch_measures_the_larger_served_instruction_string()
     test_real_measurement_matches_served_full_and_doc_instructions()
     test_native_agents_growth_and_section_diagnostics()
+    test_native_entrypoints_charge_the_larger_one_not_their_sum()
+    test_claude_entrypoint_charges_the_injected_policy_block()
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURE(S): {FAILURES}")
         sys.exit(1)

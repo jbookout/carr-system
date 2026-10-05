@@ -276,11 +276,11 @@ Several sessions run against this one checkout at the same time.
 Before teaching, admitting, approving, amending or retiring a rule, run
 `./.venv/bin/python ops/rule-admission-audit.py --preflight` with the existing
 read credential; add `--rule-id <full-rule-UUID>` for its prepared admission.
-Read the installed delivery function and admission projection before operating.
-The readback names source revision, entrypoint, check policy and log/receipt homes;
-[migration 0482](migrations/0482_rule_delivery_binding_writer.sql) owns the nested
-delivery shape. Missing connection or admission is a failed readback, never
-permission to infer readiness. Approval still goes through the record verbs.
+It derives the `projection.delivery` keys from the installed writer
+([migration 0482](migrations/0482_rule_delivery_binding_writer.sql)) and reports
+`ready` only when the prepared admission carries every one. Any other status,
+or no connection, is a failed readback, never permission to infer readiness.
+Approval still goes through the record verbs.
 
 ## Writing
 
@@ -291,28 +291,28 @@ exact-path exceptions.
 
 ## Active WR-000070 R09 executor recovery
 
-Only for WR-000070 slice R09, accepted executor source-recovery role: read
+Only for the accepted executor source-recovery role of WR-000070 slice R09: read
 [the complete scoped assignment instructions](ops/config/task-boot/r09.json)
 before assignment validation or execution. Resolve its current dispatcher intent
 and server-issued runbook; all bindings and refusal conditions remain mandatory.
 
 ## Temporary supervised WR68 source execution
 
-Only for WR-000068 slice wr68-source-repair-v1 only: read
+Only for WR-000068 slice wr68-source-repair-v1: read
 [the complete scoped assignment instructions](ops/config/task-boot/wr68.json)
 before assignment validation or execution. Resolve its current dispatcher intent
 and server-issued runbook; all bindings and refusal conditions remain mandatory.
 
 ## Temporary supervised WR69 registered Codex validation
 
-Only for Registered Codex validator for WR-000069 slice wr69-source-repair-v1 only: read
+Only for the registered Codex validator of WR-000069 slice wr69-source-repair-v1: read
 [the complete scoped assignment instructions](ops/config/task-boot/wr69.json)
 before assignment validation or execution. Resolve its current dispatcher intent
 and server-issued runbook; all bindings and refusal conditions remain mandatory.
 
 ## Temporary supervised R06 registered validation
 
-Only for Registered Codex validator for WR-000070 slice R06 only: read
+Only for the registered Codex validator of WR-000070 slice R06: read
 [the complete scoped assignment instructions](ops/config/task-boot/r06.json)
 before assignment validation or execution. Resolve its current dispatcher intent
 and server-issued runbook; all bindings and refusal conditions remain mandatory.

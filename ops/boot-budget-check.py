@@ -13,9 +13,11 @@ Mac, and it is one of the "map checks" ops/ci.sh's inventory loop runs
 directly against THIS repo (see ops/boot-budget-check-selftest.py for the one
 that builds a synthetic fixture tree instead, per the established split).
 
-NATIVE ENTRYPOINTS: measure CLAUDE.md and AGENTS.md separately; charge the
-larger standing-file cost plus shared connector instructions and the default
-standing-context SUMMARY/pack-index snapshot against the existing 10K ceiling.
+NATIVE ENTRYPOINTS: Codex reads AGENTS.md; Claude reads CLAUDE.md plus the
+AGENTS.md policy block hooks/worktree-self-plumb.py injects at SessionStart
+(measured with that hook's own extractor). Charge the larger entrypoint plus
+shared connector instructions and the default standing-context SUMMARY/pack-index
+snapshot against the existing 10K ceiling.
 AGENTS sections are printed on overage so consolidation has a named target.
 The default scoped response is not the mandatory detail=boot read. Report that
 boot's delivered full text and corpus index separately; its existing ceiling
@@ -34,6 +36,7 @@ around that by suggesting one.
 Usage:
     ./.venv/bin/python ops/boot-budget-check.py
 """
+import importlib.util
 import json
 import os
 import re
@@ -45,6 +48,7 @@ AGENTS_MD_PATH = os.path.join(REPO, "AGENTS.md")
 MCP_JS_PATH = os.path.join(REPO, "mcp-server", "src", "mcp.js")
 BUDGET_PATH = os.path.join(REPO, "ops", "config", "boot-budget.v1.json")
 CORE_FIXTURE_PATH = os.path.join(REPO, "ops", "config", "boot-budget-core-fixture.v1.json")
+SELF_PLUMB_PATH = os.path.join(REPO, "hooks", "worktree-self-plumb.py")
 
 CONSOLIDATION_ADVICE = (
     "This is not a signal to raise the budget. The fix is consolidation: merge or\n"
@@ -56,9 +60,17 @@ CONSOLIDATION_ADVICE = (
 )
 
 
-def claude_md_bytes(path):
+def file_bytes(path):
     with open(path, "rb") as fh:
         return len(fh.read())
+
+
+def claude_policy_block_bytes(agents_md_path):
+    """The AGENTS.md block Claude's SessionStart hook injects, via the hook itself."""
+    spec = importlib.util.spec_from_file_location("worktree_self_plumb", SELF_PLUMB_PATH)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    return len(hook.delivery_policy_brief(os.path.dirname(agents_md_path)).encode("utf-8"))
 
 
 def instruction_concat(expression, path, rail=""):
@@ -142,8 +154,7 @@ def measure(claude_md_path=None, mcp_js_path=None,
     def-time would silently keep pointing at whatever the constant was when
     the module loaded, which is exactly the kind of untestable check this
     file exists to not be."""
-    agents_md_path = agents_md_path or (os.path.join(os.path.dirname(claude_md_path), "AGENTS.md")
-                                        if claude_md_path else AGENTS_MD_PATH)
+    agents_md_path = agents_md_path or AGENTS_MD_PATH
     claude_md_path = claude_md_path or CLAUDE_MD_PATH
     mcp_js_path = mcp_js_path or MCP_JS_PATH
     core_fixture_path = core_fixture_path or CORE_FIXTURE_PATH
@@ -151,15 +162,15 @@ def measure(claude_md_path=None, mcp_js_path=None,
     budget = load_budget(budget_path)
     bpt = float(budget.get("bytes_per_token", 3.5))
     surface_bytes = {
-        "claude_md": claude_md_bytes(claude_md_path),
-        "agents_md": claude_md_bytes(agents_md_path),
+        "claude_md": file_bytes(claude_md_path),
+        "claude_policy_block": claude_policy_block_bytes(agents_md_path),
+        "agents_md": file_bytes(agents_md_path),
         "connector_instructions": connector_instructions_bytes(mcp_js_path),
         "core_payload": core_payload_bytes(core_fixture_path),
     }
     surface_tokens = {name: b / bpt for name, b in surface_bytes.items()}
-    # Native clients have separate entrypoints; their standing files are not
-    # both injected. Charge the larger one plus shared connector/summary text.
-    total_tokens = (max(surface_tokens["claude_md"], surface_tokens["agents_md"])
+    claude_entry = surface_tokens["claude_md"] + surface_tokens["claude_policy_block"]
+    total_tokens = (max(claude_entry, surface_tokens["agents_md"])
                     + surface_tokens["connector_instructions"] + surface_tokens["core_payload"])
     return budget, surface_tokens, total_tokens, surface_bytes
 
@@ -184,7 +195,8 @@ def main(argv=None):
     budget, surface_tokens, total_tokens, surface_bytes = measure()
 
     print("BOOT BUDGET (WR-000019 slice S11)")
-    for name in ("claude_md", "agents_md", "connector_instructions", "core_payload"):
+    for name in ("claude_md", "claude_policy_block", "agents_md",
+                 "connector_instructions", "core_payload"):
         cap = budget.get("sub_budgets_tokens", {}).get(name)
         cap_s = f"(budget {cap})" if cap is not None else "(no sub-budget set)"
         print(f"  {name:24s} {surface_bytes[name]:7d} bytes  "
@@ -192,7 +204,8 @@ def main(argv=None):
     total_cap = budget.get("total_budget_tokens")
     print(f"  {'TOTAL':24s} {'':7s}         ~{total_tokens:8.1f} tokens  "
           f"(budget {total_cap})")
-    print("  TOTAL charges the larger native entrypoint plus shared connector and summaries.")
+    print("  TOTAL charges the larger native entrypoint (Claude: claude_md + "
+          "claude_policy_block; Codex: agents_md) plus shared connector and summaries.")
     with open(CORE_FIXTURE_PATH) as fh:
         fixture = json.load(fh)
     print(f"  delivered summaries: {fixture['delivered_summary_bytes']} bytes; "

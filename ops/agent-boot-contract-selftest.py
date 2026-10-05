@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import sys
 import tempfile
-import json
 from pathlib import Path
 
 
@@ -55,6 +56,13 @@ def main() -> int:
     require(run(fallback_first).returncode != 0, "shell-first boot order was accepted")
 
     packets = REPO / "ops/config/task-boot"
+    for target in sorted(packets.glob("*.json")):
+        packet = json.loads(target.read_text())
+        require(set(packet) == {"instructions", "instructions_sha256"},
+                f"{target.name} carries fields nothing reads")
+        require(hashlib.sha256(packet["instructions"].encode()).hexdigest()
+                == packet["instructions_sha256"],
+                f"{target.name} instructions changed without re-pinning their digest")
     for key, heading in (
         ("r09", "Active WR-000070 R09 executor recovery"),
         ("wr68", "Temporary supervised WR68 source execution"),
