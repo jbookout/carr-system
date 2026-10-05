@@ -8,6 +8,10 @@ from contextlib import closing
 from pathlib import Path
 import sys
 import tempfile
+import socket
+import threading
+import time
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 import subprocess
 import unittest
@@ -158,18 +162,194 @@ print(json.dumps({'findings':[]}))
         self.assertEqual(report["findings"][0]["ruleId"], "wrapper-without-value")
         self.assertEqual(self.transport.call_count, 1)
 
-    def test_daily_ledger_rollover_cannot_report_a_false_paid_count(self):
-        binary = self.root / "jevlint"
-        binary.write_text('#!/usr/bin/env python3\nprint(\'{"findings":[]}\')\n')
-        binary.chmod(0o700)
-        with patch.object(review, "datetime") as clock:
-            clock.now.side_effect = [datetime(2026, 10, 4, 23, 59, tzinfo=timezone.utc),
-                                     datetime(2026, 10, 5, tzinfo=timezone.utc)]
-            with self.assertRaises(ValueError):
-                review.run_jevlint(binary, self.root, review.Shim("fixture", "pr:fixture:head"), port=0)
+    def test_paid_receipt_counts_each_utc_day_across_midnight(self):
+        shim = review.Shim('fixture-session', 'pr:fixture:head')
+        with patch.object(ts, 'datetime') as clock:
+            clock.now.return_value = datetime(2026, 10, 4, 23, 59, tzinfo=timezone.utc)
+            self.assertEqual(shim.evaluate(PAYLOAD)[0], 200)
+            clock.now.return_value = datetime(2026, 10, 5, tzinfo=timezone.utc)
+            other = {**PAYLOAD, 'state':{**PAYLOAD['state'], 'name':'other'}}
+            self.assertEqual(shim.evaluate(other)[0], 200)
+        self.assertEqual(shim.paid_attempts, 2)
+        self.assertEqual(shim.paid_attempts_by_utc_day, {'2026-10-04':1, '2026-10-05':1})
+
+    def test_retained_yesterday_and_foreign_runs_do_not_change_paid_receipt(self):
+        # Admission prunes old site buckets; neither that nor another caller's
+        # session can change the receipt of a run with no requests.
+        ts._reserve_paid_call({}, [], "jevlint_review", "fixture", "seed")
+        with closing(ts.sqlite3.connect(ts._cap_db_path())) as db:
+            db.execute("UPDATE site_usage SET day='2000-01-01', count=200")
+            db.commit()
+        shim = review.Shim("fixture-session", "pr:fixture:head")
+        def other_run(*args, **kwargs):
+            ts._reserve_paid_call({}, [], "jevlint_review", "fixture", "foreign")
+            return subprocess.CompletedProcess(args, 0, '{"findings":[]}', '')
+        with patch.object(review.subprocess, "run", side_effect=other_run):
+            code, _ = review.run_jevlint("unused", self.root, shim, port=0)
+        self.assertEqual(code, 0)
+        self.assertEqual(shim.paid_attempts, 0)
+
+    def test_paid_receipt_includes_failed_worker_and_direct_fallback_only_once_each(self):
+        registry = ts.load_call_sites()
+        registry['sites']['jevlint_review'].update(hourly_budget=10, daily_budget=10)
+        shim = review.Shim("fixture-session", "pr:fixture:head")
+        def worker(*args, **kwargs):
+            return None, "cache_miss" if kwargs['transport_mode'] == 'cache_only' else 'offline'
+        with patch.object(ts, 'load_call_sites', return_value=registry), patch.object(ts, 'server_ask', side_effect=worker):
+            self.assertEqual(shim.evaluate(PAYLOAD), (200, RESPONSE))
+            self.assertEqual(shim.evaluate(PAYLOAD), (200, RESPONSE))
+        self.assertEqual(shim.paid_attempts, 2)
+        self.assertEqual(shim.cached, 1)
+        self.assertEqual(self.transport.call_count, 1)
+
+    def test_worker_cache_hit_and_refusal_have_no_paid_reservation(self):
+        shim = review.Shim("fixture-session", "pr:fixture:head")
+        with patch.object(ts, 'server_ask', return_value=({**RESPONSE, 'cache_hit':True}, None)):
+            self.assertEqual(shim.evaluate(PAYLOAD), (200, {**RESPONSE}))
+        self.assertEqual(shim.paid_attempts, 0)
+        with patch.dict(ts.JEV_COST_CONFIG, daily_paid_call_cap=0):
+            refused = review.Shim("fixture-session", "pr:fixture:head")
+            self.assertEqual(refused.evaluate(PAYLOAD)[0], 403)
+        self.assertEqual(refused.paid_attempts, 0)
+
+    def test_concurrent_same_caller_and_session_reservations_stay_in_their_run(self):
+        barrier = threading.Barrier(2)
+        receipts = []
+        failures = []
+        def reserve(run, attempts):
+            try:
+                with ts.capture_paid_reservations(caller='jevlint_review', session_id='same-session', run_id=run) as receipt:
+                    barrier.wait(2)
+                    for _ in range(attempts):
+                        ts._reserve_paid_call({}, [], 'jevlint_review', 'fixture', run, session='same-session')
+                    # Same thread, foreign session: also excluded.
+                    ts._reserve_paid_call({}, [], 'jevlint_review', 'fixture', run, session='foreign-session')
+                receipts.append(receipt)
+            except Exception as error:
+                failures.append(error)
+        threads = [threading.Thread(target=reserve, args=('first', 1)),
+                   threading.Thread(target=reserve, args=('second', 3))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual({r['run_id']:sum(r['utc_days'].values()) for r in receipts}, {'first':1, 'second':3})
+
+    def test_stalled_http_peer_makes_runner_unavailable(self):
+        peers = []
+        def upstream(*args, **kwargs):
+            endpoint = urlsplit(kwargs['env']['TYPESAFE_ENDPOINT'])
+            peer = socket.create_connection((endpoint.hostname, endpoint.port))
+            peers.append(peer)
+            peer.sendall(b'POST /v1/systemone HTTP/1.1\r\nContent-Length: 100\r\nAuthorization: Bearer carr-jevlint-loopback\r\n\r\n{')
+            time.sleep(.05)
+            return subprocess.CompletedProcess(args, 0, '{"findings":[]}', '')
+        start = time.monotonic()
+        try:
+            with patch.object(review.subprocess, 'run', side_effect=upstream):
+                code, report = review.run_jevlint('unused', self.root, review.Shim('fixture', 'pr:fixture:head'), port=0)
+            self.assertEqual(code, 2)
+            self.assertEqual(report['error'], 'jevlint_unavailable')
+            self.assertLess(time.monotonic() - start, 1)
+        finally:
+            for peer in peers:
+                peer.close()
+
+
+class ServerTests(unittest.TestCase):
+    def test_dripping_header_has_an_absolute_deadline(self):
+        shim = review.Shim('fixture', 'pr:fixture:head')
+        with patch.object(review, 'REQUEST_TIMEOUT_SECONDS', .2):
+            with review.serve(shim, port=0) as url:
+                endpoint = urlsplit(url)
+                with socket.create_connection((endpoint.hostname, endpoint.port)) as peer:
+                    peer.sendall(b'POST /v1/systemone HTTP/1.1\r\nX-Drip: ')
+                    for _ in range(6):
+                        time.sleep(.025)
+                        peer.sendall(b'x')
+                    peer.settimeout(.5)
+                    self.assertEqual(peer.recv(1024), b'')
+        self.assertGreater(shim.errors, 0)
+    def test_stalled_headers_and_body_cannot_block_teardown(self):
+        for request in (b'POST /v1/systemone HTTP/1.1\r\n',
+                        b'POST /v1/systemone HTTP/1.1\r\nAuthorization: Bearer carr-jevlint-loopback\r\nContent-Length: 100\r\n\r\n{'):
+            with self.subTest(request=request):
+                shim = review.Shim('fixture', 'pr:fixture:head')
+                context = review.serve(shim, port=0)
+                endpoint = urlsplit(context.__enter__())
+                peer = socket.create_connection((endpoint.hostname, endpoint.port))
+                peer.sendall(request)
+                time.sleep(.05)
+                done = threading.Event()
+                def exit_context():
+                    context.__exit__(None, None, None)
+                    done.set()
+                closer = threading.Thread(target=exit_context)
+                closer.start()
+                finished = done.wait(1)
+                peer.close()  # release the old implementation even on failure
+                closer.join(2)
+                self.assertTrue(finished, 'stalled peer blocked context teardown')
+                self.assertGreater(shim.errors, 0)
+
+    def test_stalled_peer_expires_and_next_request_succeeds(self):
+        shim = review.Shim('fixture', 'pr:fixture:head')
+        with patch.object(review, 'REQUEST_TIMEOUT_SECONDS', .1, create=True):
+            with review.serve(shim, port=0) as url:
+                endpoint = urlsplit(url)
+                with socket.create_connection((endpoint.hostname, endpoint.port)) as peer:
+                    peer.sendall(b'POST /v1/systemone HTTP/1.1\r\n')
+                    peer.settimeout(1)
+                    self.assertEqual(peer.recv(1024), b'')
+                req = ts.urllib.request.Request(url, data=b'{}', headers={
+                    'Authorization':'Bearer carr-jevlint-loopback'})
+                with self.assertRaises(ts.urllib.error.HTTPError) as error:
+                    ts.urllib.request.urlopen(req, timeout=1)
+                self.assertEqual(error.exception.code, 400)
+                error.exception.close()
+        self.assertGreater(shim.errors, 0)
 
 
 class DiffTests(unittest.TestCase):
+    def test_literal_filenames_and_invalid_tree_entry_follow_cli_contract(self):
+        from git_env import fixture_env
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); repo = root / 'repo'; repo.mkdir()
+            env = fixture_env()
+            def git(*args):
+                return subprocess.check_output(['git', '-C', str(repo), *args], env=env).decode().strip()
+            git('init', '-q')
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base')
+            base = git('rev-parse', 'HEAD')
+            names = [':(literal)x.py', 'white space.py', 'tab\tname.py', 'unicode-ñ.py', '[wild].py']
+            for name in names:
+                (repo / name).write_text('def added(): return 2\n')
+            git('--literal-pathspecs', 'add', '--', *names)
+            git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'head')
+            scratch = root / 'scratch'; scratch.mkdir()
+            config = root / 'config.json'; config.write_text('{}')
+            self.assertEqual(set(review.materialize(repo, base, 'HEAD', scratch, config)), set(names))
+            for name in names:
+                self.assertEqual((scratch / name).read_bytes(), (repo / name).read_bytes())
+            # Missing/malformed ls-tree output must produce JSON/2 through main.
+            real_git = review.git
+            original_output = subprocess.check_output
+            def missing_entry(repo, *args):
+                if 'ls-tree' in args:
+                    return b''
+                return real_git(repo, *args)
+            with patch.object(sys, 'argv', ['jevlint_review.py', '--repo', str(repo), '--base', base,
+                                          '--pr', 'fixture', '--session', 'fixture']), \
+                 patch.object(review, 'workspace_parent', return_value=root / 'cache'), \
+                 patch.object(review, 'git', side_effect=missing_entry), \
+                 patch.object(review.subprocess, 'check_output', wraps=subprocess.check_output) as output, \
+                 patch.object(sys, 'stdout', new_callable=io.StringIO) as stdout:
+                output.side_effect = lambda args, **kw: review.INSTALL['go_module_build'] if args[:2] == ['go','version'] else original_output(args, **kw)
+                self.assertEqual(review.main(), 2)
+                self.assertEqual(json.loads(stdout.getvalue())['exit_code'], 2)
+
     def test_clean_committed_pr_becomes_only_changed_source_in_scratch(self):
         from git_env import fixture_env
         with tempfile.TemporaryDirectory() as folder:
@@ -204,6 +384,11 @@ class DiffTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_one_canonical_forwarding_predicate(self):
+        config = json.loads((review.ROOT / 'jevlint.json').read_text())
+        self.assertEqual([r['id'] for r in config['rules']], ['wrapper-without-value'])
+        cases = json.loads((review.ROOT / 'jevlint-evals.json').read_text())['cases']
+        self.assertTrue(all(c['rule'] == 'wrapper-without-value' for c in cases))
     def test_shared_budget_obeys_brief(self):
         cap = json.loads((review.ROOT / "ops/config/jev-cost-guard.v1.json").read_text())["daily_paid_call_cap"]
         self.assertEqual(cap, 500)
@@ -221,15 +406,21 @@ class EvidenceTests(unittest.TestCase):
         digest = hashlib.sha256((review.ROOT / "jevlint.json").read_bytes()).hexdigest()
         calibration = json.loads((folder / "calibration.json").read_text())
         measurements = json.loads((folder / "pr-measurements.json").read_text())
-        self.assertEqual(calibration["config_sha256"], digest)
-        self.assertEqual(measurements["config_sha256"], digest)
+        self.assertEqual(calibration["active_configuration"]["config_sha256"], digest)
+        # Historical paid runs used the original two-rule configuration; never
+        # relabel their output or count source as a newly measured run.
+        self.assertEqual(measurements["config_sha256"], calibration["config_sha256"])
+        self.assertTrue(measurements["limitations"])
         self.assertEqual(calibration["upstream"], review.PIN)
-        final = next(r["report"] for r in calibration["rounds"] if r["round"] == "calibrated")
+        final = calibration["active_configuration"]["report"]
         cases = json.loads((review.ROOT / "jevlint-evals.json").read_text())["cases"]
         self.assertEqual(final["total"], len(cases))
         self.assertEqual(final["matched"], final["total"])
         self.assertEqual(final["inconclusive"], 0)
-        self.assertTrue(all(c["matched"] for c in final["cases"]))
+        historical = next(r["report"] for r in calibration["rounds"] if r["round"] == "calibrated")
+        observed = [historical["cases"][i] for i in calibration["active_configuration"]["case_indices"]]
+        self.assertEqual(len(observed), final["total"])
+        self.assertTrue(all(c["matched"] and c["rule"] == 'wrapper-without-value' for c in observed))
         self.assertEqual(len(measurements["samples"]), 3)
         for sample in measurements["samples"]:
             self.assertEqual(sample["shim"]["paid_attempts"], sample["shim"]["answered"])

@@ -2,8 +2,6 @@
 """Advisory PR taste checks, through CARR's single Jev spend authority."""
 import argparse
 from contextlib import contextmanager
-from contextlib import closing
-from datetime import datetime, timezone
 import fcntl
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -11,10 +9,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
+import uuid
 
 import typesafe_client as ts
 from git_env import fixture_env, scrubbed_env
@@ -25,6 +26,7 @@ PIN = INSTALL["commit"]
 MODEL = "jev-1.13.0"
 PORT = 18741
 LOCAL_MARKER = "carr-jevlint-loopback"
+REQUEST_TIMEOUT_SECONDS = 15
 
 
 class Shim:
@@ -39,6 +41,8 @@ class Shim:
         self.errors = 0
         self.cached = 0
         self.paid_attempts = 0
+        self.paid_attempts_by_utc_day = {}
+        self.run_id = str(uuid.uuid4())
 
     def evaluate(self, payload):
         if (not isinstance(payload, dict) or set(payload) != {"model", "state", "questions"}
@@ -56,10 +60,17 @@ class Shim:
                 self.cached += 1
                 return self.responses[key]
             try:
-                result = ts.ask(payload["state"], payload["questions"], model=MODEL,
-                                caller="jevlint_review", session_id=self.session,
-                                facets=["code-taste", self.attribution], retries=0,
-                                cache_ttl_seconds=0, timeout=8)
+                with ts.capture_paid_reservations(caller="jevlint_review", session_id=self.session,
+                                                  run_id=self.run_id) as receipt:
+                    try:
+                        result = ts.ask(payload["state"], payload["questions"], model=MODEL,
+                                        caller="jevlint_review", session_id=self.session,
+                                        facets=["code-taste", self.attribution], retries=0,
+                                        cache_ttl_seconds=0, timeout=8, deadline=time.monotonic() + 8)
+                    finally:
+                        for day, count in receipt["utc_days"].items():
+                            self.paid_attempts_by_utc_day[day] = self.paid_attempts_by_utc_day.get(day, 0) + count
+                            self.paid_attempts += count
                 if result.get("model") != MODEL:
                     raise ts.TypeSafeError("unexpected judgment model")
                 result = {k: result[k] for k in ("model", "answers", "usage") if k in result}
@@ -79,9 +90,61 @@ class Shim:
 
 @contextmanager
 def serve(shim, port=PORT):
+    def disconnect(connection):
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    class Server(HTTPServer):
+        def __init__(self, *args):
+            self.connection_lock = threading.Lock()
+            self.active_connection = None
+            self.closing = False
+            super().__init__(*args)
+
+        def get_request(self):
+            connection, address = super().get_request()
+            with self.connection_lock:
+                if self.closing:
+                    connection.close()
+                    raise OSError("review server closing")
+                connection.settimeout(REQUEST_TIMEOUT_SECONDS)
+                self.active_connection = connection
+            return connection, address
+
+        def abort_active(self):
+            with self.connection_lock:
+                self.closing = True
+                if self.active_connection is not None:
+                    shim.errors += 1
+                    disconnect(self.active_connection)
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def log_error(self, *args):
+            shim.errors += 1
+
+        def setup(self):
+            super().setup()
+            # An idle timeout alone lets a peer drip bytes forever. This timer
+            # bounds the whole request, including headers and body.
+            def expire():
+                shim.errors += 1
+                disconnect(self.connection)
+            self.request_deadline = threading.Timer(REQUEST_TIMEOUT_SECONDS, expire)
+            self.request_deadline.daemon = True
+            self.request_deadline.start()
+
+        def finish(self):
+            self.request_deadline.cancel()
+            try:
+                super().finish()
+            finally:
+                with self.server.connection_lock:
+                    self.server.active_connection = None
 
         def do_POST(self):
             status, body = 400, {"error": "invalid_systemone_request"}
@@ -89,25 +152,30 @@ def serve(shim, port=PORT):
                 size = int(self.headers.get("Content-Length", "0"))
                 if (self.path == "/v1/systemone" and 0 < size <= 512_000
                         and self.headers.get("Authorization") == "Bearer " + LOCAL_MARKER):
-                    status, body = shim.evaluate(json.loads(self.rfile.read(size)))
-            except (ValueError, UnicodeError):
+                    raw = self.rfile.read(size)
+                    if len(raw) != size:
+                        raise ValueError("incomplete request body")
+                    status, body = shim.evaluate(json.loads(raw))
+            except (ValueError, UnicodeError, OSError):
+                shim.errors += 1
                 pass
             encoded = json.dumps(body).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
             try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
                 self.wfile.write(encoded)
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError:
                 pass
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
-    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    server = Server(("127.0.0.1", port), Handler)
+    worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .05}, daemon=True)
     worker.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}/v1/systemone"
     finally:
+        server.abort_active()
         server.shutdown()
         server.server_close()
         worker.join()
@@ -136,12 +204,15 @@ def materialize(repo, base, head, workspace, config):
             raise ValueError("unsafe git path")
         if path.suffix not in (".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".tsx"):
             continue
-        mode = git(repo, "ls-tree", head, "--", name).split()[0]
-        if mode != b"100644" and mode != b"100755":
+        entry = git(repo, "--literal-pathspecs", "ls-tree", "-z", head, "--", name)
+        metadata, separator, returned_name = entry.partition(b"\t")
+        fields = metadata.split()
+        if (not separator or returned_name != raw + b"\0" or len(fields) != 3
+                or fields[0] not in (b"100644", b"100755") or fields[1] != b"blob"):
             raise ValueError("PR source must be a regular blob")
         dest = workspace / path
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(git(repo, "show", f"{head}:{name}"))
+        dest.write_bytes(git(repo, "cat-file", "blob", fields[2].decode("ascii")))
         selected.append(name)
     (workspace / "jevlint.json").write_bytes(config.read_bytes())
     subprocess.run(["git", "init", "-q", str(workspace)], env=fixture_env(), check=True, capture_output=True)
@@ -152,8 +223,6 @@ def run_jevlint(binary, workspace, shim, *, evals=None, port=PORT):
     workspace = workspace.resolve()
     env = {k: v for k, v in fixture_env().items() if not k.startswith(
         ("TYPESAFE_", "JEVLINT_", "OPENROUTER_", "CLOUDFLARE_", "CLEF_"))}
-    day = datetime.now(timezone.utc).date()
-    before = paid_reservations()
     with serve(shim, port) as endpoint:
         env.update(TYPESAFE_ENDPOINT=endpoint, TYPESAFE_API_KEY=LOCAL_MARKER,
                    TYPESAFE_DEFAULT_MODEL=MODEL, JEVLINT_PROVIDER="typesafe")
@@ -161,26 +230,12 @@ def run_jevlint(binary, workspace, shim, *, evals=None, port=PORT):
                 "--concurrency", "1", "--config", str(workspace / "jevlint.json")]
         args += ["--evals", str(evals), "--verbose"] if evals else ["--changed"]
         result = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=1800)
-    if datetime.now(timezone.utc).date() != day:
-        raise ValueError("paid ledger rolled over; repeat the cached check for a bound count")
-    shim.paid_attempts = paid_reservations() - before
     if result.returncode not in (0, 1, 2):
         raise ValueError("unexpected jevlint exit status")
     if result.returncode == 2 or shim.refused or shim.errors:
         return 2, {"error": "jevlint_unavailable", "refused": shim.refused, "errors": shim.errors,
                    "diagnostic": result.stderr[:2000]}
     return result.returncode, json.loads(result.stdout)
-
-
-def paid_reservations():
-    path = Path(ts._cap_db_path())
-    if not path.exists():
-        return 0
-    with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as db:
-        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='site_usage'").fetchone():
-            return 0
-        return db.execute("SELECT coalesce(sum(count),0) FROM site_usage WHERE site=?",
-                          ("jevlint_review",)).fetchone()[0]
 
 
 def main():
@@ -223,6 +278,8 @@ def main():
                               "base": base, "head": head, "pr": args.pr, "files": selected,
                               "shim": {"requests": shim.requests, "answered": shim.answered,
                                        "paid_attempts": shim.paid_attempts,
+                                       "paid_attempts_by_utc_day": shim.paid_attempts_by_utc_day,
+                                       "run_id": shim.run_id, "session_id": shim.session,
                                        "retry_cache_hits": shim.cached, "refused": shim.refused,
                                        "errors": shim.errors}, "exit_code": code, "report": report}, indent=2))
             return code

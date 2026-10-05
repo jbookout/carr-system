@@ -129,5 +129,9 @@
       }
     }
   ],
-  "interpretation": "1462 cold cache; 1466 reuses 25 requests from preceding similar PR; 1494 cold requests. Samples are not a whole-repo projection."
+  "interpretation": "1462 cold cache; 1466 reuses 25 requests from preceding similar PR; 1494 cold requests. Samples are not a whole-repo projection.",
+  "limitations": [
+    "Historical caller-global counter differences are not independently bound to these runs and may include concurrent reservations or previous-day pruning. They are not reliable run cost evidence.",
+    "Samples retain the former two-rule config_sha256 and recorded outputs unchanged; no current one-rule paid measurement has been taken."
+  ]
 }

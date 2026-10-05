@@ -2808,7 +2808,7 @@
     }
   ],
   "threshold_procedure": "Floors must retain every observed violation while every good control remains an explicit pass. wrapper-without-value uses 0.93, above its initial false-positive confidence 0.70 and below its refined positive minimum 0.99. invariant-helper uses its lowest positive confidence 0.55. These choices do not estimate production precision.",
-  "limitations": "Small seed corpus; no held-out performance or production false-positive rate claimed.",
+  "limitations": "Small seed corpus; no held-out performance or production false-positive rate claimed. invariant-helper retired because its forwarding defect and controls duplicate wrapper-without-value. Historical two-rule rounds and thresholds are retained as observed, not active policy.",
   "threshold_trial": {
     "total": 16,
     "matched": 15,
@@ -2843,6 +2843,30 @@
           }
         ]
       }
+    ]
+  },
+  "active_configuration": {
+    "config_sha256": "50b3616d9fab2a22fa584484af66da1367f2ed8c989386b8e704f41d63591674",
+    "retained_rules": [
+      "wrapper-without-value"
+    ],
+    "derivation": "Deterministic projection of the unchanged calibrated wrapper-without-value observations; no new model judgments. The rounds and their config_sha256 remain historical evidence for the former two-rule configuration.",
+    "report": {
+      "total": 8,
+      "matched": 8,
+      "mismatched": 0,
+      "inconclusive": 0,
+      "reportedFailures": 3
+    },
+    "case_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      10,
+      11,
+      12
     ]
   }
 }
