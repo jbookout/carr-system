@@ -1578,6 +1578,20 @@ def launchd_path_refusal(body):
                                  capture_output=True, text=True, env=_git_env(), timeout=15)
             if top.returncode:
                 if top.returncode == 128 and top.stderr.strip() == "fatal: not a git repository (or any of the parent directories): .git":
+                    # Git also reports this when HEAD is corrupt. Only accept
+                    # a non-repository path after checking for metadata itself.
+                    ancestor = directory
+                    while True:
+                        try:
+                            os.lstat(os.path.join(ancestor, ".git"))
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            return f"cannot verify repository identity for {path}: Git metadata present at {ancestor}"
+                        parent = os.path.dirname(ancestor)
+                        if parent == ancestor:
+                            break
+                        ancestor = parent
                     continue
                 return f"cannot verify repository identity for {path}: {top.stderr.strip()}"
             checkout = top.stdout.strip()
