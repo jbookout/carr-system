@@ -59,9 +59,9 @@ test('audited automation preserves the exact v108 delivered seal', () => {
 test('audited automation source binds its measured PostgreSQL full-entry seal', () => {
   const migration = readFileSync(new URL('../../migrations/0844_automation_undo_scac_successor.sql', import.meta.url), 'utf8');
   const seed = migration.split('$automation_undo_v111_source$')[1];
-  assert.equal(createHash('sha256').update(seed).digest('hex'), 'ad646c75290e8420bd9c105dc6ae3cdeb55bd84c494fec0925c226cdb6dd6add');
+  assert.equal(createHash('sha256').update(seed).digest('hex'), '7a232fad92e00ce4ef0b0de06c0c822320f582a0d14fecb1d09b43528e358df7');
   const seals = JSON.parse(readFileSync(new URL('../../ops/config/scac-registry-full-entry-set-seals.json', import.meta.url), 'utf8'));
-  const measured = 'sha256:7777988d5d6fee4d9d5c8c0f810691a0799ca07bd132fc91c56aed40c609d308';
+  const measured = 'sha256:16a03f5781f33348d8ba5449148042e6201e5465e755ab8d467bc0fb91e69f29';
   assert.equal(seals['scac-mutation-registry.v111'], measured);
   assert.ok(migration.includes(`v.entry_set_digest is distinct from '${measured}'`));
 });

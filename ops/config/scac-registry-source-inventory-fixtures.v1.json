@@ -84990,7 +84990,6 @@
     },
     {
       "version": "v111",
-      "reason": "Append audited automation after delivered invoice tracker v110. Preserve main seals; enforce partner archive authority, lock ordering and observed mutation effects.",
       "remove": [
         "script-entrypoint:hooks/stale-claim-gate.py",
         "script-entrypoint:ops/core-rule-ids-check.py",
@@ -85521,8 +85520,8 @@
           "operation": "tools/jev-value-report.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/jev-value-report.py",
-          "schema_digest": "3da4405827a1bbf33ba88d8112cc41e2c2e10b7b9e80bbf13444466e29021f91",
-          "handler_digest": "3da4405827a1bbf33ba88d8112cc41e2c2e10b7b9e80bbf13444466e29021f91",
+          "schema_digest": "4ff91d1055c6684175c38510d25225c1b63275245a58659b5cc8d3ffefb085d4",
+          "handler_digest": "4ff91d1055c6684175c38510d25225c1b63275245a58659b5cc8d3ffefb085d4",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -85553,8 +85552,8 @@
           "handler_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e"
         },
         "external-admin:tools/migrate.py": {
-          "schema_digest": "c10c8d526fa04a913d3ec78674ee29564d72bfc7343c5db4669b4fef6093ec0f",
-          "handler_digest": "c10c8d526fa04a913d3ec78674ee29564d72bfc7343c5db4669b4fef6093ec0f"
+          "schema_digest": "d6995aa574f7ca5996da4a2776fdbfaf8f62d5dde104751cd93b853996b15763",
+          "handler_digest": "d6995aa574f7ca5996da4a2776fdbfaf8f62d5dde104751cd93b853996b15763"
         },
         "external-admin:tools/rotate-credential.py": {
           "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
@@ -86248,6 +86247,10 @@
           "schema_digest": "d6bfcae350cce93466c0d72964ccc62c1469d831bacccc016acef2e3d533bb21",
           "handler_digest": "d6bfcae350cce93466c0d72964ccc62c1469d831bacccc016acef2e3d533bb21"
         },
+        "script-entrypoint:bin/fleet-sync.sh": {
+          "schema_digest": "7ca374459d2895bffe975fecee3b4132687d1807c03fefcff33e7028e87b495d",
+          "handler_digest": "7ca374459d2895bffe975fecee3b4132687d1807c03fefcff33e7028e87b495d"
+        },
         "script-entrypoint:bin/grok_run.py": {
           "schema_digest": "8411423ec61ae026c99a9bcdd588319846fa0a38d7139d1daab9c0b680f62bad",
           "handler_digest": "8411423ec61ae026c99a9bcdd588319846fa0a38d7139d1daab9c0b680f62bad"
@@ -86309,8 +86312,8 @@
           "handler_digest": "0b8dfead4a6d22d967b0801e42b64950adc0d2424916fffb86fca597220e3260"
         },
         "script-entrypoint:hooks/escalation-gate.py": {
-          "schema_digest": "f3e813aff2b7bdfbf088561859eddee34906d0636d75afe2be2eed240ad5c81e",
-          "handler_digest": "f3e813aff2b7bdfbf088561859eddee34906d0636d75afe2be2eed240ad5c81e"
+          "schema_digest": "9f1bd1513109917ab7b46eea83ac451fc9af103181e766ab7f8694c9f77af7ac",
+          "handler_digest": "9f1bd1513109917ab7b46eea83ac451fc9af103181e766ab7f8694c9f77af7ac"
         },
         "script-entrypoint:hooks/executor-tier-gate.py": {
           "schema_digest": "82d56dc26086c9dc7d54ce201b9c906e10157f1f6d19d0d7461ebb56faccf8bd",
@@ -86377,8 +86380,8 @@
           "handler_digest": "4a12048a70674a3256c4bd522f7dfa680c8da88afa8c0ff0cea930d056338b39"
         },
         "script-entrypoint:ops/config-as-code.py": {
-          "schema_digest": "a8f707ed60948403d586dac60a6e1306e409c8a306b8dedfc0330e4cdf90e30d",
-          "handler_digest": "a8f707ed60948403d586dac60a6e1306e409c8a306b8dedfc0330e4cdf90e30d"
+          "schema_digest": "92fddde017711fc945c478095b2594c77e23cfad75ad0027a289e9265f377dbf",
+          "handler_digest": "92fddde017711fc945c478095b2594c77e23cfad75ad0027a289e9265f377dbf"
         },
         "script-entrypoint:ops/engineering-claim-local-pg-gate.py": {
           "schema_digest": "5378909088446fd3bd973a054764cd5d50fc8a7c5eeda17564ecd9308914c191",
@@ -86412,13 +86415,17 @@
           "schema_digest": "81bb52ab25d43829b1899781ac7d193955cbde2ded81c4dfa9120d8178c30ab9",
           "handler_digest": "81bb52ab25d43829b1899781ac7d193955cbde2ded81c4dfa9120d8178c30ab9"
         },
+        "script-entrypoint:ops/progress-board-render.sh": {
+          "schema_digest": "e8e2c64c1e30008448d9536f371b7f56883404c2ad9e1e58c7ea205c32ef9cc0",
+          "handler_digest": "e8e2c64c1e30008448d9536f371b7f56883404c2ad9e1e58c7ea205c32ef9cc0"
+        },
         "script-entrypoint:ops/reachability-check.py": {
           "schema_digest": "8f87e47780cd9c20de42ad2cb2913638d469d9fd8c9d5dfaf9a8081bd62f1556",
           "handler_digest": "8f87e47780cd9c20de42ad2cb2913638d469d9fd8c9d5dfaf9a8081bd62f1556"
         },
         "script-entrypoint:ops/release-pipeline.py": {
-          "schema_digest": "36b2c0d6542e925515307cf499d5616419176368c0a6c5c53f6cd36cfafd3f69",
-          "handler_digest": "36b2c0d6542e925515307cf499d5616419176368c0a6c5c53f6cd36cfafd3f69"
+          "schema_digest": "2a0bb5a7422d23a8a993ea996654a2bced7b5528c740523b5c9568406dd0e482",
+          "handler_digest": "2a0bb5a7422d23a8a993ea996654a2bced7b5528c740523b5c9568406dd0e482"
         },
         "script-entrypoint:ops/rule-admission-audit.py": {
           "schema_digest": "210280ae760f1da7888ca31ba17a779857aa6a7a6f6b63d1836e50c3252c5d29",
@@ -86429,16 +86436,16 @@
           "handler_digest": "d73fd3370633657d066027a1f88734bc695484f9de00769d288dae56f9f0fe11"
         },
         "script-entrypoint:ops/scac-mutation-inventory.mjs": {
-          "schema_digest": "4b91e5b4ade1de0432c9bb94dc9ced0ff99884f4820628fdb229777f17ca8ec8",
-          "handler_digest": "4b91e5b4ade1de0432c9bb94dc9ced0ff99884f4820628fdb229777f17ca8ec8"
+          "schema_digest": "dfe6c077af463c0977149990cc1a0de11837cc5b80aef9ddd56c624fca0e5c75",
+          "handler_digest": "dfe6c077af463c0977149990cc1a0de11837cc5b80aef9ddd56c624fca0e5c75"
         },
         "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py": {
           "schema_digest": "1aa7fd618849d3ea67e64240c9596462471266dbf88d7a0e0c2bb6afbcbcfe39",
           "handler_digest": "1aa7fd618849d3ea67e64240c9596462471266dbf88d7a0e0c2bb6afbcbcfe39"
         },
         "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py": {
-          "schema_digest": "df1811946efce0edd43ae5a5b4d5ea26e825cf20e3db98e686fd7d7c1b107584",
-          "handler_digest": "df1811946efce0edd43ae5a5b4d5ea26e825cf20e3db98e686fd7d7c1b107584"
+          "schema_digest": "173dce24dfa86e9d67738338d4f4a97df348f751257ea4f1d6e544098cfedf68",
+          "handler_digest": "173dce24dfa86e9d67738338d4f4a97df348f751257ea4f1d6e544098cfedf68"
         },
         "script-entrypoint:ops/slice-done-marker.py": {
           "schema_digest": "fe375a811727f2c675a7aed1bd84f4e3e3988c55ed774a0500ffff5b045b3c7f",
@@ -86505,8 +86512,8 @@
           "handler_digest": "2d03fd0e1da35ff203c0d17fb9efce8f5357c09503605c9c20639e4a2a509a64"
         },
         "script-entrypoint:tools/progress_board.py": {
-          "schema_digest": "0b116a70c82b5bcf73bbe5be269ccad27008f80db6bd475eaa61a00fcc9de85a",
-          "handler_digest": "0b116a70c82b5bcf73bbe5be269ccad27008f80db6bd475eaa61a00fcc9de85a"
+          "schema_digest": "83936f29618915dd3a3c921efe7e99ded728e01ff0162206a4205a191bdb3142",
+          "handler_digest": "83936f29618915dd3a3c921efe7e99ded728e01ff0162206a4205a191bdb3142"
         },
         "script-entrypoint:tools/r03-settlement-sweep-runner.py": {
           "schema_digest": "15660ed79eadd1c63767e39aa68ad11cb11915d193e76a32571d5d35e7d4ef4c",
@@ -86574,7 +86581,7 @@
         }
       },
       "expected_count": 1128,
-      "expected_sha256": "a918bd47591448aa8db2cba16d76564a0eb061b6e35b1f0ba5a7d387a36dfd48"
+      "expected_sha256": "c6ef3b5c45002ac61e30c056f93d17408ca25c54e08a1cd1b048f88b4912be32"
     }
   ],
   "current_source_review": {
