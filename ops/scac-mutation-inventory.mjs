@@ -549,6 +549,7 @@ export const REGISTRY_V106_VERSION = "scac-mutation-registry.v106";
 export const REGISTRY_V107_VERSION = "scac-mutation-registry.v107";
 export const REGISTRY_V108_VERSION = "scac-mutation-registry.v108";
 export const REGISTRY_V109_VERSION = "scac-mutation-registry.v109";
+export const REGISTRY_V110_VERSION = "scac-mutation-registry.v110";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -2054,6 +2055,8 @@ export const RELATIONSHIP_V109_DB_CATALOG_BASELINE = Object.freeze({
   runtime_dml_grants: { count: 329, digest: "sha256:40bd226aaf01dc401544beceb274301f35aed7e2c93557f938f658d7bdc04b52" },
   secdef_execute: { count: 1230, digest: "sha256:63bd1bd70454eb6dc6e2b07fc19cc3e0e08430e05a82688ed40ffb173ea336ff" },
 });
+
+export const INVOICE_TRACKER_V110_DB_CATALOG_BASELINE = Object.freeze({"projection_version":"scac-db-catalog-projection.v110","secdef_execute":{"count":1234,"digest":"sha256:20b9172e7c6e0c799907abc8d920f0409c910707bd9beba77ca21d8a23bf1bcc"},"relation_dml":{"count":317,"digest":"sha256:93c871b7b7ce93186098fb47d6c93ba91d74a6db46a8ae4db31c6620ed85b302"},"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"runtime_dml_grants":{"count":329,"digest":"sha256:40bd226aaf01dc401544beceb274301f35aed7e2c93557f938f658d7bdc04b52"}});
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -19813,6 +19816,21 @@ export function renderRelationshipRegistrySql(rows, predecessorSql = null) {
 
 
 
+export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0840_relationship_scac_successor.sql",
+    predecessorDigest: "50c556fa9090c6158b7d23a9c02ae1873d219bb82454941ec484b1c73d1d56c0",
+    domainPath: "migrations/0841_invoice_tracker.sql",
+    oldVersion: REGISTRY_V109_VERSION,
+    newVersion: REGISTRY_V110_VERSION,
+    oldCatalogBaseline: RELATIONSHIP_V109_DB_CATALOG_BASELINE,
+    newCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE,
+    oldTag: "relationship", newTag: "invoice_tracker",
+    oldLabel: "Relationship", newLabel: "Invoice tracker",
+  });
+}
+
 export function renderDocActivityRegistrySql(rows, predecessorSql = null) {
   const predecessorPath = "migrations/0812_lead_automation_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
@@ -21331,9 +21349,16 @@ export function renderGeneratedFrontier() {
   artifacts["migrations/0840_relationship_scac_successor.sql"] =
     renderRelationshipRegistrySql(v109Rows, artifacts["migrations/0827_system_work_scac_successor.sql"]);
 
+  const v110Rows = frozenInventory(REGISTRY_V110_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v110.generated.js"] =
+    renderRuntimeProjection(v110Rows, { version: REGISTRY_V110_VERSION,
+      dbCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE });
+  artifacts["migrations/0842_invoice_tracker_scac_successor.sql"] =
+    renderInvoiceTrackerRegistrySql(v110Rows, artifacts["migrations/0840_relationship_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 115 || runtimeCount !== 106 || Object.keys(artifacts).length !== 221)
+  if (migrationCount !== 116 || runtimeCount !== 107 || Object.keys(artifacts).length !== 223)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -22402,6 +22427,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         dbCatalogBaseline: RELATIONSHIP_V109_DB_CATALOG_BASELINE }));
     await writeFile(resolve("migrations/0840_relationship_scac_successor.sql"), renderRelationshipRegistrySql(rows));
     process.stdout.write("Relationship v109 frontier generated\n");
+  } else if (process.argv[2] === "--write-invoice-tracker-frontier") {
+    const rows = frozenInventory(REGISTRY_V110_VERSION);
+    await writeFile(resolve("mcp-server/src/scac-mutation-registry.v110.generated.js"),
+      renderRuntimeProjection(rows, { version: REGISTRY_V110_VERSION,
+        dbCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE }));
+    await writeFile(resolve("migrations/0842_invoice_tracker_scac_successor.sql"), renderInvoiceTrackerRegistrySql(rows));
+    process.stdout.write("Invoice tracker v110 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);
     process.stdout.write(`source inventory matches frozen ${CURRENT_REGISTRY_VERSION} frontier fixture\n`);

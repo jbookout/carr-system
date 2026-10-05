@@ -89,7 +89,10 @@ test('relationship attribution follows the delivered system-work contract withou
   assert.match(sql, /filename='0827_system_work_scac_successor[.]sql' and sha256='[0-9a-f]{64}'/);
   assert.match(sql, /filename='0839_relationship_deal_links[.]sql' and sha256='[0-9a-f]{64}'/);
   assert.match(sql, /scac_mutation_registration_v108/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry[.]v109[.]generated[.]js/);
+  // v109 stays sealed history; a later successor may own the live selector (Joe 2026-10-05: no version pins on main).
+  const live = Number(read('mcp-server/src/mutation-registry.js').match(/scac-mutation-registry[.]v(\d+)[.]generated[.]js/)[1]);
+  assert.ok(live >= 109, `live registry selector v${live} must not precede v109`);
+  assert.ok(readdirSync(resolve(root, 'mcp-server/src')).includes('scac-mutation-registry.v109.generated.js'));
   assert.match(read('tools/migrate.py'),
     /"0839_relationship_deal_links[.]sql",\n\s+"0840_relationship_scac_successor[.]sql"/);
 });
