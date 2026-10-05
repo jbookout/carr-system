@@ -33,7 +33,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -473,12 +472,9 @@ def prop_deadline_keeps_matches(rtc_m, rtd_m):
             and row["bind_status"] == "deadline" and len(row["unjudged"]) > 0)
 
 
-# ------------------------------------------------ the transport under a clock
-# The #1281 review: a 429 with retry-after inside typesafe_client.ask escaped
-# every deadline above it (3 retries, unbounded retry-after, each attempt at
-# the full timeout). These drive the REAL client (EXTRA["tsc"], swapped for a
-# mutant below) through a stub opener on a fake clock: nothing reaches the
-# network and nothing really sleeps.
+# ------------------------------------------ the Worker transport under a clock
+# Retry ownership moved to the Worker. Exercise the real client and its safe
+# capability probe through the same runner seam used by production.
 EXTRA = {"tsc": load("typesafe_client_t", TSC_PATH),
          "build": load("jev_build_advisory_t", BUILD_PATH)}
 
@@ -497,37 +493,41 @@ class FakeClock:
 
 
 class Transport:
-    """Every attempt takes `took` seconds, then answers 429 with the given
-    retry-after — or, with `hang`, uses its whole timeout and times out.
-    Records (start time, timeout) per attempt."""
-
-    def __init__(self, clock, *, retry_after="1", took=0.5, hang=False):
-        self.clock, self.retry_after, self.took, self.hang = clock, retry_after, took, hang
+    """A cache-only probe followed by a refused or timed-out Worker call."""
+    def __init__(self, clock, *, probe_took=0.5, hang=False):
+        self.clock, self.probe_took, self.hang = clock, probe_took, hang
         self.attempts = []
+        self.probes = []
 
-    def __call__(self, request, timeout=None):
+    def __call__(self, argv, timeout=None, **options):
+        request = json.loads(argv[3])
+        if request.get("transport_mode") == "cache_only":
+            self.probes.append((self.clock.now, timeout))
+            if self.probe_took >= timeout:
+                self.clock.now += timeout
+                raise subprocess.TimeoutExpired(argv, timeout)
+            self.clock.now += self.probe_took
+            return subprocess.CompletedProcess(argv, 1, "", 'TOOL ERROR ' + json.dumps({
+                "error": "jev_cache_miss", "spend_authority": "carr-jev-spend/v1"}))
         self.attempts.append((self.clock.now, timeout))
         if self.hang:
             self.clock.now += timeout
-            raise urllib.error.URLError("timed out")
-        self.clock.now += self.took
-        raise urllib.error.HTTPError("https://jev.test", 429, "Too Many Requests",
-                                     {"retry-after": self.retry_after}, io.BytesIO(b""))
+            raise subprocess.TimeoutExpired(argv, timeout)
+        self.clock.now += min(0.5, timeout)
+        return subprocess.CompletedProcess(argv, 1, "", 'TOOL ERROR ' + json.dumps({
+            "error": "jev_upstream_failed", "status": 429, "reason": "rate_limited"}))
 
 
 class Via:
-    """A client for jev_judge / the build advisory: the real ask(), served by
-    a stub transport."""
-
-    def __init__(self, tsc_m, opener):
-        self.tsc_m, self.opener = tsc_m, opener
+    """The real client with an offline Worker runner."""
+    def __init__(self, tsc_m, runner):
+        self.tsc_m, self.runner = tsc_m, runner
 
     def __getattr__(self, name):
         return getattr(self.tsc_m, name)
 
     def ask(self, state, questions, **kwargs):
-        kwargs.pop("api_key", None)
-        return self.tsc_m.ask(state, questions, api_key="k", opener=self.opener,
+        return self.tsc_m.ask(state, questions, server_runner=self.runner,
                               calls_log=os.devnull, **kwargs)
 
 
@@ -544,52 +544,48 @@ def _on_clock(fn):
 
 
 def _in_time(transport, deadline):
-    return all(start + timeout <= deadline + 1e-9 for start, timeout in transport.attempts)
+    return all(start + timeout <= deadline + 1e-9
+               for start, timeout in transport.probes + transport.attempts)
 
 
 def prop_ask_honours_deadline(rtc_m, rtd_m):
-    """typesafe_client.ask with a deadline: a retry-after past the deadline
-    stops the retries (no sleep); a short one is honoured, but every attempt's
-    timeout and every sleep fits inside the deadline."""
-    def long_wait(clock, tsc_m):
-        t = Transport(clock, retry_after="7")
-        deadline = clock.now + 5
+    """The absolute deadline bounds both probe and Worker; no client retries."""
+    def run_it(clock, tsc_m):
+        for probe_took, hang in ((0.5, True), (7, False), (0.5, False)):
+            t = Transport(clock, probe_took=probe_took, hang=hang)
+            deadline = clock.now + 5
+            try:
+                tsc_m.ask("s", {"q": tsc_m.noul("?")}, server_runner=t,
+                          calls_log=os.devnull, timeout=20, deadline=deadline)
+                return False
+            except tsc_m.TypeSafeError:
+                pass
+            expected = 0 if probe_took >= 5 else 1
+            if (len(t.attempts) != expected or len(t.probes) != 1 or clock.slept
+                    or clock.now > deadline or not _in_time(t, deadline)):
+                return False
+        passed = Transport(clock)
         try:
-            tsc_m.ask("s", {"q": tsc_m.noul("?")}, api_key="k", opener=t,
-                      calls_log=os.devnull, timeout=20, retries=3, deadline=deadline)
+            tsc_m.ask("s", {"q": tsc_m.noul("?")}, server_runner=passed,
+                      calls_log=os.devnull, deadline=clock.now)
             return False
         except tsc_m.TypeSafeError:
-            pass
-        return (len(t.attempts) == 1 and clock.slept == [] and clock.now <= deadline
-                and _in_time(t, deadline))
-
-    def short_wait(clock, tsc_m):
-        t = Transport(clock, retry_after="1")
-        deadline = clock.now + 5
-        try:
-            tsc_m.ask("s", {"q": tsc_m.noul("?")}, api_key="k", opener=t,
-                      calls_log=os.devnull, timeout=20, retries=3, deadline=deadline)
-            return False
-        except tsc_m.TypeSafeError:
-            pass
-        return len(t.attempts) > 1 and clock.now <= deadline and _in_time(t, deadline)
-
-    return _on_clock(long_wait) and _on_clock(short_wait)
+            return passed.attempts == [] and passed.probes == []
+    return _on_clock(run_it)
 
 
 def _judged_once(call):
-    """A 429 with a 1 s retry-after, 10 s of deadline: exactly one attempt,
-    no sleep, inside the deadline."""
+    """A Worker 429 is surfaced once, without client retry or sleep."""
     def run_it(clock, tsc_m):
-        t = Transport(clock, retry_after="1")
+        t = Transport(clock)
         deadline = clock.now + 10
         try:
             call(Via(tsc_m, t), deadline)
             return False
         except Exception:
             pass
-        return (len(t.attempts) == 1 and clock.slept == [] and clock.now <= deadline
-                and _in_time(t, deadline))
+        return (len(t.attempts) == 1 and len(t.probes) == 1 and clock.slept == []
+                and clock.now <= deadline and _in_time(t, deadline))
     return _on_clock(run_it)
 
 
@@ -620,7 +616,7 @@ def prop_build_advisory_bounded(rtc_m, rtd_m):
         return len(t.attempts) == 1 and t.attempts[0][1] <= 6.0 and clock.now - start <= 6.0
 
     def limited(clock, tsc_m):
-        t = Transport(clock, retry_after="1")
+        t = Transport(clock)
         try:
             build_m.advise("please build the deal room panel", client=Via(tsc_m, t))
             return False
@@ -751,7 +747,7 @@ PROPERTIES = {
     "a none-binds ranking is ok with an empty shortlist": prop_none_binds_is_ok,
     "binding stops at the deadline and keeps what was judged": prop_deadline,
     "a passed deadline makes no request and still delivers matches": prop_deadline_keeps_matches,
-    "ask() honours an absolute deadline across 429 retries": prop_ask_honours_deadline,
+    "ask() bounds the capability probe and Worker with one deadline": prop_ask_honours_deadline,
     "a 429 on a binding request is not retried": prop_bind_429_not_retried,
     "a 429 on the ranking request is not retried": prop_rank_429_not_retried,
     "the build advisory is one attempt of at most 6 s": prop_build_advisory_bounded,
@@ -991,21 +987,13 @@ MUTANTS = [
     # The deadline removed from the ranking request.
     ("a passed deadline makes no request and still delivers matches", RTD_PATH,
      ("        elif deadline - clock() < MIN_CALL_SECONDS:", "        elif False:")),
-    # Retries restored on the binding and the ranking requests.
-    ("a 429 on a binding request is not retried", RTD_PATH,
-     ('extra = {"deadline": deadline, "retries": 0,\n             "model": _sibling("jev_rule_select").EVALUATED_MODEL}',
-      'extra = {"deadline": deadline,\n             "model": _sibling("jev_rule_select").EVALUATED_MODEL}')),
-    ("a 429 on the ranking request is not retried", RTD_PATH,
-     ('extra = {"retries": 0, "deadline": deadline, "model": jrs.EVALUATED_MODEL}',
-      'extra = {"deadline": deadline, "model": jrs.EVALUATED_MODEL}')),
-    # ask() sleeping past the deadline, and attempts at the full timeout.
-    ("ask() honours an absolute deadline across 429 retries", TSC_PATH,
-     ("if deadline is not None and delay >= deadline - time.monotonic():", "if False:")),
-    ("ask() honours an absolute deadline across 429 retries", TSC_PATH,
-     ("attempt_timeout = min(timeout, remaining)", "attempt_timeout = timeout")),
-    # The build advisory with retries restored, and with the old 20 s cap.
-    ("the build advisory is one attempt of at most 6 s", BUILD_PATH,
-     ("            retries=0,\n", "")),
+    # Deadline mutants target the client that owns the end-to-end clock.
+    ("ask() bounds the capability probe and Worker with one deadline", TSC_PATH,
+     ("remaining = min(remaining, deadline - time.monotonic())",
+      "remaining = float(timeout)")),
+    ("ask() bounds the capability probe and Worker with one deadline", TSC_PATH,
+     ("remaining = float(timeout) - (time.monotonic() - started)",
+      "remaining = float(timeout)")),
     ("the build advisory is one attempt of at most 6 s", BUILD_PATH,
      ("TIMEOUT_SECONDS = 6.0", "TIMEOUT_SECONDS = 20.0")),
     ("a rule already delivered this session is not resent inside the window", RTD_PATH,

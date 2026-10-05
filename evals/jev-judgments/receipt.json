@@ -2,15 +2,14 @@
  "adapter": {
   "adapter_id": "jev-judgments-admission-replay",
   "adapter_version": "1",
-  "configuration_fingerprint": "sha256:5e53f5c9f1a047e7dbb4cd8ba2960afb3e5ae462f2e5139f46f4bc99f196724f",
+  "configuration_fingerprint": "sha256:62ec7babfc93ad307f08dcb9fe3d5718598bbf122145a50b53691591edccdf47",
   "harness_id": "evals/jev-judgments/run_eval.py",
-  "harness_version": "7245982012f4faa169e5ef40593e3753afd2800e0e1b59a2d3c43e9da59410e7",
+  "harness_version": "aec173bb93b97aafd61dd115d720772f448788559c4c92eb535ea2512037c09f",
   "model_id": "deterministic-no-model",
-  "native_session_ref": "01a1096a-7c49-7750-84af-7fd687e6e2f4",
+  "native_session_ref": "01a109c5-c2d7-7652-9da4-68955123af7e",
   "provider_id": "none",
   "surface": "offline_programmatic"
  },
- "baseline_ref": "f5e44115^",
  "cases": {
   "should_not_fire": 92,
   "sources": [
@@ -90,13 +89,14 @@
    }
   },
   "dependencies": {
+   "evals/jev-judgments/admission-policy.v1.json": "914cfa60d99c043660a69c79688befc485b2755addcaef36e4f4eb65fc3a3cad",
    "evals/jev-judgments/expectations.v1.json": "fbf78aaede01d2871dd055f2c66e625b5e00f816915ca19a5ce67cc7a9b34211",
    "lib/jev_required_actions.py": "23be831932b418a6540bb25da42b9954090a232c85a8697cfa47d2410b82ddcd",
    "lib/transcript_read.py": "17f34e6288557340d70e5cff18927a6274f61b5c802afb5848b7d71c3f1210a2",
    "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
    "mcp-server/src/jev-spend-authority.js": "d1e2444d23d8fbce95e7b1a5a430914b00e2a45b08da306cb73464fb5cb018c7",
    "mcp-server/src/judge-providers.v1.json": "48b8ca8b4defec4b82fd36f708498c707eab5f861ae0046f857ae06ae8d981ab",
-   "ops/config/jev-call-sites.v1.json": "914cfa60d99c043660a69c79688befc485b2755addcaef36e4f4eb65fc3a3cad",
+   "ops/config/jev-call-sites.v1.json": "d085982426f56cf299abcb42a59d94bbac8a4bdc8166c34b73677a073df9bbaa",
    "ops/config/jev-cost-guard.v1.json": "e17dbcf060e2ab9126d99408b4ea2068824066fe90ac5acb8a74d59bb9e0e7e5",
    "ops/typesafe_client.py": "2c762db2a1559ab30de3a13b4f153d4dde304ccffe21aa29f180bf04270a577e",
    "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2",
@@ -116,7 +116,7 @@
    "path": "evals/jev-judgments/score.py"
   },
   "source": {
-   "evals/jev-judgments/run_eval.py": "7245982012f4faa169e5ef40593e3753afd2800e0e1b59a2d3c43e9da59410e7",
+   "evals/jev-judgments/run_eval.py": "aec173bb93b97aafd61dd115d720772f448788559c4c92eb535ea2512037c09f",
    "evals/jev-judgments/score.py": "71511dc3ab33fc63455ada0e3f26f2d1a3cd0b09dfa21fcd121a5835cff4ca65"
   }
  },
@@ -134,6 +134,8 @@
  "min_useful_gain": 0.5,
  "noise_floor": 0.099,
  "notes": [
+  "Baseline git ref: f5e44115^",
+  "Admission policy is frozen from reviewed source 1cdaa6729708f7aff26837a1165fcdc1b6adb999 in admission-policy.v1.json. Labels remain sealed; this replay measures transport admission under that policy, not current production budgets or live paid-call availability.",
   "Production cases replay the call site, session presence and fixture provenance of real out/jev-calls.jsonl rows; a fixture row is replayed under CARR_HOOK_FIXTURE=1, which is how ops/ci.sh's gates class ran it (other classes now export CARR_JEV_OFFLINE).",
   "Fixture provenance is inferred: a prompt hash seen in three or more sessions. Ad-hoc explicit callers are excluded from the trace sample and covered by hand-written hard cases.",
   "Budgets (site hourly/daily, global hourly) do not bind at this sample size; Worker unit tests and disposable PostgreSQL exercise them.",

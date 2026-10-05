@@ -20,6 +20,19 @@ ANSWER = {'model': 'jev-1.13.0', 'answers': {'q': {'type': 'noul', 'noul': .8}},
           'usage': {'input_tokens': 100, 'output_tokens': 1}}
 
 class AuthorityTests(unittest.TestCase):
+    def test_spend_index_migration_extends_current_main(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("migration_order", root / "ops/migration-order-gate.py")
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        base = gate.tree_paths(root, "origin/main")
+        local = {"migrations/" + path.name for path in (root / "migrations").glob("*.sql")}
+        self.assertEqual(gate.violations(base, base, local), [])
+        migrations = list((root / "migrations").glob("*_jev_spend_attempt_index.sql"))
+        self.assertEqual(len(migrations), 1)
+        fixture = (root / "mcp-server/test/jev-spend-postgres.mjs").read_text()
+        self.assertIn(migrations[0].name, fixture)
+
     def test_hook_and_runtime_use_worker_without_local_key_or_vendor(self):
         for kwargs in ({}, {'work_class': 'app_runtime'}):
             with self.subTest(kwargs=kwargs), tempfile.TemporaryDirectory() as tmp:

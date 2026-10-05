@@ -8,6 +8,8 @@ attribution, unattended policy, fixture/CI refusal, site budgets). Both arms
 run the REAL ask(); the candidate fake Worker runs canonical checkJevSpend
 against an empty ledger, and vendor transport is replaced by a recorder, so the
 observation is simply whether a request would have left the machine.
+Admission policy is frozen at the reviewed transport revision. Live budget
+pauses can change independently and are tested by the Worker budget suites.
 
 CASES. `--build` samples production traces from out/jev-calls.jsonl
 (2026-09-28..10-04, every non-cache attempt with a caller), stratified by the
@@ -47,6 +49,7 @@ sys.path.insert(0, str(REPO / "tools" / "room-bridge"))
 import evaluation_kernel as kernel
 
 EXPECTATIONS = HERE / "expectations.v1.json"
+ADMISSION_POLICY = REPO / "evals/jev-judgments/admission-policy.v1.json"
 VERSION = "jev-judgments-expectations/v1"
 WINDOW = ("2026-09-28", "2026-10-05")
 PER_SITE = 14
@@ -245,7 +248,7 @@ def observe(client, case, scratch):
     def worker(state, questions, **options):
         who = {key: options.get(key) for key in ('caller', 'session_id', 'job_id', 'unattended')}
         if who['session_id'] == 'unbound': who['session_id'] = None
-        registry = json.loads(Path(client.JEV_CALL_SITES_PATH).read_text())
+        registry = json.loads(ADMISSION_POLICY.read_text())
         script = """import {checkJevSpend,costPolicy} from './mcp-server/src/jev-spend-authority.js';
             let input='';for await(const chunk of process.stdin)input+=chunk;
             const {who,registry}=JSON.parse(input);
@@ -318,13 +321,13 @@ def report(base_ref):
                                        "evals/jev-judgments/evidence/candidate.jsonl"], **m})
     policy_files = [f"tools/room-bridge/{name}.py" for name in
                     ("evaluation_kernel", "execution_contract", "evaluation_rubrics", "design_kernel", "policy_learning")]
-    deps = [p for p in ARM_FILES if (REPO / p).exists()] + policy_files + ["evals/jev-judgments/expectations.v1.json"]
-    fingerprint = hashlib.sha256("".join(_sha(REPO / p) for p in ARM_FILES if (REPO / p).exists())
+    deps = [p for p in ARM_FILES if (REPO / p).exists()] + policy_files + [
+        "evals/jev-judgments/expectations.v1.json", "evals/jev-judgments/admission-policy.v1.json"]
+    fingerprint = hashlib.sha256("".join(_sha(REPO / p) for p in deps)
                                  .encode()).hexdigest()
     harness = _sha(HERE / "run_eval.py")
     receipt = {
         "schema_version": 2, "surface": "jev-judgments",
-        "baseline_ref": base_ref,
         "change": "Admit a paid Jev call only from a registered call site with its declared attribution, "
                   "outside fixtures/CI and unattended workers its site excludes, within per-site and "
                   "global hourly budgets.",
@@ -352,6 +355,10 @@ def report(base_ref):
                  "candidate_usd_per_case": round(paid["candidate"] * PRICE_PER_CALL_USD, 10)},
         "verdict": {"decision": "ship", "statement": ""},
         "notes": [
+            f"Baseline git ref: {base_ref}",
+            "Admission policy is frozen from reviewed source 1cdaa6729708f7aff26837a1165fcdc1b6adb999 "
+            "in admission-policy.v1.json. Labels remain sealed; this replay measures transport admission "
+            "under that policy, not current production budgets or live paid-call availability.",
             "Production cases replay the call site, session presence and fixture provenance of real "
             "out/jev-calls.jsonl rows; a fixture row is replayed under CARR_HOOK_FIXTURE=1, which is how "
             "ops/ci.sh's gates class ran it (other classes now export CARR_JEV_OFFLINE).",

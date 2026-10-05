@@ -198,10 +198,9 @@ def _default_rank(text, pool, limit, client, timeout=None, deadline=None):
     roster = [{"id": rule["id"], "gist": (rule.get("statement") or "")[:RUBRIC_CHARS]}
               for rule in pool]
     try:
-        # retries=0: a 429's retry-after is unbounded, and three retries at
-        # the full timeout each escaped the clock (#1281 review: one ranking
-        # request took 15.1 s against the 12 s deadline).
-        extra = {"retries": 0, "deadline": deadline, "model": jrs.EVALUATED_MODEL}
+        # The client bounds the capability probe and Worker by this deadline.
+        # Vendor retries are owned by the Worker.
+        extra = {"deadline": deadline, "model": jrs.EVALUATED_MODEL}
         if timeout is not None:
             extra["timeout"] = timeout
         answer = ranker.judge({"situation": text},
@@ -252,8 +251,8 @@ def _overlap_rank(text, pool, limit, keywords):
 
 def _default_bind(subject, questions, client, timeout=None, deadline=None):
     """One binding request through ops/jev_judge (logged there),
-    with no rate-limit retries and the caller's deadline passed to the client."""
-    extra = {"deadline": deadline, "retries": 0,
+    with the caller's deadline passed to the Worker client."""
+    extra = {"deadline": deadline,
              "model": _sibling("jev_rule_select").EVALUATED_MODEL}
     if timeout is not None:
         extra["timeout"] = timeout

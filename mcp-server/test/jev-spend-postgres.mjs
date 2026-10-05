@@ -14,7 +14,7 @@ await pool.query(`create table tool_call (
   idempotency_key text primary key, verb text not null, actor_id uuid not null,
   request_hash text not null, response jsonb not null,
   created_at timestamptz not null default now())`);
-await pool.query(readFileSync(new URL('../../migrations/0825_jev_spend_attempt_index.sql', import.meta.url), 'utf8'));
+await pool.query(readFileSync(new URL('../../migrations/0835_jev_spend_attempt_index.sql', import.meta.url), 'utf8'));
 // The receipt sink is a database fixture; admission/insertion uses the
 // production reservation function, and no provider is configured.
 await pool.query(`create schema ops;

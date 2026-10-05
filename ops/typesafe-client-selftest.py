@@ -805,9 +805,8 @@ class CallReceiptTests(unittest.TestCase):
 
     def test_real_call_receipt_includes_usage_and_no_response_id(self):
         # This exercises _append_call_receipt directly with a real-shaped
-        # response (the function ask() calls only when opener is None, i.e.
-        # a genuine production call — see test_mock_opener_path_writes_no_
-        # receipt below for why the mock path can't be used to test this).
+        # Worker response. Both production and injected Worker runners record
+        # through this function; no retired vendor transport is involved.
         answer = {"model": "jev-1.13.0", "id": "resp-abc123",
                   "answers": {"q": {"type": "noul", "noul": 0.8}},
                   "usage": {"input_tokens": 11, "output_tokens": 3},
