@@ -79,14 +79,14 @@ test('relationship attribution follows lead automation without rewriting its sea
   assert.notEqual(successor.find(row => row.ingress_key === 'mcp-tool:link-parties').schema_digest,
     predecessor.find(row => row.ingress_key === 'mcp-tool:link-parties').schema_digest);
   const names = readdirSync(resolve(root, 'migrations')).sort();
-  const successorName = '0820_relationship_scac_successor.sql';
+  const successorName = '0830_relationship_scac_successor.sql';
   assert.deepEqual(names.filter(name => /_relationship_scac_successor[.]sql$/.test(name)), [successorName]);
   assert.ok(successorName > '0812_lead_automation_scac_successor.sql');
   const sql = read(`migrations/${successorName}`);
   assert.match(sql, /filename='0812_lead_automation_scac_successor[.]sql' and sha256='[0-9a-f]{64}'/);
-  assert.match(sql, /filename='0819_relationship_deal_links[.]sql' and sha256='[0-9a-f]{64}'/);
+  assert.match(sql, /filename='0829_relationship_deal_links[.]sql' and sha256='[0-9a-f]{64}'/);
   assert.match(sql, /scac_mutation_registration_v106/);
   assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry[.]v107[.]generated[.]js/);
   assert.match(read('tools/migrate.py'),
-    /"0819_relationship_deal_links[.]sql",\n\s+"0820_relationship_scac_successor[.]sql"/);
+    /"0829_relationship_deal_links[.]sql",\n\s+"0830_relationship_scac_successor[.]sql"/);
 });

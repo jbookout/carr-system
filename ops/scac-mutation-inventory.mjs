@@ -19901,7 +19901,7 @@ export function renderRelationshipRegistrySql(rows, predecessorSql = null) {
     predecessorSql,
     predecessorPath: "migrations/0812_lead_automation_scac_successor.sql",
     predecessorDigest: "2013b4ec0a6cfbb1f9fc0c2e29307e95ad3b7c49960435cf21a49382425ec507",
-    domainPath: "migrations/0819_relationship_deal_links.sql",
+    domainPath: "migrations/0829_relationship_deal_links.sql",
     oldVersion: REGISTRY_V106_VERSION,
     newVersion: REGISTRY_V107_VERSION,
     oldCatalogBaseline: LEAD_AUTOMATION_V106_DB_CATALOG_BASELINE,
@@ -21222,7 +21222,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v107.generated.js"] =
     renderRuntimeProjection(v107Rows, { version: REGISTRY_V107_VERSION,
       dbCatalogBaseline: RELATIONSHIP_V107_DB_CATALOG_BASELINE });
-  artifacts["migrations/0820_relationship_scac_successor.sql"] =
+  artifacts["migrations/0830_relationship_scac_successor.sql"] =
     renderRelationshipRegistrySql(v107Rows, artifacts["migrations/0812_lead_automation_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -22287,7 +22287,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v107.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V107_VERSION,
         dbCatalogBaseline: RELATIONSHIP_V107_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0820_relationship_scac_successor.sql"), renderRelationshipRegistrySql(rows));
+    await writeFile(resolve("migrations/0830_relationship_scac_successor.sql"), renderRelationshipRegistrySql(rows));
     process.stdout.write("Relationship v107 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);
