@@ -18,8 +18,22 @@ test('Leads extends the delivered system-work seal without rewriting its immutab
       `${path} must retain the delivered predecessor bytes`);
   }
   const leads = read('migrations/0844_leads_scac_successor.sql');
-  assert.match(leads, /filename='0827_system_work_scac_successor\.sql' and sha256='5fdf0a6e85a1eebbb8fc8eecc7a516a550bb8c675b713000340b79f5f2a57f58'/);
-  assert.match(leads, /scac_mutation_registration_v108\('sha256:[0-9a-f]{64}','mcp-tool:update-lead'\)/);
-  assert.match(leads, /scac-mutation-registry\.v109/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v109\.generated\.js/);
+  assert.match(leads, /scac_mutation_registration_v109\('sha256:[0-9a-f]{64}','mcp-tool:codex-read-recovery'\)/);
+  assert.match(leads, /scac-mutation-registry\.v110/);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v110\.generated\.js/);
+});
+
+test('Leads extends the delivered relationship v109 frontier without rewriting it', () => {
+  const delivered = {
+    "migrations/0839_relationship_deal_links.sql": "6f683da138f82d72421b79edfdc575502a882acedfeeebd44c4c4258210fe1f3",
+    "migrations/0840_relationship_scac_successor.sql": "50c556fa9090c6158b7d23a9c02ae1873d219bb82454941ec484b1c73d1d56c0",
+    "mcp-server/src/scac-mutation-registry.v109.generated.js": "da727eeeed5c11c37b80051808d76082c7b536fa7d719abec25c4475c71c6efc"
+  };
+  for (const [path, expected] of Object.entries(delivered))
+    assert.equal(createHash('sha256').update(read(path)).digest('hex'), expected, path);
+  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v110\.generated\.js/);
+  const leads = read('migrations/0844_leads_scac_successor.sql');
+  assert.match(leads, /0840_relationship_scac_successor\.sql/);
+  assert.match(leads, /scac_mutation_registration_v109\(/);
+  assert.match(leads, /scac-mutation-registry\.v110/);
 });

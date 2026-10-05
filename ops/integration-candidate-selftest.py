@@ -39,6 +39,28 @@ class CandidateTests(unittest.TestCase):
     def registry(self,v): self.write(f'mcp-server/src/scac-mutation-registry.v{v}.generated.js',f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\n')
     def commit(self):
         self.g('add','migrations','mcp-server','db'); self.g('commit','-qm','Fixture source')
+    def test_generation_accepts_exact_pending_main_merge_but_proof_requires_commit(self):
+        self.g('checkout', '-qb', 'feature')
+        self.write('migrations/0752_feature.sql', 'select 2;')
+        self.commit()
+        self.g('checkout', '-qb', 'main-next', self.base)
+        self.write('migrations/0751_main.sql', 'select 3;')
+        self.registry(98)
+        self.commit()
+        latest = self.g('rev-parse', 'HEAD')
+        self.g('update-ref', 'refs/remotes/origin/main', latest)
+        self.g('checkout', 'feature')
+        self.g('merge', '--no-commit', 'main-next')
+        target = self.repo/'mcp-server/src/scac-mutation-registry.v99.generated.js'
+        content = b'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v99";\n'
+        integration.write_generated_artifact(self.repo, target, content)
+        self.assertEqual(target.read_bytes(), content)
+        with self.assertRaises(MigrationNumberError):
+            integration.validate_candidate(self.repo, latest)
+        self.write('migrations/0751_main.sql', 'select 4;')
+        with self.assertRaises(MigrationNumberError):
+            integration.check_generated_write(self.repo, target, content, latest)
+
     def test_actual_generator_sink_rejects_reseal_and_wrong_successor(self):
         target=self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js'
         integration.check_generated_write(self.repo,target,target.read_bytes(),self.base)

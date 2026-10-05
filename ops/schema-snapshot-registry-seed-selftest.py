@@ -273,7 +273,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 110)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 111)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -759,6 +759,22 @@ assert "SCAC_FULL_SET_SEAL_COUNT=100" in GENERATOR
 assert "ops.scac_mutation_catalog_v101_current()" in GENERATOR
 assert 'scac-mutation-registry.v101.generated.js' in GENERATOR
 registry_gate = (ROOT / 'ops/siep11-mutation-registry-local-pg-gate.py').read_text()
+successor_guards: list[ast.stmt] = [
+    node for node in ast.walk(ast.parse(registry_gate))
+    if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+    and isinstance(node.test.left, ast.Name) and node.test.left.id == 'runtime_version'
+    and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.NotIn)
+]
+assert len(successor_guards) == 1
+successor_guard = compile(ast.Module(body=successor_guards, type_ignores=[]), '<successor guard>', 'exec')
+for runtime_version in ['scac-mutation-registry.v109', 'scac-mutation-registry.v110']:
+    exec(successor_guard, {'runtime_version': runtime_version})
+try:
+    exec(successor_guard, {'runtime_version': 'scac-mutation-registry.v111'})
+except RuntimeError as exc:
+    assert 'unsupported live successor' in str(exc)
+else:
+    raise AssertionError('unreviewed successors must remain refused')
 assert "0768_confirm_merge_human_only_scac_successor.sql" in GENERATOR
 assert "CONFIRM_MERGE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=102" in GENERATOR
@@ -820,23 +836,23 @@ monitor_names = {"LIVE_REGISTRY_VERSION", "LIVE_REGISTRY_ORDINAL", "SEALED_PREDE
 monitor_pins = {node.targets[0].id: ast.literal_eval(node.value)
                 for node in monitor_tree.body if isinstance(node, ast.Assign)
                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in monitor_names}
-assert monitor_pins["LIVE_REGISTRY_VERSION"] == "scac-mutation-registry.v109"
-assert monitor_pins["LIVE_REGISTRY_ORDINAL"] == 109
-assert monitor_pins["SEALED_PREDECESSOR_VERSION"] == "scac-mutation-registry.v108"
-predecessor_runtime = (ROOT / "mcp-server/src/scac-mutation-registry.v108.generated.js").read_text()
+assert monitor_pins["LIVE_REGISTRY_VERSION"] == "scac-mutation-registry.v110"
+assert monitor_pins["LIVE_REGISTRY_ORDINAL"] == 110
+assert monitor_pins["SEALED_PREDECESSOR_VERSION"] == "scac-mutation-registry.v109"
+predecessor_runtime = (ROOT / "mcp-server/src/scac-mutation-registry.v109.generated.js").read_text()
 predecessor_constants = dict(re.findall(r'^export const (SCAC_MUTATION_REGISTRY_\w+) = (.*);$',
                                        predecessor_runtime, re.MULTILINE))
 assert monitor_pins["SEALED_PREDECESSOR_DIGEST"] == "sha256:" + json.loads(predecessor_constants["SCAC_MUTATION_REGISTRY_DIGEST"])
 predecessor_seal = json.loads(subprocess.run(
     ["node", "--input-type=module", "-e", """
-    import { registrySeal, frozenInventory, SYSTEM_WORK_V108_DB_CATALOG_BASELINE }
+    import { registrySeal, frozenInventory, RELATIONSHIP_V109_DB_CATALOG_BASELINE }
       from './ops/scac-mutation-inventory.mjs';
-    console.log(JSON.stringify(registrySeal('scac-mutation-registry.v108',
-      frozenInventory('scac-mutation-registry.v108'), SYSTEM_WORK_V108_DB_CATALOG_BASELINE)));
+    console.log(JSON.stringify(registrySeal('scac-mutation-registry.v109',
+      frozenInventory('scac-mutation-registry.v109'), RELATIONSHIP_V109_DB_CATALOG_BASELINE)));
     """], cwd=ROOT, capture_output=True, text=True, check=True).stdout)
 assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
     predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
-assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0827_system_work_scac_successor.sql"
+assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0840_relationship_scac_successor.sql"
 assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0844_leads_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
@@ -1022,14 +1038,14 @@ loader_end = GENERATOR.index(
 )
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "108", "109"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "109", "110"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 108
-assert loaded_sql.count("sha256:") == 108
-assert FULL_SET_SEALS["scac-mutation-registry.v108"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 109
+assert loaded_sql.count("sha256:") == 109
+assert FULL_SET_SEALS["scac-mutation-registry.v109"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
@@ -1038,7 +1054,7 @@ assert FULL_SET_SEALS["scac-mutation-registry.v108"] in loaded_sql, (
 # feed the loader deliberately broken input and require a nonzero exit, so a
 # seal set that lost v22, gained a stray version, or carried a malformed digest
 # cannot be rendered into a snapshot as if it were sealed history.
-def loader_rejects(seals: dict, count: str, current: str = "109") -> bool:
+def loader_rejects(seals: dict, count: str, current: str = "110") -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(seals, handle)
         path = handle.name
@@ -1117,11 +1133,12 @@ assert "ops.scac_mutation_catalog_v108_current()" in GENERATOR
 assert 'scac-mutation-registry.v108.generated.js' in GENERATOR
 assert '"scac-mutation-registry.v108"' in registry_gate
 
+assert "0840_relationship_scac_successor.sql" in GENERATOR
+assert "RELATIONSHIP_REGISTRY_APPLIED" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=109" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=108" in GENERATOR
+
 assert "0844_leads_scac_successor.sql" in GENERATOR
 assert "LEADS_REGISTRY_APPLIED" in GENERATOR
-assert "SCAC_CURRENT_NUMBER=109" in GENERATOR
-assert "SCAC_VERSION_COUNT=109" in GENERATOR
-assert "SCAC_FULL_SET_SEAL_COUNT=108" in GENERATOR
-assert "ops.scac_mutation_catalog_v109_current()" in GENERATOR
-assert 'scac-mutation-registry.v109.generated.js' in GENERATOR
-assert '"scac-mutation-registry.v109"' in registry_gate
+assert "SCAC_CURRENT_NUMBER=110" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=109" in GENERATOR
