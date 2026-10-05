@@ -443,7 +443,10 @@ def guarded(args):
 
 
 def run_gh(args, stdin=None):
-    return subprocess.run(["gh", *guarded(args)], input=stdin, capture_output=True, text=True, check=True).stdout
+    try:
+        return subprocess.run(["gh", *guarded(args)], input=stdin, capture_output=True, text=True, check=True).stdout
+    except subprocess.CalledProcessError as exc:
+        raise BriefError(f"gh {' '.join(args[:3])} failed: {(exc.stderr or '').strip()[-300:]}") from None
 
 
 def _json_stream(text):
@@ -536,4 +539,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BriefError as exc:
+        print(f"brief-check: {exc}", file=sys.stderr)
+        sys.exit(2)

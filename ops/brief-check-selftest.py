@@ -240,6 +240,20 @@ class Posting(unittest.TestCase):
                 self.assertNotRegex(joined, r"\b(review|merge|approve|auto-merge)\b")
                 self.assertRegex(joined, r"repos/o/r/issues/(7/)?comments")
 
+    def test_gh_failure_reports_ghs_reason_not_a_traceback(self):
+        # Seen live on 2026-10-05: the account's REST limit ran out mid-post.
+        import subprocess
+        real = bc.subprocess.run
+
+        def refused(argv, **kw):
+            raise subprocess.CalledProcessError(1, argv, output="", stderr="gh: API rate limit exceeded (HTTP 403)\n")
+        bc.subprocess.run = refused
+        try:
+            with self.assertRaisesRegex(bc.BriefError, "rate limit exceeded"):
+                bc.run_gh(["api", "--paginate", "repos/o/r/issues/7/comments"])
+        finally:
+            bc.subprocess.run = real
+
     def test_guard_refuses_anything_but_comment_calls(self):
         with self.assertRaises(bc.BriefError):
             bc.guarded(["pr", "review", "7", "--approve"])
