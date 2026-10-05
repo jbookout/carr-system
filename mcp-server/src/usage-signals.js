@@ -27,20 +27,18 @@ export async function usageResponse(request, env, session, dependencies, guardPo
       await env.OAUTH_KV.put(`${prefix}event:${new Date(now).toISOString()}:${crypto.randomUUID()}`, JSON.stringify(event), {
         expirationTtl: RETENTION_SECONDS, metadata: event,
       });
-      try {
-        const releaseKey = `${prefix}release`;
-        if (!await env.OAUTH_KV.get(releaseKey)) await env.OAUTH_KV.put(releaseKey, JSON.stringify({ first_observed_at: new Date(Math.floor(now / DAY) * DAY).toISOString() }));
-      } catch { /* Missing release metadata makes never-used history unknown. */ }
       return json({ captured: true }, 202);
     } catch { return json({ error: 'usage_unavailable' }, 503); }
   }
   if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
   const sha = url.searchParams.get('release_sha');
-  if (!/^[a-f0-9]{40}$/.test(sha || '') || [...url.searchParams.keys()].length !== 1) return json({ error: 'invalid_usage_request' }, 400);
+  const started = url.searchParams.get('release_started_at');
+  const keys = [...url.searchParams.keys()];
+  if (!/^[a-f0-9]{40}$/.test(sha || '') || keys.some(key => !['release_sha', 'release_started_at'].includes(key)) || new Set(keys).size !== keys.length || started !== null && (!Number.isFinite(Date.parse(started)) || new Date(started).toISOString() !== started || Date.parse(started) > now)) return json({ error: 'invalid_usage_request' }, 400);
+  const releaseStart = started === null ? null : Date.parse(started);
   const prefix = `doctorcre_usage:v1:${url.origin}:${sha}:`;
   try {
-    const release = await env.OAUTH_KV.get(`${prefix}release`, { type: 'json' });
-    const complete = !!release && Date.parse(release.first_observed_at) > now - RETENTION_SECONDS * 1000;
+    const complete = releaseStart !== null && releaseStart > now - RETENTION_SECONDS * 1000;
     const rows = FEATURES.map(feature => ({ ...feature, uses: { joe: 0, dell: 0 }, last_used: { joe: null, dell: null }, never_used: { joe: complete ? true : null, dell: complete ? true : null } }));
     const features = new Map(rows.map(row => [`${row.event_name}:${row.screen || '*'}`, row]));
     let cursor;
@@ -49,7 +47,7 @@ export async function usageResponse(request, env, session, dependencies, guardPo
       for (const { metadata: event } of page.keys) {
         if (!validUsageEvent(event) || event.release_sha !== sha) continue;
         const time = Date.parse(event.timestamp);
-        if (time > now || time <= now - RETENTION_SECONDS * 1000) continue;
+        if (time > now || time <= now - RETENTION_SECONDS * 1000 || releaseStart !== null && time < releaseStart) continue;
         for (const row of [features.get(`${event.event_name}:${event.screen}`), features.get(`${event.event_name}:*`)].filter(Boolean)) {
           row.never_used[event.partner] = false;
           if (!row.last_used[event.partner] || event.timestamp > row.last_used[event.partner]) row.last_used[event.partner] = event.timestamp;
@@ -60,7 +58,7 @@ export async function usageResponse(request, env, session, dependencies, guardPo
       if (!page.list_complete && !cursor) throw new Error('Incomplete list');
     } while (cursor);
     return json({ schema: USAGE_SCHEMA, release_sha: sha, enabled, observed_at: new Date(now).toISOString(),
-      week_start: new Date(now - 7 * DAY).toISOString(), first_observed_at: release?.first_observed_at || null,
-      coverage: complete ? 'since_capture_started' : release ? 'retained_window' : 'awaiting_capture', features: rows });
+      week_start: new Date(now - 7 * DAY).toISOString(), release_started_at: started,
+      coverage: complete ? 'since_release' : 'retained_window', features: rows });
   } catch { return json({ error: 'usage_unavailable' }, 503); }
 }

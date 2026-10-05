@@ -33,6 +33,7 @@ test('server rejects client data, free text, extra fields, forged partners and m
   const stored = env.OAUTH_KV.writes.find(write => write.key.includes(':event:'));
   assert.equal(stored.options.expirationTtl, RETENTION_SECONDS);
   assert.deepEqual(JSON.parse(stored.value), event());
+  assert.equal(env.OAUTH_KV.writes.every(write => write.options?.expirationTtl === RETENTION_SECONDS), true);
 });
 
 test('weekly summary separates partners, paginates, records last use and avoids false never-used after retention', async () => {
@@ -40,16 +41,17 @@ test('weekly summary separates partners, paginates, records last use and avoids 
   for (const [partner, time, screen] of [['joe', now, 'home'], ['joe', now - 8 * 86400000, 'deals'], ['dell', now - 1000, 'home']]) {
     await usageResponse(post(event({ partner, screen, timestamp: new Date(time).toISOString() })), env, { ...session, actor: { slug: partner } }, { now: () => time }, guard);
   }
-  const get = () => usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}`), env, session, { now: () => now }, guard);
+  let releaseStartedAt = new Date(now - 9 * 86400000).toISOString();
+  const get = () => usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}&release_started_at=${releaseStartedAt}`), env, session, { now: () => now }, guard);
   let body = await (await get()).json();
-  assert.equal(body.coverage, 'since_capture_started');
+  assert.equal(body.coverage, 'since_release');
   assert.deepEqual(body.features.find(row => row.id === 'home:view').uses, { joe: 1, dell: 1 });
   const deals = body.features.find(row => row.id === 'deals:view');
   assert.deepEqual(deals.uses, { joe: 0, dell: 0 });
   assert.equal(deals.last_used.joe, '2026-09-27T12:00:00.000Z');
   assert.equal(deals.never_used.joe, false);
   assert.equal(deals.never_used.dell, true);
-  await env.OAUTH_KV.put(`doctorcre_usage:v1:${origin}:${sha}:release`, JSON.stringify({ first_observed_at: new Date(now - 181 * 86400000).toISOString() }));
+  releaseStartedAt = new Date(now - 181 * 86400000).toISOString();
   body = await (await get()).json();
   assert.equal(body.coverage, 'retained_window');
   assert.equal(body.features.find(row => row.id === 'tours:view').never_used.joe, null);
@@ -72,11 +74,9 @@ test('concurrent captures keep distinct events and server time determines retent
   assert.equal(events.every(write => JSON.parse(write.value).timestamp === new Date(now).toISOString() && write.options.expirationTtl === 15552000), true);
 });
 
-test('release marker contention cannot lose an accepted usage event', async () => {
-  const store = new Kv();
-  const put = store.put.bind(store);
-  store.put = async (key, value, options) => { if (key.endsWith(':release')) throw new Error('KV write contention'); return put(key, value, options); };
-  const response = await usageResponse(post(event()), { OAUTH_KV: store }, session, { now: () => now }, guard);
-  assert.equal(response.status, 202);
-  assert.equal(store.writes.filter(write => write.key.includes(':event:')).length, 1);
+test('missing release provenance leaves never-used history unknown', async () => {
+  const response = await usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}`), { OAUTH_KV: new Kv() }, session, { now: () => now }, guard);
+  const body = await response.json();
+  assert.equal(body.coverage, 'retained_window');
+  assert.equal(body.features[0].never_used.joe, null);
 });
