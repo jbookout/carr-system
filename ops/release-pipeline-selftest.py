@@ -2213,7 +2213,7 @@ class AppLane(Base):
             return res
         runner.run = run  # type: ignore[method-assign]
         self.assertEqual(pipe.tick(["app"]), 0)
-        self.assertEqual(runner.names()[:4], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-release"])
+        self.assertEqual(runner.names()[:5], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-prepare", "app-release"])
         self.assertEqual(self.fx.records()[-1]["status"], "shipped")
         # The slice marker follows Worker releases only: the app lane records
         # no ops.release row for membership to attach to.
@@ -3032,6 +3032,7 @@ class DeployCredential(unittest.TestCase):
         self.assertEqual(pipe.tick(["app"]), 0)
         self.assertEqual(runner.envs["app-release"].get("CLOUDFLARE_API_TOKEN"), CF_TOKEN)
         self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-npm-ci"])
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-prepare"])
         self.assert_never_echoed()
 
         (self.cred / "tokens.env").write_text("")

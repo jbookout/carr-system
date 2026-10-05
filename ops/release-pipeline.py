@@ -54,9 +54,11 @@ TWO LANES, one tick:
               marker can never delay the next tick. It never fails, blocks or
               retries the release it follows.
   app     the DoctorCRE app (its own repository). Released when its origin/main
-          moves by anything other than docs/tests: `npm ci` and
-          `npm run release:production` from a clean detached origin/main
-          checkout, then /app-release reads the SHA back.
+          moves by anything other than docs/tests: `npm ci`,
+          `npm run release:prepare` (checks, tests, build, artifact verify;
+          no credential) and `npm run release:production` (publish the
+          verified artifact) from a clean detached origin/main checkout, then
+          /app-release reads the SHA back.
 
 BATCHING. Each lane releases the LATEST main SHA, never each merge separately.
 The last released SHA per lane lives in out/release-pipeline/state.json; when it
@@ -2139,6 +2141,10 @@ class Pipeline:
         wt = self.store.release_worktree("app", sha)
         self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
+        # The app owns its checks, tests, build and artifact verification in
+        # `release:prepare`; `release:production` only consumes the verified
+        # dist/ that step leaves behind, so it runs credential-free first.
+        self.step("app-prepare", ["npm", "run", "release:prepare"], wt, timeout=3600)
         self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600,
                   env=self.deploy_env())
         if self.dry_run:
