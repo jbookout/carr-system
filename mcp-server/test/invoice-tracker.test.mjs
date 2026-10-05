@@ -61,7 +61,7 @@ test('reference-monitor acceptance uses the live invoice frontier and exact seal
 });
 
 // Parallel registry additions must form one ordered history, preserving both contracts.
-test('invoice successor preserves the shipped system-work frontier', async()=>{
+test('invoice successor preserves the shipped relationship frontier', async()=>{
  const inventory=await import('../../ops/scac-mutation-inventory.mjs');
  assert.equal(SCAC_MUTATION_REGISTRY_VERSION,'scac-mutation-registry.v110');
  assert.equal(inventory.REGISTRY_V110_VERSION,SCAC_MUTATION_REGISTRY_VERSION);
@@ -77,13 +77,13 @@ test('invoice successor preserves the shipped system-work frontier', async()=>{
  assert.deepEqual(boundAfter.filter(row=>!boundBefore.some(previous=>previous.ingress_key===row.ingress_key)).map(row=>row.ingress_key).sort(),
   ['mcp-tool:read-invoice-tracker','mcp-tool:record-commission-receipt']);
  const sql=readFileSync(new URL('../../migrations/0842_invoice_tracker_scac_successor.sql',import.meta.url),'utf8');
- assert.match(sql,/0827_system_work_scac_successor.sql/);
+ assert.match(sql,/0840_relationship_scac_successor.sql/);
  assert.match(sql,/scac_mutation_registry_v110_seal_available/);
  assert.match(sql,/scac_mutation_registry_v108_seal_available/);
 });
 
 // These migrations must append after main; inserting below its ledger breaks prefix checks.
-test('invoice migrations append with exclusive numbers after shipped system-work contract',()=>{
+test('invoice migrations append with exclusive numbers after shipped relationship contract',()=>{
  const names=readdirSync(new URL('../../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql'));
  const predecessor=names.filter(n=>!n.endsWith('_invoice_tracker.sql')&&!n.endsWith('_invoice_tracker_scac_successor.sql')).sort().at(-1);
  for(const filename of ['0841_invoice_tracker.sql','0842_invoice_tracker_scac_successor.sql']){
