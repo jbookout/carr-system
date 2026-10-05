@@ -6,13 +6,18 @@ The integration owner renders the returned successor once, then proves its tree.
 """
 from __future__ import annotations
 import hashlib
+import hmac
 import fcntl
 import os
+import secrets
+import signal
 import tempfile
+import time
 import json
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'ops'))
 from git_env import scrubbed_env
@@ -23,6 +28,8 @@ from migration_number_contract import (
 
 REGISTRY = re.compile(r'^mcp-server/src/scac-mutation-registry\.v([1-9][0-9]*)\.generated\.js$')
 SHA = re.compile(r'^[0-9a-f]{40}$')
+GENERATOR_TIMEOUT_SECONDS = 300
+OWNER_ENV = 'CARR_INTEGRATION_OWNER'
 
 
 def git(repo: Path, *args: str) -> bytes:
@@ -132,65 +139,155 @@ def source_input_digest(repo: Path) -> str:
     return digest.hexdigest()
 
 
+def source_binding(repo: Path) -> dict:
+    return {'head': git(repo,'rev-parse','HEAD').decode().strip(), 'diff': source_input_digest(repo)}
+
+
+def _ownership_paths(repo: Path) -> tuple[Path, Path]:
+    common = Path(git(repo, 'rev-parse', '--git-common-dir').decode().strip())
+    if not common.is_absolute(): common = repo/common
+    return common/'integration-generation.lock', common/'integration-generation.owner'
+
+
+@contextmanager
+def _exclusive(lock_path: Path):
+    """Yield whether this process now holds the shared Git-root generation lock."""
+    with lock_path.open('a') as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: yield False
+        else: yield True
+
+
+def write_generated_artifact(repo: Path, target: Path, content: bytes) -> None:
+    """Check and write one source artifact as a single owned operation.
+
+    Without a coordinator the writer takes the generation lock itself. Under a
+    coordinator only its renderer, carrying the published owner token, may
+    write, and it writes against the coordinator's pinned base. The base and
+    the target bytes are revalidated immediately before the atomic replace.
+    """
+    lock_path, owner_path = _ownership_paths(repo)
+    with _exclusive(lock_path) as acquired:
+        if acquired:
+            base = git(repo, 'rev-parse', 'origin/main').decode().strip()
+        else:
+            try: owner = json.loads(owner_path.read_text())
+            except (OSError, ValueError): owner = {}
+            token = os.environ.get(OWNER_ENV, '')
+            if not token or not hmac.compare_digest(token, str(owner.get('token', ''))):
+                raise MigrationNumberError('integration generation already owned')
+            base = owner['base']
+        before = target.read_bytes() if target.exists() else None
+        check_generated_write(repo, target, content, base)
+        fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=f'.{target.name}.')
+        try:
+            with os.fdopen(fd, 'wb') as out:
+                out.write(content); out.flush(); os.fsync(out.fileno())
+            os.chmod(temporary, target.stat().st_mode & 0o777 if before is not None else 0o644)
+            current = target.read_bytes() if target.exists() else None
+            if current != before or git(repo, 'rev-parse', 'origin/main').decode().strip() != base:
+                raise MigrationNumberError('integration base or target changed during the write; refresh main and regenerate')
+            os.replace(temporary, target)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True); raise
+
+
+def _run_renderer(argv: list[str], repo: Path, env: dict[str, str]) -> int | None:
+    """Run the renderer in its own process group; None means it timed out.
+
+    The whole group is stopped before returning, so no descendant can write
+    after the receipt becomes terminal or ownership is released.
+    """
+    process = subprocess.Popen(argv, cwd=repo, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               start_new_session=True)
+    try:
+        return process.wait(timeout=GENERATOR_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return None
+    finally:
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        process.wait()
+        deadline = time.monotonic() + 5
+        while True:
+            try: os.killpg(process.pid, 0)
+            except ProcessLookupError: break
+            if time.monotonic() > deadline:
+                raise MigrationNumberError('renderer processes survived termination; reconcile before retry')
+            time.sleep(0.01)
+
+
 def regenerate_once(repo: Path, base: str, pending: list[str], argv: list[str], receipt: Path) -> dict:
     """Render an allocated successor exactly once under a shared Git-root lock.
 
     Renderers consume CARR_INTEGRATION_ALLOCATION. They own all reference and
     schema changes; this coordinator never substitutes numbers in applied SQL.
-    Failed or interrupted execution stays recorded until its source input changes.
+    A failed attempt records the source state it left behind; neither that
+    state nor the attempt's own inputs may execute again until reconciled.
     """
     if not argv or any(not isinstance(a, str) or not a for a in argv):
         raise MigrationNumberError('generator argv must be a nonempty string array')
     if not receipt.is_absolute() or receipt.resolve().is_relative_to(repo.resolve()):
         raise MigrationNumberError('generation receipt must be a private absolute path outside the worktree')
-    common = Path(git(repo, 'rev-parse', '--git-common-dir').decode().strip())
-    if not common.is_absolute(): common = repo/common
-    with (common/'integration-generation.lock').open('a') as lock:
-        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise MigrationNumberError('integration generation already owned') from None
+    lock_path, owner_path = _ownership_paths(repo)
+    with _exclusive(lock_path) as acquired:
+        if not acquired:
+            raise MigrationNumberError('integration generation already owned')
         require_current_base(repo, base)
         plan = allocation_plan(repo, base, pending)
-        inputs = {'plan': plan, 'argv': argv, 'head': git(repo,'rev-parse','HEAD').decode().strip(),
-                  'diff': source_input_digest(repo)}
-        # Include untracked draft bytes; their edits are changed generator input.
-        if receipt.exists():
-            prior=json.loads(receipt.read_text())
-            if prior.get('state') == 'running':
-                raise MigrationNumberError('interrupted generation requires reconciliation before retry')
-            if prior.get('state') == 'generated' and prior.get('base') == base and prior.get('head') == inputs['head'] and prior.get('argv_digest') == hashlib.sha256(json.dumps(argv).encode()).hexdigest() and prior.get('pending_requested') == pending and prior.get('source_after') == source_input_digest(repo) and prior.get('outputs') and all(
-                (repo/p).is_file() and hashlib.sha256((repo/p).read_bytes()).hexdigest()==digest
-                for p,digest in prior['outputs'].items()):
-                validate_candidate(repo,base,require_clean=False)
-                return prior
-        inputs['pending'] = {n: hashlib.sha256((repo/'migrations'/n).read_bytes()).hexdigest() for n in pending}
+        argv_digest = hashlib.sha256(json.dumps(argv).encode()).hexdigest()
+        # Untracked draft bytes are part of the source; their edits are changed input.
+        source = source_binding(repo)
+        prior = json.loads(receipt.read_text()) if receipt.exists() else {}
+        if prior.get('state') == 'generated' and prior.get('base') == base and prior.get('argv_digest') == argv_digest and prior.get('pending_requested') == pending and prior.get('source_after') == source and prior.get('outputs') and all(
+            (repo/p).is_file() and hashlib.sha256((repo/p).read_bytes()).hexdigest()==digest
+            for p,digest in prior['outputs'].items()):
+            validate_candidate(repo,base,require_clean=False)
+            return prior
+        if prior.get('state') == 'running' or (prior.get('state') == 'refused' and prior.get('source_after') in (None, source)):
+            raise MigrationNumberError('failed or interrupted generation requires reconciliation before retry')
+        inputs = {'plan': plan, 'argv': argv, 'source': source,
+                  'pending': {n: hashlib.sha256((repo/'migrations'/n).read_bytes()).hexdigest() for n in pending}}
         fingerprint = hashlib.sha256(json.dumps(inputs,sort_keys=True).encode()).hexdigest()
+        if prior.get('fingerprint') == fingerprint:
+            raise MigrationNumberError('generation already attempted for these inputs; reconcile its receipt before retry')
         def publish(value: dict) -> None:
             receipt.parent.mkdir(parents=True,exist_ok=True)
             fd, temporary = tempfile.mkstemp(dir=receipt.parent)
             with os.fdopen(fd,'w') as out:
                 json.dump(value,out,sort_keys=True); out.flush(); os.fsync(out.fileno())
             os.replace(temporary,receipt)
-        if receipt.exists():
-            prior=json.loads(receipt.read_text())
-            if prior.get('fingerprint') == fingerprint:
-                raise MigrationNumberError('generation already attempted for these inputs; reconcile its receipt before retry')
-        result={'schema':'integration-generation/v1','fingerprint':fingerprint,'base':base,'head':inputs['head'],
-                'argv_digest':hashlib.sha256(json.dumps(argv).encode()).hexdigest(),
-                'pending_requested':pending,'state':'running','allocation':plan}
+        result={'schema':'integration-generation/v1','fingerprint':fingerprint,'base':base,'head':source['head'],
+                'argv_digest':argv_digest,'pending_requested':pending,'state':'running','allocation':plan}
         publish(result)
         # No service credential or provider diagnostic reaches this source renderer.
         env={k:v for k,v in os.environ.items() if k in {'PATH','HOME','LANG','LC_ALL','TMPDIR','USER'}}
         env['CARR_INTEGRATION_ALLOCATION']=json.dumps(plan,sort_keys=True)
+        env[OWNER_ENV]=secrets.token_hex(32)
+        fd = os.open(owner_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as out:
+            json.dump({'token': env[OWNER_ENV], 'base': base}, out)
         try:
-            run=subprocess.run(argv,cwd=repo,env=env,capture_output=True,timeout=300)
-            if run.returncode: raise MigrationNumberError(f'generator refused or failed (exit {run.returncode})')
+            # A surviving process group leaves the receipt running: only a human
+            # can know what it wrote.
+            returncode = _run_renderer(argv, repo, env)
+        finally:
+            owner_path.unlink(missing_ok=True)
+        try:
+            if returncode is None: raise MigrationNumberError('generator timed out')
+            if returncode: raise MigrationNumberError(f'generator refused or failed (exit {returncode})')
+            if git(repo,'rev-parse','HEAD').decode().strip() != source['head']:
+                raise MigrationNumberError('generator moved HEAD; generation attests only its pinned source')
             main=main_snapshot(repo,base)
-            for name in plan['migration_names'].values():
+            outputs = set(plan['migration_names'].values())
+            for name in outputs:
                 if not (repo/'migrations'/name).is_file():
                     raise MigrationNumberError('generator exited zero without its allocated migration output')
             for old,new in plan['migration_names'].items():
-                if old != new and (repo/'migrations'/old).exists():
+                stale_input = new in inputs['pending'] and inputs['pending'][new] != inputs['pending'][old] and \
+                    hashlib.sha256((repo/'migrations'/new).read_bytes()).hexdigest() == inputs['pending'][new]
+                if (old not in outputs and (repo/'migrations'/old).exists()) or stale_input:
                     raise MigrationNumberError('generator left an obsolete pending migration')
             current={p.name:p.read_bytes() for p in (repo/'migrations').glob('*.sql')}
             validate_integration_union({Path(p).name:b for p,b in main.items() if p.startswith('migrations/')},current)
@@ -198,41 +295,54 @@ def regenerate_once(repo: Path, base: str, pending: list[str], argv: list[str], 
             if not target.is_file():
                 raise MigrationNumberError('generator exited zero without its allocated registry successor')
             check_generated_write(repo,target,target.read_bytes(),base)
-            validate_candidate(repo,base,require_clean=False)
+            if validate_candidate(repo,base,require_clean=False)['head'] != source['head']:
+                raise MigrationNumberError('HEAD moved during generation; generation attests only its pinned source')
             result['state']='generated'
-            result['source_after']=source_input_digest(repo)
+            result['source_after']=source_binding(repo)
+            if result['source_after']['head'] != source['head']:
+                raise MigrationNumberError('HEAD moved during generation; generation attests only its pinned source')
             result['outputs']={str(p.relative_to(repo)):hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in [target,*[repo/'migrations'/n for n in plan['migration_names'].values()]]}
             publish(result)
             return result
         except Exception:
-            result['state']='refused'; publish(result); raise
+            result['state']='refused'
+            result.pop('outputs', None)
+            try: result['source_after']=source_binding(repo)
+            except (MigrationNumberError, OSError): result.pop('source_after', None)
+            publish(result); raise
 
 
-if __name__ == '__main__':
+def main(argv: list[str] | None = None) -> int:
     import argparse
-    import sys
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base')
     parser.add_argument('--pending', action='append', default=[])
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--check-write', type=Path)
+    mode.add_argument('--write', type=Path, help='owned check-and-write of stdin bytes to one source artifact')
     mode.add_argument('--verify', action='store_true')
     mode.add_argument('--regenerate', help='JSON argv for the source renderer consuming the allocation')
     parser.add_argument('--receipt', type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
     try:
-        if args.base is None:
-            if not args.check_write: raise MigrationNumberError("an exact --base is required")
-            args.base=git(repo,"rev-parse","origin/main").decode().strip()
+        if args.write:
+            write_generated_artifact(repo, args.write, sys.stdin.buffer.read())
+            return 0
+        if args.base is None: raise MigrationNumberError('an exact --base is required')
         if args.regenerate:
             if args.receipt is None: raise MigrationNumberError('--regenerate requires --receipt')
             print(json.dumps(regenerate_once(repo,args.base,args.pending,json.loads(args.regenerate),args.receipt),sort_keys=True))
-        elif args.check_write:
-            check_generated_write(repo, args.check_write, sys.stdin.buffer.read(), args.base)
         else:
             print(json.dumps(validate_candidate(repo,args.base) if args.verify else allocation_plan(repo,args.base,args.pending), sort_keys=True))
-    except (MigrationNumberError, ValueError, OSError, subprocess.SubprocessError) as exc:
+        return 0
+    except MigrationNumberError as exc:
         print(f'integration candidate refused: {exc}', file=sys.stderr)
-        raise SystemExit(78)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        # Other exception text can carry renderer argv, paths or child output.
+        print(f'integration candidate refused: {type(exc).__name__}', file=sys.stderr)
+    return 78
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
