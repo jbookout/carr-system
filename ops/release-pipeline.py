@@ -1344,7 +1344,9 @@ class Pipeline:
             return "pending"
         conclusion = latest.get("conclusion")
         if conclusion == "success":
-            return "green"
+            verdict_job_names = {"main canary", "main canary (gates, migration, types, freshness)"}
+            jobs = [j for j in gh.jobs(int(latest["id"])) if j.get("name") in verdict_job_names]
+            return "green" if len(jobs) == 1 and jobs[0].get("conclusion") == "success" else "red"
         if conclusion in ("cancelled", "skipped", "neutral"):
             return "cancelled"
         return "red"
