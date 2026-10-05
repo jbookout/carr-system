@@ -324,6 +324,7 @@ const DECLARED_CHECK_NAMES = Object.freeze([
   "is anything that should be reporting not reporting",
   "main canary (gates, migration, types, freshness)",
   "merge",
+  "measure",
   "Backup artifact",
 ]);
 

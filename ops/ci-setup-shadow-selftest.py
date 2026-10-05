@@ -4,12 +4,14 @@ import importlib.util
 import json
 import math
 import os
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from git_env import fixture_env
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('setup_shadow', ROOT / 'ops/ci-setup-shadow.py')
@@ -114,6 +116,117 @@ class SetupReplays(unittest.TestCase):
             finally:
                 if state and not state.startswith('Z'): os.kill(pid,9)
 
+    def test_parent_exit_disposes_redirected_descendants(self):
+        for exit_code in (0, 7):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); pidfile = root/'child.pid'
+                code = ("import subprocess,sys; child=subprocess.Popen([sys.executable,'-c',"
+                        "'import time; time.sleep(30)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                        "open(sys.argv[1],'w').write(str(child.pid)); sys.exit(int(sys.argv[2]))")
+                try:
+                    if exit_code:
+                        with self.assertRaises(mod.Refusal):
+                            mod.command([sys.executable,'-c',code,str(pidfile),str(exit_code)],root,{})
+                    else:
+                        mod.command([sys.executable,'-c',code,str(pidfile),str(exit_code)],root,{})
+                    pid = int(pidfile.read_text())
+                    state = subprocess.run(['ps','-o','stat=','-p',str(pid)],capture_output=True,text=True).stdout.strip()
+                    self.assertTrue(not state or state.startswith('Z'), state)
+                finally:
+                    if pidfile.exists():
+                        try: os.kill(int(pidfile.read_text()),9)
+                        except ProcessLookupError: pass
+
+    def test_digest_drift_in_both_arms_cannot_qualify(self):
+        for field in ('dependency_digest', 'check_digest'):
+            baseline = [self.row(cold,10,30) for _ in range(10) for cold in (True,False)]
+            candidate = [self.row(cold,8,28) for _ in range(10) for cold in (True,False)]
+            for index, (before, after) in enumerate(zip(baseline,candidate)):
+                before[field] = after[field] = f'drift-{index}'
+            self.assertEqual(mod.compare(baseline,candidate)['action'],'remove-candidate-cache',field)
+
+    def test_output_never_overwrites_occupied_or_symlink_sink(self):
+        for fault in ('existing', 'dangling', 'race-file', 'race-link'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); output = root/'output.json'; target = root/'target'
+                if fault != 'dangling': target.write_text('preserve me')
+                if fault == 'existing': output.write_text('preserve output')
+                if fault == 'dangling': output.symlink_to(target)
+                def benchmark(*args):
+                    if fault == 'race-file': output.write_text('preserve output')
+                    if fault == 'race-link': output.symlink_to(target)
+                    return {'healthy': True}
+                with patch.object(sys,'argv',['shadow','--enabled','--output',str(output)]), patch.object(mod,'benchmark',side_effect=benchmark):
+                    try: result = mod.main()
+                    except SystemExit as error: result = error.code
+                self.assertNotEqual(result,0)
+                if fault == 'dangling': self.assertFalse(target.exists())
+                else: self.assertEqual(target.read_text(),'preserve me')
+                if fault in ('existing','race-file'): self.assertEqual(output.read_text(),'preserve output')
+
+    def test_new_output_contains_complete_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)/'output.json'
+            with patch.object(sys,'argv',['shadow','--enabled','--output',str(output)]), patch.object(mod,'benchmark',return_value={'healthy': True}):
+                self.assertEqual(mod.main(),0)
+            self.assertEqual(json.loads(output.read_text()),{'healthy': True})
+
+    def test_benchmark_inputs_are_bound_to_immutable_head(self):
+        for target in ('practice-plugin','pip'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); repo = root/'source'; repo.mkdir()
+                paths = mod.inventory(ROOT)['source_sha256']
+                for relative in paths:
+                    path = repo/relative; path.parent.mkdir(parents=True,exist_ok=True)
+                    path.write_bytes((ROOT/relative).read_bytes())
+                lock = repo/('requirements.lock' if target == 'pip' else target+'/package-lock.json')
+                lock.parent.mkdir(parents=True,exist_ok=True); lock.write_text('immutable lock')
+                def git(*args):
+                    return subprocess.run(['git',*args],cwd=repo,env=fixture_env(),
+                                          check=True,capture_output=True,text=True).stdout.strip()
+                git('init','-q'); git('add','ops/ci.sh','ops/local-pg-ci.py','ops/stale-config-check.py',
+                    'ops/atomic-rule-compat-migration-gate.py','.github/workflows/ci.yml',
+                    '.github/workflows/db-acceptance.yml','.github/workflows/main-canary.yml',str(lock.relative_to(repo)))
+                git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture')
+                head = git('rev-parse','HEAD'); tree = git('rev-parse','HEAD^{tree}')
+                real_command = mod.command; mutated = False
+                def stub(argv,cwd,env,**kwargs):
+                    nonlocal mutated
+                    if argv[0] == 'git':
+                        result = real_command(argv,cwd,fixture_env(env),**kwargs)
+                        if argv[1] == 'checkout' and Path(cwd).name.startswith('trial-') and not mutated:
+                            lock.write_text('mutated live lock')
+                            (repo/'ops/ci.sh').write_text('mutated live inventory')
+                            mutated = True
+                        return result
+                    if argv[:2] == ['node','--version']: return 'v26.5.1\n'
+                    if argv[:2] == ['npm','--version']: return '11\n'
+                    if argv[:2] == ['npm','test']:
+                        return 'TAP version 13\nok 1 - fixture\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n'
+                    if argv[0] == 'npm' and 'ci' in argv:
+                        for path in (Path(argv[argv.index('--cache')+1]),Path(cwd)/target/'node_modules'):
+                            path.mkdir(exist_ok=True); (path/'module').write_text('installed')
+                        return ''
+                    if argv[0] == 'npm' and 'ls' in argv:
+                        return '{"name":"fixture","dependencies":{"module":{"version":"1"}}}'
+                    if argv[1:3] == ['-m','venv']: return ''
+                    if '-m' in argv and 'pip' in argv:
+                        if '--version' in argv: return 'pip 26 fixture'
+                        if 'install' in argv:
+                            store = Path(argv[argv.index('--cache-dir')+1]); store.mkdir(exist_ok=True)
+                            (store/'module').write_text('installed'); return ''
+                        if 'list' in argv: return '[{"name":"fixture","version":"1"}]'
+                        if 'check' in argv: return ''
+                    if '-c' in argv: return '{"imports":"passed"}'
+                    self.fail(f'unexpected command: {argv}')
+                with patch.object(mod,'command',side_effect=stub): report = mod.benchmark(repo,1,target)
+                self.assertTrue(mutated)
+                self.assertEqual((report['head'],report['tree']),(head,tree))
+                self.assertEqual(report['inventory']['source_sha256'],paths)
+                expected_lock = hashlib.sha256(b'immutable lock').hexdigest()
+                for rows in report['trials'].values():
+                    for row in rows: self.assertEqual(row['identity']['lock'],expected_lock)
+
     def test_acceptance_p95_total_and_output_parity(self):
         baseline=[self.row(cold, 10, 30) for _ in range(10) for cold in (True, False)]
         winner=[self.row(cold, 8, 28) for _ in range(10) for cold in (True, False)]
@@ -145,7 +258,7 @@ class SetupReplays(unittest.TestCase):
         self.assertTrue(mod.npm_dependencies('{"name":"package","dependencies":{"a":{"version":"1"}}}'))
 
     def test_exit_zero_failed_or_incomplete_test_ack_refuses(self):
-        healthy='ok 1 - fixture\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n'
+        healthy='TAP version 13\nok 1 - fixture\n1..1\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n'
         with patch.object(mod,'command',return_value=healthy):
             self.assertTrue(mod.check_npm(Path.cwd(),{}))
         for output in ('', healthy.replace('# fail 0', '# fail 1'),
@@ -154,6 +267,31 @@ class SetupReplays(unittest.TestCase):
                        healthy.replace('# fail 0\n','')):
             with self.subTest(output=output), patch.object(mod,'command',return_value=output):
                 with self.assertRaises(mod.Refusal): mod.check_npm(Path.cwd(),{})
+
+    def test_complete_nested_and_multiple_tap_batches(self):
+        nested = ('TAP version 13\n# Subtest: suite\n'
+                  '    ok 1 - first\n    ok 2 - second\n    1..2\n'
+                  "ok 1 - suite\n  ---\n  type: 'suite'\n  ...\n1..1\n# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n")
+        for output in (nested, nested+nested, nested.replace('    1..2\n','').replace('    ok 1','    1..2\n    ok 1')):
+            with patch.object(mod,'command',return_value=output): self.assertTrue(mod.check_npm(Path.cwd(),{}))
+        for output in (nested+'Bail out! fixture\n', nested.replace('    ok 2 - second\n',''),
+                       nested.replace('1..1\n','1..2\n'), nested.replace('    1..2\n',''),
+                       nested.replace('# tests 2','# tests 3').replace('# pass 2','# pass 3'),
+                       nested.replace('    ok 2','    ok 1'), nested.replace('1..1\n',''),
+                       nested+'# Subtest: truncated next test\n',
+                       'ok 1 - fixture\n# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n',
+                       nested+nested.replace('# cancelled 0\n','')):
+            with self.subTest(output=output), patch.object(mod,'command',return_value=output):
+                with self.assertRaises(mod.Refusal): mod.check_npm(Path.cwd(),{})
+
+    def test_real_node_tap_counts_suites_and_parent_tests(self):
+        code = ("const {test,describe,it}=require('node:test'); "
+                "test('parent',async t=>{await t.test('leaf',()=>{})}); "
+                "describe('suite',()=>{it('leaf',()=>{}); it.skip('skip',()=>{})})")
+        output = subprocess.run(['node','--test-reporter=tap','-e',code],check=True,
+                                capture_output=True,text=True).stdout
+        with patch.object(mod,'command',return_value=output):
+            self.assertTrue(mod.check_npm(Path.cwd(),{}))
 
     def test_workflow_is_only_default_off_private_measurement(self):
         source=(ROOT/'.github/workflows/ci-setup-shadow.yml').read_text()

@@ -41,16 +41,13 @@ def command(argv, cwd, env, *, require_output=False, timeout=900):
     try:
         stdout, _ = child.communicate(timeout=timeout)
     except BaseException as error:
-        # npm launches Node/build children. Killing only npm leaks those into
-        # later measurements; this session owns and disposes the whole group.
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.communicate()
         if isinstance(error, subprocess.TimeoutExpired):
             raise Refusal('child unavailable or deadline exceeded; trial refused') from None
         raise
+    finally:
+        # A parent can exit with redirected children still running. Cleanup
+        # belongs to the process group on every path, including successful exit.
+        dispose_group(child)
     if child.returncode:
         raise Refusal(f'child exited {child.returncode}; trial refused')
     if require_output:
@@ -61,6 +58,28 @@ def command(argv, cwd, env, *, require_output=False, timeout=900):
         if not isinstance(parsed, (dict, list)):
             raise Refusal('invalid JSON acknowledgement; trial refused')
     return stdout
+
+
+def dispose_group(child):
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.communicate()
+    deadline = time.monotonic()+5
+    while True:
+        try:
+            processes = subprocess.run(['ps','-axo','pgid=,stat='],capture_output=True,
+                                       text=True,check=True,timeout=5).stdout.splitlines()
+            active = any(int(fields[0]) == child.pid and not fields[1].startswith('Z')
+                         for line in processes if len(fields := line.split()) == 2)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise Refusal('owned process group disposal could not be verified') from None
+        if not active:
+            return
+        if time.monotonic() >= deadline:
+            raise Refusal('owned process group remains active; trial refused')
+        time.sleep(.01)
 
 
 def tree_manifest(root):
@@ -120,6 +139,8 @@ def compare(baseline, candidate):
         return report
     identity_fields = {'os', 'architecture', 'runtime', 'installer', 'lock', 'package_path', 'source_tree'}
     expected_identity = baseline[0].get('identity') if isinstance(baseline[0], dict) else None
+    digest_fields = ('dependency_digest', 'check_digest')
+    expected_digests = tuple(baseline[0].get(name) for name in digest_fields) if isinstance(baseline[0], dict) else None
     for before, after in zip(baseline, candidate):
         if not isinstance(before, dict) or not isinstance(after, dict):
             return report
@@ -138,10 +159,9 @@ def compare(baseline, candidate):
                     return report
             if row['job_seconds'] < row['setup_seconds']:
                 return report
-            if any(not row.get(name) for name in ('dependency_digest', 'check_digest')):
+            if (any(not isinstance(row.get(name), str) or not row[name] for name in digest_fields)
+                    or tuple(row[name] for name in digest_fields) != expected_digests):
                 return report
-        if any(before[name] != after[name] for name in ('dependency_digest','check_digest')):
-            return report
     metrics = {}
     improved = True
     for cold, label in ((True, 'cold'), (False, 'warm')):
@@ -209,20 +229,95 @@ def check_npm(package, env):
     # Node 26 defaults to the spec reporter even with captured stdout. Force
     # TAP in the same npm test command, including its spawned Node children.
     output = command(['npm', 'test'], package, {**env, 'NODE_OPTIONS':'--test-reporter=tap'})
-    # TAP assertions and totals are deterministic; timings and diagnostic paths
-    # are deliberately omitted. A passing run with no assertions is refused.
-    assertions = [line for line in output.splitlines()
-                  if re.match(r'^\s*(?:ok |not ok |# (?:tests|pass|fail|cancelled|skipped|todo) )', line)]
-    summaries = {name: re.findall(r'^# '+name+r' (\d+)\s*$', output, re.M)
-                 for name in ('tests', 'pass', 'fail', 'cancelled')}
-    batches = len(summaries['tests'])
-    if (not assertions or not batches
-            or any(len(counts) != batches for counts in summaries.values())
-            or any(int(count) <= 0 for name in ('tests', 'pass') for count in summaries[name])
-            or any(int(count) != 0 for name in ('fail', 'cancelled') for count in summaries[name])
-            or any(re.match(r'^\s*not ok ', line) for line in assertions)):
+    return tap_digest(output)
+
+
+def tap_digest(output):
+    """Validate each Node TAP stream and its nested plans before hashing evidence."""
+    def refuse():
         raise Refusal('test process returned failed or incomplete TAP acknowledgement')
-    return digest(sorted(assertions))
+
+    def scope():
+        return {'count': 0, 'plan': None, 'ended': False}
+
+    def complete(frame):
+        if frame['plan'] is None or frame['plan'] != frame['count']:
+            refuse()
+
+    def complete_batch():
+        if pending_subtests:
+            refuse()
+        for frame in stack:
+            complete(frame)
+        if (not {'tests','pass','fail','cancelled'} <= totals.keys()
+                or totals['tests'] <= 0 or totals['pass'] <= 0
+                or totals['fail'] or totals['cancelled']
+                or totals['tests'] != assertion_count-suite_count
+                or totals['tests'] != sum(totals.get(name,0) for name in ('pass','skipped','todo'))):
+            refuse()
+
+    stack = []; totals = {}; pending_subtests = set(); evidence = []
+    assertion_count = suite_count = batches = 0
+    last_assertion_indent = None
+    for line in output.splitlines():
+        if re.match(r'^\s*Bail out!',line,re.I) or re.match(r'^\s*not ok\b',line):
+            refuse()
+        if line == 'TAP version 13':
+            if stack:
+                complete_batch()
+            stack = [scope()]; totals = {}; pending_subtests = set(); assertion_count = suite_count = 0
+            last_assertion_indent = None; batches += 1
+            continue
+        assertion = re.match(r'^( *)(ok) (\d+)(?:\s|$)',line)
+        plan = re.fullmatch(r'( *)1\.\.(\d+)(?:\s+#.*)?',line)
+        summary = re.fullmatch(r'# (tests|pass|fail|cancelled|skipped|todo) (\d+)\s*',line)
+        subtest = re.match(r'^( *)# Subtest:',line)
+        if subtest:
+            indent = len(subtest[1])
+            if not stack or totals or indent % 4 or indent//4 in pending_subtests:
+                refuse()
+            pending_subtests.add(indent//4)
+        if assertion or plan or summary:
+            if not stack:
+                refuse()
+            evidence.append(line)
+        if summary:
+            name, count = summary.groups()
+            if name in totals:
+                refuse()
+            totals[name] = int(count)
+        elif assertion or plan:
+            if totals:
+                refuse()
+            token = assertion or plan
+            indent = len(token[1])
+            if indent % 4 or indent//4 > len(stack):
+                refuse()
+            depth = indent//4
+            while len(stack) > depth+1:
+                complete(stack.pop())
+            if depth == len(stack):
+                stack.append(scope())
+            frame = stack[-1]
+            if assertion:
+                if frame['ended'] or int(assertion[3]) != frame['count']+1:
+                    refuse()
+                frame['count'] += 1; assertion_count += 1
+                pending_subtests.discard(depth)
+                last_assertion_indent = indent
+            else:
+                if frame['plan'] is not None:
+                    refuse()
+                frame['plan'] = int(plan[2]); frame['ended'] = bool(frame['count'])
+        elif re.fullmatch(r" *type: ['\"]suite['\"]",line):
+            if last_assertion_indent is None or len(line)-len(line.lstrip()) != last_assertion_indent+2:
+                refuse()
+            suite_count += 1
+            last_assertion_indent = None
+    if not batches:
+        refuse()
+    complete_batch()
+    return digest(sorted(evidence))
 
 
 def trial_environment(env, trial):
@@ -238,16 +333,21 @@ def benchmark(repo, repeats, target):
     env = {'PATH': os.environ.get('PATH',''), 'LANG':'C.UTF-8', 'LC_ALL':'C',
            'CI':'1', 'WRANGLER_SEND_METRICS':'false', 'F03_PARITY_REQUIRE_PYTHON':'1'}
     head = command(['git','rev-parse','HEAD'],repo,env).strip()
-    source_tree = command(['git','rev-parse','HEAD^{tree}'],repo,env).strip()
+    source_tree = command(['git','rev-parse',head+'^{tree}'],repo,env).strip()
     if command(['git','status','--porcelain','--untracked-files=no'],repo,env).strip():
         raise Refusal('tracked source differs from HEAD; commit before measuring')
-    runtime = command(['node','--version'],repo,env).strip() if target != 'pip' else platform.python_version()
     with tempfile.TemporaryDirectory(prefix='carr-setup-shadow.') as temp:
         root = Path(temp); env.update(HOME=str(root/'home'), TMPDIR=str(root), XDG_CONFIG_HOME=str(root/'config'))
         (root/'home').mkdir()
-        installer = command(['npm','--version'],repo,env).strip() if target != 'pip' else None
+        snapshot = root/'source'
+        command(['git','clone','--quiet','--shared','--no-checkout',str(repo),str(snapshot)],root,env)
+        command(['git','checkout','--quiet','--detach',head],snapshot,env)
+        if command(['git','rev-parse','HEAD^{tree}'],snapshot,env).strip() != source_tree:
+            raise Refusal('immutable source snapshot differs from reported tree')
+        runtime = command(['node','--version'],snapshot,env).strip() if target != 'pip' else platform.python_version()
+        installer = command(['npm','--version'],snapshot,env).strip() if target != 'pip' else None
         report = {'schema': 'carr-ci-setup-shadow/v1', 'shadow': True, 'enable_reuse': False,
-                  'head': head, 'tree': source_tree, 'target':target, 'inventory':inventory(repo),
+                  'head': head, 'tree': source_tree, 'target':target, 'inventory':inventory(snapshot),
                   'check_scope': 'package npm test' if target != 'pip' else 'locked-distribution import smoke; full lane still required',
                   'cache_transport': 'private local copies including hash validation; hosted remote overhead NOT measured',
                   'trials': {mode: [] for mode in (('fresh','store','tree') if target != 'pip' else ('fresh','store'))}}
@@ -267,7 +367,7 @@ def benchmark(repo, repeats, target):
                         nonlocal phase_start
                         now = time.monotonic(); phases[name] = now-phase_start; phase_start = now
                     trial = root/f'trial-{repetition}-{mode}-{cold}'
-                    command(['git','clone','--quiet','--shared','--no-checkout',str(repo),str(trial)],root,env)
+                    command(['git','clone','--quiet','--shared','--no-checkout',str(snapshot),str(trial)],root,env)
                     command(['git','checkout','--quiet','--detach',head],trial,env)
                     check_env = trial_environment(env, trial)
                     store = trial/'store'
@@ -276,9 +376,9 @@ def benchmark(repo, repeats, target):
                         command([sys.executable,'-m','venv',str(venv)],trial,check_env)
                         python = str(venv/'bin/python')
                         installer = command([python,'-m','pip','--version'],trial,check_env).split()[1]
-                        lock = repo/'requirements.lock'; install_root=store
+                        lock = snapshot/'requirements.lock'; install_root=store
                     else:
-                        lock = repo/target/'package-lock.json'; install_root=trial/target/'node_modules'
+                        lock = snapshot/target/'package-lock.json'; install_root=trial/target/'node_modules'
                     identity = {'os':platform.platform(), 'architecture':platform.machine(), 'runtime':runtime,
                                 'installer':installer, 'lock':hashlib.sha256(lock.read_bytes()).hexdigest(),
                                 'package_path':target, 'source_tree':source_tree}
@@ -338,13 +438,19 @@ def main():
         print(json.dumps(inventory(repo),sort_keys=True,indent=2)); return 0
     if not args.enabled:
         print('CI setup experiment disabled (default); no setup or cache effects'); return 0
-    if not 1 <= args.repeats <= 20 or args.output is None or args.output.exists():
+    if not 1 <= args.repeats <= 20 or args.output is None or args.output.exists() or args.output.is_symlink():
         parser.error('use 1..20 repeats and a new --output file; fewer than ten cannot qualify')
     try:
         report=benchmark(repo,args.repeats,args.target)
+        # Exclusive publication refuses a destination created during the trial,
+        # including dangling symlinks; it never follows or truncates that sink.
+        payload = json.dumps(report,sort_keys=True,indent=2,allow_nan=False)+'\n'
+        with args.output.open('x',encoding='utf-8') as output:
+            output.write(payload)
+    except OSError:
+        print('output destination unavailable or occupied; report refused',file=sys.stderr); return 1
     except Refusal as error:
         print(str(error),file=sys.stderr); return 1
-    args.output.write_text(json.dumps(report,sort_keys=True,indent=2,allow_nan=False)+'\n')
     return 0
 
 
