@@ -17,12 +17,14 @@ assert len(rows) >= 5
 for row in rows:
     assert row["after"]["detected"] >= row["before"]["detected"], row
     assert row["after"]["false_positives"] <= row["before"]["false_positives"], row
-assert by_id["failed_test_injection"]["after"]["calls"] == 1
+# Triage is deterministic here and #1528 retired the injection screen: no paid call.
+assert by_id["failed_test_injection"]["after"]["calls"] == 0
 assert set(by_id["failed_test_injection"]["after"]["found"]) == {"failure", "ci_failed"}
 for case_id in ("unsupported_stop", "ordinary_diff_stop"):
-    assert "done_unsupported" in by_id[case_id]["after"]["found"], by_id[case_id]
-assert by_id["ordinary_diff_stop"]["before"]["calls"] == 2
-assert by_id["ordinary_diff_stop"]["after"]["calls"] == 1
+    assert "done_review" in by_id[case_id]["after"]["found"], by_id[case_id]
+    assert "done_unsupported" not in by_id[case_id]["after"]["found"], by_id[case_id]
+assert by_id["ordinary_diff_stop"]["before"]["calls"] == 0  # legacy dispatch uses current predicates
+assert by_id["ordinary_diff_stop"]["after"]["calls"] == 0
 assert by_id["repeated_stop"]["after"]["calls"] == 0
 if have_logs:
     spend = module.spend_replay()

@@ -2671,17 +2671,10 @@ else:
             if ("/migrations/" in _f or "node_modules" in _f or "/corpus/" in _f
                     or f"import_{_n}" in _f):
                 continue
-            # A WATCHER NAMING A FILE IS NOT A CONSUMER OF IT. Added 2026-08-09,
-            # same council pass. Five of the six deprecation rows warned solely
-            # because THIS file's own WATCH list holds those filenames, and
-            # The retired parity harness no longer participates in the scan. The
-            # check was its own dependency, so the register could never go green
-            # and had printed the identical six warnings since 2026-08-02. That
-            # is not a harmless cosmetic: a row that is chronically red detects
-            # nothing, and this system has already been bitten by it once — on
-            # 2026-08-08 a plugin install deleted the entire hooks block and the
-            # catastrophic wipe printed the same headline as a benign stale row,
-            # so all five gates were off for a day and it was found by accident.
+            # A WATCHER NAMING A FILE IS NOT A CONSUMER OF IT. health-check.py's
+            # WATCH list names deprecated files to detect their remaining users.
+            # Skip this watcher so its own list does not count as a dependency
+            # and keep the warning active after the last consumer is removed.
             if os.path.basename(_f) == "health-check.py":
                 continue
             try:
