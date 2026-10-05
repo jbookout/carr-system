@@ -2772,7 +2772,7 @@
       "total": 5,
       "positive_examples": 0,
       "required_positive_examples": 1,
-      "reason": "No relevant violating example in the requested deletion diffs. Passing negative controls alone cannot calibrate violation confidence."
+      "reason": "No violating example in the selected deletion fixture corpus. Passing negative controls alone cannot calibrate violation confidence."
     },
     {
       "rule": "function-name-behavior-mismatch",
@@ -2780,7 +2780,7 @@
       "total": 5,
       "positive_examples": 0,
       "required_positive_examples": 1,
-      "reason": "No relevant violating example in the requested deletion diffs. Passing negative controls alone cannot calibrate violation confidence."
+      "reason": "No violating example in the selected deletion fixture corpus. Passing negative controls alone cannot calibrate violation confidence."
     },
     {
       "rule": "coincidental-abstraction",
@@ -2788,7 +2788,7 @@
       "total": 5,
       "positive_examples": 0,
       "required_positive_examples": 1,
-      "reason": "No relevant violating example in the requested deletion diffs. Passing negative controls alone cannot calibrate violation confidence."
+      "reason": "No violating example in the selected deletion fixture corpus. Passing negative controls alone cannot calibrate violation confidence."
     },
     {
       "rule": "swallowed-errors",
@@ -2796,7 +2796,7 @@
       "total": 5,
       "positive_examples": 0,
       "required_positive_examples": 1,
-      "reason": "No relevant violating example in the requested deletion diffs. Passing negative controls alone cannot calibrate violation confidence."
+      "reason": "No violating example in the selected deletion fixture corpus. Passing negative controls alone cannot calibrate violation confidence."
     },
     {
       "rule": "causal-value-evidence",
