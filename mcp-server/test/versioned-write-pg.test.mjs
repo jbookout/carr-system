@@ -1,55 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, renameSync } from 'node:fs';
-import path from 'node:path';
-import pg from 'pg';
-import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
+import { withLeadVerbFixture as fixture } from './helpers/lead-verb-fixture.mjs';
 import { executeRegisteredTool } from '../src/tools.js';
-
-async function fixture(fn) {
-  const bin = execFileSync('/opt/homebrew/opt/postgresql@17/bin/pg_config', ['--bindir'], { encoding: 'utf8' }).trim();
-  const dir = mkdtempSync('/tmp/carr-c4-pg-');
-  const release = await acquirePostgresFixtureGroup();
-  const clients = [];
-  let started = false;
-  try {
-    execFileSync(path.join(bin, 'initdb'), ['-D', dir, '-U', 'fixture', '--auth=trust', '--no-locale'], { stdio: 'pipe' });
-    execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-l', path.join(dir, 'server.log'), '-o', `-k ${dir} -h '' -c timezone=UTC`, '-w', 'start'], { stdio: 'pipe' });
-    started = true;
-    const connect = async () => {
-      const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
-      await c.connect(); clients.push(c); return c;
-    };
-    const c = await connect();
-    const schema = readFileSync(new URL('../../db/schema.sql', import.meta.url), 'utf8');
-    for (const name of ['actor', 'lead', 'lead_stage', 'lead_lane', 'event', 'tool_call'])
-      await c.query(schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))[0]);
-    await c.query(schema.match(/CREATE FUNCTION public.trg_touch_row\(\)[\s\S]*?end \$\$;/)[0]);
-    await c.query(`alter table tool_call add primary key(idempotency_key);
-      create trigger lead_touch before update on lead for each row execute function trg_touch_row();
-      create view v_ref_index as select 'lead'::text subject_type,id subject_id,registry_ref ref from lead;
-      insert into lead_stage(slug,label) values ('new','New'),('engaged','Engaged'),('do_not_contact','Do not contact'),('archived','Archived');
-      insert into lead_lane(slug,label) values ('primary','Primary');`);
-    const actor = { id: randomUUID(), slug: 'joe', human: true };
-    const lead = randomUUID();
-    await c.query("insert into actor(id,slug,kind,display_name) values($1,'joe','human','Synthetic partner')", [actor.id]);
-    await c.query("insert into lead(id,party_id,registry_ref,stage,notes,created_by,updated_by) values($1,$2,'L-1','new','Original synthetic note',$3,$3)", [lead, randomUUID(), actor.id]);
-    const command = async (client, extra = {}) => {
-      await client.query('begin');
-      try {
-        const value = await executeRegisteredTool(client, actor, 'update-lead', { lead, idempotency_key: randomUUID(), base_version: 1, fields: { notes: 'Revised synthetic note' }, ...extra });
-        await client.query('commit'); return value;
-      } catch (e) { await client.query('rollback'); throw e; }
-    };
-    await fn({ c, connect, actor, lead, command });
-  } finally {
-    for (const c of clients) await c.end();
-    try { if (started) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'fast', '-w', 'stop'], { stdio: 'pipe' }); }
-    finally { await release(); mkdirSync('/tmp/_to_delete', { recursive: true }); renameSync(dir, path.join('/tmp/_to_delete', path.basename(dir))); }
-  }
-}
 
 test('registered lead patch preserves response, field events, version refusals and replay', () => fixture(async ({ c, lead, command }) => {
   const key = randomUUID();
@@ -84,4 +37,39 @@ test('same-key concurrent versioned patches return the committed response', () =
   await c.query('commit');
   assert.deepEqual(await pending, { replayed: true, ...first });
   assert.equal(waited, true, 'the second writer must reach its lock while the first transaction remains open');
+}));
+
+test('stage review preserves evidence attribution and refuses cross-lead evidence', () => fixture(async ({ c, actor, lead, command }) => {
+  const activity = randomUUID();
+  await c.query("insert into activity(id,lead_id,occurred_at,kind,connected,actor_id,summary) values($1,$2,'2026-10-01T10:00:00Z','call',true,$3,'Synthetic call')", [activity, lead, actor.id]);
+  await assert.rejects(() => command(c, { fields: { stage: 'engaged' }, stage_review: { reason: 'Synthetic evidence', evidence_ids: [randomUUID()] } }), e => e.payload?.error === 'stage_evidence_mismatch');
+  const args = { fields: { stage: 'engaged' }, stage_review: { reason: 'Reply received', evidence_ids: [activity], human_quote: 'Synthetic confirmation' }, idempotency_key: randomUUID() };
+  const result = await command(c, args);
+  assert.deepEqual(result, { ok: true, updated: ['stage'] });
+  const event = (await c.query("select new_value,cause,human_quote,agent_rationale from event where subject_id=$1 and field='stage'", [lead])).rows[0];
+  assert.deepEqual(event, { new_value: { stage: 'engaged', stage_review: { ...args.stage_review, evidence_date: '2026-10-01T10:00:00.000Z' } }, cause: 'human_stated', human_quote: 'Synthetic confirmation', agent_rationale: 'Reply received' });
+  assert.deepEqual(await command(c, args), { replayed: true, ...result });
+}));
+
+test('Undo accepts only the latest automatic move and preserves correction attribution', () => fixture(async ({ c, actor, lead, command }) => {
+  const event = randomUUID();
+  await c.query(`create view v_lead_stage_transition as select subject_id lead_id,id event_id,
+    row_number() over(order by recorded_at) mutation_order,cause='automation_job' automatic,
+    old_value->>'stage' prior_stage,new_value->>'stage' stage from event where field='stage'`);
+  await c.query("insert into event(id,occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause) values($1,now(),$2,'advance-leads','lead',$3,'stage','{\"stage\":\"engaged\"}','{\"stage\":\"new\"}','automation_job')", [event, actor.id, lead]);
+  const args = { fields: { stage: 'engaged' }, stage_review: { reason: 'Undo synthetic move', evidence_ids: [], undo_event_id: event, human_quote: 'Restore previous stage' } };
+  await assert.rejects(() => command(c, { ...args, stage_review: { ...args.stage_review, undo_event_id: randomUUID() } }), e => e.payload?.error === 'undo_changed');
+  await assert.rejects(() => command(c, { ...args, fields: { stage: 'new' } }), e => e.payload?.error === 'undo_changed');
+  await command(c, args);
+  const recorded = (await c.query("select cause,new_value from event where verb='update-lead' and subject_id=$1", [lead])).rows[0];
+  assert.equal(recorded.cause, 'human_correction');
+  assert.equal(recorded.new_value.stage_review.undo_event_id, event);
+}));
+
+test('field and authority guards preserve refusal payloads without a write', () => fixture(async ({ c, command }) => {
+  await assert.rejects(() => command(c, { expected_actor: 'dell' }), e => e.payload?.error === 'account_changed');
+  await assert.rejects(() => command(c, { fields: { stage: 'missing' } }), e => e.payload?.error === 'unknown_stage' && e.payload.valid.includes('new'));
+  await assert.rejects(() => command(c, { fields: { identity: 'ignored' } }), e => e.payload?.error === 'no_updatable_fields');
+  await assert.rejects(() => command(c, { fields: { stage: 'do_not_contact' } }), e => e.payload?.error === 'do_not_contact_requires_suppression');
+  assert.equal((await c.query('select count(*)::int n from event')).rows[0].n, 0);
 }));

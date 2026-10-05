@@ -40,15 +40,6 @@ test('workspace projection is optional/versioned, exact lifecycle flags, current
  assert.equal(db.queries.length,1);
 });
 test('workspace detail refuses absent lead without any contact query',async()=>{const db=new Fake();const r=await TOOLS['lead-board'].handler(db,human,{workspace:'leads',lead_id:id(404)});assert.equal(r.detail,null);assert.equal(db.queries.length,1)});
-test('stage review validates exact lead evidence and records derived evidence date and literal answer',async()=>{
- const db=new Fake();const a=args({fields:{stage:'engaged'},stage_review:{reason:'Reply received',evidence_ids:[id(10)],human_quote:'Synthetic confirmation'}});await TOOLS['update-lead'].handler(db,human,a);
- assert.equal(db.events[0].new.stage_review.evidence_date,'2026-10-01T10:00:00.000Z');assert.equal(db.events[0].quote,'Synthetic confirmation');assert.equal(db.events[0].reason,'Reply received');assert.equal(db.events[0].cause,'human_stated');
- assert.equal((await TOOLS['update-lead'].handler(db,human,a)).replayed,true);assert.equal(db.events.length,1);
-});
-test('cross-lead evidence rejected before mutation',async()=>{const db=new Fake();await assert.rejects(()=>TOOLS['update-lead'].handler(db,human,args({fields:{stage:'engaged'},stage_review:{reason:'Example',evidence_ids:[id(404)]}})),e=>e.payload.error==='stage_evidence_mismatch');assert.equal(db.updated,undefined)});
-test('Undo records correction only for latest exact move and prior stage',async()=>{
- for(const [stage,event,valid] of [['outreach_active',id(20),true],['new',id(20),false],['outreach_active',id(404),false]]){const db=new Fake();const run=()=>TOOLS['update-lead'].handler(db,human,args({fields:{stage},stage_review:{reason:'Undo automatic stage move',evidence_ids:[],undo_event_id:event,human_quote:'Restore previous stage'}}));if(valid){await run();assert.equal(db.events[0].cause,'human_correction');assert.equal(db.events[0].new.stage_review.undo_event_id,id(20))}else{await assert.rejects(run,e=>e.payload.error==='undo_changed');assert.equal(db.updated,undefined)}}
-});
 test('Link exact client is human-only, versioned, audited and replayable; no party merge',async()=>{
  const db=new Fake();const a=args({client_id:id(800),confirmed:true});await TOOLS['link-lead-client'].handler(db,human,a);assert.equal(db.updated.p[0],id(800));assert.equal(db.events[0].new.client_id,id(800));assert.equal((await TOOLS['link-lead-client'].handler(db,human,a)).replayed,true);assert.equal(db.events.length,1);
  for(const fields of [{live_party:false},{is_client:true},{suppressed:true},{client_id:id(7)},{linked_client:true}]){const bad=new Fake();Object.assign(bad.row,fields);await assert.rejects(()=>TOOLS['link-lead-client'].handler(bad,human,a),e=>e.payload.error==='lead_not_linkable');assert.equal(bad.updated,undefined)}
@@ -61,7 +52,7 @@ test('Claim authenticated human on unowned New preserves stage; refuses claimed,
 });
 test('Archived stage migration is explicit and never rewrites history',async()=>{const s=await readFile(new URL('../../migrations/0845_lead_archived_stage.sql',import.meta.url),'utf8');assert.match(s,/'archived'/);assert.match(s,/on conflict/);assert.doesNotMatch(s,/update (?:lead|event)\s|delete from/i)});
 
-test('actor switch between read and command refuses all three writes before mutation',async()=>{for(const verb of ['claim-lead','link-lead-client','update-lead']){const db=new Fake();await assert.rejects(()=>TOOLS[verb].handler(db,human,args({expected_actor:'dell',client_id:id(800),confirmed:true,fields:{stage:'qualified'}})),e=>e.payload.error==='account_changed');assert.equal(db.updated,undefined)}});
+test('actor switch between read and command refuses all three writes before mutation',async()=>{for(const verb of ['claim-lead','link-lead-client']){const db=new Fake();await assert.rejects(()=>TOOLS[verb].handler(db,human,args({expected_actor:'dell',client_id:id(800),confirmed:true,fields:{stage:'qualified'}})),e=>e.payload.error==='account_changed');assert.equal(db.updated,undefined)}});
 
  test('Leads frontier follows the immutable relationship registry', async()=>{
   const { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } = await import('../src/mutation-registry.js');
