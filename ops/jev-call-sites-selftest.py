@@ -272,181 +272,34 @@ class RegistryAdmissionTests(Harness):
 
 
 
-class ChangeTollsDedupeTests(unittest.TestCase):
-    """pre-push asked the same diff twice per push (owed, then verify) and again
-    on every re-push. One paid question per distinct diff per day now."""
 
-    def setUp(self):
-        spec = importlib.util.spec_from_file_location("tolls_under_test", REPO / "ops" / "jev_change_tolls.py")
-        self.tolls = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.tolls)
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(self.tolls, "CACHE_PATH", str(root / "tolls-cache.json")))
-        self.asked = []
-        tolls = self.tolls
 
-        class Client:
-            noul = staticmethod(client.noul)
+class ChangeTollsPredicateTests(unittest.TestCase):
+    def test_repeated_changed_paths_are_pure_and_do_not_transport(self):
+        spec = importlib.util.spec_from_file_location('tolls_under_test', REPO/'ops/jev_change_tolls.py')
+        tolls = importlib.util.module_from_spec(spec); spec.loader.exec_module(tolls)
+        class Explosive:
+            def __getattr__(self, name): raise AssertionError(name)
+        state = {'files':['ops/ci.sh']}
+        first = tolls.owed(state, client=Explosive())
+        self.assertEqual(first,tolls.owed(state,client=Explosive()))
+        self.assertEqual([n for _,n,_ in first],['ci_sh_reseal','inventory_reseal'])
 
-            @staticmethod
-            def ask(state, questions, **kwargs):
-                self_ref.asked.append(state)
-                return {"answers": {name: {"type": "noul", "noul": 0.9 if name == "gate_rebless" else 0.1}
-                                    for name in tolls.TOLLS}}
-        self_ref = self
-        self.enterContext(patch.object(self.tolls, "_client", lambda: Client))
-
-    def test_same_diff_is_asked_once_and_a_new_diff_is_asked_again(self):
-        state = {"files": ["hooks/x.py"], "behind_main": 0}
-        first = self.tolls.owed(state)
-        second = self.tolls.owed(dict(state))
-        self.assertEqual(first, second)
-        self.assertEqual(len(self.asked), 1)
-        self.tolls.owed({"files": ["hooks/y.py"], "behind_main": 0})
-        self.assertEqual(len(self.asked), 2)
-
-    def test_same_name_question_revision_requires_a_fresh_judgment(self):
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        text, fix = self.tolls.TOLLS["gate_rebless"]
-        with patch.dict(self.tolls.TOLLS, gate_rebless=(text + " Revised criterion.", fix)):
-            self.tolls.owed(state)
-        self.assertEqual(len(self.asked), 2)
-
-    def test_changed_file_contents_invalidate_collected_state(self):
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        subprocess.run(["git", "init", "-q", str(root)], env=ENV, check=True)
-        subprocess.run(["git", "remote", "add", "origin", str(root)], cwd=root, env=ENV, check=True)
-        (root / "fixture.py").write_text("old contents")
-        subprocess.run(["git", "add", "fixture.py"], cwd=root, env=ENV, check=True)
-        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                        "commit", "-qm", "fixture"], cwd=root, env=ENV, check=True)
-        (root / "fixture.py").write_text("first revision")
-        first = self.tolls.change(base="HEAD", repo=str(root))
-        self.tolls.owed(first)
-        (root / "fixture.py").write_text("second revision")
-        second = self.tolls.change(base="HEAD", repo=str(root))
-        self.tolls.owed(second)
-        self.assertEqual(len(self.asked), 2)
-
-    def concurrent(self, states):
-        original = self.tolls._client()
-        start = threading.Barrier(2)
-        class SlowClient:
-            noul = original.noul
-            @staticmethod
-            def ask(*args, **kwargs):
-                time.sleep(0.1)
-                return original.ask(*args, **kwargs)
-        def invoke(state):
-            start.wait(timeout=3)
-            return self.tolls.owed(state)
-        with patch.object(self.tolls, "_client", lambda: SlowClient), ThreadPoolExecutor(2) as pool:
-            return list(pool.map(invoke, states))
-
-    def test_concurrent_same_state_pays_once(self):
-        state = {"files": ["hooks/x.py"]}
-        answers = self.concurrent([state, state])
-        self.assertEqual(answers[0], answers[1])
-        self.assertEqual(len(self.asked), 1)
-
-    def test_paused_cache_peer_returns_unavailable_before_request_deadline(self):
-        ctx = multiprocessing.get_context("fork")
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        for candidate in (state, {"files": ["hooks/y.py"]}):
-            with self.subTest(state=candidate), patch.object(self.tolls, "TIMEOUT_SECONDS", 0.15):
-                results = ctx.Queue()
-                def invoke():
-                    try:
-                        self.tolls.owed(candidate)
-                    except TimeoutError as exc:
-                        results.put(str(exc))
-                    else:
-                        results.put("unexpected success")
-                with open(self.tolls.CACHE_PATH + ".lock", "a") as lock:
-                    self.tolls.fcntl.flock(lock, self.tolls.fcntl.LOCK_EX)
-                    worker = ctx.Process(target=invoke)
-                    worker.start()
-                    try:
-                        worker.join(0.8)
-                        self.assertFalse(worker.is_alive(), "a paused peer must not hang the push hook")
-                        self.assertIn("cache lock unavailable", results.get(timeout=1))
-                    finally:
-                        self.tolls.fcntl.flock(lock, self.tolls.fcntl.LOCK_UN)
-                        worker.join(2)
-                        if worker.is_alive():
-                            worker.terminate()
-                            worker.join(2)
-                        results.close()
-        self.assertEqual(len(self.asked), 1, "lock failure must not pay without a claim")
-
-    def test_separate_processes_share_one_cache_claim(self):
-        ctx = multiprocessing.get_context("fork")
-        count, start = ctx.Value("i", 0), ctx.Event()
-        original = self.tolls._client()
-        class ProcessClient:
-            noul = original.noul
-            @staticmethod
-            def ask(*args, **kwargs):
-                with count.get_lock():
-                    count.value += 1
-                time.sleep(0.1)
-                return original.ask(*args, **kwargs)
-        def invoke():
-            start.wait(3)
-            self.tolls.owed({"files": ["hooks/x.py"]})
-        with patch.object(self.tolls, "_client", lambda: ProcessClient):
-            workers = [ctx.Process(target=invoke) for _ in range(2)]
-            for worker in workers:
-                worker.start()
-            start.set()
-            for worker in workers:
-                worker.join(5)
-                self.assertEqual(worker.exitcode, 0)
-        self.assertEqual(count.value, 1)
-
-    def test_concurrent_different_states_preserve_both_entries(self):
-        states = [{"files": ["hooks/x.py"]}, {"files": ["hooks/y.py"]}]
-        self.concurrent(states)
-        for state in states:
-            self.tolls.owed(state)
-        self.assertEqual(len(self.asked), 2)
-
-    def test_readers_never_observe_partial_cache_json(self):
-        self.tolls.owed({"files": ["hooks/x.py"]})
-        entered, release = threading.Event(), threading.Event()
-        original = self.tolls.json.dump
-        def partial(value, fh, **kwargs):
-            fh.write("{")
-            fh.flush()
-            entered.set()
-            release.wait(timeout=3)
-            fh.seek(0)
-            fh.truncate()
-            return original(value, fh, **kwargs)
-        with patch.object(self.tolls.json, "dump", partial), ThreadPoolExecutor(1) as pool:
-            write = pool.submit(self.tolls.owed, {"files": ["hooks/y.py"]})
-            try:
-                self.assertTrue(entered.wait(timeout=3))
-                persisted = json.loads(Path(self.tolls.CACHE_PATH).read_text())
-                self.assertTrue(persisted)
-            finally:
-                release.set()
-                write.result(timeout=3)
-
-    def test_cache_expires_after_a_day(self):
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        with patch.object(self.tolls.time, "time", return_value=self.tolls.time.time() + 86_401):
-            self.tolls.owed(state)
-        self.assertEqual(len(self.asked), 2)
-
-    def test_an_injected_client_bypasses_the_cache(self):
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        self.tolls.owed(state, client=self.tolls._client())
-        self.assertEqual(len(self.asked), 2)
+    def test_collector_reads_changed_content_without_model(self):
+        spec = importlib.util.spec_from_file_location('tolls_collector', REPO/'ops/jev_change_tolls.py')
+        tolls = importlib.util.module_from_spec(spec); spec.loader.exec_module(tolls)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            subprocess.run(['git','init','-q',tmp],env=ENV,check=True)
+            subprocess.run(['git','remote','add','origin',tmp],cwd=tmp,env=ENV,check=True)
+            (root/'fixture.py').write_text('old')
+            subprocess.run(['git','add','fixture.py'],cwd=tmp,env=ENV,check=True)
+            subprocess.run(['git','-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'],cwd=tmp,env=ENV,check=True)
+            (root/'fixture.py').write_text('first')
+            first=tolls.change(base='HEAD',repo=tmp)
+            (root/'fixture.py').write_text('second')
+            second=tolls.change(base='HEAD',repo=tmp)
+            self.assertNotEqual(first['file_content_sha256'],second['file_content_sha256'])
 
 
 # Files that make up the transport itself, or call it only through a site
