@@ -16,7 +16,11 @@ export function scrubError(input = {}) {
   const route = String(input.route || '/').split(/[?#]/)[0].split('/').slice(0, 8)
     .map(part => !part || ROUTES.has(part) ? part : ':value').join('/');
   const stack = String(input.stack || '').slice(0, 8000).split('\n').slice(0, 20)
-    .flatMap(line => { const match = line.match(/:(\d{1,7}):(\d{1,7})\)?\s*$/); return match ? [`asset:${match[1]}:${match[2]}`] : []; }).join('\n');
+    .flatMap(line => {
+      if (!/^\s*(?:at\s|asset:)|^[^\s:]*@(?:https?:\/\/|\/)/.test(line)) return [];
+      const match = line.match(/:(\d{1,7}):(\d{1,7})\)?\s*$/);
+      return match ? [`asset:${match[1]}:${match[2]}`] : [];
+    }).join('\n');
   return { type, message, stack, route: route.startsWith('/') ? route : '/:value',
     release_sha: SHA.test(input.release_sha || '') ? input.release_sha : null };
 }

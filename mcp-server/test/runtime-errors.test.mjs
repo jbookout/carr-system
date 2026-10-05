@@ -93,7 +93,7 @@ test('a previously observed release cannot clear when the current release is unk
 
 test('PII and record contents never survive the capture seam', () => {
   const result = scrubError({ type: 'TypeError', message: 'Cannot read properties of Alice Smith alice@example.test patient diagnosis',
-    stack: 'TypeError: Alice Smith\n at Alice (https://app.test/js/client.js?email=alice@example.test:12:3)\n at /Users/Alice/private.js:45:2',
+    stack: 'TypeError: Alice Smith record:9876543:1234567\n at Alice (https://app.test/js/client.js?email=alice@example.test:12:3)\n at /Users/Alice/private.js:45:2',
     route: '/clients/Alice?email=alice@example.test', body: 'medical record', release_sha: 'a'.repeat(40) });
   assert.equal(result.message, 'Cannot read properties of [redacted]');
   assert.equal(result.route, '/clients/:value');
