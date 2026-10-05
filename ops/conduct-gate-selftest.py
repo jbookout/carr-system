@@ -289,7 +289,7 @@ def shadow_writing_cases():
 
 def handoff_scan_cases():
     """scan() in process. Only the exact refused command is exempt, and a
-    prose handoff the patterns miss is a stated, undetected residual."""
+    prose handoff the patterns miss emits a nonblocking review residual."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("conduct_stop_gate_scan", HOOK)
     gate = importlib.util.module_from_spec(spec)
@@ -301,8 +301,8 @@ def handoff_scan_cases():
     fired, _ = gate.scan(apply, "yes install it", ["python ops/install.py --apply"])
     out.append(("exact-refused-command-exempt", not fired))
     prose = "mlx-serve is ready once the Homebrew tap is trusted; trust it, then install."
-    fired, _ = gate.scan(prose, "yes install it", ())
-    out.append(("prose-handoff-pattern-residual", not fired))
+    fired, findings = gate.scan(prose, "yes install it", ())
+    out.append(("prose-handoff-pattern-residual", not fired and ("handoff_review", "needs_review") in findings))
     return out
 
 def main():

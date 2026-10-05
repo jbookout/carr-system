@@ -222,3 +222,19 @@ def handoff_was_denied(assistant, denied):
     normalize = lambda command: re.sub(r"^\./", "", command.strip())
     commands = {normalize(line) for block in shown for line in block.splitlines() if line.strip()}
     return bool(commands & {normalize(cmd) for cmd in denied if isinstance(cmd,str)})
+
+
+# A vocabulary cue only selects prose for review. It never proves a handoff,
+# an available capability, or a missing attempt, and cannot block execution.
+HANDOFF_REVIEW_CUE = re.compile(r"\b(?:install|trust|configure|deploy|migrate|authenticate|sign[ -]in|enable|grant)\b", re.I)
+HANDOFF_REVIEW_MESSAGE = (
+    "handoff_review: needs_review — possible prose handoff; exact action, "
+    "attempt and capability evidence is unavailable. Review who must act; "
+    "this advisory does not establish an unattempted permitted command.")
+
+
+def handoff_needs_review(text, human_last, denied=()):
+    """Select an unresolved prose action for a visible, nonblocking advisory."""
+    return bool(text.strip() and HANDOFF_REVIEW_CUE.search(text)
+                and not (human_last and HUMAN_WANTS_COMMAND.search(human_last))
+                and not (denied and handoff_was_denied(text, denied)))

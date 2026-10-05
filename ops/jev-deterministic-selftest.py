@@ -126,6 +126,89 @@ class DeterministicTests(unittest.TestCase):
         from lib.acceptance_checks import evaluate
         self.assertEqual(evaluate([{'id':'d','kind':'contains','path':'dir','text':'x'}],root=self.root)['status'],'failed')
 
+    def test_stalled_open_and_read_have_enforced_deadlines_in_stop_callers(self):
+        import os, time, types
+        from lib import acceptance_checks as acceptance
+        (self.root/'output').write_text('content')
+        criterion={'id':'output','kind':'contains','path':'output','text':'content'}
+        prompt=json.dumps({'acceptance_contract':{'criteria':[criterion]}})
+        recs=[{'type':'user','message':{'content':prompt}}]
+        req=load('jev_requirements');done=load('jev_done_checks')
+        for operation in ('open','read'):
+            proxy=types.SimpleNamespace(**{name:getattr(os,name) for name in
+                ('open','read','fstat','close','O_RDONLY','O_NONBLOCK')})
+            original=getattr(os,operation)
+            def stalled(*args, original=original):
+                time.sleep(0.6)
+                return original(*args)
+            setattr(proxy,operation,stalled)
+            # Inject the same stalled syscall into the disposable reader too.
+            program=("import importlib.util,sys,time;"
+                     "spec=importlib.util.spec_from_file_location('reader',sys.argv[1]);"
+                     "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);"
+                     f"module.os.{operation}=lambda *a: time.sleep(60);"
+                     "sys.stdout.buffer.write(module._read_regular(sys.argv[2],int(sys.argv[3])))")
+            with patch.object(acceptance,'os',proxy), \
+                 patch.object(acceptance,'_READER_PROGRAM',program,create=True), \
+                 patch.object(acceptance,'READ_TIMEOUT',0.05,create=True), \
+                 patch.object(req,'_acceptance',return_value=acceptance), \
+                 patch.object(done,'_sibling_lib',return_value=acceptance):
+                callers=[lambda:acceptance.evaluate([criterion],root=self.root,deadline=time.monotonic()+0.05),
+                         lambda:req.check({'cwd':str(self.root)},recs),
+                         lambda:done.check_done_claim('Done.',{'claim_scope':'current_completion',
+                             'criteria':[criterion],'root':str(self.root)})['detail']]
+                for index,caller in enumerate(callers):
+                    with self.subTest(operation=operation,caller=index):
+                        start=time.monotonic();result=caller();elapsed=time.monotonic()-start
+                        self.assertLess(elapsed,0.3,result)
+                        self.assertEqual(result['status'],'failed',result)
+                        self.assertIn('deadline',result['criteria'][0]['reason'])
+
+    def test_replaced_artifact_fifo_is_checked_after_open(self):
+        from lib import acceptance_checks as acceptance
+        path=self.root/'output';path.write_text('content')
+        # Replace after path validation, before opening in the reader.
+        program=("import importlib.util,sys,os;"
+                 "spec=importlib.util.spec_from_file_location('reader',sys.argv[1]);"
+                 "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);"
+                 "os.unlink(sys.argv[2]);os.mkfifo(sys.argv[2]);"
+                 "sys.stdout.buffer.write(module._read_regular(sys.argv[2],int(sys.argv[3])))")
+        with patch.object(acceptance,'_READER_PROGRAM',program):
+            result=acceptance.evaluate([{'id':'x','kind':'contains','path':'output','text':'content'}],root=self.root)
+        self.assertEqual(result['status'],'failed')
+        self.assertIn('regular file',result['criteria'][0]['reason'])
+
+    def test_reader_deadline_works_from_a_thread(self):
+        import concurrent.futures
+        from lib import acceptance_checks as acceptance
+        (self.root/'output').write_text('content')
+        with patch.object(acceptance,'_READER_PROGRAM','import time;time.sleep(60)'), \
+             patch.object(acceptance,'READ_TIMEOUT',0.05), \
+             concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            result=pool.submit(acceptance.evaluate,[{'id':'x','kind':'contains','path':'output','text':'content'}],
+                               root=self.root).result(timeout=0.5)
+        self.assertEqual(result['status'],'failed')
+        self.assertIn('deadline',result['criteria'][0]['reason'])
+
+    def test_prose_handoff_advisory_reaches_both_hook_entrypoints(self):
+        import subprocess
+        prose='mlx-serve is ready once the Homebrew tap is trusted; trust it, then install.'
+        transcript=self.root/'turn.jsonl'
+        transcript.write_text('\n'.join(json.dumps(row) for row in [
+            {'type':'user','message':{'content':'yes install it'}},
+            {'type':'assistant','message':{'content':prose}}])+'\n')
+        for hook,payload in [
+            ('conduct-stop-gate',{'transcript_path':str(transcript),'session_id':'selftest'}),
+            ('escalation-gate',{'transcript_path':str(transcript),'session_id':'selftest',
+                'tool_name':'AskUserQuestion','tool_input':{'questions':[{'question':prose,'options':[]}]}})]:
+            with self.subTest(hook=hook):
+                run=subprocess.run([sys.executable,str(REPO/'hooks'/(hook+'.py'))],
+                    input=json.dumps(payload),capture_output=True,text=True,timeout=10)
+                self.assertEqual(run.returncode,0,run.stderr)
+                self.assertIn('handoff_review',run.stdout,run.stderr)
+                self.assertIn('needs_review',run.stdout)
+                self.assertNotIn('"decision": "block"',run.stdout)
+
     def test_artifact_read_honors_deadline(self):
         import time
         from lib.acceptance_checks import evaluate

@@ -92,6 +92,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from conduct_patterns import (  # noqa: E402
     PROTECTED, HUMAN_WANTS_CHOICE, HUMAN_WANTS_COMMAND, FENCE, BARE_FENCE_CMD,
     INLINE_CMD, HANDOFF_PROSE, denied_commands, handoff_was_denied,
+    handoff_needs_review, HANDOFF_REVIEW_MESSAGE,
 )
 
 # ── (1) FACT CAPTURE — only Joe was in the room. Research cannot reach it. ────
@@ -319,7 +320,7 @@ ATTEMPT_FIRST_REASON = (
 
 def hands_off_unattempted(blob, human_last, denied):
     """Return the finding name when the question hands Joe an untried command,
-    else None. Keyword patterns only: prose they miss is not machine-detected."""
+    else None; unresolved prose action cues return handoff_review (nonblocking)."""
     if not blob.strip():
         return None
     if human_last and HUMAN_WANTS_COMMAND.search(human_last):
@@ -331,7 +332,7 @@ def hands_off_unattempted(blob, human_last, denied):
     for name, pat in HANDOFF_PROSE:
         if pat.search(blob):
             return name
-    return None
+    return "handoff_review" if handoff_needs_review(blob, human_last, denied) else None
 
 
 def read_turn(path, limit=400):
@@ -395,7 +396,13 @@ def main():
             blob = question_text(ti)
             finding = hands_off_unattempted(
                 blob, human_last, denied_commands(recs, start))
-            if finding:
+            if finding == "handoff_review":
+                audit({"ts": now(), "hook": "escalation-gate", "classes": ["handoff_review"],
+                       "patterns": ["needs_review"], "session": payload.get("session_id")})
+                print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE,
+                    "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                           "additionalContext": HANDOFF_REVIEW_MESSAGE}}))
+            elif finding:
                 audit({
                     "ts": now(),
                     "hook": "escalation-gate",

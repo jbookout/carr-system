@@ -1,7 +1,7 @@
 """Evaluate caller-owned acceptance criteria against artifacts the verifier reads.
 
 Criteria are supplied before execution, never learned from output. This module
-reads artifacts; it never executes commands or models. A worker's claim that a
+reads artifacts; it never executes acceptance commands or invokes models. A worker's claim that a
 check ran is not evidence, so there is no check predicate: a criterion of any
 kind other than the artifact predicates abstains. Missing, unreadable or
 contradictory evidence fails.
@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
+import sys
 import time
 
 MAX_BYTES = 96000
@@ -40,23 +42,24 @@ Natural language is deliberately not compiled into a permission to complete.
         return {}
 
 
-def read_regular(path, limit, *, deadline=None):
-    """At most limit+1 bytes of a regular file, or ValueError.
+READ_TIMEOUT = 1.0
+_READER_PROGRAM = """
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('acceptance_reader', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sys.stdout.buffer.write(module._read_regular(sys.argv[2], int(sys.argv[3])))
+"""
 
-    Opening never waits for a writer (a FIFO or device is refused after open,
-    so a swap between check and open cannot block), and reads stop at the
-    deadline.
-    """
-    if deadline is not None and time.monotonic() >= deadline:
-        raise ValueError('artifact read deadline expired')
+
+def _read_regular(path, limit):
+    """Read in the disposable process; fstat checks the opened object itself."""
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError('artifact is not a regular file')
         chunks, size = [], 0
         while size <= limit:
-            if deadline is not None and time.monotonic() >= deadline:
-                raise ValueError('artifact read deadline expired')
             chunk = os.read(fd, min(CHUNK, limit + 1 - size))
             if not chunk:
                 break
@@ -65,6 +68,27 @@ def read_regular(path, limit, *, deadline=None):
         return b''.join(chunks)
     finally:
         os.close(fd)
+
+
+def read_regular(path, limit, *, deadline=None):
+    """Bound open/read time as well as bytes, including calls from threads.
+
+    A stalled filesystem operation cannot hold the verifier: subprocess.run
+    kills and reaps the disposable reader at the deadline. No signal handlers
+    or lingering I/O threads are installed in the caller.
+    """
+    remaining = READ_TIMEOUT if deadline is None else min(READ_TIMEOUT, deadline - time.monotonic())
+    if remaining <= 0:
+        raise ValueError('artifact read deadline expired')
+    try:
+        result = subprocess.run([sys.executable, '-c', _READER_PROGRAM,
+                                 str(Path(__file__).resolve()), str(path), str(limit)],
+                                capture_output=True, timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError('artifact read deadline expired') from exc
+    if result.returncode:
+        raise ValueError('artifact unreadable or not a regular file')
+    return result.stdout
 
 
 def _path(value, root):
@@ -117,6 +141,7 @@ verifier reads each artifact itself. When receipts is a list, a worker named
 its artifacts, and each criterion also needs exactly one matching receipt whose
 digest equals the bytes read; with None the caller is the observer.
 """
+    deadline = min(deadline, time.monotonic() + READ_TIMEOUT) if deadline is not None else time.monotonic() + READ_TIMEOUT
     root = Path(root).resolve()
     if not isinstance(criteria, list) or not criteria:
         return {'status':'needs_review','criteria':[], 'reason':'explicit acceptance criteria required'}

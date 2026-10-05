@@ -129,6 +129,7 @@ from conduct_patterns import (  # noqa: E402
     OFFLOAD, SOFT_WAIT, FENCE, BARE_FENCE_CMD, HANDOFF_PROSE,
     HUMAN_WANTS_COMMAND, HUMAN_WANTS_CHOICE, PROTECTED, bare_id_hits,
     CLASSIFIER_DENIAL, denied_commands, handoff_was_denied,
+    handoff_needs_review, HANDOFF_REVIEW_MESSAGE,
 )
 
 # ── WR-000019 S8: the writing shadow check (rule 5be2f462) ─────────────────
@@ -333,7 +334,7 @@ def scan(assistant, human_last, denied=()):
     """Return (fired, findings). findings = list of (klass, name).
 
     Command handoffs are found by the fence and HANDOFF_PROSE patterns only.
-    A handoff written as prose those patterns miss is not machine-detected;
+    Prose action cues those patterns miss produce a nonblocking review residual;
     no observed capability or permission evidence exists here to decide it.
     """
     findings = []
@@ -371,7 +372,9 @@ def scan(assistant, human_last, denied=()):
     for name, ident in bare_id_hits(prose):
         findings.append(("bare_id", f"{name}:{ident}"))
 
-    return (len(findings) > 0), findings
+    if not any(k == "command_handoff" for k, _ in findings) and handoff_needs_review(prose, human_last, denied):
+        findings.append(("handoff_review", "needs_review"))
+    return any(k != "handoff_review" for k, _ in findings), findings
 
 
 def _shadow_mode_enabled():
@@ -601,6 +604,13 @@ def main():
         # independently, and it never influences `fired` either way.
         shadow_writing_check(assistant, payload.get("session_id"))
 
+        review_advisory = ("handoff_review", "needs_review") in findings
+        if review_advisory:
+            audit({"ts": now(), "hook": "conduct-stop-gate", "classes": ["handoff_review"],
+                   "patterns": ["needs_review"], "session": payload.get("session_id")})
+            if not fired:
+                print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE}))
+            findings = [(k, n) for k, n in findings if k != "handoff_review"]
         if not fired:
             sys.exit(0)
 
@@ -639,7 +649,10 @@ def main():
         remember_blocked(assistant, payload.get("session_id"))
 
         dlog(f"BLOCK {classes} :: {[n for _, n in findings]}")
-        print(json.dumps({"decision": "block", "reason": body}))
+        response = {"decision": "block", "reason": body}
+        if review_advisory:
+            response["systemMessage"] = HANDOFF_REVIEW_MESSAGE
+        print(json.dumps(response))
         sys.exit(0)
 
     except Exception as exc:
