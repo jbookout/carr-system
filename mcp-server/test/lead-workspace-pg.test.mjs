@@ -137,7 +137,8 @@ run(
   async (c) => {
     const f = await fixture(c);
     await c.query("set role carr_reader");
-    for (const table of ["lead", "deal", "activity", "event"])
+    // 0824's vendor contract grants carr_reader deal and activity; Leads widens neither.
+    for (const table of ["lead", "event"])
       assert.equal(
         (
           await c.query(

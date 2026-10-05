@@ -28,6 +28,8 @@ import psycopg
 from psycopg import sql
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from lib.disposable_pg_fixture import postgres_fixture_group
 MIGRATION = ROOT / "migrations/0756_dot_reader.sql"
 
 
@@ -44,6 +46,9 @@ class DotReader(unittest.TestCase):
             cls.bin = module.find_postgres_binaries()
         except module.LocalPGRefusal:
             raise unittest.SkipTest("disposable PostgreSQL binaries unavailable")
+        cls.pg_budget = postgres_fixture_group()
+        cls.pg_budget.__enter__()
+        cls.addClassCleanup(cls.pg_budget.__exit__, None, None, None)
         cls.tmp = tempfile.TemporaryDirectory(prefix="dot-reader-test-")
         cls.addClassCleanup(cls.tmp.cleanup)
         cls.data = Path(cls.tmp.name) / "data"

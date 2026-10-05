@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import shlex
+import shutil
 import sys
 import tempfile
 import unittest
@@ -229,13 +230,37 @@ class FakeGitHub:
 
 
 class Fixture:
+    _history_root = None
+    _base_sha = None
+
+    @classmethod
+    def _baseline_history(cls):
+        # The initial Git history is identical for every scenario. Build it
+        # once; each fixture copies both repositories before any mutation.
+        if cls._history_root is None:
+            cls._history_root = tempfile.TemporaryDirectory(prefix="release-baseline-")
+            root = Path(cls._history_root.name)
+            origin, repo = root / "origin.git", root / "repo"
+            git(root, "init", "--bare", "-b", "main", str(origin))
+            git(root, "clone", str(origin), str(repo))
+            git(repo, "config", "user.email", "t@example.invalid")
+            git(repo, "config", "user.name", "t")
+            (repo / "README.md").write_text("x")
+            git(repo, "add", "README.md")
+            git(repo, "commit", "-q", "-m", "c")
+            git(repo, "push", "-q", "origin", "HEAD:main")
+            cls._base_sha = git(repo, "rev-parse", "HEAD")
+        return Path(cls._history_root.name), cls._base_sha
+
     def __init__(self, tmp: Path):
         self.tmp = tmp
         self.slice_marks: list[tuple[str, str]] = []
         self.origin = tmp / "origin.git"
         self.repo = tmp / "repo"
-        git(tmp, "init", "--bare", "-b", "main", str(self.origin))
-        git(tmp, "clone", str(self.origin), str(self.repo))
+        baseline, self.base = self._baseline_history()
+        shutil.copytree(baseline / "origin.git", self.origin)
+        shutil.copytree(baseline / "repo", self.repo)
+        git(self.repo, "remote", "set-url", "origin", str(self.origin))
         # Machine state is not history, exactly as the real checkout's
         # .gitignore has it. Without this, commit()'s `git add -A` swept the
         # stub `.venv/bin/python` (written below) into every test's first
@@ -243,9 +268,6 @@ class Fixture:
         # canary-ignored; and it swept the pipeline's own out/release-pipeline
         # state into any commit made after a tick.
         (self.repo / ".git" / "info" / "exclude").write_text(".venv\nout/\n")
-        git(self.repo, "config", "user.email", "t@example.invalid")
-        git(self.repo, "config", "user.name", "t")
-        self.base = self.commit({"README.md": "x"})
         self.cred = tmp / "cred"
         self.cred.mkdir()
         (self.cred / "db.env").write_text(
@@ -315,6 +337,31 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+
+
+class FixtureIsolation(unittest.TestCase):
+    def test_fixtures_share_an_immutable_baseline_but_not_mutable_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "first").mkdir()
+            (root / "second").mkdir()
+            with mock.patch.dict(FIXTURE_ENV, {
+                "GIT_AUTHOR_DATE": "2026-09-01T00:00:00Z",
+                "GIT_COMMITTER_DATE": "2026-09-01T00:00:00Z",
+            }):
+                first = Fixture(root / "first")
+            with mock.patch.dict(FIXTURE_ENV, {
+                "GIT_AUTHOR_DATE": "2026-09-02T00:00:00Z",
+                "GIT_COMMITTER_DATE": "2026-09-02T00:00:00Z",
+            }):
+                second = Fixture(root / "second")
+            self.assertEqual(first.base, second.base)
+            changed = first.commit({"mcp-server/src/isolated.js": "first only"})
+            self.assertNotEqual(changed, first.base)
+            self.assertEqual(git(second.repo, "rev-parse", "HEAD"), second.base)
+            self.assertEqual(git(root, "--git-dir", str(second.origin),
+                                 "rev-parse", "refs/heads/main"), second.base)
+            self.assertFalse((second.repo / "mcp-server/src/isolated.js").exists())
 
 
 class Classification(unittest.TestCase):
@@ -455,7 +502,9 @@ class Batching(Base):
                                        "--release-key", "r-2026-09-30-01"])
         self.assertIs(kwargs["start_new_session"], True)
         self.assertIs(kwargs["stdin"], rp.subprocess.DEVNULL)
-        self.assertEqual(set(kwargs["env"]) - {"HOME", "PATH", "LANG"}, set())
+        self.assertEqual(set(kwargs["env"]) - {"HOME", "PATH", "LANG", "CARR_JEV_JOB"}, set())
+        self.assertEqual(kwargs["env"]["CARR_JEV_JOB"], "release-pipeline.slice-marker",
+                         "the detached marker's paid Jev calls are attributed to this job")
         run.assert_not_called()
         started.wait.assert_not_called()
         started.communicate.assert_not_called()

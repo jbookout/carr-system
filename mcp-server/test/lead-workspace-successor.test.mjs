@@ -16,22 +16,22 @@ test('unapplied Leads migrations extend the main migration ledger', async () => 
     'the Leads seal must follow its Archived vocabulary');
 });
 
-test('Leads follows the shipped lead automation frontier without replacing its contracts or migration numbers', async () => {
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v107');
-  for (const name of ['find-rule', 'teach', 'ask-jev', 'advance-leads', 'approve-lead-move', 'record-lead-contact', 'claim-lead', 'link-lead-client', 'update-lead', 'lead-board'])
+test('Leads follows the shipped Doc activity frontier without replacing its contracts or migration numbers', async () => {
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v108');
+  for (const name of ['find-rule', 'teach', 'ask-jev', 'advance-leads', 'approve-lead-move', 'record-lead-contact', 'claim-lead', 'link-lead-client', 'update-lead', 'lead-board', 'read-doc-activity'])
     assert.ok(registeredOperation(name), `${name} must survive the integration`);
   assert.equal(registeredOperation('confirm-merge').human_only, true);
   const names = (await readdir(new URL('../../migrations/', import.meta.url))).filter(name => /^\d+_.*\.sql$/.test(name));
-  for (const number of ['0812', '0813', '0814'])
+  for (const number of ['0825', '0833', '0834'])
     assert.equal(names.filter(name => name.startsWith(`${number}_`)).length, 1, 'new Leads migration numbers must be unique');
   const sorted = names.sort();
-  assert.ok(sorted.indexOf('0812_lead_automation_scac_successor.sql') < sorted.indexOf('0813_lead_archived_stage.sql') &&
-    sorted.indexOf('0813_lead_archived_stage.sql') < sorted.indexOf('0814_leads_scac_successor.sql'),
+  assert.ok(sorted.indexOf('0825_doc_activity_scac_successor.sql') < sorted.indexOf('0833_lead_archived_stage.sql') &&
+    sorted.indexOf('0833_lead_archived_stage.sql') < sorted.indexOf('0834_leads_scac_successor.sql'),
     'Leads migrations must sort after the predecessor they pin, or the applied ledger stops being a prefix');
-  const sql = await readFile(new URL('../../migrations/0814_leads_scac_successor.sql', import.meta.url), 'utf8');
-  assert.match(sql, /0812_lead_automation_scac_successor.sql/);
-  assert.match(sql, /0813_lead_archived_stage.sql/);
-  assert.match(sql, /scac-mutation-registry\.v106/);
+  const sql = await readFile(new URL('../../migrations/0834_leads_scac_successor.sql', import.meta.url), 'utf8');
+  assert.match(sql, /0825_doc_activity_scac_successor.sql/);
+  assert.match(sql, /0833_lead_archived_stage.sql/);
   assert.match(sql, /scac-mutation-registry\.v107/);
-  assert.match(sql, /scac_mutation_registration_v106\('sha256:[0-9a-f]{64}','mcp-tool:update-lead'\)/);
+  assert.match(sql, /scac-mutation-registry\.v108/);
+  assert.match(sql, /scac_mutation_registration_v107\('sha256:[0-9a-f]{64}','mcp-tool:update-lead'\)/);
 });

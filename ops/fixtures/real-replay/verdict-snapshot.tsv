@@ -669,8 +669,11 @@ context-handoff-gate.py	Stop	advisories:fb34ec1f1d75/claims-done	announce	Claude
 context-handoff-gate.py	Stop	advisories:fc80d2b5ad77/reports-evidence	announce	Claude context lifecycle control warning (LIFECYCLE_INVALID); native Claude behavior continues.
 costar-lane-gate.py	PreToolUse[mcp__claude-in-chrome__.*]	(all)	counts	allow=2 deny=1
 costar-lane-gate.py	PreToolUse[mcp__claude-in-chrome__.*]	scenarios:b2a0f1e2d3c4	deny	COSTAR LANE — refused. This is the Chrome extension, and CoStar is driven ONLY in the Claude desktop app's own Browser pane (rule <hex>). Th
-delegation-gate.py	PreToolUse[Bash|Read|Grep|Glob|WebFetch|WebSearch]	(all)	counts	allow=368 announce=1
+delegation-gate.py	PreToolUse[Bash|Read|Grep|Glob|WebFetch|WebSearch]	(all)	counts	allow=365 announce=4
+delegation-gate.py	PreToolUse[Bash|Read|Grep|Glob|WebFetch|WebSearch]	bash:4552f184b8e3	announce	PRE-CHECK #.# — this command looks likely to fail. It has NOT been blocked; run it anyway if you disagree.
+delegation-gate.py	PreToolUse[Bash|Read|Grep|Glob|WebFetch|WebSearch]	bash:4c08e8152e30	announce	PRE-CHECK #.# — this command looks likely to fail. It has NOT been blocked; run it anyway if you disagree.
 delegation-gate.py	PreToolUse[Bash|Read|Grep|Glob|WebFetch|WebSearch]	bash:9de030768415	announce	MODEL ROOM ROUTE — read the current rule before this CLI call: Decision `<uuid>` records Joe's route:
+delegation-gate.py	PreToolUse[Bash|Read|Grep|Glob|WebFetch|WebSearch]	bash:9fcfc2d5b12d	announce	PRE-CHECK #.# — this command looks likely to fail. It has NOT been blocked; run it anyway if you disagree.
 delegation-gate.py	Stop	(all)	counts	allow=87 announce=1
 delegation-gate.py	Stop	scenarios:c3059d17e2ab	announce	DELEGATION TELEMETRY — this session's mechanical-call pattern reached # moment(s) where the retired denial rule would have fired (threshold 
 draft-export-gate.py	PreToolUse[Bash]	(all)	counts	allow=320 announce=1
@@ -711,7 +714,7 @@ guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:995d89a284a1	deny	recursive/f
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	scenarios:5c0000000005	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
-jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=375 announce=66
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=374 announce=67
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:005d482ca566	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:010a4c03c18b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:03e198646e6d	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
@@ -722,6 +725,7 @@ jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:106ba50bf4f1	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:12993081a8ac	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:1c14d7cd0107	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:24e45f35da6a	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2846baa603e1	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2a66692e0056	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2d46204312ac	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
@@ -804,6 +808,7 @@ jev-supervisor.py	Stop	advisories:d2d70bafa6c9/claims-done	announce	[jev stop_bo
 jev-supervisor.py	Stop	advisories:e1f51dde3b65/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
 jev-supervisor.py	Stop	advisories:f9556cac264d/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
 jev-supervisor.py	Stop	advisories:fb34ec1f1d75/claims-done	announce	[jev stop_boundary] unavailable: Jev Stop judgment unavailable; inspect the claim and diff
+job-watchdog-digest.py	UserPromptSubmit	(all)	counts	allow=6
 ledger-sweep.py	Stop	(all)	counts	allow=87 announce=1
 ledger-sweep.py	Stop	scenarios:c3f6a7b8c9d0	announce	LEDGER SWEEP — the partner's last turn matched triggers # · OVERRULED A RECOMMENDATION; # · RULED ON HOW SOMETHING IS STRUCTURED from rule <
 lint-gate.py	PostToolUse[Write|Edit|MultiEdit|apply_patch|functions\.apply_patch]	(all)	counts	announce=72
@@ -1226,4 +1231,3 @@ weekend-quiet-gate.py	PreToolUse[PushNotification|mcp__.*__(send_message|create_
 weekend-quiet-gate.py	PreToolUse[PushNotification|mcp__.*__(send_message|create_draft|update_draft)]	scenarios:5c0000000001@saturday-unattended	deny	WEEKEND QUIET — refused. It is Saturday, and weekends are off for both partners (rule <hex>). Joe and Dell do not work them, and neither of 
 write-effect-check.py	PostToolUse[Bash]	(all)	counts	allow=320
 write-effect-check.py	PreToolUse[Bash]	(all)	counts	allow=320
-job-watchdog-digest.py	UserPromptSubmit	(all)	counts	allow=6
