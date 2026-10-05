@@ -546,7 +546,8 @@ export const REGISTRY_V105_VERSION = "scac-mutation-registry.v105";
 // Lead automation follows the delivered Observatory read contract.
 export const REGISTRY_V106_VERSION = "scac-mutation-registry.v106";
 export const REGISTRY_V107_VERSION = "scac-mutation-registry.v107";
-export const CURRENT_REGISTRY_VERSION = REGISTRY_V107_VERSION;
+export const REGISTRY_V108_VERSION = "scac-mutation-registry.v108";
+export const CURRENT_REGISTRY_VERSION = REGISTRY_V108_VERSION;
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -2026,6 +2027,12 @@ export const DOC_ACTIVITY_V107_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 1222, digest: "sha256:83be610b25f963d3cdaa6d6f64eb665b1ad5d9f6b5217763b8858c1e86b9b756" },
 });
 
+export const RULE_APPROVAL_V108_DB_CATALOG_BASELINE = Object.freeze({
+  ...DOC_ACTIVITY_V107_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v108",
+  secdef_execute: { count: 1226, digest: "sha256:3b27f829617560b96fe435a130f4dffc460670a5ce1cf9b45546baf2e8cfa77f" },
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -2779,6 +2786,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V105_VERSION]: "v105",
   [REGISTRY_V106_VERSION]: "v106",
   [REGISTRY_V107_VERSION]: "v107",
+  [REGISTRY_V108_VERSION]: "v108",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2972,7 +2980,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V44_VERSION, REGISTRY_V45_VERSION, REGISTRY_V46_VERSION,
     REGISTRY_V47_VERSION, REGISTRY_V48_VERSION, REGISTRY_V49_VERSION,
     REGISTRY_V50_VERSION, REGISTRY_V51_VERSION, REGISTRY_V52_VERSION, REGISTRY_V53_VERSION, REGISTRY_V54_VERSION,
-    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION, REGISTRY_V73_VERSION, REGISTRY_V74_VERSION, REGISTRY_V75_VERSION, REGISTRY_V76_VERSION, REGISTRY_V77_VERSION, REGISTRY_V78_VERSION, REGISTRY_V79_VERSION, REGISTRY_V80_VERSION, REGISTRY_V81_VERSION, REGISTRY_V82_VERSION, REGISTRY_V83_VERSION, REGISTRY_V84_VERSION, REGISTRY_V85_VERSION, REGISTRY_V86_VERSION, REGISTRY_V87_VERSION, REGISTRY_V88_VERSION, REGISTRY_V89_VERSION, REGISTRY_V90_VERSION, REGISTRY_V91_VERSION, REGISTRY_V92_VERSION, REGISTRY_V93_VERSION, REGISTRY_V94_VERSION, REGISTRY_V95_VERSION, REGISTRY_V96_VERSION, REGISTRY_V97_VERSION, REGISTRY_V98_VERSION, REGISTRY_V99_VERSION, REGISTRY_V100_VERSION, REGISTRY_V101_VERSION, REGISTRY_V102_VERSION, REGISTRY_V103_VERSION, REGISTRY_V104_VERSION, REGISTRY_V105_VERSION, REGISTRY_V106_VERSION, REGISTRY_V107_VERSION].includes(version))
+    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION, REGISTRY_V73_VERSION, REGISTRY_V74_VERSION, REGISTRY_V75_VERSION, REGISTRY_V76_VERSION, REGISTRY_V77_VERSION, REGISTRY_V78_VERSION, REGISTRY_V79_VERSION, REGISTRY_V80_VERSION, REGISTRY_V81_VERSION, REGISTRY_V82_VERSION, REGISTRY_V83_VERSION, REGISTRY_V84_VERSION, REGISTRY_V85_VERSION, REGISTRY_V86_VERSION, REGISTRY_V87_VERSION, REGISTRY_V88_VERSION, REGISTRY_V89_VERSION, REGISTRY_V90_VERSION, REGISTRY_V91_VERSION, REGISTRY_V92_VERSION, REGISTRY_V93_VERSION, REGISTRY_V94_VERSION, REGISTRY_V95_VERSION, REGISTRY_V96_VERSION, REGISTRY_V97_VERSION, REGISTRY_V98_VERSION, REGISTRY_V99_VERSION, REGISTRY_V100_VERSION, REGISTRY_V101_VERSION, REGISTRY_V102_VERSION, REGISTRY_V103_VERSION, REGISTRY_V104_VERSION, REGISTRY_V105_VERSION, REGISTRY_V106_VERSION, REGISTRY_V107_VERSION, REGISTRY_V108_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -19960,6 +19968,101 @@ export function renderDocActivityRegistrySql(rows, predecessorSql = null) {
     preflight + sql;
 }
 
+export function renderRuleApprovalRegistrySql(rows, predecessorSql = null) {
+  const predecessorPath = "migrations/0825_doc_activity_scac_successor.sql";
+  const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
+  const predecessorDigest = "a7b87f0dd5c3e88cf9756017ac4fb8abcda41ddb460ec5a24c9282a2e73793dd";
+  if (sha256(predecessor) !== predecessorDigest)
+    throw new Error("v108 predecessor migration pin drifted");
+  const oldCatalogBaseline = DOC_ACTIVITY_V107_DB_CATALOG_BASELINE;
+  const newCatalogBaseline = RULE_APPROVAL_V108_DB_CATALOG_BASELINE;
+  const oldSeal = registrySeal(REGISTRY_V107_VERSION,
+    frozenInventory(REGISTRY_V107_VERSION), oldCatalogBaseline);
+  const newSeal = registrySeal(REGISTRY_V108_VERSION, rows, newCatalogBaseline);
+  const entrySets = JSON.parse(readFileSync(FULL_ENTRY_SET_SEALS_PATH, "utf8"));
+  const oldEntrySet = entrySets[REGISTRY_V107_VERSION];
+  const newEntrySet = entrySets[REGISTRY_V108_VERSION];
+  if (!/^sha256:[0-9a-f]{64}$/.test(oldEntrySet ?? "") ||
+      !/^sha256:[0-9a-f]{64}$/.test(newEntrySet))
+    throw new Error("v108 entry-set fixture malformed");
+  const oldCatalog = JSON.stringify(oldCatalogBaseline);
+  const newCatalog = JSON.stringify(newCatalogBaseline);
+  const start = predecessor.indexOf("\ndrop trigger scac_mutation_registry_version_sealed");
+  if (start < 0) throw new Error("v108 predecessor DDL boundary missing");
+  let sql = predecessor.slice(start + 1)
+    .replaceAll("$doc_activity_v107", "$rule_approval_v108")
+    .replaceAll("scac-mutation-registry.v107", "scac-mutation-registry.v108")
+    .replaceAll("scac-db-catalog-projection.v107", "scac-db-catalog-projection.v108")
+    .replaceAll("_v107", "_v108")
+    .replaceAll("v106_current", "v107_current")
+    .replaceAll("v106_live_at_seal", "v107_live_at_seal")
+    .replaceAll("snapshot_v106", "snapshot_v107")
+    .replaceAll("Doc activity v107 seed", "Rule approval v108 seed")
+    .replaceAll(oldSeal.digest, newSeal.digest)
+    .replaceAll(oldEntrySet, newEntrySet)
+    .replaceAll(oldCatalog.replaceAll("v107", "v108"), newCatalog)
+    .replaceAll(`<>${oldSeal.entryCount}`, `<>${newSeal.entryCount}`)
+    .replaceAll(`<>${oldSeal.sourceEntryCount}`, `<>${newSeal.sourceEntryCount}`)
+    .replaceAll(`,${oldSeal.entryCount},${oldSeal.sourceEntryCount},`,
+      `,${newSeal.entryCount},${newSeal.sourceEntryCount},`);
+  for (const category of ["secdef_execute", "relation_dml", "column_dml",
+    "role_authority", "runtime_dml_grants"]) {
+    const oldValue = oldCatalogBaseline[category];
+    const newValue = newCatalogBaseline[category];
+    if (!oldValue || !newValue) continue;
+    sql = sql
+      .replaceAll(`observed_count<>${oldValue.count}`, `observed_count<>${newValue.count}`)
+      .replaceAll(`observed_digest<>'${oldValue.digest}'`, `observed_digest<>'${newValue.digest}'`);
+  }
+  const oldGrants = oldCatalogBaseline.runtime_dml_grants;
+  const newGrants = newCatalogBaseline.runtime_dml_grants;
+  sql = replaceExactlyOnce(sql,
+    `(grant_snapshot->>'entry_count')::integer=${oldGrants.count} and\n    grant_snapshot->>'grant_digest'='${oldGrants.digest}'`,
+    `(grant_snapshot->>'entry_count')::integer=${newGrants.count} and\n    grant_snapshot->>'grant_digest'='${newGrants.digest}'`,
+    "v108 reference monitor grant binding");
+  const originalVersions = Array.from({ length: 107 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const corruptedVersions = originalVersions.replace(
+    /'scac-mutation-registry[.]v107'$/, "'scac-mutation-registry.v108'");
+  const completeVersions = `${originalVersions},'scac-mutation-registry.v108'`;
+  if (sql.split(corruptedVersions).length - 1 !== 2)
+    throw new Error("v108 version lists changed in predecessor");
+  sql = sql.replaceAll(corruptedVersions, completeVersions);
+  for (const [before, after, label] of [
+    [`  (registry_version='scac-mutation-registry.v108' and registry_digest='${newSeal.digest}'));`,
+      `  (registry_version='scac-mutation-registry.v107' and registry_digest='${oldSeal.digest}') or\n  (registry_version='scac-mutation-registry.v108' and registry_digest='${newSeal.digest}'));`, "epoch history"],
+    [`    when 'scac-mutation-registry.v108' then '${newSeal.digest}' end;`,
+      `    when 'scac-mutation-registry.v107' then '${oldSeal.digest}'\n    when 'scac-mutation-registry.v108' then '${newSeal.digest}' end;`, "registry history"],
+    [`    when 'scac-mutation-registry.v108' then '${newCatalog}'::jsonb end;`,
+      `    when 'scac-mutation-registry.v107' then '${oldCatalog}'::jsonb\n    when 'scac-mutation-registry.v108' then '${newCatalog}'::jsonb end;`, "catalog history"],
+    ["ops.scac_mutation_registry_v108_seal_available()) then",
+      "ops.scac_mutation_registry_v107_seal_available() and ops.scac_mutation_registry_v108_seal_available()) then", "policy snapshot history"],
+    [`         or (r.registry_version='scac-mutation-registry.v108' and r.registry_digest='${newSeal.digest}'))`,
+      `         or (r.registry_version='scac-mutation-registry.v107' and r.registry_digest='${oldSeal.digest}')\n         or (r.registry_version='scac-mutation-registry.v108' and r.registry_digest='${newSeal.digest}'))`, "policy epoch history"],
+    ["     or not ops.scac_mutation_registry_v108_seal_available()",
+      "     or not ops.scac_mutation_registry_v107_seal_available()\n     or not ops.scac_mutation_registry_v108_seal_available()", "final seal history"],
+  ]) sql = replaceExactlyOnce(sql, before, after, `v108 ${label}`);
+  const seedStart = sql.indexOf("$rule_approval_v108_source$[");
+  const seedEnd = sql.indexOf("]$rule_approval_v108_source$", seedStart);
+  if (seedStart < 0 || seedEnd < 0) throw new Error("v108 source seed boundary missing");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart)}$rule_approval_v108_source$${seed}$rule_approval_v108_source$${sql.slice(seedEnd + "]$rule_approval_v108_source$".length)}`;
+  const preflight = `do $rule_approval_v108_preflight$\ndeclare v ops.scac_mutation_registry_version%rowtype; registration jsonb;\nbegin\n` +
+    `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
+    `    raise exception 'Rule approval v108 requires exact applied 0825'; end if;\n` +
+    `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V107_VERSION}';\n` +
+    `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
+    `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
+    `    or v.catalog_projection is distinct from '${oldCatalog}'::jsonb then\n` +
+    `    raise exception 'Doc activity v107 predecessor seal drifted'; end if;\n` +
+    `  registration:=ops.scac_mutation_registration_v107('${oldSeal.digest}','mcp-tool:codex-read-recovery');\n` +
+    `  if coalesce((registration->>'registered')::boolean,false) is not true then\n` +
+    `    raise exception 'Doc activity v107 predecessor entry drifted'; end if;\n` +
+    `end $rule_approval_v108_preflight$;\n\n`;
+  return `-- GENERATED by ops/scac-mutation-inventory.mjs. Review; never hand-edit.\n` +
+    preflight + sql;
+}
+
 export function renderJevCapRegistrySql(rows, predecessorSql = null) {
   const predecessorPath = "migrations/0786_find_rule_scac_successor.sql";
   const predecessor = predecessorSql ?? readFileSync(resolve(REPO_ROOT, predecessorPath), "utf8");
@@ -21271,9 +21374,16 @@ export function renderGeneratedFrontier() {
   artifacts["migrations/0825_doc_activity_scac_successor.sql"] =
     renderDocActivityRegistrySql(v107Rows, artifacts["migrations/0812_lead_automation_scac_successor.sql"]);
 
+  const v108Rows = frozenInventory(REGISTRY_V108_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v108.generated.js"] =
+    renderRuntimeProjection(v108Rows, { version: REGISTRY_V108_VERSION,
+      dbCatalogBaseline: RULE_APPROVAL_V108_DB_CATALOG_BASELINE });
+  artifacts["migrations/0838_one_step_rule_approval_scac_successor.sql"] =
+    renderRuleApprovalRegistrySql(v108Rows, artifacts["migrations/0825_doc_activity_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 113 || runtimeCount !== 104 || Object.keys(artifacts).length !== 217)
+  if (migrationCount !== 114 || runtimeCount !== 105 || Object.keys(artifacts).length !== 219)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -22335,6 +22445,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         dbCatalogBaseline: LEAD_AUTOMATION_V106_DB_CATALOG_BASELINE }));
     await writeFile(resolve("migrations/0812_lead_automation_scac_successor.sql"), renderLeadAutomationRegistrySql(rows));
     process.stdout.write("Lead automation v106 frontier generated\n");
+  } else if (process.argv[2] === "--write-rule-approval-frontier") {
+    const rows = frozenInventory(REGISTRY_V108_VERSION);
+    await writeFile(resolve("mcp-server/src/scac-mutation-registry.v108.generated.js"),
+      renderRuntimeProjection(rows, { version: REGISTRY_V108_VERSION,
+        dbCatalogBaseline: RULE_APPROVAL_V108_DB_CATALOG_BASELINE }));
+    await writeFile(resolve("migrations/0838_one_step_rule_approval_scac_successor.sql"), renderRuleApprovalRegistrySql(rows));
+    process.stdout.write("wrote rule approval v108 runtime and migration\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);
     process.stdout.write(`source inventory matches frozen ${CURRENT_REGISTRY_VERSION} frontier fixture\n`);

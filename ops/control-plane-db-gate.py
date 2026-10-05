@@ -1113,7 +1113,7 @@ def main() -> int:
                    state,admitted_by,admitted_at)
                 values (%s,%s,'machine_enforceable','hard_enforced','before fixture action',
                         '{"workflows":["db-gate"]}',
-                        '{"targets":["db-gate"]}', '{"paths":["database"]}',
+                        '{"targets":["db-gate"],"delivery":{"load_layer":"control","packs":[],"why":"fixture control"}}', '{"paths":["database"]}',
                         '{"type":"object"}',
                         array['ops/control-plane-db-gate.py'],'admitted',%s,now())
             """, (rule_id, intake_id, actor))

@@ -340,12 +340,12 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move"].includes(verb) || verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move"].includes(verb) || verb === "teach" || verb === "approve-rule" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
     if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
-    return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
+    return { ...prior.rows[0].response, replayed: true };          // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction
   await client.query(
@@ -356,6 +356,36 @@ async function withEnvelope(client, actor, verb, args, fn) {
      identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
      identity.authorization_class, identity.correlation_id]);
   return result;
+}
+
+// SQL owns the atomic approval. Preserve its typed refusal across the MCP
+// seam, including legacy P0001 guards that predate structured error detail.
+async function withRuleEnvelope(client, actor, verb, args, fn) {
+  try {
+    return await withEnvelope(client, actor, verb, args, fn);
+  } catch (error) {
+    if (error instanceof ToolError) {
+      error.payload.message ||= error.payload.hint || error.payload.error.replaceAll('_', ' ');
+      throw error;
+    }
+    if (error?.code === 'P0001') {
+      let detail = {};
+      try { detail = JSON.parse(error.detail || '{}'); } catch { /* legacy guard */ }
+      throw new ToolError({
+        error: typeof detail.error === 'string' && detail.error.startsWith('rule_')
+          ? detail.error : verb === 'approve-rule' ? 'rule_approval_refused' : 'rule_admission_refused',
+        message: redact(error.message),
+        ...(typeof detail.control === 'string' ? { control: detail.control } : {}),
+        ...(typeof detail.pack === 'string' ? { pack: detail.pack } : {}),
+      });
+    }
+    const refusal = pgConstraintError(error);
+    if (refusal) {
+      refusal.payload.message ||= refusal.payload.hint;
+      throw refusal;
+    }
+    throw error;
+  }
 }
 
 async function writeEvent(client, actor, verb, subjectType, subjectId, fields = {}) {
@@ -5810,10 +5840,11 @@ export const TOOLS = {
 
   "teach": {
     write: true,
-    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is retired with an immutable receipt in the same transaction. Superseding an ACTIVE rule requires a human caller and the same authority connection as retire-rule. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    description: "Write a rule from the human's own words (status: proposed — one Joe-authority approve-rule call derives admission and makes it live; gate rules first require their installed, verified carrying_control). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is retired with an immutable receipt in the same transaction. Superseding an ACTIVE rule requires a human caller and the same authority connection as retire-rule. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one Joe approve-rule call; named packs must exist and gate controls must be installed and verified. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
+      packs: { type: "array", items: { type: "string" }, description: "Named rule packs for just-in-time delivery; scope.packs is also accepted." },
       personal: { type: "boolean", description: "true = applies to this partner only" },
       supersedes: { type: "string", description: "rule_id this one replaces and retires atomically; ACTIVE rules require a human caller" },
       enforcement_home: { type: "string", enum: ["gate","jit","core","judgment_advisory"],
@@ -5885,6 +5916,7 @@ export const TOOLS = {
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
         { new: { statement: args.statement, supersedes: supersedes || null,
                  enforcement_home: enforcementHome,
+                 packs: args.packs || [],
                  carrying_control: enforcementHome === "gate" ? carryingControl : null,
                  why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null },
           human_quote: args.human_quote, idempotency_key: args.idempotency_key });
@@ -5918,7 +5950,7 @@ export const TOOLS = {
 
   "admit-rule": {
     write: true,
-    description: "Normalize and admit one PROPOSED rule into executable authority. Capture remains free; this is the separate human gate. Applicability, projection, reachability, input contract, binding moment, fixtures, and enforcement points are all explicit. A machine-enforceable rule is refused unless at least one installed enforcement point and fixture are named. Admission writes an immutable authority receipt but does not activate the rule; activate-rule remains a second explicit human act.",
+    description: "Optionally prepare an explicit admission contract for a proposed rule. approve-rule derives admission from teach when none exists, then activates atomically. projection.delivery must be an object with load_layer (layer0, control or pack), packs (array of names), and why (required for layer0). Malformed delivery refuses before admission is written. A machine-enforceable rule requires installed enforcement and fixtures. Admission writes an immutable authority receipt and leaves the rule proposed.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string" },
@@ -5939,7 +5971,8 @@ export const TOOLS = {
     }, required: ["idempotency_key","rule_id","enforcement_class","binding_moment",
                   "applicability","projection","reachability","input_contract",
                   "fixture_refs","enforcement_points","reason"] },
-    handler: async (c, actor, args) => withEnvelope(c, actor, "admit-rule", args, async () => {
+    handler: async (c, actor, args) => withRuleEnvelope(c, actor, "admit-rule", args, async () => {
+      await c.query("select ops.validate_rule_delivery($1::jsonb)", [JSON.stringify(args.projection)]);
       args.rule_id = await resolveRuleId(c, args.rule_id);
       const rule = await c.query("select status,statement from rule where id=$1", [args.rule_id]);
       if (!rule.rows.length) throw new ToolError({ error: "rule_not_found", rule_id: args.rule_id });
@@ -6031,19 +6064,19 @@ export const TOOLS = {
 
   "approve-rule": {
     write: true, authorityOnly: true,
-    description: "Approve one captured system rule in a single Joe-authority act. Approval means the server atomically verifies exact registered enforcement, records the immutable authority receipt, and activates the rule in the same transaction. There is no approved-but-inactive or active-but-pending state. If enforcement is missing, approval refuses so the system must build and verify the control before carrying Joe's already-recorded approval. Dell retains teaching, review and optional participation capability but cannot replace Joe as the required system authority. Advisory guidance is not mislabeled as an unbreakable rule.",
+    description: "Make a taught rule live in one Joe-authority call. The server derives admission and delivery from teach metadata when no admission exists, records immutable admission and approval receipts, and activates in the same transaction. Core rules use layer0; jit rules require named packs; judgment advisory rules use layer0 or their named packs. Advisory delivery is labeled delivered_advisory. Gate rules still require their named carrying_control to be installed and verified, otherwise a typed refusal names the control to build. policy_kind and control_keys are optional for taught rules and remain available for explicit admitted contracts.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string", description: "Full UUID or the short id printed by standing-context." },
-      policy_kind: { type: "string", enum: ["machine_enforceable","human_only"] },
+      policy_kind: { type: "string", enum: ["machine_enforceable","human_only","judgment_advisory"] },
       control_keys: { type: "array", items: { type: "string" }, description: "Compiler-selected registered controls. Unknown or unverified controls refuse approval; callers cannot supply implementation or test evidence." },
       reason: { type: "string" },
-    }, required: ["idempotency_key","rule_id","policy_kind","control_keys","reason"] },
-    handler: async (c, actor, args) => withEnvelope(c, actor, "approve-rule", args, async () => {
+    }, required: ["idempotency_key","rule_id","reason"] },
+    handler: async (c, actor, args) => withRuleEnvelope(c, actor, "approve-rule", args, async () => {
       args.rule_id = await resolveRuleId(c, args.rule_id);
       const approved = await c.query(
         "select ops.approve_rule($1,$2,$3,$4,$5) as result",
-        [args.rule_id,args.policy_kind,args.control_keys,args.idempotency_key,args.reason]);
+        [args.rule_id,args.policy_kind ?? null,args.control_keys ?? null,args.idempotency_key,args.reason]);
       const result = approved.rows[0]?.result;
       if (!result || result.policy_status !== "active")
         throw new ToolError({ error: "rule_approval_failed", rule_id: args.rule_id });
