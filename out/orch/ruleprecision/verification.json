@@ -110,5 +110,25 @@
     "study.html": "21763a2e3fc549cfb67d507de9aab087ab83d75ab8b24731b2c58761afb1835a",
     "climb.jsonl": "b462ba1880f76a41af821287c6b4742868e6fdcb1f052d0c967f5903eac02ea7",
     "final.html": "42b953437338c07355df986a1082a25b6330ba8c8c82275217a3cd2e177239a5"
+  },
+  "path_admission_repair": {
+    "why": "Task explicitly requests final.html; immutable measurement names must retain ledger references.",
+    "scope": "Eight exact report paths only; whitespace, traversal and neighboring collections still refuse.",
+    "red_first": true,
+    "path_checks_passed": 69,
+    "baseline_cochange_checks": 41,
+    "gate_integrity_strict_checks": 14,
+    "gate_integrity_worktree": "passed",
+    "types_and_pushfloor_after_repair": "passed",
+    "baseline_registration": "path-hygiene-check.py source contract, re-blessed with gate-integrity.py in source commit",
+    "invocation": "Commit used session-owned core.hooksPath for this command; all hooks enabled; shared checkout unchanged.",
+    "broad_suite_timing": "520 suites passed before path repair; affected suites re-run after it; hosted strict suite checks final head."
+  },
+  "committed_receipt_check": {
+    "surfaces": 1,
+    "receipts": 1,
+    "status": "passed",
+    "base": "origin/main",
+    "source_commit": "59add5be12b49a5394a0e660d88fe21213d398d2"
   }
 }
