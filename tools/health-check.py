@@ -1440,6 +1440,33 @@ def _canonical_health():
                       f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
+        sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+        import scheduled_jobs as _scheduled_jobs
+        if CANONICAL_FIXTURE and "scheduled_jobs" not in snap:
+            print("  -- scheduled jobs NOT IN FIXTURE")
+        elif sys.platform != "darwin" and not CANONICAL_FIXTURE:
+            print("  -- scheduled jobs launchd check applies to macOS")
+        else:
+            try:
+                _scheduled_rows = _scheduled_jobs.check(
+                    snapshot=snap.get("scheduled_jobs") if CANONICAL_FIXTURE else None,
+                    now=_canonical_now(snap).timestamp())
+                for _job_row, _line in zip(_scheduled_rows, _scheduled_jobs.render(_scheduled_rows)):
+                    print("  " + _line)
+                    rc = _red("scheduled_jobs_" + _job_row["code"], _line,
+                              subject=_job_row["label"],
+                              hard_error=_job_row["code"] == "evidence_unavailable",
+                              time_rolling=_job_row["code"] == "stale_log")
+                if not _scheduled_rows:
+                    print("  OK scheduled jobs match manifest; canonical main is current")
+            except Exception as exc:
+                _detail = (f"scheduled job check unreadable ({type(exc).__name__}) · on breach: "
+                           "job-watchdog.py scan files/updates loop scheduled_jobs:checker:evidence_unavailable · "
+                           "owner orchestrator · fix: restore the manifest and machine evidence reader · "
+                           "verify: python3 ops/scheduled-jobs-check.py · auto-clear: next complete scan")
+                print("  WARN " + _detail)
+                rc = _red("scheduled_jobs_evidence_unavailable", _detail,
+                          subject="checker", hard_error=True)
         for headless_row in _headless_rows():
             print("  " + headless_row["line"])
             if headless_row["status"] == "WARN":
