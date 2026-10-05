@@ -2807,6 +2807,42 @@
       "reason": "Retrospective causal attribution requires bound verdict/action/change/baseline records outside function-only state; keep in reviewer doctrine."
     }
   ],
-  "threshold_procedure": "Minimum observed true-positive confidence for each retained rule, including the additional digest case. Pass controls must remain explicit pass, never hidden failure/inconclusive. All final expectations must match.",
-  "limitations": "Small seed corpus; no held-out performance or production false-positive rate claimed."
+  "threshold_procedure": "Floors must retain every observed violation while every good control remains an explicit pass. wrapper-without-value uses 0.93, above its initial false-positive confidence 0.70 and below its refined positive minimum 0.99. invariant-helper uses its lowest positive confidence 0.55. These choices do not estimate production precision.",
+  "limitations": "Small seed corpus; no held-out performance or production false-positive rate claimed.",
+  "threshold_trial": {
+    "total": 16,
+    "matched": 15,
+    "mismatched": 0,
+    "inconclusive": 1,
+    "unmatched_cases": [
+      {
+        "rule": "invariant-helper",
+        "file": "ops/fixtures/jevlint/digest-before.py",
+        "expected": "fail",
+        "actual": "inconclusive",
+        "matched": false,
+        "confidence": 0.55,
+        "floor": 0.73,
+        "decisions": {
+          "pass": 0,
+          "fail": 1,
+          "skip": 0,
+          "abstain": 0,
+          "reported": 0,
+          "belowFloor": 1
+        },
+        "units": [
+          {
+            "name": "_digest",
+            "kind": "function",
+            "startLine": 1,
+            "endLine": 2,
+            "status": "fail",
+            "confidence": 0.55,
+            "reported": false
+          }
+        ]
+      }
+    ]
+  }
 }
