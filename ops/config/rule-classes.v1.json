@@ -1,10 +1,10 @@
 {
- "_note": "Committed classification for the gated rule boot (standing-context detail=boot, mcp-server/src/rule-boot.js). Holds ids, class, a <=20-word trigger summary and a length per rule; NEVER a rule statement. Statements are read live from the store when a context fetches its boot. `chars` is the statement length at classification, read only by the CI budget guard, which has no store to call. always_on = class a, plus rules whose only enforcement is a Stop gate (chat_lint, conduct_stop, completion_evidence: the gate fires after the reply is written), plus class-b rules with a conversational moment that Jev confirmed against the rule text. sponsors lists every partner whose scope the budget check measures.",
+ "_note": "Committed classification for the gated rule boot (standing-context detail=boot, mcp-server/src/rule-boot.js). Holds ids, class, a <=20-word trigger summary and a length per rule; NEVER a rule statement. Statements are read live from the store when a context fetches its boot. `chars` is the statement length at classification, read only by the CI budget guard, which has no store to call. Class a includes standing person, team and business facts independent of task, including factual premises in mixed rules. ops/sync-rule-boot-classes.py validates supported fact shapes against the existing rule-selection corpus; unrecognized shapes require full-statement review. always_on = class a, plus rules whose only enforcement is a Stop gate (chat_lint, conduct_stop, completion_evidence: the gate fires after the reply is written), plus class-b rules with a conversational moment that Jev confirmed against the rule text. sponsors lists every partner whose scope the budget check measures.",
  "budget_tokens": 40000,
  "chars_per_token": 3.6,
  "sponsors": ["dell", "joe"],
  "class_legend": {
-  "a": "always-on conduct: full text loaded",
+  "a": "always-on conduct and standing facts: full text loaded",
   "b": "action point",
   "c": "topic-conditional",
   "d": "enforced by a deterministic gate",
@@ -402,12 +402,13 @@
    "when": "conduct_stop (conduct-stop-gate.py Stop)"
   },
   "3d185f2b": {
-   "always_on": false,
+   "always_on": true,
    "chars": 1409,
-   "class": "c",
-   "moment": "system-design builds (personas, tools, app surfaces)",
-   "summary": "On system builds, Joe iterates to done alone; Dell reviews the finished product, never gates the process.",
-   "when": "system-design builds (personas, tools, app surfaces)"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Joe leads system-design builds; Dell reviews the finished product.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_role"
   },
   "3fa17fa0": {
    "always_on": false,
@@ -434,12 +435,13 @@
    "when": "client/compliance writing mentioning HIPAA"
   },
   "424ba0cc": {
-   "always_on": false,
+   "always_on": true,
    "chars": 416,
-   "class": "c",
-   "moment": "cold or paused client cadence",
-   "summary": "Never nurture-ping cold or paused clients by default; let ghosting clients go silent.",
-   "when": "cold or paused client cadence"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "The practice operates from abundance; avoid default cold-client nurture pings.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:organization_posture"
   },
   "4399df76": {
    "always_on": false,
@@ -561,12 +563,13 @@
    "when": "before stating a rate/average as a baseline"
   },
   "51d9f05f": {
-   "always_on": false,
+   "always_on": true,
    "chars": 144,
-   "class": "c",
-   "moment": "prospect-facing communications",
-   "summary": "When addressing prospects, stay educational and consultative, never aggressive-sales; assume no CARR familiarity.",
-   "when": "prospect-facing communications"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Prospects know healthcare, not CRE or CARR; use educational communication.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:audience_persona"
   },
   "5409731b": {
    "always_on": false,
@@ -594,12 +597,13 @@
    "when": "Joe posts an x.com link"
   },
   "5697071b": {
-   "always_on": false,
+   "always_on": true,
    "chars": 2787,
-   "class": "c",
-   "moment": "an Alabama lead or deal arriving",
-   "summary": "When an Alabama lead or deal arrives, route it to Dell as the licensed party of record.",
-   "when": "an Alabama lead or deal arriving"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Joe holds Florida licensure only; Dell carries Alabama representation.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_license_territory"
   },
   "57d13061": {
    "always_on": false,
@@ -697,12 +701,13 @@
    "when": "registering or dispatching a cognition workflow"
   },
   "614c1209": {
-   "always_on": false,
+   "always_on": true,
    "chars": 3147,
-   "class": "c",
-   "moment": "assessing deal staleness or follow-up status",
-   "summary": "Before marking a deal stale or asking about follow-up, check mail and calendar for contact evidence.",
-   "when": "assessing deal staleness or follow-up status"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Partners cannot hand-log everything; infer contact from available evidence.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_capacity_constraint"
   },
   "6172e7d5": {
    "always_on": false,
@@ -749,12 +754,13 @@
    "when": "add-loop / opening an open_loop"
   },
   "67580c28": {
-   "always_on": false,
+   "always_on": true,
    "chars": 1839,
-   "class": "c",
-   "moment": "building, restyling, or reviewing any CARR surface",
-   "summary": "When building or reviewing any CARR surface, use the dark cinematic register, not plain light/grey.",
-   "when": "building, restyling, or reviewing any CARR surface"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Joe defines calm positively; CARR surfaces use the dark cinematic register.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_preference"
   },
   "6901cc3b": {
    "always_on": false,
@@ -798,12 +804,13 @@
    "when": "loop_successor schema (close-loop verb)"
   },
   "725dff46": {
-   "always_on": false,
+   "always_on": true,
    "chars": 140,
-   "class": "b",
-   "moment": "writing prospect-visible content",
-   "summary": "When writing prospect-visible content, credit the vendor network to the team, never to Dell alone.",
-   "when": "writing prospect-visible content"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Our vendor network belongs to the team; Dell's healthcare experience is his.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:team_asset_ownership"
   },
   "72e06bdf": {
    "always_on": false,
@@ -940,12 +947,13 @@
    "when": "renaming a shared-by-design row (party.org_id, vendor_category.slug)"
   },
   "9293d609": {
-   "always_on": false,
+   "always_on": true,
    "chars": 2639,
-   "class": "b",
-   "moment": "building or reviewing any CARR surface",
-   "summary": "When building or reviewing a CARR surface, ship real motion and interactivity, not a static page.",
-   "when": "building or reviewing any CARR surface"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Joe wants rich motion and interactivity in his everyday workstations.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_preference"
   },
   "9310827b": {
    "always_on": true,
@@ -1110,12 +1118,13 @@
    "when": "writing a command into a doc, SOP, or instruction"
   },
   "a8f159ad": {
-   "always_on": false,
+   "always_on": true,
    "chars": 1750,
-   "class": "b",
-   "moment": "building or reviewing a structured CARR surface",
-   "summary": "Any structured surface (board, packet, report) ships a real visual of its structure, not text alone.",
-   "when": "building or reviewing a structured CARR surface"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Joe and Dell are visual thinkers; structured surfaces include visuals.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_persona"
   },
   "a9ecd5b4": {
    "always_on": true,
@@ -1194,12 +1203,13 @@
    "when": "architecture/mechanism-class design fork with no deterministic verifier"
   },
   "b7ec8f3b": {
-   "always_on": false,
+   "always_on": true,
    "chars": 1524,
-   "class": "c",
-   "moment": "designing or reviewing the Doc app surface",
-   "summary": "On the DoctorCRE surface: no descriptive title text, icon-only toggles, drag-not-button kanban moves",
-   "when": "designing or reviewing the Doc app surface"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Team means Joe and Dell; DoctorCRE uses the shared interaction grammar.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:team_identity"
   },
   "bbffc139": {
    "always_on": false,
@@ -1321,12 +1331,13 @@
    "when": "asking Joe multiple things"
   },
   "c8ebeb5b": {
-   "always_on": false,
+   "always_on": true,
    "chars": 1242,
-   "class": "c",
-   "moment": "a finding surfaces a practice-acquisition exit",
-   "summary": "When a practice owner sells to a platform, list them as a future-startup lead, never a sell-side pitch.",
-   "when": "a finding surfaces a practice-acquisition exit"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "CARR represents buyers and tenants; practice exits yield future-startup leads.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:organization_service_model"
   },
   "ca841807": {
    "always_on": false,
@@ -1347,12 +1358,13 @@
    "when": "the Claude Code feedback-survey prompt appearing"
   },
   "ce12c11e": {
-   "always_on": false,
+   "always_on": true,
    "chars": 156,
-   "class": "c",
-   "moment": "framing a sales pitch to a client/lead",
-   "summary": "Lead with the no-conflict tenant/buyer-only model as the strongest sales hook.",
-   "when": "framing a sales pitch to a client/lead"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "CARR's tenant/buyer-only model is Joe's strongest sales hook.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:organization_service_model"
   },
   "cff429f5": {
    "always_on": false,
@@ -1371,13 +1383,14 @@
    "when": "a new contact enters the system"
   },
   "d3774a28": {
-   "always_on": false,
+   "always_on": true,
    "chars": 198,
-   "class": "c",
-   "moment": "brand copy review / conceptual-model vs file-reality divergence",
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
    "personal_to": "joe",
-   "summary": "When the conceptual model and file reality diverge, surface it explicitly and let Joe rule.",
-   "when": "brand copy review / conceptual-model vs file-reality divergence"
+   "summary": "Concept coherence is Joe's strength; surface divergence for his ruling.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_persona"
   },
   "d5dcfe26": {
    "always_on": true,
@@ -1564,20 +1577,22 @@
    "when": "completion_evidence gate (autonomous-run completion)"
   },
   "f0f9156e": {
-   "always_on": false,
+   "always_on": true,
    "chars": 1430,
-   "class": "c",
-   "moment": "an architecture fork with a local-vs-cloud dimension",
-   "summary": "On any local-vs-cloud fork, design the mobility-first option and present privacy exposure candidly; Joe decides.",
-   "when": "an architecture fork with a local-vs-cloud dimension"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Joe values mobility; local-first was never his ruling.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_preference"
   },
   "f2d58a30": {
-   "always_on": false,
+   "always_on": true,
    "chars": 1515,
-   "class": "b",
-   "moment": "drafting any client-facing recommendation document",
-   "summary": "In every client-facing recommendation, name at least one thing you would not do and why.",
-   "when": "drafting any client-facing recommendation document"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "CARR never represents landlords or sellers; recommendations demonstrate fee-neutral judgment.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:organization_service_model"
   },
   "f47a8fe9": {
    "always_on": true,
@@ -1589,12 +1604,13 @@
    "when": "completion_evidence gate"
   },
   "f5bac101": {
-   "always_on": false,
+   "always_on": true,
    "chars": 92,
-   "class": "c",
-   "moment": "deciding where to spend effort (prospecting vs polish)",
-   "summary": "While Joe and Dell are early-stage, prioritize prospecting and pipeline over polish on low-impact areas.",
-   "when": "deciding where to spend effort (prospecting vs polish)"
+   "class": "a",
+   "moment": "every turn: standing person, team or business context",
+   "summary": "Joe and Dell are early-stage; prioritize pipeline over low-impact polish.",
+   "when": "every turn",
+   "always_on_reason": "class-a; standing-fact:partner_operating_stage"
   },
   "f5beac20": {
    "always_on": true,
