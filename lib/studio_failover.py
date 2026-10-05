@@ -11,7 +11,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 TRANSFER_LOCK = 638148226000001
 
@@ -80,8 +80,12 @@ def connection(kind='jobs', home=None):
     expected = 'carr_jobs' if kind == 'jobs' else 'carr_authority_joe'
     if parsed.scheme not in ('postgres', 'postgresql') or parsed.username != expected:
         raise RuntimeError('failover credential identity missing or invalid')
-    if '-pooler' in (parsed.hostname or '') or parsed.port == 6432:
-        raise RuntimeError('session locks require a direct PostgreSQL endpoint')
+    query = parse_qs(parsed.query)
+    if (not (parsed.hostname or '').endswith('.neon.tech')
+        or '-pooler' in parsed.hostname or parsed.port == 6432
+        or set(query) - {'sslmode', 'channel_binding'}
+        or query.get('sslmode') not in (['require'], ['verify-ca'], ['verify-full'])):
+        raise RuntimeError('session locks require a direct off-host Neon endpoint with TLS')
     conn = psycopg.connect(dsn, autocommit=True, connect_timeout=5,
                            options='-c statement_timeout=5000',
                            keepalives_idle=5, keepalives_interval=2, keepalives_count=2)
@@ -112,16 +116,9 @@ class Leader:
         return self.read() == (host, self.epoch)
 
     def claim(self, source, target, evidence):
-        with self.conn.transaction():
-            if not self.conn.execute('select pg_try_advisory_xact_lock(%s)', (TRANSFER_LOCK,)).fetchone()[0]:
-                raise RuntimeError('running_jobs_hold_transfer_lock')
-            row = self.conn.execute('select host,epoch from ops.studio_leader where singleton for update').fetchone()
-            if row[0] == target:
-                return row[1]  # Resume only from the observed target, not a repeated transfer.
-            if row[0] != source: raise RuntimeError('leader_owner_conflict')
-            return self.conn.execute('''update ops.studio_leader set host=%s,epoch=epoch+1,
-                fence_evidence=%s, changed_at=clock_timestamp() where singleton and host=%s and epoch=%s
-                returning epoch''', (target, json.dumps(evidence), source, row[1])).fetchone()[0]
+        _, epoch = self.read()
+        return self.conn.execute('select ops.transfer_studio_leader(%s,%s,%s,%s::jsonb)',
+                                 (source, target, epoch, json.dumps(evidence))).fetchone()[0]
 
     def close(self):
         self.conn.close()

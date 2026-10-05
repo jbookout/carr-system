@@ -69,6 +69,39 @@ class FailoverTests(unittest.TestCase):
             self.assertFalse(snapshot['paths']['job.plist'])
             self.assertFalse(snapshot['paths']['/missing/failover-executable'])
 
+    def test_dry_run_requires_transfer_authority_even_when_jobs_can_read_leader(self):
+        module = self.host_module()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            conn = Mock()
+            conn.execute.return_value.fetchone.return_value = ('studio', 1)
+            config = {'jobs': [], 'hosts': {'macbook': {'hostname': 'fixture'}}}
+            with patch.object(module.Path, 'home', return_value=root), \
+                 patch.object(module, 'command', return_value=Mock(stdout='', returncode=1)), \
+                 patch.object(module, 'connection', side_effect=[conn, RuntimeError('missing authority')]):
+                snapshot = module.Host(root, config, 'macbook').snapshot()
+            self.assertFalse(snapshot['leader_ready'])
+            self.assertIn('authority prerequisite: RuntimeError', snapshot['errors'])
+
+    def test_leader_connection_refuses_host_local_and_pooled_endpoints(self):
+        from lib.studio_failover import connection
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / '.config/carr/failover.env'
+            path.parent.mkdir(parents=True)
+            for host in ['localhost', 'mac-studio.tailc8cc93.ts.net', 'ep-fixture-pooler.neon.tech']:
+                path.write_text('CARR_FAILOVER_JOBS_URL=postgresql://carr_jobs:fixture@' + host + '/fixture?sslmode=require\n')  # ci-secret-scan: allow -- owned fixture
+                path.chmod(0o600)
+                with self.assertRaisesRegex(RuntimeError, 'direct off-host'):
+                    connection(home=raw)
+            path.write_text('CARR_FAILOVER_JOBS_URL=postgresql://carr_jobs:fixture@ep-fixture.neon.tech/fixture?sslmode=require&hostaddr=127.0.0.1\n')  # ci-secret-scan: allow -- owned fixture
+            with self.assertRaisesRegex(RuntimeError, 'direct off-host'):
+                connection(home=raw)
+            path.write_text('CARR_FAILOVER_JOBS_URL=postgresql://carr_jobs:fixture@ep-fixture.neon.tech/fixture?sslmode=require\n')  # ci-secret-scan: allow -- owned fixture
+            conn = Mock()
+            conn.execute.return_value.fetchone.return_value = ('carr_jobs', 'carr_jobs')
+            with patch('psycopg.connect', return_value=conn):
+                self.assertIs(connection(home=raw), conn)
+
     def test_demote_apply_refuses_wrong_host_before_mutation(self):
         module = self.host_module()
         host = Mock()
@@ -78,6 +111,24 @@ class FailoverTests(unittest.TestCase):
              patch.object(sys, 'argv', ['failover', 'demote', '--apply']):
             with self.assertRaisesRegex(RuntimeError, 'apply_requires_target_host_and_gui'): module.main()
         host.demote.assert_not_called()
+
+    def test_offline_fence_binds_target_revision_even_if_dead_source_is_older(self):
+        from datetime import datetime, timezone
+        module = self.host_module()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            receipt = root / 'power.json'
+            evidence = {'kind': 'powered-off', 'source': 'studio', 'target': 'macbook',
+                        'source_sha': 'older-source', 'target_sha': 'current-target',
+                        'verified_at': datetime.now(timezone.utc).isoformat(),
+                        'keep_off_until_failback': True}
+            receipt.write_text(json.dumps(evidence))
+            with patch.object(module, 'command', return_value=Mock(stdout='current-target', returncode=0)):
+                host = module.Host(root, {'jobs': []}, 'macbook', receipt)
+                self.assertTrue(host.fence('studio'))
+                evidence['target_sha'] = 'different-target'
+                receipt.write_text(json.dumps(evidence))
+                self.assertFalse(host.fence('studio'))
 
     def test_abort_reports_job_still_registered_and_disarms(self):
         module = self.host_module()

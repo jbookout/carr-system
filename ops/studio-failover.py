@@ -7,7 +7,8 @@ The restore/ingress evidence file is ~/.config/carr/failover-prerequisites.json:
  manual: {role_name: {status: "passed", evidence: "receipt path or reference"}}}.
 Directory state requires a hash of its sorted file-name/content-hash pairs.
 Power fencing is a manual decision, supplied by --power-fence with a receipt:
-{kind: "powered-off", source, target, source_sha, verified_at, keep_off_until_failback: true}.
+{kind: "powered-off", source, target, target_sha, verified_at, keep_off_until_failback: true}.
+source_sha is optional provenance; a powered-off source may have an older revision.
 SSH failure alone never proves fencing. A rehearsal never invokes apply or copies state.
 """
 from __future__ import annotations
@@ -106,6 +107,17 @@ class Host:
             try: owner = leader.read()[0]; leader_ready = True
             finally: leader.close()
         except Exception as exc: errors.append('leader prerequisite: ' + type(exc).__name__)
+        try:
+            authority = Leader(connection('authority'))
+            try:
+                authority.read()
+                executable = authority.conn.execute("select has_function_privilege(current_user,"
+                    "'ops.transfer_studio_leader(text,text,bigint,jsonb)','execute')").fetchone()[0]
+                if not executable: raise RuntimeError('transfer function privilege missing')
+            finally: authority.close()
+        except Exception as exc:
+            leader_ready = False
+            errors.append('authority prerequisite: ' + type(exc).__name__)
         prerequisite_path = self.home / '.config/carr/failover-prerequisites.json'
         try: evidence = json.loads(prerequisite_path.read_text())
         except (OSError, ValueError): evidence = {}
@@ -162,7 +174,7 @@ class Host:
         if self.power_fence:
             receipt = json.loads(self.power_fence.read_text())
             valid = (receipt.get('kind') == 'powered-off' and receipt.get('source') == source
-                     and receipt.get('target') == self.target and receipt.get('source_sha') == self.sha
+                     and receipt.get('target') == self.target and receipt.get('target_sha') == self.sha
                      and receipt.get('keep_off_until_failback') is True and recent(receipt.get('verified_at'), 1))
             if valid: self.fence_evidence = receipt
             return valid
@@ -175,7 +187,7 @@ class Host:
         valid = (receipt.get('source') == source and receipt.get('source_sha') == self.sha
                  and receipt.get('armed') is False and recent(receipt.get('verified_at'), 1)
                  and receipt.get('unregistered') == sorted(j['label'] for j in self.config['jobs']))
-        if valid: self.fence_evidence = receipt
+        if valid: self.fence_evidence = {**receipt, 'kind': 'demoted', 'target': self.target, 'target_sha': self.sha}
         return valid
 
     def claim(self, source, target):
