@@ -25,9 +25,9 @@ def main():
         root = Path(tmp)
         data = root / "data"
         # Never inherit a provider DSN or a configured database connection.
-        env = {k: v for k, v in os.environ.items()
-               if not k.startswith("PG") and "DATABASE_URL" not in k}
-        env.update(CARR_JEV_OFFLINE="1", JEV_TEST_PG_SOCKET=tmp)
+        # A pinned locale: macOS postmaster refuses to start without one.
+        env = pg.scrub_cloud_environment(os.environ)
+        env.update(CARR_JEV_OFFLINE="1", JEV_TEST_PG_SOCKET=tmp, LC_ALL="C")
         env["PATH"] = f"{binaries.initdb.parent}{os.pathsep}{env.get('PATH', '')}"
         subprocess.run([str(binaries.initdb), "-D", str(data), "-U", "carr_ci",
                         "--auth=trust", "--encoding=UTF8", "--no-locale"],
