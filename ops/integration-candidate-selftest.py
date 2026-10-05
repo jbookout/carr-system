@@ -189,6 +189,19 @@ class CandidateTests(unittest.TestCase):
         self.write('migrations/0749_pending.sql','select 2;')
         with self.assertRaises(MigrationNumberError):integration.validate_candidate(self.repo,self.base)
 
+    def test_machine_codex_hook_projection_does_not_hide_uncommitted_source(self):
+        shutil.copyfile(REPO/'.gitignore', self.repo/'.gitignore')
+        self.g('add', '.gitignore'); self.g('commit', '-qm', 'Fixture ignore policy')
+        hooks = self.repo/'.codex/hooks.json'
+        hooks.parent.mkdir(); hooks.write_text('{}\n')
+        self.assertEqual(integration.validate_candidate(self.repo, self.base)['pending_migrations'], [])
+        for name in ['migrations/0749_pending.sql', '.codex/source.js', 'nested/.codex/hooks.json']:
+            source = self.repo/name; source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text('uncommitted source\n')
+            with self.subTest(source=name), self.assertRaises(MigrationNumberError):
+                integration.validate_candidate(self.repo, self.base)
+            source.unlink()
+
 
 class RestoreForwardTests(unittest.TestCase):
     def setUp(self):
