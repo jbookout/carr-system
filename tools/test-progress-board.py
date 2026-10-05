@@ -23,6 +23,7 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "tools"))
 SCRIPT = REPO / "tools" / "progress_board.py"
 LAUNCHD_SCRIPT = REPO / "ops" / "progress-board-render.sh"
 SPEC = importlib.util.spec_from_file_location("progress_board", SCRIPT)
@@ -216,6 +217,35 @@ class BoardCase(unittest.TestCase):
 
 
 class ProgressBoardCLI(BoardCase):
+    def test_task_producer_explicitly_classifies_system_work(self):
+        self.run_board('init','demo','--title','Synthetic board')
+        self.run_board('task','demo','repair','--title','Synthetic repair','--status','running','--executor','codex')
+        self.assertEqual(self.read_state('demo')['tasks']['repair'].get('domain'),'system')
+
+    def test_large_history_publishes_bounded_pages_without_losing_rows(self):
+        import system_work_cache
+        self.run_board('init', 'carr-v5', '--title', 'Synthetic board')
+        items=[{'id':f'repo:pr:{i}', 'kind':'pull_request', 'title':'Synthetic title '*12,
+                'completed':True,'opened_at':'2026-09-01T00:00:00Z',
+                'last_activity_at':'2026-09-02T00:00:00Z','identity':{}} for i in range(1448)]
+        external={'schema':'system-work-external.v1','items':items,'complete':True,
+                  'observed_at':'2026-10-01T00:00:00Z','coverage':[],'completed_pr_history':True,'pr_work_refs':[]}
+        remote={}
+        def call(verb,args):
+            board=args['board_id']
+            if verb=='publish-board-snapshot':
+                self.assertLessEqual(len(json.dumps(args['snapshot'],separators=(',',':'),ensure_ascii=False)),262144)
+                remote[board]={'version':1,'snapshot_json':args['snapshot']}
+            return {'ok':True,'snapshot':remote.get(board),'questions':[]}
+        with patch.dict(os.environ,self.env), patch.object(BOARD,'call_verb',call), patch.object(system_work_cache,'cached_github',return_value=external):
+            BOARD.publish_board('carr-v5')
+        manifest=remote['carr-v5']['snapshot_json']['external_inventory']
+        restored=[row for page in manifest['pages'] for row in remote[page['board_id']]['snapshot_json']['items']]
+        self.assertEqual(restored,items)
+        self.assertNotIn('items',manifest)
+
+
+
     def test_conditional_recovery_compares_after_acquiring_shared_lock(self):
         import fcntl
         self.run_board("init", "demo", "--title", "Demo")

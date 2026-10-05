@@ -15,13 +15,15 @@ test('find-rule follows the shipped human-only merge registry without rewriting 
   assert.ok(successor.some(row => row.ingress_key === 'mcp-tool:find-rule'));
   assert.equal(SCAC_MUTATION_REGISTRY_VERSION, inventory.CURRENT_REGISTRY_VERSION);
   const current = inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
-  for (const verb of ['find-rule','teach','confirm-merge']) {
+  // Teach has a separately sealed successor input contract for one-step approval.
+  for (const verb of ['find-rule','confirm-merge']) {
     const key = `mcp-tool:${verb}`;
     assert.deepEqual(inventory.boundInventoryRows(current).find(row => row.ingress_key === key),
       inventory.boundInventoryRows(successor).find(row => row.ingress_key === key));
   }
   assert.equal(registeredOperation('confirm-merge').human_only, true);
   assert.ok(registeredOperation('find-rule'));
+  assert.ok(registeredOperation('teach'));
   const sql = inventory.renderFindRuleRegistrySql(successor);
   assert.equal(readFileSync(new URL('../../migrations/0786_find_rule_scac_successor.sql', import.meta.url), 'utf8'), sql);
   assert.match(sql, /0768_confirm_merge_human_only_scac_successor.sql/);
