@@ -61,10 +61,16 @@ def make_report(*, shard, source, toolchain, started, finished, queued,
         "source": source, "toolchain": toolchain,
         "manifest_sha256": MANIFEST_SHA256,
         "started": started, "finished": finished, "queued": queued,
-        "setup_seconds": setup_seconds, "tests": tests,
-        "cleanup": cleanup, "returncode": returncode, "port": port,
+        "setup_seconds": setup_seconds,
+        "tests": [dict(test, returncode=_report_returncode(test["returncode"])) for test in tests],
+        "cleanup": cleanup, "returncode": _report_returncode(returncode), "port": port,
         "root": hashlib.sha256(str(root).encode()).hexdigest(),
     }
+
+
+def _report_returncode(value):
+    # subprocess uses -signal; the bounded report uses the shell's 128+signal.
+    return 128 - value if type(value) is int and value < 0 else value
 
 
 def _number(value):

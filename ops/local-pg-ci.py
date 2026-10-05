@@ -60,6 +60,56 @@ class CommandRunner(Protocol):
 
 
 class SubprocessRunner:
+    def __init__(self):
+        self.cleanup_confirmed = True
+
+    @staticmethod
+    def _processes():
+        result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat="],
+                                capture_output=True, text=True, check=True, timeout=5)
+        processes = {}
+        for line in result.stdout.splitlines():
+            pid, parent, group, state = line.split()
+            if not state.startswith("Z"):
+                processes[int(pid)] = (int(parent), int(group))
+        return processes
+
+    def _cancel(self, proc):
+        owned = {proc.pid}
+        for sig, grace in ((signal.SIGTERM, 1), (signal.SIGKILL, 5)):
+            deadline = time.monotonic() + grace
+            while True:
+                processes = self._processes()
+                # Keep escaped descendants after their parent exits, and also
+                # discover new children of any still-owned process.
+                while True:
+                    found = {pid for pid, (parent, group) in processes.items()
+                             if parent in owned or group == proc.pid}
+                    if found <= owned:
+                        break
+                    owned.update(found)
+                alive = owned & processes.keys()
+                if not alive:
+                    proc.wait(timeout=5)
+                    return True
+                if proc.pid == os.getpgrp():
+                    raise LocalPGRefusal("refusing cancellation of the caller's process group")
+                if any(group == proc.pid for _, group in processes.values()):
+                    try:
+                        os.killpg(proc.pid, sig)
+                    except OSError:
+                        pass
+                for pid in alive:
+                    try:
+                        os.kill(pid, sig)
+                    except OSError:
+                        pass
+                proc.poll()
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+        return False
+
     def run(
         self,
         command: Sequence[str | Path],
@@ -68,17 +118,31 @@ class SubprocessRunner:
         cwd: Path | None = None,
         capture: bool = False,
     ) -> CommandResult:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             [str(part) for part in command],
             env=None if env is None else dict(env),
             cwd=cwd,
             text=True,
-            capture_output=capture,
-            check=False,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            start_new_session=True,
         )
-        return CommandResult(
-            completed.returncode, completed.stdout or "", completed.stderr or ""
-        )
+        try:
+            stdout, stderr = proc.communicate()
+        except BaseException:
+            previously_confirmed = self.cleanup_confirmed
+            self.cleanup_confirmed = False
+            try:
+                self.cleanup_confirmed = self._cancel(proc) and previously_confirmed
+            except Exception:
+                pass  # An unreadable process tree cannot acknowledge cleanup.
+            raise
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+        return CommandResult(proc.returncode, stdout or "", stderr or "")
 
 
 def repository_python(repo: Path) -> Path:
@@ -752,7 +816,7 @@ def run_local_ci(
         exit_code = 78
         print("local-db-ci: execution refused; disposable cleanup follows", file=sys.stderr)
     finally:
-        cleanup = True
+        cleanup = getattr(command_runner, "cleanup_confirmed", True)
         for owned_data, attempted in ((integration_data, integration_started), (data, start_attempted)):
             if not attempted:
                 continue
