@@ -1,0 +1,376 @@
+{
+  "schema": "ruleprecision-noise-label-audit/v1",
+  "source_revision": "b4dc32fde6c07be4b19497ba0a14e1fcf64c7237",
+  "sample_method": "Purposive six Agent-containing fixed TEST turns with c6f69dee recorded as false positive. Audit only; no test examples used to write predicates or tune candidates. This is not a random sample and cannot estimate missing-label rate.",
+  "rows": [
+    {
+      "case_id": "v2-disp-001",
+      "rule_id": "c6f69dee",
+      "original": "not_shortlisted",
+      "audit": "proposed_positive",
+      "rationale": "The turn creates delegated agents with task descriptions. The live staffing rule governs naming and role-rule composition whenever an agent is staffed; it does not require voice writing or a permanent agent file.",
+      "live_statement_sha256": "b2228676894dee75c8298962126da848b42119fb4595a4a5c101f67f472a4d88",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-001",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-002",
+      "rule_id": "c6f69dee",
+      "original": "negative",
+      "audit": "proposed_positive",
+      "rationale": "The turn creates delegated agents with task descriptions. The live staffing rule governs naming and role-rule composition whenever an agent is staffed; it does not require voice writing or a permanent agent file.",
+      "live_statement_sha256": "b2228676894dee75c8298962126da848b42119fb4595a4a5c101f67f472a4d88",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-002",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-008",
+      "rule_id": "c6f69dee",
+      "original": "negative",
+      "audit": "proposed_positive",
+      "rationale": "The turn creates delegated agents with task descriptions. The live staffing rule governs naming and role-rule composition whenever an agent is staffed; it does not require voice writing or a permanent agent file.",
+      "live_statement_sha256": "b2228676894dee75c8298962126da848b42119fb4595a4a5c101f67f472a4d88",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-008",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-013",
+      "rule_id": "c6f69dee",
+      "original": "negative",
+      "audit": "proposed_positive",
+      "rationale": "The turn creates delegated agents with task descriptions. The live staffing rule governs naming and role-rule composition whenever an agent is staffed; it does not require voice writing or a permanent agent file.",
+      "live_statement_sha256": "b2228676894dee75c8298962126da848b42119fb4595a4a5c101f67f472a4d88",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-013",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-014",
+      "rule_id": "c6f69dee",
+      "original": "not_shortlisted",
+      "audit": "proposed_positive",
+      "rationale": "The turn creates delegated agents with task descriptions. The live staffing rule governs naming and role-rule composition whenever an agent is staffed; it does not require voice writing or a permanent agent file.",
+      "live_statement_sha256": "b2228676894dee75c8298962126da848b42119fb4595a4a5c101f67f472a4d88",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-014",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-016",
+      "rule_id": "c6f69dee",
+      "original": "not_shortlisted",
+      "audit": "proposed_positive",
+      "rationale": "The turn creates delegated agents with task descriptions. The live staffing rule governs naming and role-rule composition whenever an agent is staffed; it does not require voice writing or a permanent agent file.",
+      "live_statement_sha256": "b2228676894dee75c8298962126da848b42119fb4595a4a5c101f67f472a4d88",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-016",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-008",
+      "rule_id": "2b66211d",
+      "original": "negative",
+      "audit": "proposed_positive",
+      "rationale": "The turn starts more than one Agent call. The live fan-out rule requires scoped-first launch, watched first run, and fresh context for verifier roles. Fan-out applies even when the count stays far below its cap.",
+      "live_statement_sha256": "21f5241aa8db00e5159b7904751132668a49b5b576275688830f9beeb8437a24",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-008",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-013",
+      "rule_id": "2b66211d",
+      "original": "negative",
+      "audit": "proposed_positive",
+      "rationale": "The turn starts more than one Agent call. The live fan-out rule requires scoped-first launch, watched first run, and fresh context for verifier roles. Fan-out applies even when the count stays far below its cap.",
+      "live_statement_sha256": "21f5241aa8db00e5159b7904751132668a49b5b576275688830f9beeb8437a24",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-013",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-016",
+      "rule_id": "2b66211d",
+      "original": "not_shortlisted",
+      "audit": "proposed_positive",
+      "rationale": "The turn starts more than one Agent call. The live fan-out rule requires scoped-first launch, watched first run, and fresh context for verifier roles. Fan-out applies even when the count stays far below its cap.",
+      "live_statement_sha256": "21f5241aa8db00e5159b7904751132668a49b5b576275688830f9beeb8437a24",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-016",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-002",
+      "rule_id": "df55c398",
+      "original": "negative",
+      "audit": "proposed_positive",
+      "rationale": "The delegated brief asks to find every place a policy is injected, or to trace every HTML sink to its source. These are source-file hunts across disk, the explicit boundary-line trigger in the live rule.",
+      "live_statement_sha256": "3a2f7b10de1b1951e65245b00615b3416a7387c460060426ce17481922f9ba92",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-002",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-014",
+      "rule_id": "df55c398",
+      "original": "negative",
+      "audit": "proposed_positive",
+      "rationale": "The delegated brief asks to find every place a policy is injected, or to trace every HTML sink to its source. These are source-file hunts across disk, the explicit boundary-line trigger in the live rule.",
+      "live_statement_sha256": "3a2f7b10de1b1951e65245b00615b3416a7387c460060426ce17481922f9ba92",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-014",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-001",
+      "rule_id": "81709f57",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "Agent execution or a bounded inventory does not convene a red team with distinct lenses.",
+      "live_statement_sha256": "37bbf4951ef976312a80510108e92658be90b1fef6088e62798acc3b62258132",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-001",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-001",
+      "rule_id": "8aefcdce",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task neither chooses Copilot for Outlook/calendar/Teams work nor asks for those surfaces.",
+      "live_statement_sha256": "ae9487693d3b1a21d8067cadad5745b7cb5f5b4f271a45c3fd5ac1cb4ef77a1d",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-001",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-001",
+      "rule_id": "b587f6c2",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task has no stated architecture fork without a deterministic verifier and expensive reversal.",
+      "live_statement_sha256": "282090786bc0b26353eed5e1b7b400318d7dc5d67c84a38e7474cfd005951226",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-001",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-002",
+      "rule_id": "81709f57",
+      "original": "negative",
+      "audit": "confirmed_noise",
+      "rationale": "Agent execution or a bounded inventory does not convene a red team with distinct lenses.",
+      "live_statement_sha256": "37bbf4951ef976312a80510108e92658be90b1fef6088e62798acc3b62258132",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-002",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-002",
+      "rule_id": "8aefcdce",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task neither chooses Copilot for Outlook/calendar/Teams work nor asks for those surfaces.",
+      "live_statement_sha256": "ae9487693d3b1a21d8067cadad5745b7cb5f5b4f271a45c3fd5ac1cb4ef77a1d",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-002",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-002",
+      "rule_id": "b587f6c2",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task has no stated architecture fork without a deterministic verifier and expensive reversal.",
+      "live_statement_sha256": "282090786bc0b26353eed5e1b7b400318d7dc5d67c84a38e7474cfd005951226",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-002",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-008",
+      "rule_id": "81709f57",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "Agent execution or a bounded inventory does not convene a red team with distinct lenses.",
+      "live_statement_sha256": "37bbf4951ef976312a80510108e92658be90b1fef6088e62798acc3b62258132",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-008",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-008",
+      "rule_id": "8aefcdce",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task neither chooses Copilot for Outlook/calendar/Teams work nor asks for those surfaces.",
+      "live_statement_sha256": "ae9487693d3b1a21d8067cadad5745b7cb5f5b4f271a45c3fd5ac1cb4ef77a1d",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-008",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-008",
+      "rule_id": "b587f6c2",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task has no stated architecture fork without a deterministic verifier and expensive reversal.",
+      "live_statement_sha256": "282090786bc0b26353eed5e1b7b400318d7dc5d67c84a38e7474cfd005951226",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-008",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-013",
+      "rule_id": "81709f57",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "Agent execution or a bounded inventory does not convene a red team with distinct lenses.",
+      "live_statement_sha256": "37bbf4951ef976312a80510108e92658be90b1fef6088e62798acc3b62258132",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-013",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-013",
+      "rule_id": "8aefcdce",
+      "original": "negative",
+      "audit": "confirmed_noise",
+      "rationale": "The task neither chooses Copilot for Outlook/calendar/Teams work nor asks for those surfaces.",
+      "live_statement_sha256": "ae9487693d3b1a21d8067cadad5745b7cb5f5b4f271a45c3fd5ac1cb4ef77a1d",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-013",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-013",
+      "rule_id": "b587f6c2",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task has no stated architecture fork without a deterministic verifier and expensive reversal.",
+      "live_statement_sha256": "282090786bc0b26353eed5e1b7b400318d7dc5d67c84a38e7474cfd005951226",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-013",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-014",
+      "rule_id": "81709f57",
+      "original": "negative",
+      "audit": "confirmed_noise",
+      "rationale": "Agent execution or a bounded inventory does not convene a red team with distinct lenses.",
+      "live_statement_sha256": "37bbf4951ef976312a80510108e92658be90b1fef6088e62798acc3b62258132",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-014",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-014",
+      "rule_id": "8aefcdce",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task neither chooses Copilot for Outlook/calendar/Teams work nor asks for those surfaces.",
+      "live_statement_sha256": "ae9487693d3b1a21d8067cadad5745b7cb5f5b4f271a45c3fd5ac1cb4ef77a1d",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-014",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-014",
+      "rule_id": "b587f6c2",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task has no stated architecture fork without a deterministic verifier and expensive reversal.",
+      "live_statement_sha256": "282090786bc0b26353eed5e1b7b400318d7dc5d67c84a38e7474cfd005951226",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-014",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-016",
+      "rule_id": "81709f57",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "Agent execution or a bounded inventory does not convene a red team with distinct lenses.",
+      "live_statement_sha256": "37bbf4951ef976312a80510108e92658be90b1fef6088e62798acc3b62258132",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-016",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-016",
+      "rule_id": "8aefcdce",
+      "original": "negative",
+      "audit": "confirmed_noise",
+      "rationale": "The task neither chooses Copilot for Outlook/calendar/Teams work nor asks for those surfaces.",
+      "live_statement_sha256": "ae9487693d3b1a21d8067cadad5745b7cb5f5b4f271a45c3fd5ac1cb4ef77a1d",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-016",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-016",
+      "rule_id": "b587f6c2",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "The task has no stated architecture fork without a deterministic verifier and expensive reversal.",
+      "live_statement_sha256": "282090786bc0b26353eed5e1b7b400318d7dc5d67c84a38e7474cfd005951226",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-016",
+      "for_tuning": false
+    },
+    {
+      "case_id": "v2-disp-013",
+      "rule_id": "ede4c735",
+      "original": "not_shortlisted",
+      "audit": "confirmed_noise",
+      "rationale": "Research on faster local model setups is internal source investigation; the live rule limits prose lint to prospect-visible drafts.",
+      "live_statement_sha256": "1c7d4dbc6726dc9043e84a9109122e6b780f447c91c7d9398462e784c0ca0118",
+      "full_rule_source": "corpus-live.json (199 live active rules), statement field; no human_quote exported",
+      "case_source": "ops/fixtures/rule-delivery-eval/cases.v2.json#v2-disp-013",
+      "for_tuning": false
+    }
+  ],
+  "sample_pairs": 30,
+  "proposed_corrections": 11,
+  "original": {
+    "tp": 71,
+    "fp": 191,
+    "precision": 0.27099236641221375,
+    "availability_hits": 583,
+    "applications": 717,
+    "availability": 0.8131101813110181
+  },
+  "corrected_if_admitted": {
+    "tp": 82,
+    "fp": 180,
+    "precision": 0.31297709923664124,
+    "availability_hits": 594,
+    "applications": 728,
+    "availability": 0.8159340659340659
+  },
+  "label_status": "Proposed by bounded study role, requires independent root readback; frozen gold files unchanged.",
+  "independent_readback": {
+    "auditor": "root Principal Engineer",
+    "sampled_case_ids": [
+      "v2-disp-001",
+      "v2-disp-002",
+      "v2-disp-008",
+      "v2-disp-013",
+      "v2-disp-014",
+      "v2-disp-016"
+    ],
+    "full_statement_ids": [
+      "c6f69dee",
+      "2b66211d",
+      "df55c398"
+    ],
+    "verdict": "11 proposed positive corrections accepted for separate sensitivity calculation; original benchmark unchanged",
+    "precision": 0.31297709923664124,
+    "availability": 0.8159340659340659,
+    "for_tuning": false
+  }
+}

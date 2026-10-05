@@ -1,0 +1,34 @@
+{
+  "schema": "ruleprecision-final-lock/v1",
+  "locked_at": "2026-10-05T22:17:59.320958+00:00",
+  "candidate": "source-lookup-v5",
+  "source_revision": "b4dc32fde6c07be4b19497ba0a14e1fcf64c7237",
+  "files": {
+    "lib/rule_delivery_precision.py": "f690f0e442ef4438a89bb41dcf9da431e58d50fd7f98f602887fe29e1d33e58a",
+    "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
+    "ops/config/ruleprecision.v1.json": "07e96509343dcc3725d96ae9e9fc614891873181f4dd2e8f30749136a88c99b3",
+    "tools/ruleprecision-eval.py": "3106549167f1e9ec45ca00ca53e481c3b088af2108940ae4df1b8820cfb67f3f",
+    "out/orch/ruleprecision/candidate.py": "a6063cfe1583759f78edd151f2ecfb36b02dc5cc178633166995eaa7202df06a",
+    "out/orch/ruleprecision/candidate-config.json": "451ad7fdc170245b128eb6329e31a300f0024f7d3f55ff9e85de9e6715bcae95",
+    "out/orch/ruleprecision/climb.jsonl": "b462ba1880f76a41af821287c6b4742868e6fdcb1f052d0c967f5903eac02ea7",
+    "out/orch/ruleprecision/baseline-contract.json": "c3430795a0bfed2e8762026308c55ce435bded914fd767a2b0ed6a8ac1ca1d37",
+    "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+    "out/orch/ruleprecision/real-turns/rule-texts.json": "8fed435321d7e63a2db6f7be4ce4a3e07e2ada76af3c3b0e2ed9e38701d672d4",
+    "out/orch/ruleprecision/real-turns/heldout.sealed.jsonl": "d9e4c89f0054af062980f7e7ddbe69574b4062a35b07c5b0e1ca3d1b05df2cf8"
+  },
+  "training_reproduced": {
+    "cases": 168,
+    "jit_tp": 179,
+    "jit_fp": 41,
+    "precision": 0.8136363636363636,
+    "availability_hits": 1392,
+    "applications": 1690,
+    "availability": 0.8236686390532545,
+    "text_tokens": 81696.0,
+    "unjudged": 0
+  },
+  "jev_calls_total": 0,
+  "final_candidate_evaluation_per_split": 1,
+  "no_retuning_from_test": true,
+  "stopping_rule": "three consecutive train alternatives produced zero retained precision gain; report held-out ceiling without retuning"
+}

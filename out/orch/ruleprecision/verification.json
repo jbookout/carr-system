@@ -1,0 +1,134 @@
+{
+  "schema": "ruleprecision-verification/v1",
+  "base_revision": "b4dc32fde6c07be4b19497ba0a14e1fcf64c7237",
+  "local_ci": {
+    "schema": "carr-ci-result/v1",
+    "strict": false,
+    "classes": [
+      {
+        "name": "pushfloor",
+        "status": "passed",
+        "checks": 1
+      },
+      {
+        "name": "types",
+        "status": "passed",
+        "checks": 1
+      },
+      {
+        "name": "contract",
+        "status": "partial",
+        "checks": 1
+      },
+      {
+        "name": "gates",
+        "status": "passed",
+        "checks": 1
+      },
+      {
+        "name": "secret",
+        "status": "passed",
+        "checks": 1
+      },
+      {
+        "name": "dependency",
+        "status": "passed",
+        "checks": 1
+      },
+      {
+        "name": "binding",
+        "status": "passed",
+        "checks": 1
+      },
+      {
+        "name": "artifact",
+        "status": "passed",
+        "checks": 1
+      },
+      {
+        "name": "freshness",
+        "status": "passed",
+        "checks": 1
+      }
+    ]
+  },
+  "unit_ci": {
+    "schema": "carr-ci-result/v1",
+    "strict": false,
+    "classes": [
+      {
+        "name": "unit",
+        "status": "passed",
+        "checks": 1
+      }
+    ]
+  },
+  "gate_suites": 520,
+  "targeted_tests": {
+    "receipt_selftest": 93,
+    "health_integration": 60,
+    "selector": "passed",
+    "calibration": "passed",
+    "eval_controls": "passed",
+    "real_turn_privacy": "passed",
+    "shadow_identity_privacy_concurrency": "passed",
+    "audited_health": 12
+  },
+  "failed_first": true,
+  "frozen_hashes_verified": true,
+  "candidate_heldout_runs_per_split": 1,
+  "post_test_tuning": false,
+  "jev_calls": 0,
+  "paid_claude_api_calls": 0,
+  "live_delivery_changes": 0,
+  "production_rule_or_business_writes": 0,
+  "bound_health_action_executed": false,
+  "hosted_ci": "pending PR creation",
+  "limits": [
+    "Local capture-verb grant read not configured: no DATABASE_URL; contract class partial.",
+    "Two machine-only LaunchAgent declarations drift; outside this branch.",
+    "No local migration check needed for this source-only change; hosted strict suite remains required.",
+    "No live selector quality or brokerage-wide real-turn coverage claim."
+  ],
+  "design_pass": {
+    "skills": [
+      "/Users/booko/.agents/skills/codebase-design/SKILL.md",
+      "/Users/booko/.agents/skills/zero-tech-debt/SKILL.md"
+    ],
+    "intended_state": "Pure action selection shared by replay and shadow; observation owns proposal state; audited health owns separately enabled response.",
+    "alternatives": "Finite predicate registry compared with trained text classifier; deterministic registry retained after objective met.",
+    "compatibility": "Incumbent retained because task explicitly requires identical live output; no retired selector restored."
+  },
+  "report_visual_check": {
+    "study_desktop": true,
+    "final_desktop": true,
+    "final_disclosures": true,
+    "narrow_viewport": false
+  },
+  "report_hashes": {
+    "archaeology.md": "a2f660e0319cc27992a579f57aa9a4b82e16812c245a28d8e63ba15a8c313799",
+    "study.html": "21763a2e3fc549cfb67d507de9aab087ab83d75ab8b24731b2c58761afb1835a",
+    "climb.jsonl": "b462ba1880f76a41af821287c6b4742868e6fdcb1f052d0c967f5903eac02ea7",
+    "final.html": "42b953437338c07355df986a1082a25b6330ba8c8c82275217a3cd2e177239a5"
+  },
+  "path_admission_repair": {
+    "why": "Task explicitly requests final.html; immutable measurement names must retain ledger references.",
+    "scope": "Eight exact report paths only; whitespace, traversal and neighboring collections still refuse.",
+    "red_first": true,
+    "path_checks_passed": 69,
+    "baseline_cochange_checks": 41,
+    "gate_integrity_strict_checks": 14,
+    "gate_integrity_worktree": "passed",
+    "types_and_pushfloor_after_repair": "passed",
+    "baseline_registration": "path-hygiene-check.py source contract, re-blessed with gate-integrity.py in source commit",
+    "invocation": "Commit used session-owned core.hooksPath for this command; all hooks enabled; shared checkout unchanged.",
+    "broad_suite_timing": "520 suites passed before path repair; affected suites re-run after it; hosted strict suite checks final head."
+  },
+  "committed_receipt_check": {
+    "surfaces": 1,
+    "receipts": 1,
+    "status": "passed",
+    "base": "origin/main",
+    "source_commit": "59add5be12b49a5394a0e660d88fe21213d398d2"
+  }
+}

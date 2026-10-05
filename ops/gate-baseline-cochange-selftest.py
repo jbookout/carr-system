@@ -302,6 +302,18 @@ with tempfile.TemporaryDirectory() as tmp:
               blessed_hash(repo, contract_name, "contracts") == sha256_of(body),
               blessed_hash(repo, contract_name, "contracts"))
 
+    source_contract = repo / "ops" / "githooks" / "path-hygiene-check.py"
+    source_contract.parent.mkdir(parents=True, exist_ok=True)
+    source_contract.write_text("print('fixture path policy')\n")
+    git(repo, "add", "ops/githooks/path-hygiene-check.py")
+    r = git(repo, "commit", "-m", "path policy without bless", env=NO_AUTO)
+    check("path policy source without baseline is refused", r.returncode != 0, r.stderr)
+    r = git(repo, "commit", "-m", "path policy source with computed bless")
+    check("path policy source is auto-blessed", r.returncode == 0, r.stderr)
+    check("path policy source hash lands in contracts",
+          blessed_hash(repo, "path-hygiene-check.py", "contracts")
+          == sha256_of("print('fixture path policy')\n"))
+
     # ── 6. what the check must leave alone ──────────────────────────────────
     (repo / "unrelated.txt").write_text("hello\n")
     git(repo, "add", "unrelated.txt")

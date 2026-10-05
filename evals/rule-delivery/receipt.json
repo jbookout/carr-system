@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:014966d863e972c42370031a1d2a08db84c6cd7bca8dedb804320e8f173bf63e",
+    "configuration_fingerprint": "sha256:d8943a32272b28fbd892d552822de6a881a80927842e74fe3ece87eaf6012d6d",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a10b58-ff3f-7d12-9991-48e7da320455",
+    "native_session_ref": "01a10e01-1a63-7952-b838-f6880aca1e6b",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -20,7 +20,7 @@
     "total": 338,
     "train": 212
   },
-  "change": "Remove the retired parity command route and refresh source-bound deterministic rule-delivery evidence for PR 1546.",
+  "change": "Add an opt-in counterfactual precision observer while preserving current model-facing delivery; refresh canonical source-bound regression evidence.",
   "cost": {
     "baseline_usd_per_case": 0.0,
     "candidate_usd_per_case": 0.0
@@ -145,7 +145,7 @@
     },
     "dependencies": {
       "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
-      "hooks/rule-pack-preuse-reselection.py": "a2b66119a644ebd84ed0e0b5da02bccd962629ac834dee406eb7f431d13bcc17",
+      "hooks/rule-pack-preuse-reselection.py": "59aeaffbccc293f61f9cffba8c0b8dc5b1ab51a4c017e225109a1ed2c6ff8321",
       "lib/claude_continuity_config.py": "9e6d1afd1c5714bd61892ca1da7de058dbcfebae84f9131fd70d24d6a91985f5",
       "lib/claude_rule_delivery_dedupe.py": "6b37b3e0cd950410332fcc4099c17b61650d87eb63158bf550c5d259ca0540b4",
       "lib/rule_delivery_preuse.py": "3a4e46653d2255561a2b171b4762dce6d74581eb7f2156cce6afc320e26adee2",
@@ -159,15 +159,14 @@
       "ops/config/rule-jit-triggers.v1.json": "b0b23e68c4121e649b82f5d7f93704f1574e2a7ce798a5e3d823b1322c04dd59",
       "ops/config/rule-routes.v1.json": "1d94a8dab3d249fd86da466743dc3b904e6e27d2cd289de108d9cbb0c9fadbb5",
       "ops/config/rule-selection-corpus.v1.json": "90f0e31475f1cd2c445475f8742de3dc94b62a2474d581fcefb5429a5eae102f",
-      "ops/config/rule-triage.v1.json": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c",
       "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
       "ops/fixtures/real-replay/read-calls.jsonl": "19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
       "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
       "ops/machine_envelope.py": "749970f4dfb838af4e6cd1e6537988a278fc0006a02b32f665dfd0f943266c3f",
-      "ops/rule_delivery_eval.py": "ee881cb42a56b997bfd660ba50b61f6b3982343f15f82d45fd3b7303b6bac382",
-      "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
-      "ops/rule_trigger_delivery.py": "3b231db2919624a85b6dd2dcecd56afc15ec84a4fd9df0082f45abce9e1b2b77",
-      "ops/typesafe_client.py": "798286fa008b772ba846c28249da0ce054dda88317288f134c58ae354fb20e6d",
+      "ops/rule_delivery_eval.py": "e59e392ec3cceae4df58d9aed14887c5e901105730e06020466b261b4803efc2",
+      "ops/rule_trigger_compile.py": "26e0595e793aaba54df070f206edfa9d72f33d861f77741e0f3947bf7dbccdce",
+      "ops/rule_trigger_delivery.py": "773911b40433f70242b7b85eb33c64a487e8be20dd6c9f2ba28ac70daf10edb1",
+      "ops/typesafe_client.py": "91acd006df639e545a5fe6890712507652219fadb3d972b03b1fed42f1fa086d",
       "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
     },
     "expectations": {
@@ -199,13 +198,15 @@
   "noise_floor": 0.3,
   "notes": [
     "The receipt retains the established pre-PR-1325 baseline c11c1153a59ff90f7d348f11330c97a25cb0f2f9. Both arms were freshly replayed with the retained production-function harness; dependency bindings now include the retired parity-route removal.",
-    "A separate replay against reviewed PR 1546 head 388e5d9ae02bea8d572bb7a4040984c986c3bdeb measured zero change in all three dimensions, with zero provider cost. This cleanup claims no quality or cost improvement.",
     "Existing frozen cases have historical reuse; results are descriptive regression evidence, not new untouched holdout or live-provider evidence.",
     "Human test recall point loss against the established baseline is 0.625 percentage points; its paired interval is [-2.143, 0] points. This does not establish noninferiority at the one-point margin with 95% confidence.",
     "All-traffic recall against that historical baseline decreases through suppression of compiled cues on complete machine envelopes; do not claim all-traffic recall is preserved against it.",
     "The native /claude-api slash commands are unavailable in this runtime. The existing deterministic replay and programmatic grader regenerated source-bound evidence without a model call.",
     "Frozen expectations and split remain unchanged. No production deployment or live-model quality improvement is claimed.",
-    "The merged-source replay also preserves the measured complete-envelope prompt false-delivery reduction: test 14 to 0 and train 40 to 1 against the established historical baseline."
+    "The merged-source replay also preserves the measured complete-envelope prompt false-delivery reduction: test 14 to 0 and train 40 to 1 against the established historical baseline.",
+    "The wrapper calls the incumbent once and returns its exact output unchanged. Shadow proposals and new held-out precision measurements are reported separately in out/orch/ruleprecision/final.html; these historical regression dimensions do not grade that counterfactual selector.",
+    "The accepted established historical baseline is reused to verify the unchanged delivery contract. No new live quality or provider-cost gain is claimed. Shadow mode is opt-in, and default health is read-only.",
+    "Paid Claude API is forbidden for this task; canonical deterministic build-eval replay and programmatic hill-climb replace unavailable native slash commands."
   ],
   "primary_dimension": "envelope-prompt-clean-delivery",
   "repeats": 2,

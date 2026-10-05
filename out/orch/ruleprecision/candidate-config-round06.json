@@ -1,0 +1,97 @@
+{
+  "refine": true,
+  "add_actions": true,
+  "allow_ids": [
+    "113b3833",
+    "185013c6",
+    "2b66211d",
+    "4a9188f3",
+    "647f843d",
+    "6cfb67f5",
+    "9d80fd2d",
+    "9f15f21a",
+    "bbffc139",
+    "c20dc3d5",
+    "c53beeaa",
+    "ca841807",
+    "faae6748",
+    "fb110a39"
+  ],
+  "calibration": {
+    "method": "finite per-rule accept/reject maximizing synthetic TRAIN precision subject to availability floor; retrieval retained for real TRAIN availability",
+    "availability_floor": 0.8131101813110181,
+    "train_tp": 162,
+    "train_fp": 32,
+    "rule_counts": {
+      "185013c6": [
+        11,
+        0
+      ],
+      "fb110a39": [
+        11,
+        4
+      ],
+      "6cfb67f5": [
+        11,
+        1
+      ],
+      "ca841807": [
+        20,
+        0
+      ],
+      "c53beeaa": [
+        11,
+        0
+      ],
+      "fb2b263d": [
+        8,
+        5
+      ],
+      "bbffc139": [
+        17,
+        1
+      ],
+      "86647daf": [
+        8,
+        3
+      ],
+      "4a9188f3": [
+        10,
+        5
+      ],
+      "c20dc3d5": [
+        38,
+        7
+      ],
+      "2b66211d": [
+        14,
+        6
+      ],
+      "113b3833": [
+        14,
+        8
+      ],
+      "1b8e7f43": [
+        1,
+        1
+      ],
+      "647f843d": [
+        2,
+        0
+      ],
+      "9f15f21a": [
+        1,
+        0
+      ],
+      "9d80fd2d": [
+        1,
+        0
+      ],
+      "faae6748": [
+        1,
+        0
+      ]
+    },
+    "jev_calls": 0
+  }
+}

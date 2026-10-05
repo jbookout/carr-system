@@ -1,0 +1,38 @@
+{
+  "fixed_baseline": {
+    "event_full_text_estimate": 171269.75,
+    "once_per_session_full_text_estimate": 121337.5,
+    "session_groups": 72,
+    "per_session_once_estimate": 1685.2430555555557,
+    "method": "statement characters/4; no rendered receipt/envelope overhead",
+    "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+    "limit": "sampled events only; unobserved earlier/later session turns are absent"
+  },
+  "fixed_candidate": {
+    "event_full_text_estimate": 52952.0,
+    "once_per_session_full_text_estimate": 38471.25,
+    "session_groups": 72,
+    "per_session_once_estimate": 534.3229166666666,
+    "method": "statement characters/4; no rendered receipt/envelope overhead",
+    "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+    "limit": "sampled events only; unobserved earlier/later session turns are absent"
+  },
+  "real_baseline": {
+    "event_full_text_estimate": 1655.5,
+    "once_per_session_full_text_estimate": 1655.5,
+    "session_groups": 29,
+    "per_session_once_estimate": 57.08620689655172,
+    "method": "statement characters/4; no rendered receipt/envelope overhead",
+    "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+    "limit": "sampled events only; unobserved earlier/later session turns are absent"
+  },
+  "real_candidate": {
+    "event_full_text_estimate": 1556.5,
+    "once_per_session_full_text_estimate": 990.5,
+    "session_groups": 29,
+    "per_session_once_estimate": 34.1551724137931,
+    "method": "statement characters/4; no rendered receipt/envelope overhead",
+    "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+    "limit": "sampled events only; unobserved earlier/later session turns are absent"
+  }
+}

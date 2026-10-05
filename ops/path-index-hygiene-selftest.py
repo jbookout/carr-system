@@ -107,6 +107,18 @@ def main() -> int:
           not PATHS.violations(["ops/config/policy.v1.json"]), failures)
     check("ordinary descriptive filename passes", not PATHS.violations(["ops/report-2026.json"]), failures)
 
+    for name in ("ci-final-result.json", "final-fixed-test.json", "final-lock.json",
+                 "final-readback.json", "final-real-test.json", "final.html",
+                 "predicate-v1-train.json", "render-final.py"):
+        path = "out/orch/ruleprecision/" + name
+        check(f"requested measurement artifact passes: {name}", not PATHS.violations([path]), failures)
+        check(f"measurement exception excludes neighboring collection: {name}",
+              bool(PATHS.violations([path.replace('/ruleprecision/', '/other/')])) , failures)
+        check(f"measurement exception excludes whitespace alias: {name}",
+              bool(PATHS.violations([path + ' '])), failures)
+        check(f"measurement exception excludes traversal alias: {name}",
+              bool(PATHS.violations(['out/orch/ruleprecision/../ruleprecision/' + name])), failures)
+
     check("declared vendor-tree depth passes",
           not PATHS.violations(["plugins/pstack/skills/why/references/sources/linear.md"]), failures)
     check("vendor-tree prefix does not exempt neighboring paths",

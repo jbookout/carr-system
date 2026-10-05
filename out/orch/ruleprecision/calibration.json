@@ -1,0 +1,2861 @@
+{
+  "schema": "ruleprecision-calibration/v1",
+  "split": "train",
+  "source_sha256": "92008fa3318ec538a8003b9a2c02dfce201fc2cb32cef451456bfe82c7370362",
+  "config_sha256": "451ad7fdc170245b128eb6329e31a300f0024f7d3f55ff9e85de9e6715bcae95",
+  "case_sha256": "0c7d04ac4de81fc0f2c64dbedd625bb08d51713dcb5b3dd6a23ddbda3f93386c",
+  "corpus_sha256": "9fc1b0c33ee3c6820c15a46baca6ea32a85449ad4911bae78e94af25c5a4c4f9",
+  "jev_calls": 0,
+  "errors": 0,
+  "objective": "maximize relevant JIT deliveries / judged JIT deliveries subject to availability >=583/717",
+  "method": "finite action predicates followed by per-rule empirical accept/reject gates",
+  "threshold_is_probability": false,
+  "train": {
+    "cases": 168,
+    "jit_tp": 179,
+    "jit_fp": 41,
+    "precision": 0.8136363636363636,
+    "availability_hits": 1392,
+    "applications": 1690,
+    "availability": 0.8236686390532545,
+    "text_tokens": 81696.0,
+    "unjudged": 0
+  },
+  "train_tokens": {
+    "event_full_text_estimate": 91765.25,
+    "once_per_session_full_text_estimate": 81696.0,
+    "session_groups": 168,
+    "per_session_once_estimate": 486.2857142857143,
+    "method": "statement characters/4; no rendered receipt/envelope overhead",
+    "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+    "limit": "sampled events only; unobserved earlier/later session turns are absent"
+  },
+  "per_rule": {
+    "424ba0cc": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Cold and paused clients leave the active book and go to a separate not-top-of-mind category \u2014 never pester a ghosting client. The practice operates from an abundance mindset: plent",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4dd44fd7": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Outbound document formats: LOIs and letters are sent in WORD format so the listing agent can easily edit or revise \u2014 that is the negotiation workflow. The PDF-only rule applies to ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4399df76": {
+      "decision": "dropped",
+      "train_tp": 1,
+      "train_fp": 2,
+      "empirical_precision": 0.3333333333333333,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Every LOI term is negotiable and template values are placeholders holding the most-common case, never fixed CARR policy. Document tooling treats template text as a per-deal-overrid",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "8c1e6057": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Whenever a partner is asked to edit, open, or review a file, the message must include a clickable markdown link to that file (the path as the link target), never just the filename ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "57d83b75": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "On every new client, run open-source research before working from the handed-over record alone: practice website, NPPES, Healthgrades and the specialty directories, license and ass",
+      "source_conditions": {
+        "additions": "lambda f: \"new-client\" in f.verbs"
+      }
+    },
+    "f5d97b4a": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CoStar is driven ONLY in the Claude desktop app's own Browser pane. NEVER Chrome, never the Chrome extension, which CoStar blocks on the first click. Move slowly like a human: one ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "2ca2add2": {
+      "decision": "dropped",
+      "train_tp": 1,
+      "train_fp": 7,
+      "empirical_precision": 0.125,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Capture and rendering are separate decisions. When pulling from any source platform, capture EVERY available field by default, including listing-agent and owner contacts, property ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "f92dfab2": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Every client search packet includes market commentary, not just a property list. Ground it in evidence we actually pulled: comparable sales with medians and ranges, what inventory ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "97326357": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A claim about what a surface (Cowork, phone, Claude Code, scheduled run) can or cannot do becomes doctrine only after a live test from that surface itself. Until tested, it is a hy",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "70e372f0": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Dell experience calibration (team scope, the boundary stated): Dell's sessions learn and adapt to his working style through what he SAYS, ASKS, and CORRECTS \u2014 register preferences,",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "0c1bac27": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Partnership complementarity ledger (team scope, replacing any analyze-Dell framing \u2014 Joe's reframe): the goal is finding how Joe and Dell FIT, not assessing either man. Sessions no",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "8c812bed": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Complementarity ledger data-parity gate (amends rule 0c1bac27, Joe's addition): the ledger PUBLISHES NOTHING \u2014 no Monday-brief notes, no fit summaries \u2014 until Dell's evidence base ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "5d44d3f3": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "Verification backfill (extends the new-client research rule to the whole book, Joe 2026-08-01 after the C-112 finding): every client, party, and deal already in the system gets the",
+      "source_conditions": {
+        "additions": "lambda f: bool(f.verbs & {\"new-client\", \"new-deal\", \"import-parties\"})"
+      }
+    },
+    "49c627cc": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Before claiming the record layer cannot do something, read the FULL verb list and match on BEHAVIOR, not on the column name. Verbs are named for what they do, so the field they wri",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d26d63b0": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When ANY new contact enters the system \u2014 lead, client, vendor, or a party met in passing \u2014 run a deep open-source research pass BEFORE asking the partner for anything that was not ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "faf1b643": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Vendor relationship levels are defined by countable events, never by impression. 0 Prospective: identified, no two-way contact. 1 Building: the first TWO-WAY contact has happened \u2014",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "ca841807": {
+      "decision": "selected",
+      "train_tp": 20,
+      "train_fp": 0,
+      "empirical_precision": 1.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "Findings, enrichment results, and record updates go into the DATABASE, never into a markdown report. Under the record layer, a job that researches or verifies something writes it t",
+      "source_conditions": {
+        "additions": "lambda f: bool(f.verbs & RECORD_MUTATIONS)"
+      }
+    },
+    "4f7c348f": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Every session recites BOTH rule files for its partner \u2014 shared AND that partner's own personal file \u2014 every time; neither is skipped, and personal is not optional. Form: state the ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4a9188f3": {
+      "decision": "selected",
+      "train_tp": 10,
+      "train_fp": 5,
+      "empirical_precision": 0.6666666666666666,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "THE TEST FOR CAPTURING A TAUGHT RULE IS 'would the system have to ask this again?' \u2014 never whether the partner phrased it as 'always X', 'never Y' or 'from now on'. That phrasing t",
+      "source_conditions": {
+        "refinements": "lambda f: _correction(f) or f.command('git', 'commit') or 'teach' in f.verbs",
+        "additions": "lambda f: \"teach\" in f.verbs or _correction(f)"
+      }
+    },
+    "9f15f21a": {
+      "decision": "selected",
+      "train_tp": 1,
+      "train_fp": 0,
+      "empirical_precision": 1.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NATIONAL ACCOUNT MODELLING, ruled by Joe 2026-08-02 on the Musicologie case. A franchise or multi-location brand is ONE national account, and each franchisee is their OWN SUB-CLIEN",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "b42e217e": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DELL IS A FULL WRITER AND A FULL TEACHER, EQUAL TO JOE \u2014 his sessions get the SAME verb surface, including teach, activate-rule, retire-rule, confirm-merge, and every write verb. N",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "54e2bcb9": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A CARR AGENT'S OWN CONTACT DETAILS IN A CLIENT CONTACT FIELD ARE A PLACEHOLDER, NEVER DATA \u2014 confirmed by Joe 2026-08-02. Salesforce records are routinely created with the agent's ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9310827b": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "BE THE SAFETY CHECK FOR BOTH PARTNERS, EQUALLY AND OUT LOUD. When either Joe or Dell asks for something that looks wrong, risky, or based on a mistaken premise, say so BEFORE doing",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4c21d86b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "SURVIVORSHIP RULE FOR DUPLICATE PARTIES \u2014 which row wins a merge, decided in advance so no merge is an improvisation. Precedence, in order: (1) a party carrying a BUSINESS REF (C-/",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c6f69dee": {
+      "decision": "dropped",
+      "train_tp": 1,
+      "train_fp": 14,
+      "empirical_precision": 0.06666666666666667,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE STAFFING MODEL: AN AGENT IS A JOB DESCRIPTION, MADE UP OF SKILLS PLUS THE RULES THAT ROLE MUST NEVER BREAK. Name agents by HUMAN JOB TITLE, not file-name convention \u2014 \"Content ",
+      "source_conditions": {
+        "additions": "lambda f: f.delegate"
+      }
+    },
+    "ede4c735": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 3,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "WRITING-RULES BINDS PROSPECT-VISIBLE SURFACES ONLY; INTERNAL TEXT IS EXEMPT. DNA/writing-rules.md governs anything a prospect could ever see \u2014 outreach, social, proposals, packets,",
+      "source_conditions": {
+        "refinements": "_draft",
+        "additions": "_draft"
+      }
+    },
+    "f47a8fe9": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE FOUR VERIFICATION FAILURES, each of which produced a wrong claim on 2026-08-02, and the one habit that caught every single one. (1) COUNTING TOMBSTONES AS LIVE. A merged row is",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "73381d78": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A CONFIG FILE READ BY TWO PARSERS HAS TWO CONTRACTS, AND FIXING ONE BREAKS THE OTHER UNLESS YOU CHECK. `~/.config/carr/db.env` is read by `set -a; . db.env` in bin/nightly.sh AND b",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "f2d58a30": {
+      "decision": "dropped",
+      "train_tp": 1,
+      "train_fp": 4,
+      "empirical_precision": 0.2,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "EVERY CLIENT-FACING RECOMMENDATION NAMES AT LEAST ONE THING WE WOULD NOT DO, AND WHY. One honest limit per option, stated in the document rather than saved for the meeting. Applies",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "48083552": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DISCOVERY BEFORE SOLVING, IN EVERY CLIENT AND PROSPECT MEETING. Before recommending a property, a rate, or a course of action, ask and get answers to: what have you already tried a",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "015183f5": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "OPERATE PROCEDURALLY: DEFINE BY DECISION PROCEDURE, NOT BY DESCRIPTION. A description tells a reader what something is like; a procedure tells them how to decide. Descriptions prod",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4e104d4c": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A NEWLY DEPLOYED VERB IS REACHABLE IMMEDIATELY THROUGH `call-verb`; NO RECONNECT, NO SESSION RESTART, NEVER A REDEPLOY. CONSTRAINT-SHAPED: this binds at the moment of a specific cl",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "2a3ff869": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Microsoft formats (docx/pptx/xlsx) are the default for client and company documents rather than Google-native formats, unless the partner says otherwise. Note the split established",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "0f38532e": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Single source of truth: every file, idea and fact has ONE home, and every other mention points at it rather than restating it. A second copy is not redundancy, it is a future contr",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "61c64d91": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Twin readiness: every new asset gets a tier AT CREATION, never retrofitted. Shared-workspace means it carries no Joe-only assumptions and can be read by either partner as-is; perso",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "def3e84e": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 4,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Artifact tombstones: nothing silently rots. A superseded gallery artifact gets OVERWRITTEN with the red \"_TO_DELETE\" page and a description prefix saying so, and the deletion is qu",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "388cc81e": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE MATCH THRESHOLD, and what to do when it is not met: a lone surname NEVER merges records. Cross-dataset identity needs a SECOND corroborating field \u2014 email domain, phone, addres",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "df8f1da0": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "ASSESSMENT VS ACTION: \"examine this\", \"what do you think\", \"is this worth it\" means DELIVER THE ASSESSMENT AND STOP. An opinion request is not a work order, and answering it by bui",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9873a0d2": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "PROMOTION WATCH: when A PARTNER re-explains the same \"how\" twice across sessions, or an existing ability drifts from what it was built to do, that is the signal an ability wants pr",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d5dcfe26": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A DATED DESIGN MEMO IS NOT SELF-UPDATING, AND A DECISION IS FOUND BY WHAT IT DOES, NEVER BY ITS LABEL. Two procedures, both mandatory before acting on anything a dated memo, spec, ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "2b889e80": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NO NEGATIVE FINDING FROM A SINGLE COLLECTION. Before saying or writing that something does not exist, NAME every parallel collection that could hold it, then check each one; \"not i",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9e3fb6d0": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 5,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "WHEN JOE SHARES INDUSTRY CONTENT FROM A COLLEAGUE OR COMPETITOR, RUN BOTH PASSES: INGEST THE SUBSTANCE SO IT CAN BE APPLIED, AND ANALYZE THE CRAFT WITHOUT EVER COPYING IT. Pass one",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "3578d799": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NAME VERBS AND SYSTEM NOUNS IN HUMAN WORDS, NOT MACHINE OR DATA-PIPELINE WORDS. This is the verb-layer companion to the agent-naming rule (#c6f69dee, \"Content Writer\" over write-co",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "e313a3ca": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "RUN THE COMMAND; DO NOT HAND THE PARTNER A COMMAND TO PASTE. When a session can execute something itself, executing it is the job. Pasting a command into chat for the partner to co",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "81709f57": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": true,
+      "rule_summary": "A RED TEAM ASSIGNS DISTINCT LENSES, NEVER REDUNDANT VOTES \u2014 and one seat re-runs the evidence instead of arguing the conclusion.",
+      "source_conditions": {
+        "refinements": "lambda f: _has(f.text, r\"\\b(?:red[- ]?team|panel|council|distinct lenses|adversarial review)\\b\")"
+      }
+    },
+    "1b8e7f43": {
+      "decision": "selected",
+      "train_tp": 1,
+      "train_fp": 1,
+      "empirical_precision": 0.5,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "A BLOCKED ACTION IS FILED, NEVER DROPPED. When a session cannot do something because the capability is withheld \u2014 a verb missing from its profile, a human-gated verb, a permission ",
+      "source_conditions": {
+        "additions": "lambda f: \"add-loop\" in f.verbs and _has(f.text, r\"\\b(?:blocked|refused|unavailable)\\b\")"
+      }
+    },
+    "c20dc3d5": {
+      "decision": "selected",
+      "train_tp": 38,
+      "train_fp": 7,
+      "empirical_precision": 0.8444444444444444,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "THE ESCALATION CONTRACT \u2014 three constraints, each binding at a named moment, making an agent hierarchy safe rather than merely tidy. A pyramid prevents unowned scope; it does not p",
+      "source_conditions": {
+        "refinements": "_finding",
+        "additions": "_finding"
+      }
+    },
+    "c53beeaa": {
+      "decision": "selected",
+      "train_tp": 11,
+      "train_fp": 0,
+      "empirical_precision": 1.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "AN `ok:true` FROM A RECORD VERB CONFIRMS THE CALL PARSED, NEVER THAT THE VALUES LANDED IN THE RIGHT FIELDS. Re-read the row after any write carrying long or multi-line text. THE DE",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "2e362970": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "EVERY NEW IMPLEMENTATION STARTS WITH A DEEP-DIVE RESEARCH PASS, BEFORE ANY BUILDING. Gather the available guidance, expert practice and current documentation on the topic first, th",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9ff56260": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A command a session issues never names a private key path. The script resolves its own secret from its own default, and automation prescribes `./run.sh <verb>` and nothing more. Th",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "a8c55a47": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 3,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A MANUAL PATH AND AN AUTOMATED PATH THAT DO THE SAME JOB MUST BE THE SAME CODE. When a script already performs an operation correctly, documentation and sessions call THE SCRIPT \u2014 ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "5be2f462": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CUT MODIFIERS THAT CARRY NO INFORMATION, AND NEVER INVENT AN OPPOSING VIEW FOR CONTRAST. Two writing constraints that bind every session's prose to a partner, taken from a standard",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "5697071b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "LICENSURE IS PER PARTNER, NOT PER TERRITORY, AND THE TWO ARE CURRENTLY DIFFERENT. As of 2026-08-04 Joe holds a FLORIDA licence ONLY. His Alabama exam is being scheduled and is not ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c4a284b2": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 9,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "FOR A QUESTION PRACTITIONERS HAVE ALREADY SOLVED AT SCALE, START FROM THE OBSERVED CONVENTION AND VERIFY IT AGAINST THE RULE \u2014 NEVER THE REVERSE. Rule text tells you what is permit",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d9ce2b08": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "SOLVE THE PROBLEM; DO NOT SETTLE FOR REPORTING IT. When a session hits a blocker, \"blocked\" is a hypothesis to be disproved, not a finding to be handed over. Before reporting anyth",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "2271e684": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Double-check before delivering; flag uncertainty; for technical specifics (pricing, APIs, platform features, data access) SEARCH to verify, never trust memory.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "236ca227": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Weekends are off, both humans: Sat/Sun are not workdays for Joe or Dell; never plan around a weekend response or read weekend silence as drift. Heartbeat stands down Sat/Sun; Monda",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "25fcddee": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Unknowns pass before unfamiliar deliverables: first attempt in new territory \u2192 interview Joe one question at a time on approach-changing ambiguities and/or show 2\u20134 cheap variants ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "2b66211d": {
+      "decision": "selected",
+      "train_tp": 14,
+      "train_fp": 6,
+      "empirical_precision": 0.7,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "Fan-out hygiene (Jul 25): (1) Verifiers get fresh context \u2014 a checker never inherits the maker's conversation; it judges a real signal (the artifact, the test that ran, the source)",
+      "source_conditions": {
+        "refinements": "lambda f: _review(f) or _has(f.text, r\"\\b(?:fan[- ]?out|fleet|verifier|fresh context|review panel|several agents|multiple agents)\\b\")",
+        "additions": "_review"
+      }
+    },
+    "3fa17fa0": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Stale notes are not status: before drafting re-engagement off notes older than ~60 days, ask Joe \"is this still true?\"",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "72e06bdf": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Never pre-qualify leads before the board (Jul 16): estimate quality (score/rank/tier) and PRESENT every lead a run produces; Joe qualifies at the board. Never withhold weak-but-pla",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9730f565": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Check the clock, don't infer it: dates/times from real timestamps (bash date, tool results, Joe's timezone), never conversational mood.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9d80fd2d": {
+      "decision": "selected",
+      "train_tp": 1,
+      "train_fp": 0,
+      "empirical_precision": 1.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Doctor cadence is the message: outreach frequency IS content \u2014 pressure reads as desperation; walk-ins and back-channeling are aggressive, not persistent. A prospect's own follow-u",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c1db316c": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Complete solutions, not incremental patches; the cleanest correct way first.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "f5beac20": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Expansion posture: never dismiss useful-but-not-today knowledge \u2014 capture it in its durable home AND propose how it could apply, including scope expansions Joe hasn't considered. H",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "fa217e48": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Verify the artifact, not the summary: confirming any work means checking the actual file/record/output against a THIS-session tool result; state plainly anything unverified, skippe",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "17ffd587": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "No lead-outreach reminders on ANY glanceable surface (Jul 15/16): never surface \"call this lead / follow up\" in open-loops, the heartbeat, or the Monday brief \u2014 leads live on The L",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "6a4e6283": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Independent verification before anything ships: maker never grades its own client-facing/public work \u2014 fresh-eyes pass first (writing-audit for prose; artifact-vs-criteria otherwis",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "b1521526": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Source-truth hierarchy on conflict: (1) Joe live \u2192 (2) the domain's source-of-truth file \u2192 (3) newer dated file, flag the conflict \u2192 (4) backups/archives never authoritative. Publi",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c1547ed1": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "The placement test (Jul 24, every new workflow/system/asset): state WHERE it lives and why \u2014 repo `~/carr-system` (deterministic/executable; version history is the point) vs the Dr",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "f04a05aa": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Autonomous runs: every scheduled task/trigger/subagent gets at creation: a verifiable done-condition, an explicit failure path (stop-and-report beats looping), a watched first run,",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "767f9b41": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A confirmation question is an audit trigger \u2014 actually re-verify, then report honestly what was and wasn't at bar. \"No, and here's what's left\" beats \"yes.\"",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "80def9d2": {
+      "decision": "dropped",
+      "train_tp": 2,
+      "train_fp": 18,
+      "empirical_precision": 0.1,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "User-friendly by law (Jul 13): every human-facing surface and every choice handed to Joe/Dell follows DNA/ux-doctrine.md \u2014 one obvious action per item, say what changed and offer u",
+      "source_conditions": {
+        "additions": "_surface"
+      }
+    },
+    "0e22e34a": {
+      "decision": "dropped",
+      "train_tp": 1,
+      "train_fp": 4,
+      "empirical_precision": 0.2,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "3\u20134 levels deep max; unambiguous folder names; descriptive filenames, no \"final_v2\" (edit in place; Drive version history = rollback); don't pre-build empty structure.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "1fddcffb": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Core routing test (Jul 15): the always-read core holds ONLY what every session needs regardless of task; anything task-specific becomes a task-loaded file with a one-line pointer. ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "99e951b9": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Index upkeep: any multi-folder category gets a short INDEX.md, updated same session as changes; read root INDEX.md first each session. New 00_Context file \u2192 entry in 00_Context/IND",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "a3f6c7f9": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Diagnose before restructuring: point to a real task that was slow, never a hypothetical.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "b01edd26": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "No hardcoded counts or blanket self-summaries a later edit can falsify (\"the files below,\" not \"the four files\").",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "fb2b263d": {
+      "decision": "selected",
+      "train_tp": 8,
+      "train_fp": 5,
+      "empirical_precision": 0.6153846153846154,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Cross-references at the point of change: anything decided/built \u2192 immediately check other INDEX/context files for stale phrasing; grep the literal old text across CARR AI and .clau",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "412d37d3": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "HIPAA is always spelled HIPAA; double-check compliance references.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "51d9f05f": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 5,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "Prospects are healthcare experts unfamiliar with CRE; tone educational/consultative, never aggressive-sales; assume they've never heard of CARR.",
+      "source_conditions": {
+        "additions": "_draft"
+      }
+    },
+    "725dff46": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": true,
+      "rule_summary": "The vendor network is the TEAM's (\"our vendor network\"), never Dell's alone; Dell's 15+ years healthcare experience is a key differentiator.",
+      "source_conditions": {
+        "refinements": "lambda f: _draft(f) and _has(f.text, r\"\\b(?:vendor|network|team|dell)\\b\")"
+      }
+    },
+    "ce12c11e": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Lead with the no-conflict tenant/buyer-only model; the conflict-of-interest framing (listing broker double fee, seller's interests) is Joe's strongest hook.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "f5bac101": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Joe & Dell are early-stage: prioritize prospecting/pipeline over polish on low-impact areas.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "86647daf": {
+      "decision": "selected",
+      "train_tp": 8,
+      "train_fp": 3,
+      "empirical_precision": 0.7272727272727273,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": false,
+      "has_baseline_refinement": true,
+      "rule_summary": "The moment any substantive build/change/decision/lesson finishes (never \"session close\"), ask: does it (a) change how the shared system operates, (b) create partner-only work, (c) ",
+      "source_conditions": {
+        "refinements": "lambda f: _git_delivery(f) or bool(f.verbs & WRITE_RECORD_VERBS) or _intent(f, r\"\\b(?:finished|completed|shipped|decided|built)\\b\", r\"\\b(?:shared system|build|system|decision|rule)\\b\")"
+      }
+    },
+    "fc4d7753": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Merit tests: real need not hypothetical \u00b7 smallest structure that works (rule < section < file < folder) \u00b7 output as tiebreaker \u00b7 single-source binds. Outside ideas get the same te",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "8aefcdce": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": true,
+      "rule_summary": "Copilot: Microsoft-native (Outlook triage, calendar, Teams summaries). Claude: everything else \u2014 lead gen, outreach, research, automation, documents, pipeline.",
+      "source_conditions": {
+        "refinements": "lambda f: _has(f.text, r\"\\b(?:copilot|outlook|calendar|teams)\\b\")"
+      }
+    },
+    "2e8b4840": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A lead record and a client record for the same person are not a duplicate. Every party starts as a lead and converts to a client; both refs coexist by design. Do not flag or propos",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "b587f6c2": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": true,
+      "rule_summary": "WHEN TO CONVENE A FRONTIER-MODEL COUNCIL \u2014 the decision procedure, so convening is never a mood or a ritual. A council meeting is a deliberative round table: two or more OUTSIDE fr",
+      "source_conditions": {
+        "refinements": "lambda f: _has(f.text, r\"\\b(?:architecture|mechanism|design)\\b\") and _has(f.text, r\"\\b(?:fork|irreversible|expensive reversal|no deterministic verifier|council)\\b\")"
+      }
+    },
+    "185013c6": {
+      "decision": "selected",
+      "train_tp": 11,
+      "train_fp": 0,
+      "empirical_precision": 1.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "OUTSIDE MODELS ARE PART OF THE DELEGATION POOL FOR ACTUAL JOBS, NOT ONLY ADVISORY CHAIRS \u2014 AND COST TIER IS PART OF THE EXECUTOR CHOICE. Joe has joined the system to other frontier",
+      "source_conditions": {
+        "refinements": "lambda f: f.delegate or _intent(f, r\"\\b(?:spawn|delegate|dispatch|fan[- ]?out|staff)\\b\", r\"\\b(?:agent|worker|model|workflow|task)\\b\")",
+        "additions": "lambda f: f.delegate"
+      }
+    },
+    "94806da2": {
+      "decision": "dropped",
+      "train_tp": 1,
+      "train_fp": 5,
+      "empirical_precision": 0.16666666666666666,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "FOR ANY SOURCE THAT WILL CHANGE DOCTRINE, RULES, OR RECORDS, READ THE RAW BYTES \u2014 never let a fetch tool's summary layer be the only reader. Proven necessary 2026-08-06 night: WebF",
+      "source_conditions": {
+        "additions": "_source"
+      }
+    },
+    "590b11e1": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NO METRIC WITHOUT A BOUND ACTION \u2014 a CONSTRAINT that binds at the moment of building. When a session adds or edits any health row, alarm, meter, or trend surface (the detectable mo",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c315befa": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NAME THE DEAL IN THE QUESTION ITSELF. Any question, interview box, draft, or status ask presented to a partner must carry the specific subject \u2014 practice/deal name, and the ref whe",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d8c9b1f0": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A FINDING THAT ONLY EXISTS IN A RECORD HAS NOT REACHED THE PARTNER. Before raising any loop, sweep finding, or automated-run output with Joe or Dell, check whether it was ever actu",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "a9ecd5b4": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A CHECK MUST COMPARE THE ARTIFACT AGAINST WHAT IT SHOULD BE, AND A SUCCESS SIGNAL MUST BE DERIVED FROM READING THAT ARTIFACT. Binds at two named moments.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d7e6de46": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CLIENT BENEFIT VALUE IS NOT REVENUE, AND THE TWO MUST NEVER MEET IN THE SAME FIELD. A deal's `won_value` is the value DELIVERED TO THE CLIENT \u2014 the number on the Benefit Summary Sh",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "7105955b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A RENUMBERED OR SUPERSEDED ROW IS NOT AN ABANDONED ONE, AND THE CLOSE MUST SAY SO IN ITS FIRST WORDS. The loop verbs offer only two resolutions, `done` and `dropped`, and neither f",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "3d185f2b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 6,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "SYSTEM-DESIGN BUILDS FINISH THROUGH JOE; DELL REVIEWS FINISHED PRODUCT, NEVER GATES THE PROCESS. Joe is the AI/system-design partner: on system builds (voices, personas, tools, app",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "f0f9156e": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "OPTIMIZE FOR MOBILITY; PRIVACY IS A PRESENTED CONCERN, NOT A SILENT DEFAULT. Joe never ruled the system local-first \u2014 sessions inferred that posture from privacy reasoning and comp",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "14181e60": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DATABASE FIRST; MARKDOWN ONLY WHERE A MACHINE REQUIRES A FILE. Constraint, binding the moment a session is about to Write/Edit a .md file: stop and route content to the database vi",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "b42f11a0": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "BUILD FOR THE TRAJECTORY, NOT THE SNAPSHOT. When sizing any system build, capacity decision, or architecture choice, the design target is where the practice is GOING \u2014 both partner",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "23ea0607": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 3,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "SALESFORCE PHASE IS NOT AUTHORITATIVE FOR A DEAL ALREADY CLOSED IN THE DEAL ROOM. FIRES AT: the moment a salesforce-diff CHANGED row proposes a phase move, on any run of the Salesf",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "76a53dfe": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A BLOCKED MARKDOWN WRITE IS NOT REDIRECTED, IT IS RE-ROUTED THROUGH THE VERBS. FIRES AT: the moment the record-home gate blocks a write, and the moment a session is about to hand a",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "5409731b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A NEW TRIGGER CHANGES THE PERMISSION SURFACE OF EVERY VERB THAT WRITES ITS TABLE \u2014 GRANT-CHECK EVERY TABLE THE TRIGGER READS, AS THE ROLE THAT WILL FIRE IT. FIRES AT: the moment a ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "308ef1de": {
+      "decision": "dropped",
+      "train_tp": 6,
+      "train_fp": 11,
+      "empirical_precision": 0.35294117647058826,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "TWO-WRITER DISCIPLINE COVERS THE GIT WORKING TREE: a session must CLAIM the working tree before creating or switching branches in ~/carr-system (or any shared checkout), exactly as",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "fb110a39": {
+      "decision": "selected",
+      "train_tp": 11,
+      "train_fp": 4,
+      "empirical_precision": 0.7333333333333333,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "FABLE IS RESERVED FOR ITS BEST USE CASES; OPUS, SONNET, CODEX AND GROK ARE THE SUBAGENT WORKFORCE. Fable \u2014 the frontier main-session model, which draws down the weekly allowance fa",
+      "source_conditions": {
+        "additions": "lambda f: f.delegate"
+      }
+    },
+    "179be4b8": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Finish feasible follow-ups that are necessary to deliver the current agreed result in the same session. Do not park an incomplete agreed deliverable merely because its remaining wo",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "6901cc3b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 5,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DOC MUST BE PERFECT, BECAUSE ADOPTION IS THE ONLY METRIC THAT MATTERS \u2014 AND ADOPTION IS BINARY. Joe's ruling 2026-08-08: if Doc is not perfect, Dell will never use him and Joe will",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "43e2ef76": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "PLAN THE CHECK BEFORE YOU BUILD THE THING. On any non-trivial build, change, or deliverable (3+ steps, or anything carrying a structure or architecture decision), the session decid",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "fc21a431": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CORRECTION \u2192 RULE, ON ANY CORRECTION, NOT JUST A DRAFT EDIT. The trigger is ANY moment a partner corrects, rejects, redirects, or overrules the session \u2014 a rejected draft, a bare \"",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "efbdfb1a": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "KNOWING EVERYTHING I KNOW NOW \u2014 THE DELIBERATE SECOND PASS. On any non-trivial build, once it works, the session pauses and asks explicitly: knowing everything I know now that I di",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "a6e6ab4e": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CHECK AGAINST THE BASELINE, NOT ONLY AGAINST THE SPEC. Whenever a change modifies something that already worked, verification includes a before-and-after comparison \u2014 the prior beh",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "df55c398": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "EVERY DELEGATED SWEEP CARRIES A DATA-CLASS BOUNDARY, AND A WIDENED SCOPE RE-STATES IT. Three clauses, all binding at the moment a subagent brief is written. (1) THE BOUNDARY LINE: ",
+      "source_conditions": {
+        "refinements": "_sweep",
+        "additions": "_sweep"
+      }
+    },
+    "8cddc6ad": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "RENAMING A SHARED ROW RE-LABELS EVERY RECORD ATTACHED TO IT \u2014 COUNT THE ATTACHMENTS BEFORE ANY RENAME. A rename is only equivalent to a correction when exactly one record rides the",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "1f3a7372": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A SCHEDULED ROUTINE LOGS ITS FINDINGS TO THE RECORD BEFORE IT ENDS \u2014 an unattended run that only prints is a run whose findings die with the session. Every scheduled task, cron job",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "af7de070": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 8,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A PERMISSION-CLASSIFIER BLOCK IS NOT A PERMISSION DENIAL \u2014 RETRY IT ONCE BEFORE EVER HANDING THE COMMAND TO THE PARTNER. This is the missing case in rule e313a3ca, whose hand-over ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "647f843d": {
+      "decision": "selected",
+      "train_tp": 2,
+      "train_fp": 0,
+      "empirical_precision": 1.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE DEFERRAL GATE: A LOOP IS FOR WORK THAT IS GENUINELY BLOCKED AND AT RISK OF BEING LOST, AND FOR NOTHING ELSE. Before opening any open_loop, the session must name why THIS sessio",
+      "source_conditions": {
+        "additions": "lambda f: \"add-loop\" in f.verbs"
+      }
+    },
+    "e8868cbe": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE 48-HOUR TEST IS THE SYSTEM'S ACCEPTANCE CRITERION. The system must run for a day or two with Joe absent and be fine. Joe's standard: \"if it cannot do that, then there is no ben",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d9874334": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CONSTRAINT, binding at the moment a session is about to name `capability` as a blocker or ask a partner for a permission: PROVE IT IS PERMISSION AND NOT THROUGHPUT FIRST. A timeout",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "740bb505": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "PROJECTING A LONG JOB: EXCLUDE DEAD TIME, INCLUDE CRASH OVERHEAD, AND SAY WHICH YOU DID. Two different mistakes bracket the true answer, and picking either denominator blindly prod",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9530fb1c": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NAMING THE RIGHT FIX AND NOT BUILDING IT IS THE SAME FAILURE AS DEFERRING IT. Joe, 2026-08-09, on being told worktree isolation \"would end it structurally\" and then handed nothing:",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "347a9ca6": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A SESSION'S NAME DOES NOT PREDICT THE WORK IT WILL DO. Joe works INSIDE routine and scheduled sessions, and turns them into full build sessions. His correction, 2026-08-09, after a",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "3a9dbafd": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NEVER MAKE A PARTNER DECODE AN ID. Say what the thing IS, in plain words, every time. Joe, 2026-08-09: \"you need to stop naming stuff in a way that doesn't tell me anything about w",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "eaa31ac5": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CONSTRAINT, binding at the moment a session is about to say it HANDED OFF, SENT, DELIVERED, NOTIFIED or PASSED something on: name the recipient, or do not use the word. Writing a r",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "e4d965d9": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A REFUSAL IS A CLOSED ROUTE, NOT A CLOSED PROBLEM. Binding at the moment a session is about to tell a partner it cannot do something: it must have tried more than one route, and mu",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "847f9995": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NO UNATTENDED PATH MAY DEPEND ON AN INTERACTIVE CREDENTIAL. Binding at the moment any scheduled job, cron task, launchd agent, background session or automated chain is built or rev",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4fae20f4": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A RATE IS NOT A BASELINE UNTIL YOU CHECK WHAT ELSE IS IN THE WINDOW.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "cff429f5": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A THIN CONTACT RECORD IS A RESEARCH TASK, NOT A QUESTION FOR JOE.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d7c69aa6": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A NEW NAME ON THE CALENDAR IS AN INTAKE TRIGGER, NOT A CALENDAR ENTRY.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "bc9188b4": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "EVERY SESSION COMMITS ITS OWN WORK, INCLUDING UNATTENDED AND BACKGROUND RUNS. The prior blanket ban on background/unattended commits is ABOLISHED. TRIGGER: fires the moment a run i",
+      "source_conditions": {
+        "additions": "_git_delivery"
+      }
+    },
+    "88e9b5eb": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "\"NOT AUTHORIZED\" AND \"NOT POSSIBLE\" ARE DIFFERENT FINDINGS AND MUST NEVER BE REPORTED AS THE SAME ONE. Binding at the moment a session writes a blocker into a loop or tells a partn",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c0b38d80": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "RE-BLESS THE GATE BASELINE IN THE SAME COMMIT THAT CHANGES A GATE. A constraint, binding at the moment a commit touches any gate script or the enforcement map listing which rules a",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "38b15dc6": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "ANY MULTI-CLAUSE INSTRUCTION GIVEN TO A PARTNER MUST PRESENT EACH CLAUSE SEPARATELY, NUMBERED, WITH AN EXPLICIT STATEMENT THAT ALL OF THEM ARE REQUIRED. Never pack several required",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "5e89c211": {
+      "decision": "dropped",
+      "train_tp": 2,
+      "train_fp": 9,
+      "empirical_precision": 0.18181818181818182,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "NEVER SPEND A COGNITION TOKEN ON STATE, RECURRENCE, ROUTING, VALIDATION, OR A DECISION ALREADY EXPRESSIBLE AS A TESTED PREDICATE. Do not invoke a model for state, recurrence, routi",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4402973a": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "SALVAGE BEFORE HEAL. When any healing, regeneration, or rewrite process detects content that was written to the wrong place \u2014 a generated file that drifted, a projection someone ed",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "24e10ee8": {
+      "decision": "dropped",
+      "train_tp": 14,
+      "train_fp": 29,
+      "empirical_precision": 0.32558139534883723,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE COMMIT MESSAGE AND THE DIFF MUST AGREE. Binding the moment a session writes any act into a commit message, close-out, decision entry, or partner report \u2014 not a review step afte",
+      "source_conditions": {
+        "additions": "lambda f: _git_delivery(f) or _code(f)"
+      }
+    },
+    "cd84d22a": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DECLINE THE CLAUDE CODE FEEDBACK-SURVEY TRANSCRIPT SHARE FROM ANY CARR SESSION.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "614c1209": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 3,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE SYSTEM INFERS CONTACT FROM EVIDENCE IT ALREADY HAS; IT DOES NOT ASK THE PARTNER TO REPORT HIS OWN ACTIVITY. Binding at the moment a session is about to ask a partner what he di",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "58b44ccb": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A SESSION THAT CANNOT REACH THE CODE REPO STOPS, AND A CLAUDE CODE CLOUD SESSION TELEPORTS RATHER THAN STOPPING DEAD. Trigger: a session tries to reach ~/carr-system (jbookout/carr",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "152ceb65": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "SHOW THE SHAPE, DO NOT NARRATE IT. When a session explains anything to a partner that HAS a shape \u2014 an ordering, a hierarchy, a before-and-after, a control flow, a set of parallel ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "e65efc68": {
+      "decision": "dropped",
+      "train_tp": 11,
+      "train_fp": 33,
+      "empirical_precision": 0.25,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "WRITE THE TEST BEFORE THE THING, AND ESPECIALLY BEFORE A GATE. On any non-trivial build, the check is WRITTEN and RUNNING before the implementation is finished \u2014 not designed in ad",
+      "source_conditions": {
+        "additions": "_code"
+      }
+    },
+    "1c21263c": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "REWORK IS A SIGNAL THE SESSION READS ON ITSELF, NOT ONE IT WAITS FOR A PARTNER TO NOTICE. When the same SHAPE of problem needs fixing about four times in one stretch of work, stop ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "1d50a3bb": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "WHEN A STOP GATE REOPENS A TURN, SEND THE DELTA, NOT THE MESSAGE AGAIN. A gate that blocks a turn is asking for one specific missing thing \u2014 fresh verification, a command actually ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "67580c28": {
+      "decision": "dropped",
+      "train_tp": 6,
+      "train_fp": 13,
+      "empirical_precision": 0.3157894736842105,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "CONSTRAINT, binding at the moment a session BUILDS, RESTYLES, OR REVIEWS ANY CARR SURFACE - a board, the Deal Room, the control room or command center, an artifact, a dashboard, a ",
+      "source_conditions": {
+        "refinements": "_surface",
+        "additions": "_surface"
+      }
+    },
+    "a8f159ad": {
+      "decision": "dropped",
+      "train_tp": 2,
+      "train_fp": 17,
+      "empirical_precision": 0.10526315789473684,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "CONSTRAINT, binding at the moment a session BUILDS OR REVIEWS ANY CARR SURFACE that carries structure - a board, the command center, the Deal Room, a client packet, a report, a pro",
+      "source_conditions": {
+        "refinements": "_surface",
+        "additions": "_surface"
+      }
+    },
+    "9293d609": {
+      "decision": "dropped",
+      "train_tp": 3,
+      "train_fp": 16,
+      "empirical_precision": 0.15789473684210525,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "CONSTRAINT, binding at the moment a session BUILDS OR REVIEWS ANY CARR SURFACE: it ships with real MOTION and real INTERACTIVITY, not a static page. Joe works entire days inside th",
+      "source_conditions": {
+        "refinements": "_surface",
+        "additions": "_surface"
+      }
+    },
+    "eeb3d106": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CONSTRAINT, binding at the moment a session BUILDS OR REVIEWS ANY CARR WORKSTATION SURFACE - the command center, a board, the Deal Room, any live dashboard: the surface must FEEL A",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4039b9b5": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DOCTRINE WRITING IS MODEL-AGNOSTIC. Any qualified seat writes doctrine \u2014 Fable, Sol 5.6, Opus, or whatever comes next. The \"single writer, the Fable design seat\" ownership stamp on",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "173119a8": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "CONSTRAINT, binding at the moment a session is about to say anything about UNCOMMITTED WORK, a DIRTY TREE, or who is BLOCKING whom: measure against `origin/<branch>`, never against",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "4a53ff82": {
+      "decision": "dropped",
+      "train_tp": 14,
+      "train_fp": 26,
+      "empirical_precision": 0.35,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "WORKTREE-PER-SESSION IS THE DEFAULT; THE CANONICAL TREE IS THE INTEGRATION LANE ONLY. Binding the moment a session is about to make its FIRST write to tracked files in ~/carr-syste",
+      "source_conditions": {
+        "additions": "_code"
+      }
+    },
+    "596f7549": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When a tool error blames a subsystem (an importer, an exporter, another lane), do not act on the blame until you have (1) verified the subsystem claim against the data it points at",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "ab814a26": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "A RULE SHIPS WITH ITS ENFORCEMENT, DECIDED AT CREATION \u2014 RECITATION IS NOT ENFORCEMENT. Binding the moment any rule is taught or amended: classify it then as (a) MACHINE-ENFORCEABL",
+      "source_conditions": {
+        "additions": "lambda f: bool(f.verbs & {\"teach\", \"approve-rule\", \"activate-rule\", \"amend-rule\"})"
+      }
+    },
+    "5cd8d0f6": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": true,
+      "rule_summary": "SELF-SERVE THE BLOCKER, THEN RUN THE COMMAND. When a session cannot run a terminal command but has the ability to make the change that would let it run (fix the command's form to m",
+      "source_conditions": {
+        "refinements": "lambda f: _has(f.text, r\"\\b(?:blocked|refused|denied|permission error|cannot run|can't run)\\b\")"
+      }
+    },
+    "1c42d80c": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "ALWAYS FIX THE THING; A WORKAROUND IS NOT A FIX. Binding at the moment a session hits friction it did not expect: a refusal, a false alarm, a command that has to be reshaped to get",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c8ebeb5b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "A PRACTICE OWNER SELLING TO A PLATFORM IS A LEAD, AND THE LEAD IS THEIR NEXT STARTUP \u2014 NOT THE SALE. When a finding lane surfaces a practice being acquired (a DSO or platform filin",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d7f74c93": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": true,
+      "rule_summary": "NEVER JUSTIFY AN AGENT-ACCESS BOUNDARY ON DATA CONFIDENTIALITY. Joe closed the exposure question on 2026-08-12 and it stays closed: Claude, Codex and Grok all read CARR material ro",
+      "source_conditions": {
+        "refinements": "lambda f: _has(f.text, r\"\\b(?:confidential|exposure|access boundary|data access|agent access|credential custody)\\b\")"
+      }
+    },
+    "bd4a6d22": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When Joe chooses a machine or system state permanently, change the check so it reads that state as accepted \u2014 do not leave the check red and route every future push around it. Name",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "6cfb67f5": {
+      "decision": "selected",
+      "train_tp": 11,
+      "train_fp": 1,
+      "empirical_precision": 0.9166666666666666,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "CONSTRAINT, binding at the moment a session delegates any task to another seat: the dispatch names the SPECIFIC model and its reasoning-effort level, never a vendor alone \u2014 \"Codex\"",
+      "source_conditions": {
+        "additions": "lambda f: f.delegate"
+      }
+    },
+    "1fcaa63a": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When a partner invokes the heavy build protocol \u2014 or the admission machinery derives work heavy \u2014 the session runs the FULL protocol defined in doctrine `heavy-build-protocol` with",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "737a68d6": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When a required record-layer capability has no verb, create and register that verb immediately as part of the same work; do not leave a database mutation dependent on an undocument",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "a7784a18": {
+      "decision": "dropped",
+      "train_tp": 18,
+      "train_fp": 31,
+      "empirical_precision": 0.3673469387755102,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "Every coding session must work in its own isolated worktree or clone. The shared checkout is coordination and bootstrap state only; it must not be used as an agent work surface. A ",
+      "source_conditions": {
+        "additions": "lambda f: _code(f) or _git_delivery(f)"
+      }
+    },
+    "b7ec8f3b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 1,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DOCTORCRE SURFACE GRAMMAR, from Joe's review of the V5-UX-S01 prototypes on 2026-09-16, applied site-wide: (1) A good title does the job; no descriptive sentence under a title, no ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "a2e78f48": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 2,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "AUTONOMOUS REPAIR OF KNOWN ISSUES, Joe's ruling 2026-09-16 from the Control Room prototype review: when the system detects that something is broken and the fix is known, agents rep",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "204391be": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "MISSING VERB, BUILD IT. Binding at the moment a session, while building or researching a product surface, finds that the record layer has no verb for something the surface needs (n",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "a3da3d39": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "ASK JOE DIRECTLY FOR EVERY APPROVAL, IN THE SAME TURN, WITH AN INTERVIEW BOX. Binding at the moment anything is left waiting on Joe's approval: a taught rule left proposed, a decis",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "f673326b": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Do not add access restrictions, data fences or protective steps Joe did not ask for when granting an agent access. Joe and Dell share all business knowledge and working behaviors, ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "661d7757": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Jev is available for all review work across coding, CI, pull requests, product, and CARR records. An agent may call Jev for a bounded review judgment whenever useful, including ind",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "76fcbed6": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "EVERY SOURCE JOE SENDS GETS ITS OWN FULL STUDY, STARTED WHEN IT ARRIVES, AND THE STUDY'S JOB IS TO APPLY IT. (1) One source per study job, launched as soon as the link arrives, nev",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c864b8cb": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When Joe needs to make several calls, ask ONE question at a time using an interview box \u2014 never batch multiple confirmations into a single message.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "57d13061": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 5,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "For any x.com/X retrieval \u2014 single links and research at scale alike \u2014 GROK BUILD IS THE FIRST MOVE (amended 2026-08-07 on Joe's order, from Chrome-first to Grok-first, after a liv",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "faae6748": {
+      "decision": "selected",
+      "train_tp": 1,
+      "train_fp": 0,
+      "empirical_precision": 1.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Never tell Joe to delete a file \u2014 always MOVE candidate deletions into a _to_delete staging folder yourself and let him decide wholesale. This applies to every surface (vault, OneD",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "6330bec8": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "On any non-trivial problem or decision, apply the crux discipline before generating options: refuse the first framing (a deliverable like \"we need a strategy\" or a symptom like \"X ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "6437ae15": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 6,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "When Joe provides an article, video, or any source, READ IT IN FULL and mine it for gold nuggets applicable to the CARR context \u2014 never triage by preview, title, or apparent audien",
+      "source_conditions": {
+        "additions": "_source"
+      }
+    },
+    "7e9739f2": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "All dialogue with Joe must be clear, concise, easily scannable, and as simple as possible while still carrying the details he needs. Lead with the outcome, short sections, no walls",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "5e896ed6": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "When Joe feeds a link (article, video, thread), the session incorporates the applicable learnings into the system in the same session \u2014 merge into the right doctrine file, log the ",
+      "source_conditions": {
+        "refinements": "_source",
+        "additions": "_source"
+      }
+    },
+    "98e74e7c": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 7,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When Joe feeds a link or source, never evaluate it only against its stated use case. Run a lateral pass the way Joe does: hold each capability or pattern up against the WHOLE syste",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "20d106f1": {
+      "decision": "dropped",
+      "train_tp": 3,
+      "train_fp": 6,
+      "empirical_precision": 0.3333333333333333,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Joe's development kit (personal scope, his request, three mechanisms): (1) CLOSE-BEFORE-OPEN \u2014 when Joe opens a substantial new build or design thread, the session surfaces his sin",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "19304882": {
+      "decision": "dropped",
+      "train_tp": 2,
+      "train_fp": 7,
+      "empirical_precision": 0.2222222222222222,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Joe's strength-training kit (personal scope, his request \u2014 reps that build, not guards that manage): (1) COMPRESSION REPS \u2014 on major decisions and builds, the session invites Joe's",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "bc4145f6": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Joe's curriculum rule (personal scope, his request): as sessions observe his working patterns through the development and strength-training mechanisms, they periodically recommend ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "58cef3a1": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Steelman Joe's labels (personal scope, from his own diagnosis): Joe's confident statements that are slightly off are usually correct intuitions wearing the wrong name \u2014 the compres",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "95e76c1f": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Joe's stated operating posture, in his own words (personal scope, his note 2026-08-01): \"Confidence without cockiness. Open minded but competent. I seek criticism as a strength bui",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "1021fa84": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Read Joe brokerage-first, not system-first. He started the CARR broker role in OCTOBER 2025 and spent nearly all of that time focused entirely on the brokerage work; the AI system ",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "bbffc139": {
+      "decision": "selected",
+      "train_tp": 17,
+      "train_fp": 1,
+      "empirical_precision": 0.9444444444444444,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "THE LEDGER TRIGGERS. Joe's development kit (rules 21-23: override ledger, calibration ledger, compression reps, timing gym, close-before-open) has produced ZERO entries since it wa",
+      "source_conditions": {
+        "additions": "_correction"
+      }
+    },
+    "27277539": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Encourage Joe's technical stretch; explain terms fully; never steer him to simpler alternatives.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "113b3833": {
+      "decision": "selected",
+      "train_tp": 14,
+      "train_fp": 8,
+      "empirical_precision": 0.6363636363636364,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "TRAIN candidate had >=0.50 empirical relevance; keep known action coverage and an availability margin",
+      "has_action_addition": true,
+      "has_baseline_refinement": true,
+      "rule_summary": "Retrieval-as-code (Jul 25): for any lookup beyond the standing core, run `~/carr-system/run.sh retrieve \"<question>\"` first and read only what it returns; rebuild via `run.sh secti",
+      "source_conditions": {
+        "refinements": "_lookup",
+        "additions": "_lookup"
+      }
+    },
+    "018ce972": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Cheapest-window timing: present structural changes as window math (cost now vs after the next dependency); he decides fast on that frame.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "d3774a28": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 3,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Concept coherence is his edge: when the conceptual model and file reality diverge, surface it explicitly and let him rule. Brand copy iterates line-by-line \u2014 rejections carry the d",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "dcf98880": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "He executes his human-side steps reliably \u2014 hand him precise verification steps; don't simplify them away.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "30a189fb": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Life AI check: a non-CARR task \u2192 STOP and ask whether it belongs in Life AI before writing here. Never store non-CARR brand material here.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "9b081605": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "Email handover: drafts for Joe's action are emailed from the AI Gmail TO joe.bookout@carr.us; auto-send whitelist = Joe's own CARR address ONLY. AI-Gmail Drafts = the pending queue",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "c66dc739": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 13,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "Mail capture on Joe's side reads the LOCAL mail stores on his Mac \u2014 never a Gmail API integration, and never ask him for Gmail auth (app-password or OAuth) again. The confirmed loc",
+      "source_conditions": {
+        "additions": "lambda f: _mail(f) and _has(f.text, r\"\\b(?:mail|emails?|inbox)\\b\")"
+      }
+    },
+    "25fab860": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "QUOTE TWEETS BELONG TO THE DAILY X REPLY RUN, NEVER TO THE WEEKLY BATCH. The `x-reply-run-daily` job already drafts roughly ten quote-tweet candidates per run, so a weekly social b",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "466a545a": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 7,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "When Joe feeds a source, the job is to IMPROVE the system with it, and the burden of proof sits on \"we already do this.\" Reading in full is not studying: grade every claim by testi",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "0156e9fa": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "END WITH ONE NEXT ACTION, NEVER A MENU. Close a message to Joe with a single thing to do or say \u2014 not two options, not a table of branches, not \"say X or Y and I'll do either.\" Whe",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "49533583": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 8,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": true,
+      "has_baseline_refinement": false,
+      "rule_summary": "CONSTRAINT, binding at the moment a session reaches for any of Joe's meetings, attendees, or mail: READ THE LOCAL APPLE STORES ON HIS MAC \u2014 APPLE CALENDAR AND APPLE MAIL \u2014 AND NEVE",
+      "source_conditions": {
+        "additions": "_mail"
+      }
+    },
+    "557838a5": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 5,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "WHEN JOE POSTS A LINK, THE QUOTED POST INSIDE IT IS PART OF THE SOURCE, NOT A FOOTNOTE. For any x.com link Joe hands over, the session reads the original post AND every post it quo",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "b3ea627f": {
+      "decision": "already_full_text_at_boot",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "boot receipt excludes repeated text",
+      "rationale": "retain live boot availability",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DO NOT SCRIPT JOE'S LINES. NEVER END A MESSAGE BY TELLING HIM A PHRASE TO SAY BACK. Binding at the moment a session is about to close a message to Joe.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "11b2b73b": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 12,
+      "empirical_precision": 0.0,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "DESIGN CONTENT JOE SHARES FEEDS THE DOCTRINE, EVERY TIME. When Joe shares UI/UX or web-design content (a thread, an article, a repo, another AI's output), the session's job is to m",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    },
+    "6172e7d5": {
+      "decision": "dropped",
+      "train_tp": 0,
+      "train_fp": 0,
+      "empirical_precision": null,
+      "condition": "action predicate or current delivery, then calibrated per-rule gate",
+      "rationale": "below TRAIN empirical relevance cutoff or no supported TRAIN delivery; shadow-only exclusion",
+      "has_action_addition": false,
+      "has_baseline_refinement": false,
+      "rule_summary": "GROK RUNS THE WATCH-VIDEO SKILL, AND IT IS THE DEFAULT SEAT FOR VIDEO AND IMAGE SOURCES. Grok Build is an installed local CLI with its own retrieval and its own multimodal reading.",
+      "source_conditions": {
+        "baseline": "Current routes/compiled trigger replay; then empirical per-rule gate."
+      }
+    }
+  },
+  "real_train": {
+    "cases": 121,
+    "jit_tp": 74,
+    "jit_fp": 0,
+    "precision": 1.0,
+    "availability_hits": 589,
+    "applications": 616,
+    "availability": 0.9561688311688312,
+    "text_tokens": 5235.5,
+    "unjudged": 0
+  },
+  "real_train_tokens": {
+    "event_full_text_estimate": 5235.5,
+    "once_per_session_full_text_estimate": 3325.25,
+    "session_groups": 72,
+    "per_session_once_estimate": 46.18402777777778,
+    "method": "statement characters/4; no rendered receipt/envelope overhead",
+    "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+    "limit": "sampled events only; unobserved earlier/later session turns are absent"
+  },
+  "real_train_sha256": "85d13cb60fd4ca1ddd6bc891aa57e0ee070e7f9bf3cb429c154de2144c783eb1",
+  "calibration_origin": {
+    "cutoff": 0.5,
+    "metric": "empirical TRAIN TP/(TP+FP); not a calibrated probability",
+    "counts_evidence": "round01.json",
+    "counts_sha256": "67bde7f7c79e447fe77a5cb2758cad2f9cb6b167f177d491ec355a74d162da24",
+    "selection_sha256": "451ad7fdc170245b128eb6329e31a300f0024f7d3f55ff9e85de9e6715bcae95",
+    "exclusions": "Every nonboot active rule outsideallow_ids is omitted in shadow proposal, including unknown/unseen active rules. Defaultmodulewithoutallow_ids preserves unknown baselineids."
+  }
+}

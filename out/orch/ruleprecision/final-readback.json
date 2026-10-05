@@ -1,0 +1,14 @@
+{
+  "schema": "ruleprecision-final-readback/v1",
+  "candidate_test_runs_per_split": 1,
+  "jev_calls_total": 0,
+  "files": {
+    "final-fixed-test.json": "0a416e0e0dc45707362aebd90fa24da937ce5ac9c9d7f8f359cb7060ae88fda3",
+    "final-real-test.json": "98bc71f51ed8f2c7190e1f5f83182f358a61528f230faa4df652257dba8fa34c",
+    "baseline-real-test.json": "1eb44f8a4c24971baed82888dcd70285d9890b16f11c96d283864a05c110c534",
+    "heldout-tokens.json": "d1a2f8d9fad75bfab78ba187c7746024284c1f5aa08a6c28af0a73ee38b9fca5"
+  },
+  "target_met_fixed": true,
+  "target_met_real_sample": true,
+  "no_post_test_tuning": true
+}

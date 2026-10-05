@@ -1,0 +1,51 @@
+{
+  "schema": "ruleprecision-study-render/v1",
+  "html_sha256": "21763a2e3fc549cfb67d507de9aab087ab83d75ab8b24731b2c58761afb1835a",
+  "bytes": 38117,
+  "source_assertions": {
+    "all_substantive_paragraphs_retained": true,
+    "primary_citations_retained": 6,
+    "tables": 3,
+    "native_disclosures": 12,
+    "external_assets": 0,
+    "javascript": false,
+    "candidate_test_scoring": false,
+    "selector_changes": false
+  },
+  "visual_readback": {
+    "browser": "Chrome",
+    "url": "loopback temporary report preview",
+    "verified": [
+      "navy/orange hero",
+      "four separately labelled metric cards",
+      "readable delivery-path table",
+      "readable rule-noise table",
+      "implementation disclosure opens and shows full text"
+    ],
+    "narrow_viewport_visual_test": false
+  },
+  "train_chronology": {
+    "earlier_snapshot": {
+      "tp": 142,
+      "fp": 347,
+      "availability_hits": 1355,
+      "applications": 1690,
+      "accepted": false
+    },
+    "current_predicate": {
+      "tp": 140,
+      "fp": 336,
+      "availability_hits": 1353,
+      "applications": 1690,
+      "accepted": false
+    },
+    "calibrator_status": "completed; retained winner and held-out results in final-lock.json and final.html"
+  },
+  "root_readback": {
+    "report_desktop_visual_check": true,
+    "dark_report_contrast": true,
+    "final_report_disclosures_checked": true,
+    "frozen_hashes_match": true,
+    "narrow_viewport_visual_test": false
+  }
+}

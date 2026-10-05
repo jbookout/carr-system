@@ -1,0 +1,70 @@
+{
+  "schema": "ruleprecision-train-checkpoint/v1",
+  "candidate": "source-lookup-v5",
+  "source_sha256": "92008fa3318ec538a8003b9a2c02dfce201fc2cb32cef451456bfe82c7370362",
+  "config_sha256": "451ad7fdc170245b128eb6329e31a300f0024f7d3f55ff9e85de9e6715bcae95",
+  "train_sha256": "0c7d04ac4de81fc0f2c64dbedd625bb08d51713dcb5b3dd6a23ddbda3f93386c",
+  "real_train_sha256": "85d13cb60fd4ca1ddd6bc891aa57e0ee070e7f9bf3cb429c154de2144c783eb1",
+  "contract_sha256": "c3430795a0bfed2e8762026308c55ce435bded914fd767a2b0ed6a8ac1ca1d37",
+  "corpus_sha256": "9fc1b0c33ee3c6820c15a46baca6ea32a85449ad4911bae78e94af25c5a4c4f9",
+  "ledger_sha256": "1c18a58575b67b827d2ada72274a30cc48fef1691cb12f4465b31e1406db8d50",
+  "train": {
+    "cases": 168,
+    "jit_tp": 179,
+    "jit_fp": 41,
+    "precision": 0.8136363636363636,
+    "availability_hits": 1392,
+    "applications": 1690,
+    "availability": 0.8236686390532545,
+    "text_tokens": 81696.0,
+    "unjudged": 0
+  },
+  "real_train": {
+    "cases": 121,
+    "jit_tp": 74,
+    "jit_fp": 0,
+    "precision": 1.0,
+    "availability_hits": 589,
+    "applications": 616,
+    "availability": 0.9561688311688312,
+    "text_tokens": 5235.5,
+    "unjudged": 0
+  },
+  "jev_calls_total": 0,
+  "test_touched": false,
+  "final_test_runs_by_this_executor": 0,
+  "plateau": {
+    "rounds": [
+      "point-optimal-rule-knapsack",
+      "minimum-positive-support-3",
+      "baseline-conjunction-only"
+    ],
+    "accepted_precision_gain_pp": [
+      0,
+      0,
+      0
+    ],
+    "reason": "one fragileavailability candidate, one weakerprecision candidate, one floorfailing candidate"
+  },
+  "token_estimates": {
+    "synthetic_train": {
+      "event_full_text_estimate": 91765.25,
+      "once_per_session_full_text_estimate": 81696.0,
+      "session_groups": 168,
+      "per_session_once_estimate": 486.2857142857143,
+      "method": "statement characters/4; no rendered receipt/envelope overhead",
+      "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+      "limit": "sampled events only; unobserved earlier/later session turns are absent"
+    },
+    "real_train": {
+      "event_full_text_estimate": 5235.5,
+      "once_per_session_full_text_estimate": 3325.25,
+      "session_groups": 72,
+      "per_session_once_estimate": 46.18402777777778,
+      "method": "statement characters/4; no rendered receipt/envelope overhead",
+      "grouping": "hashed session_group when supplied; otherwise each synthetic case is a session proxy",
+      "limit": "sampled events only; unobserved earlier/later session turns are absent"
+    }
+  },
+  "next_action": "Root copies frozen source/config and runs one final held-out checkpoint; no retuning from test examples."
+}
