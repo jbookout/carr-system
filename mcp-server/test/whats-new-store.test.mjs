@@ -1,4 +1,4 @@
-import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
+import { acquirePostgresFixtureGroup, postgresEnv } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -30,9 +30,9 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
   const clients = [];
   const releaseBudget = await acquirePostgresFixtureGroup();
   try {
-    execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
+    execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe', env: postgresEnv });
     // Hosted Postgres uses UTC; the catchup date contract uses America/Chicago.
-    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h '' -c timezone=UTC`,'-w','start'], { stdio: 'pipe' });
+    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h '' -c timezone=UTC`,'-w','start'], { stdio: 'pipe', env: postgresEnv });
     running = true;
     const connect = async () => {
       const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
@@ -260,7 +260,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
   } finally {
     try {
       for (const c of clients) await c.end();
-      if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio:'pipe' });
+      if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio: 'pipe', env: postgresEnv });
       mkdirSync('/tmp/_to_delete',{ recursive:true });
       renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
     } finally {

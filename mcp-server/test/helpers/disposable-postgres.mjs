@@ -2,6 +2,10 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+// The environment for initdb and pg_ctl. A macOS postmaster started with no
+// locale aborts ("postmaster became multithreaded during startup").
+export const postgresEnv = Object.freeze({ ...process.env, LC_ALL: 'C' });
+
 // Use the same kernel-owned lease as Python proofs, across all worktrees.
 export async function acquirePostgresFixtureGroup() {
   const child = spawn('python3', ['-u', fileURLToPath(new URL('../../../lib/disposable_pg_fixture.py', import.meta.url))],

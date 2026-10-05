@@ -1,4 +1,4 @@
-import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
+import { acquirePostgresFixtureGroup, postgresEnv } from './helpers/disposable-postgres.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -48,7 +48,7 @@ test("confirm-merge executes against the current activity schema", async t => {
   // Short socket path avoids macOS's Unix socket length limit for worktrees.
   const socket = "/tmp";
   const port = 20000 + process.pid % 30000;
-  const run = (command, args) => execFileSync(path.join(bin, command), args, { encoding: "utf8", stdio: "pipe" });
+  const run = (command, args) => execFileSync(path.join(bin, command), args, { encoding: "utf8", stdio: "pipe", env: postgresEnv });
   let db;
   let startAttempted = false;
   const releaseBudget = await acquirePostgresFixtureGroup();

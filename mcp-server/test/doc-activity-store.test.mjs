@@ -1,4 +1,4 @@
-import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
+import { acquirePostgresFixtureGroup, postgresEnv } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -24,8 +24,8 @@ test('activity feed executes store predicates, cursor serialization and selected
   let running = false, c;
   const releaseBudget = await acquirePostgresFixtureGroup();
   try {
-    execFileSync(path.join(bin, 'initdb'), ['-D', dir, '-U', 'fixture', '--auth=trust', '--no-locale'], { stdio: 'pipe' });
-    execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-l', path.join(dir, 'server.log'), '-o', `-k ${dir} -h ''`, '-w', 'start'], { stdio: 'pipe' });
+    execFileSync(path.join(bin, 'initdb'), ['-D', dir, '-U', 'fixture', '--auth=trust', '--no-locale'], { stdio: 'pipe', env: postgresEnv });
+    execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-l', path.join(dir, 'server.log'), '-o', `-k ${dir} -h ''`, '-w', 'start'], { stdio: 'pipe', env: postgresEnv });
     running = true;
     c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
     await c.connect();
@@ -120,7 +120,7 @@ test('activity feed executes store predicates, cursor serialization and selected
   } finally {
     try {
       if (c) await c.end();
-      if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' });
+      if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe', env: postgresEnv });
     } finally {
       await releaseBudget();
     }

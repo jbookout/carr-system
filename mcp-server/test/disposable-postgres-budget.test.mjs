@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
+import { acquirePostgresFixtureGroup, postgresEnv } from './helpers/disposable-postgres.mjs';
 
 test('Node PostgreSQL fixtures hold the shared budget through teardown', async () => {
   const first = await acquirePostgresFixtureGroup();
@@ -40,6 +40,15 @@ test('all Node cluster constructors acquire the shared fixture budget', async ()
   }
   const constructors = await scan(root);
   assert.ok(constructors.length > 0);
-  for (const { url, source } of constructors)
+  for (const { url, source } of constructors) {
     assert.match(source, /await acquirePostgresFixtureGroup\(/, url.pathname);
+    // A macOS postmaster with no locale aborts at startup, so the cluster
+    // commands run under the helper's pinned-locale environment.
+    assert.match(source, /env: postgresEnv\b/, url.pathname);
+  }
+});
+
+test('the shared PostgreSQL environment pins the C locale', () => {
+  assert.equal(postgresEnv.LC_ALL, 'C');
+  assert.equal(postgresEnv.PATH, process.env.PATH);
 });

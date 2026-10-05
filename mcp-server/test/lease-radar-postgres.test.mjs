@@ -1,4 +1,4 @@
-import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
+import { acquirePostgresFixtureGroup, postgresEnv } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,mkdtempSync,existsSync,mkdirSync,renameSync} from 'node:fs';
@@ -15,8 +15,8 @@ test('real PostgreSQL projection covers horizon, missing dates, tombstones, hold
   const dir=mkdtempSync('/tmp/lease-radar-');let c,running=false;
   const releaseBudget = await acquirePostgresFixtureGroup();
   try{
-    execFileSync(path.join(bin,'initdb'),['-D',dir,'-U','fixture','--auth=trust','--no-locale'],{stdio:'pipe'});
-    execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'],{stdio:'pipe'});running=true;
+    execFileSync(path.join(bin,'initdb'),['-D',dir,'-U','fixture','--auth=trust','--no-locale'],{ stdio: 'pipe', env: postgresEnv });
+    execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'],{ stdio: 'pipe', env: postgresEnv });running=true;
     c=new pg.Client({host:dir,user:'fixture',database:'postgres'});await c.connect();
     const schema=readFileSync(new URL('../../db/schema.sql',import.meta.url),'utf8');
     for(const name of ['actor','client','party','client_status','lease','next_action','critical_date']){
@@ -71,7 +71,7 @@ test('real PostgreSQL projection covers horizon, missing dates, tombstones, hold
   } finally {
     try {
       try { await c?.end(); } finally {
-        if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{stdio:'pipe'});
+        if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{ stdio: 'pipe', env: postgresEnv });
         mkdirSync('/tmp/_to_delete',{recursive:true});
         renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
       }
@@ -83,8 +83,8 @@ test('database horizon changes both reported coverage and membership, including 
   const dir=mkdtempSync('/tmp/lease-radar-policy-');let c,running=false;
   const releaseBudget = await acquirePostgresFixtureGroup();
   try{
-    execFileSync(path.join(bin,'initdb'),['-D',dir,'-U','fixture','--auth=trust','--no-locale'],{stdio:'pipe'});
-    execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'],{stdio:'pipe'});running=true;
+    execFileSync(path.join(bin,'initdb'),['-D',dir,'-U','fixture','--auth=trust','--no-locale'],{ stdio: 'pipe', env: postgresEnv });
+    execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'],{ stdio: 'pipe', env: postgresEnv });running=true;
     c=new pg.Client({host:dir,user:'fixture',database:'postgres'});await c.connect();
     const schema=readFileSync(new URL('../../db/schema.sql',import.meta.url),'utf8');
     for(const name of ['actor','client','party','client_status','lease','next_action','critical_date']){
@@ -118,7 +118,7 @@ test('database horizon changes both reported coverage and membership, including 
   } finally {
     try {
       try { await c?.end(); } finally {
-        if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{stdio:'pipe'});
+        if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{ stdio: 'pipe', env: postgresEnv });
         mkdirSync('/tmp/_to_delete',{recursive:true});
         renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
       }
