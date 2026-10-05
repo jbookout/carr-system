@@ -17,6 +17,7 @@ import time
 import uuid
 
 import typesafe_client as ts
+import jev_semantic
 from git_env import fixture_env, scrubbed_env
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,9 +67,8 @@ class Shim:
                         state = payload["state"]
                         state = dict(state) if isinstance(state, dict) else {"source": state}
                         state["review_attribution"] = self.attribution
-                        result = ts.ask(state,
-                                        payload["questions"], model=MODEL,
-                                        caller="jevlint_review", session_id=self.session,
+                        result = jev_semantic.ask(state, payload["questions"], client=ts,
+                                        caller="jevlint_review", version="jevlint-systemone-v1", session_id=self.session,
                                         facets=["evidence_matching"],
                                         cache_ttl_seconds=0, timeout=8, deadline=time.monotonic() + 8)
                     finally:
@@ -78,13 +78,15 @@ class Shim:
                             self.paid_attempts += count
                 if result.get("model") != MODEL:
                     raise ts.TypeSafeError("unexpected judgment model")
+                if result.get("cache_hit"):
+                    self.cached += 1
                 result = {k: result[k] for k in ("model", "answers", "usage") if k in result}
                 self.answered += 1
                 response = (200, result)
             except ts.JevCallRefused as exc:
                 self.refused += 1
                 response = (403, {"error": exc.code})
-            except ts.TypeSafeError:
+            except (ts.TypeSafeError, ValueError, TimeoutError):
                 self.errors += 1
                 # 502 would make upstream retry. An unavailable judgment is
                 # terminal here and must never become an advisory clean pass.

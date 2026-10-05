@@ -123,6 +123,25 @@ class RoutingTests(unittest.TestCase):
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_reused_answers_are_excluded_from_provider_repeat_metrics(self):
+        ev = load("paired_eval")
+        request = {"state": "synthetic", "model": "jev-1.13.0", "questions": {"q": {"type": "noul"}}}
+        corpus = ev.freeze([{"receipt_id": "cached-fixture", "request": request,
+                             "request_sha256": ev.digest(request), "work_class": "system_work", "gold": {"q": True}}])
+        def answer(*a, **k):
+            return {"cache_hit": True, "model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": .9}},
+                    "usage": {"input_tokens": 1000, "output_tokens": 10}, "latency_ms": 123}
+        report = ev.run(corpus, answer, answer, repeats=2,
+                        rates={name: {"input_usd_per_million": 2, "output_usd_per_million": 4} for name in ("jev", "decisions")})
+        self.assertEqual(report["status"], "incomplete")
+        self.assertEqual(report["paired_successes"], 0)
+        for metrics in report["providers"].values():
+            self.assertEqual(metrics["successes"], 0)
+            self.assertEqual(metrics["cache_hits"], 2)
+            self.assertEqual(metrics["cost_usd"], 0)
+            self.assertIsNone(metrics["p50_latency_ms"])
+            self.assertEqual(metrics["labelled_questions"], 0)
+
     def test_score_alias_collisions_and_shadowed_invalid_values_are_not_evidence(self):
         ev = load("paired_eval")
         request = {"state": "code", "model": "jev-1.13.0", "questions": {
