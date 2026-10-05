@@ -16,6 +16,49 @@ PLUGIN = REPO / "plugins/pstack"
 
 
 class PortContractTests(unittest.TestCase):
+    def test_versioned_marketplace_survives_source_worktree_removal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "canonical"
+            root.mkdir()
+            env = fixture_env()
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, env=env, check=True, capture_output=True)
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "selftest@example.invalid")
+            git("config", "user.name", "Selftest")
+            git("config", "core.hooksPath", "/dev/null")
+            shutil.copytree(PLUGIN, root / "plugins/pstack", ignore=shutil.ignore_patterns("node_modules", "__pycache__"))
+            shutil.copytree(REPO / ".claude-plugin", root / ".claude-plugin")
+            git("add", "plugins/pstack", ".claude-plugin")
+            git("commit", "-qm", "fixture")
+            revision = git("rev-parse", "HEAD").stdout.decode().strip()
+            feature = Path(tmp) / "feature"
+            git("worktree", "add", "-qb", "topic", str(feature))
+            store = Path(tmp) / "installed-marketplaces"
+            def bundle(source, destination=store):
+                return subprocess.run([sys.executable, str(source / "plugins/pstack/scripts/bundle.py"),
+                                       str(destination)], cwd=source, env=env, capture_output=True, text=True)
+            rejected = bundle(feature, feature / "out/bundles")
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("outside Git checkouts", rejected.stderr)
+            result = bundle(feature)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = Path(result.stdout.strip())
+            self.assertEqual(installed, store.resolve() / revision)
+            expected = (feature / "plugins/pstack/skills/architect/SKILL.md").read_bytes()
+            git("worktree", "remove", str(feature))
+            self.assertEqual((installed / "plugins/pstack/skills/architect/SKILL.md").read_bytes(), expected)
+            self.assertFalse(any(path.is_symlink() for path in installed.rglob("*")))
+            self.assertFalse((installed / ".git").exists())
+            self.assertEqual(json.loads((installed / ".claude-plugin/marketplace.json").read_text())["name"], "carr-local")
+            again = bundle(root)
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(again.stdout, result.stdout)
+            (installed / "plugins/pstack/skills/architect/SKILL.md").write_text("corrupted")
+            corrupt = bundle(root)
+            self.assertNotEqual(corrupt.returncode, 0)
+            self.assertIn("bundle differs from committed source", corrupt.stderr)
+
     def test_manifest_cannot_grant_a_depth_exception(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
