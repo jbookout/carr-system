@@ -130,6 +130,10 @@ def _semantic():
     return module
 
 
+def roster_binding(rules):
+    material = sorted((r["id"], r["statement"]) for r in rules)
+    return hashlib.sha256(json.dumps(material, ensure_ascii=False).encode()).hexdigest()
+
 def label_case(case, rules, tsc, *, calls_log, timeout=120.0):
     """{rule id: probability} for one bounded case in one request. Rules settled by UNIVERSAL_POLICY are not asked: they get 1.0 or
     0.0 from the policy. Returns (probabilities, usage) with usage
@@ -150,7 +154,8 @@ def label_case(case, rules, tsc, *, calls_log, timeout=120.0):
                                  calls_log=calls_log, timeout=timeout, facets=["evidence_matching"])
         for rid, row in answer["answers"].items():
             probs[rid] = round(float(row["noul"]), 4)
-        usage.update(answer.get("usage") or {})
+        usage.update({"input_tokens": 0, "output_tokens": 0} if answer.get("cache_hit") else answer.get("usage") or {})
+        usage["cached_observation"] = answer.get("cached_observation") or (answer.get("usage") if answer.get("cache_hit") else None)
         usage["requests"] = 0 if answer.get("cache_hit") else 1
     return probs, usage
 
@@ -177,10 +182,11 @@ def second_pass(rule, cases, tsc, *, calls_log, timeout=120.0):
             false="The rule's trigger is not met by this turn's action.")
     answer = _semantic().ask(state, questions, client=tsc, caller="rule_gold_label", version="second-pass-v1", calls_log=calls_log, timeout=timeout,
                      facets=["evidence_matching"])
-    u = answer.get("usage") or {}
+    u = {} if answer.get("cache_hit") else answer.get("usage") or {}
     return ({cid: round(float(row["noul"]), 4) for cid, row in (answer.get("answers") or {}).items()},
             {"input_tokens": int(u.get("input_tokens") or 0),
-             "output_tokens": int(u.get("output_tokens") or 0), "requests": 1})
+             "output_tokens": int(u.get("output_tokens") or 0), "requests": 0 if answer.get("cache_hit") else 1,
+             "cached_observation": answer.get("cached_observation") or (answer.get("usage") if answer.get("cache_hit") else None)})
 
 
 # ------------------------------------------------------------------ doctrine (second target)
@@ -236,7 +242,7 @@ def doctrine_label_case(case, documents, sections, tsc, *, calls_log, search_ref
     bodies = answer["answers"]
     doc_p = {d["id"]:float(bodies["d"+str(i)]["noul"]) for i,d in enumerate(docs)}
     sec_p = {row["ref"]:float(bodies["s"+str(i)]["noul"]) for i,row in enumerate(picked)}
-    usage = {"input_tokens":int((answer.get("usage") or {}).get("input_tokens") or 0),
+    usage = {"input_tokens":0 if answer.get("cache_hit") else int((answer.get("usage") or {}).get("input_tokens") or 0),
              "requests":0 if answer.get("cache_hit") else 1, "shortlist":len(picked),
              "unjudged": [row["ref"] for row in sections if row["ref"] not in refs]}
 

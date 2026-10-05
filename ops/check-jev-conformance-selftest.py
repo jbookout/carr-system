@@ -13,6 +13,26 @@ def load(name):
     return module
 
 class Conformance(unittest.TestCase):
+    def test_semantic_imports_and_independent_function_scopes(self):
+        checker = load('check-jev-conformance')
+        for source in (
+            "from jev_semantic import ask as ask_once\ndef run(s,q):\n return ask_once(s,q,caller='x',version='v1')",
+            "import jev_semantic as api\ndef run(s,q):\n return api.ask(s,q,caller='x',version='v1')",
+            "import jev_semantic as semantic\ndef outer(s,q):\n def a():\n  return semantic.ask(s,q,caller='x',version='v1')\n def b():\n  return semantic.ask(s,q,caller='x',version='v1')",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(checker.python_errors(source), [])
+        # Imports inside sibling functions cannot confer a semantic exemption.
+        source = """def a(s,q):
+ from jev_semantic import ask
+ return ask(s,q,caller='x',version='v1')
+def b(s,q):
+ from typesafe_client import ask
+ return ask(s,q,caller='x',version='v1')
+"""
+        errors = checker.python_errors(source)
+        self.assertTrue(any('6: model' in error for error in errors), errors)
+
     def test_loop_cannot_repeat_unchanged_state(self):
         checker = load('check-jev-conformance')
         errors = checker.python_errors("""import typesafe_client as tsc

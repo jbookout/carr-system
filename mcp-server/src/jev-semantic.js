@@ -8,6 +8,7 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 export async function cachedSemanticAsk(askJev, request, version) {
+  request = structuredClone(request);
   if (request.model !== MODEL || !version) throw new Error("pin semantic model and question-set version");
   const questions = Object.fromEntries(Object.entries(request.questions).sort().map(([k,q]) =>
     [k, q.type === "choice" ? {...q, criteria:Object.fromEntries(Object.entries(q.criteria).sort())} : q]));

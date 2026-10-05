@@ -15,21 +15,45 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BASELINE = ROOT/'ops/config/jev-conformance-legacy.v1.json'
 
+def scope_nodes(scope):
+    """Walk one executable scope, leaving independent function bodies alone."""
+    yield scope
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield from scope_nodes(child)
+
 def python_errors(source):
     tree = ast.parse(source)
     errors = []
     if not re.search(r'typesafe|jev_judge|jev_semantic', source):
         return errors
-    aliases = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
-               and (n.module or '').split('.')[-1] in {'typesafe_client','jev_judge','jev_semantic'}
-               for a in n.names if a.name in {'ask','judge','_ask_jev','server_ask'}}
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     scopes = [tree]+[n for n in ast.walk(tree) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))]
     for scope in scopes:
+        ancestry, parent = [scope], parents.get(scope)
+        while parent is not None:
+            if parent in scopes:
+                ancestry.append(parent)
+            parent = parents.get(parent)
+        imports = {}
+        for ancestor in reversed(ancestry):
+            for node in scope_nodes(ancestor):
+                if isinstance(node, ast.ImportFrom):
+                    module = (node.module or '').split('.')[-1]
+                    for alias in node.names:
+                        imports[alias.asname or alias.name] = (module, alias.name)
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        imports[alias.asname or alias.name] = (alias.name.split('.')[-1], None)
+        aliases = {name for name, (module, method) in imports.items()
+                   if module in {'typesafe_client', 'jev_judge', 'jev_semantic'}
+                   and method in {'ask', 'judge', '_ask_jev', 'server_ask'}}
+        semantic_aliases = {name for name, value in imports.items() if value == ('jev_semantic', 'ask')}
+        semantic_modules = {name for name, value in imports.items() if value == ('jev_semantic', None)}
         seen = set()
-        nodes = [n for n in ast.walk(scope) if isinstance(n,ast.Call)]
-        if scope is tree:
-            nested = {id(n) for f in scopes[1:] for n in ast.walk(f)}
-            nodes = [n for n in nodes if id(n) not in nested]
+        local_nodes = list(scope_nodes(scope))
+        nodes = [n for n in local_nodes if isinstance(n,ast.Call)]
         for n in nodes:
             method = n.func.attr if isinstance(n.func,ast.Attribute) else getattr(n.func,'id','')
             if not ((isinstance(n.func,ast.Attribute) and method in {'ask','judge','_ask_jev','server_ask'}) or method in aliases):
@@ -39,10 +63,10 @@ def python_errors(source):
             # call expression. A state derived inside that loop is new evidence.
             state_node = n.args[0] if n.args else next((k.value for k in n.keywords if k.arg == 'state'), ast.Constant(None))
             state_names = {v.id for v in ast.walk(state_node) if isinstance(v, ast.Name)}
-            for loop in (v for v in ast.walk(scope) if isinstance(v, (ast.For, ast.AsyncFor, ast.While))):
-                if not any(v is n for child in loop.body for v in ast.walk(child)):
+            for loop in (v for v in local_nodes if isinstance(v, (ast.For, ast.AsyncFor, ast.While))):
+                if not any(v is n for child in loop.body for v in scope_nodes(child)):
                     continue
-                changed_names = {v.id for child in loop.body for v in ast.walk(child)
+                changed_names = {v.id for child in loop.body for v in scope_nodes(child)
                                  if isinstance(v, ast.Name) and isinstance(v.ctx, ast.Store)}
                 if isinstance(loop, (ast.For, ast.AsyncFor)):
                     changed_names |= {v.id for v in ast.walk(loop.target) if isinstance(v, ast.Name)}
@@ -51,7 +75,13 @@ def python_errors(source):
             if state in seen:
                 errors.append(f'{n.lineno}: fanout: combine all questions for this state')
             seen.add(state)
-            if isinstance(n.func,ast.Attribute) and 'semantic' in ast.unparse(n.func.value):
+            semantic_call = (isinstance(n.func, ast.Name) and method in semantic_aliases) or (
+                isinstance(n.func, ast.Attribute) and (
+                    (isinstance(n.func.value, ast.Name) and n.func.value.id in semantic_modules)
+                    or (isinstance(n.func.value, ast.Name) and n.func.value.id not in imports
+                        and 'semantic' in n.func.value.id)
+                    or (not isinstance(n.func.value, ast.Name) and 'semantic' in ast.unparse(n.func.value))))
+            if semantic_call:
                 kw = {k.arg:k.value for k in n.keywords}
                 if not {'caller','version'} <= kw.keys():
                     errors.append(f'{n.lineno}: cache: semantic call needs caller/version')

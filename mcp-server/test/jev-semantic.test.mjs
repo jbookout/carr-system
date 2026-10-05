@@ -25,3 +25,14 @@ test('invalid, partial or wrong-model responses never cache',async()=>{
     assert.equal(calls,2);
   }
 });
+test('the hashed payload and submitted evidence are one immutable snapshot', async()=>{
+  const input=request(); input.state.text='before'; let seen;
+  const ask=async r=>{seen=structuredClone(r);return {answers:{q:{choice:'a'}}};};
+  const pending=cachedSemanticAsk(ask,input,'snapshot-v1');
+  input.state.text='after'; input.questions.q.criteria.a='Changed';
+  await pending;
+  assert.equal(seen.state.text,'before');
+  assert.equal(seen.questions.q.criteria.a,'A');
+  const hit=await cachedSemanticAsk(ask,{...request(),state:{text:'before'}},'snapshot-v1');
+  assert.equal(hit.cache_hit,true);
+});

@@ -13,6 +13,28 @@ const eligible = (text) => ({ ...record(text),
   next_actions: [{ status: 'open', description: 'Ask the tenant to review the revised rent and approve a response to the landlord.' }],
 });
 
+test('all legal rejection values abstain at the public deal interface', async()=>{
+  for(const rejection of [null,undefined,'synthetic',{reason:'synthetic'}]) {
+    clearSemanticCache();
+    const result=await readDealWithJev(eligible('The landlord sent a counter and the tenant must respond. '.repeat(4)),
+      {askJev:async()=>{throw rejection;}});
+    assert.equal(result.reason,'jev_unavailable');
+    assert.equal(result.judged,false);
+  }
+});
+test('date-only deadlines use the CARR calendar day, including invalid dates',()=>{
+  // CARR business dates use America/Chicago, including the UTC day boundary.
+  for(const now of ['2026-10-04T12:00:00Z','2026-10-05T01:00:00Z']) {
+    for(const [day,relative,expired] of [['2026-10-03','past',true],['2026-10-04','future_or_today',false],
+      ['2026-10-05','future_or_today',false],['bad','unknown',null],['2026-02-30','unknown',null]]) {
+      const state=dealReadingState({...record(''),critical_dates:[{due_on:day,status:'open'}],
+        negotiation_rounds:[{expires_on:day}]},new Date(now)).state.deal;
+      assert.equal(state.active_dates[0].due_relative_to_today,relative,`${day} at ${now}`);
+      assert.equal(state.latest_negotiation.expired,expired,`${day} at ${now}`);
+    }
+  }
+});
+
 test('thin Deal Room evidence abstains without a vendor call', async () => {
   let calls = 0;
   const answer = await readDealWithJev(record('Brief note'), {

@@ -192,7 +192,7 @@ export async function rerankShortlist({ situation, candidates, variant, askJev, 
   try {
     answered = await ask(askJev, request, model);
   } catch (error) {
-    return fallback({ ...result, requests: 1 }, /semantic answer|resolved model/.test(error.message) ? "invalid_jev_answer" : "jev_unavailable");
+    return fallback({ ...result, requests: 1 }, /semantic answer|resolved model/.test(error?.message ?? "") ? "invalid_jev_answer" : "jev_unavailable");
   }
   result = { ...result, requests: answered.cache_hit ? 0 : 1 };
   const relevance = readAnswers(request.questions, answered);

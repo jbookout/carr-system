@@ -519,13 +519,9 @@ def grade_fuzzy(output, subchecks, *, client=None, judge=None):
     doctrine, never one request per sub-check and never a single broad
     question standing in for several.
 
-    Returns {"check": "scorecard_fuzzy", "verdict": bool | "unavailable",
-    "confidence": None, "escalate": bool,
-    "detail": {"subchecks": {text: probability|None, ...}}}. `verdict` is
-    True only when every sub-check clears 0.5; a Noul carries no separate
-    confidence (see ops/typesafe_client.py's noul() docstring), so escalate is
-    set instead whenever any sub-check lands in the ambiguous middle
-    (0.35-0.65) where yes and no are close to equally likely. NEVER raises.
+    Nonempty semantic grading returns verdict="review_required", escalate=True
+    and per-subcheck advice. Only an empty checklist returns exact True.
+    No probability threshold authorizes a passing grade. NEVER raises.
     """
     judge = judge or _sibling("jev_judge")
     subchecks = list(subchecks)

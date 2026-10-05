@@ -23,6 +23,17 @@ function candidate(n, extra = {}) {
 
 const USAGE = { input_tokens: 900, output_tokens: 20 };
 
+test('every legal Promise rejection retains deterministic order', async()=>{
+  for (const rejection of [null, undefined, 'synthetic', {reason:'synthetic'}]) {
+    clearSemanticCache();
+    const candidates=[candidate(1),candidate(2)];
+    const result=await rerankShortlist({situation:'Synthetic',candidates,variant:'score',
+      askJev:async()=>{throw rejection;}});
+    assert.equal(result.reason,'jev_unavailable');
+    assert.deepEqual(result.order,candidates);
+  }
+});
+
 // A fake Jev that answers every question from a per-candidate table keyed on
 // the candidate title appearing in the instructions. It records each request.
 function fakeJev(valueFor, { model = "jev-1.13.0" } = {}) {

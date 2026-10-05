@@ -67,6 +67,12 @@ class SemanticTestCase(unittest.TestCase):
             return super().run(result)
 
 class CallModeTests(SemanticTestCase):
+    def test_live_partitioning_does_not_request_disabled_topic_advice(self) -> None:
+        transcript = {"segments": [{"text": "synthetic words " * 100} for _ in range(20)]}
+        with patch.object(post_call.post_call_jev, "topic_cut", side_effect=AssertionError("dead paid path")) as ask:
+            post_call._topic_chunks(transcript)
+        ask.assert_not_called()
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.recordings = Path(self.tmp.name)
@@ -825,7 +831,7 @@ class PostCallTests(SemanticTestCase):
                         result = distiller(request, opener=local_opener, popen=Mock(return_value=child))
                     else:
                         result = distiller(request, opener=local_opener)
-                self.assertEqual(len(timeouts), 1, "all cuts must share one deadline")
+                self.assertEqual(len(timeouts), 0, "disabled topic advice must spend no requests")
                 self.assertLessEqual(sum(timeouts), 5.0)
                 self.assertEqual(len(chunks_sent), len(greedy))
                 for messages, chunk in zip(chunks_sent, greedy):

@@ -284,7 +284,8 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
         entry = entries.get(rule_id)
         if rule_id not in by_id:
             continue
-        if bool(entry) and rule_id not in stale and "jev_compiled" in sources:
+        if (bool(entry) and entry.get("mode") in {"triggered", "residual"}
+                and rule_id not in stale and "jev_compiled" in sources):
             prob = _matched_probability(text, entry, rtc.prompt_keywords(entry))
             selected[rule_id] = {"id": rule_id,
                                  "probability": rtc.SURFACE_AT if prob is None else prob,

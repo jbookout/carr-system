@@ -418,7 +418,7 @@ class GradeFuzzyTests(SemanticTestCase):
         judge = self._FakeJudge({"c0": 0.95, "c1": 0.9})
         out = sc.grade_fuzzy("some output", ["mentions X", "is polite"],
                               client=self._FakeClient, judge=judge)
-        self.assertTrue(out["verdict"])
+        self.assertEqual(out["verdict"], "review_required")
         self.assertTrue(out["escalate"])
         self.assertEqual(len(judge.calls), 1, "every sub-check batched into one request")
 
@@ -437,7 +437,7 @@ class GradeFuzzyTests(SemanticTestCase):
     def test_no_subchecks_is_vacuously_true_and_does_not_ask_jev(self):
         judge = self._FakeJudge(fail=True)
         out = sc.grade_fuzzy("some output", [], client=self._FakeClient, judge=judge)
-        self.assertTrue(out["verdict"])
+        self.assertIs(out["verdict"], True)
         self.assertEqual(len(judge.calls), 0)
 
     def test_an_outage_reports_unavailable_not_an_exception(self):

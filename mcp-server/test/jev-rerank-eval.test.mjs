@@ -21,6 +21,19 @@ function close(actual, expected, epsilon = 1e-9) {
   assert.ok(Math.abs(actual - expected) < epsilon, `${actual} != ${expected}`);
 }
 
+test('cached observations do not charge provider requests, tokens or historical latency', async()=>{
+  const fixture=loadFixture();
+  fixture.cases=fixture.cases.slice(0,1);
+  const oracle=labelOracle(fixture);
+  let tick=0;
+  const report=await evaluateVariant({fixture,variant:'score',now:()=>++tick,
+    askJev:async request=>({...await oracle(request),cache_hit:true,latency_ms:123})});
+  assert.equal(report.summary.requests,0);
+  assert.equal(report.summary.input_tokens,0);
+  assert.equal(report.summary.cost_usd,0);
+  assert.equal(report.summary.p95_latency_ms,0);
+});
+
 // TEST-ONLY synthetic Jev: answers from the fixture's own labels. It proves
 // the metric plumbing reaches 1.0 when the order is ideal. It is never a
 // measurement of Jev and the harness has no mode that uses it.
@@ -123,6 +136,7 @@ test("a failed Jev case is scored on the deterministic order it fell back to", a
   const report = await evaluateVariant({ fixture, variant: "noul", askJev: async () => { throw new Error("down"); } });
   const baseline = await evaluateVariant({ fixture, variant: "deterministic" });
   assert.equal(report.summary.fallbacks, 11);
+  assert.equal(report.summary.requests, 11, "failed provider attempts still count as requests");
   close(report.summary.ndcg_at_10, baseline.summary.ndcg_at_10);
   assert.equal(report.summary.input_tokens, 0);
 });

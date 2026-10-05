@@ -155,6 +155,12 @@ function metered(askJev, now, meter) {
     const started = now();
     meter.requests += 1;
     const result = await cachedSemanticAsk(askJev, request, "meter-v1");
+    if (result.cache_hit) {
+      meter.requests -= 1;
+      meter.cache_hits += 1;
+      meter.cache_read_ms += now() - started;
+      return result;
+    }
     meter.latency_ms += typeof result?.latency_ms === "number" ? result.latency_ms : now() - started;
     const usage = result?.usage;
     if (usage && Number.isInteger(usage.input_tokens)) meter.input_tokens += usage.input_tokens;
@@ -174,7 +180,7 @@ export async function evaluateVariant({ fixture, variant, askJev, taxonomy = DOC
   now = () => performance.now(), model = JEV_RERANK_MODEL }) {
   const rows = [];
   for (const c of fixture.cases) {
-    const meter = { requests: 0, latency_ms: 0, input_tokens: 0, output_tokens: 0 };
+    const meter = { requests: 0, latency_ms: 0, input_tokens: 0, output_tokens: 0, cache_hits: 0, cache_read_ms: 0 };
     let order = c.candidates;
     let outcome = null;
     if (variant !== "deterministic") {
@@ -192,6 +198,7 @@ export async function evaluateVariant({ fixture, variant, askJev, taxonomy = DOC
       judged: outcome ? outcome.judged : null, reason: outcome ? outcome.reason : null,
       model: outcome?.model ?? null, ambiguity: outcome?.ambiguity ?? null,
       requests: meter.requests, latency_ms: meter.latency_ms,
+      cache_hits: meter.cache_hits, cache_read_ms: meter.cache_read_ms,
       input_tokens: meter.input_tokens, output_tokens: meter.output_tokens,
     });
   }
@@ -206,6 +213,7 @@ export async function evaluateVariant({ fixture, variant, askJev, taxonomy = DOC
       wrong_top1_rate: mean(evaluable.map(r => (r.wrong_top1 ? 1 : 0))),
       p95_latency_ms: percentile(rows.map(r => r.latency_ms), 95),
       requests: rows.reduce((s, r) => s + r.requests, 0),
+      cache_hits: rows.reduce((s, r) => s + r.cache_hits, 0),
       input_tokens: inputTokens, output_tokens: rows.reduce((s, r) => s + r.output_tokens, 0),
       tokens_source: variant === "deterministic" ? "none" : "reported",
       cost_usd: inputTokens * price() / 1e6,

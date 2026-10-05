@@ -100,10 +100,10 @@ def select_candidate(task_text, candidates, *, client=None, judge=None,
     forbid asking.
 
     Returns {"check": "best_of", "verdict": <candidate id> | "none" |
-    "unavailable", "confidence": float | None, "escalate": bool,
+    "unavailable" | "review_required", "confidence": float | None, "escalate": bool,
     "detail": {...}}. NEVER raises. NEVER defaults to "the first candidate" on
     low confidence or on a "none" verdict — escalate=True means a human or a
-    larger model looks; it is not this function's job to guess on their behalf.
+    larger model looks. Semantic IDs are returned only in detail.advisory_candidate_id.
     """
     judge = judge or _sibling("jev_judge")
     candidates = list(candidates)
@@ -168,8 +168,9 @@ def select_candidate(task_text, candidates, *, client=None, judge=None,
         "any_evidence": any(_has_evidence(c) for c in candidates),
         "confidence_note": confidence_note,
         "model": answer.get("model"),
+        "advisory_candidate_id": None if verdict == "none" else verdict,
     }
     judge.record("supervise.best_of", task_text[:200] if task_text else None,
                  answer, existing_decision=None, log_path=log_path or judge.SHADOW_LOG)
-    return {"check": "best_of", "verdict": verdict, "confidence": confidence,
+    return {"check": "best_of", "verdict": "review_required", "confidence": confidence,
             "escalate": escalate, "detail": detail}

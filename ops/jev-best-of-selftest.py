@@ -99,14 +99,16 @@ class PrefilterTests(SemanticTestCase):
         judge = FakeJudge(choice="a", confidence=0.9)
         out = bo.select_candidate("do the thing", candidates, judge=judge, client=FakeClient)
         self.assertEqual(len(judge.calls), 1)
-        self.assertEqual(out["verdict"], "a")
+        self.assertEqual(out["verdict"], "review_required")
+        self.assertEqual(out["detail"]["advisory_candidate_id"], "a")
 
     def test_zero_passing_candidates_falls_through_to_jev(self):
         candidates = [_candidate("a", passes=False), _candidate("b", passes=False)]
         judge = FakeJudge(choice="b", confidence=0.9)
         out = bo.select_candidate("do the thing", candidates, judge=judge, client=FakeClient)
         self.assertEqual(len(judge.calls), 1)
-        self.assertEqual(out["verdict"], "b")
+        self.assertEqual(out["verdict"], "review_required")
+        self.assertEqual(out["detail"]["advisory_candidate_id"], "b")
 
     def test_no_candidates_is_a_none_verdict_with_no_jev_call(self):
         judge = FakeJudge(fail=True)
@@ -151,7 +153,8 @@ class NoneVerdictTests(SemanticTestCase):
         candidates = [_candidate("a", passes=False), _candidate("b", passes=False)]
         judge = FakeJudge(choice=bo.NONE_RIGHT, confidence=0.7)
         out = bo.select_candidate("task", candidates, judge=judge, client=FakeClient)
-        self.assertEqual(out["verdict"], "none")
+        self.assertEqual(out["verdict"], "review_required")
+        self.assertIsNone(out["detail"]["advisory_candidate_id"])
         self.assertTrue(out["escalate"])
 
     def test_never_defaults_to_attempt_1_on_a_missing_choice(self):
@@ -174,7 +177,8 @@ class ConfidenceTests(SemanticTestCase):
         judge = FakeJudge(choice="b", confidence=0.20)
         out = bo.select_candidate("task", candidates, judge=judge, client=FakeClient,
                                    conf_escalate_at=bo.CONF_ESCALATE_AT)
-        self.assertEqual(out["verdict"], "b")
+        self.assertEqual(out["verdict"], "review_required")
+        self.assertEqual(out["detail"]["advisory_candidate_id"], "b")
         self.assertTrue(out["escalate"])
 
     def test_confidence_at_or_above_the_floor_does_not_escalate(self):
@@ -187,7 +191,8 @@ class ConfidenceTests(SemanticTestCase):
         candidates = [_candidate("a", passes=False), _candidate("b", passes=False)]
         judge = FakeJudge(choice="a", confidence=None)
         out = bo.select_candidate("task", candidates, judge=judge, client=FakeClient)
-        self.assertEqual(out["verdict"], "a")
+        self.assertEqual(out["verdict"], "review_required")
+        self.assertEqual(out["detail"]["advisory_candidate_id"], "a")
         self.assertTrue(out["escalate"])
 
 
