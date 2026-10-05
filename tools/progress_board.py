@@ -2248,7 +2248,8 @@ def discover_v1() -> dict[tuple[str, int], tuple[dict[str, Any] | None, str | No
         for row in candidates:
             if v1_metadata(row) and isinstance(row.get("number"), int):
                 key = repo, row["number"]
-                discovered[key] = fetch_pr(key[1], repo)
+                assert GITHUB_PASS is not None
+                discovered[key] = GITHUB_PASS.read(key[1], repo, row)
     return discovered
 
 
