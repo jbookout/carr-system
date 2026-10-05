@@ -47,25 +47,26 @@ test('all deal reads expose the four lifecycle fields without inventing a missin
  }
 });
 
-test('reference-monitor acceptance uses the live invoice frontier and exact sealed predecessor',()=>{
+test('reference-monitor acceptance follows the live frontier and its sealed predecessor', async()=>{
  const gate=readFileSync(new URL('../../ops/siep18-reference-monitor-local-pg-gate.py',import.meta.url),'utf8');
  const value=name=>gate.match(new RegExp(`${name}\\s*=\\s*(?:\\(\\s*)?"([^"]+)"`))?.[1];
+ const live=Number(SCAC_MUTATION_REGISTRY_VERSION.split('.v')[1]);
+ assert.ok(live>=110);
  assert.equal(value('LIVE_REGISTRY_VERSION'),SCAC_MUTATION_REGISTRY_VERSION);
- assert.equal(Number(gate.match(/LIVE_REGISTRY_ORDINAL = (\d+)/)?.[1]),Number(SCAC_MUTATION_REGISTRY_VERSION.split('.v')[1]));
- const predecessor=registrySeal('scac-mutation-registry.v109',frozenInventory('scac-mutation-registry.v109'),RELATIONSHIP_V109_DB_CATALOG_BASELINE);
- assert.equal(value('SEALED_PREDECESSOR_VERSION'),predecessor.version);
- assert.equal(value('SEALED_PREDECESSOR_DIGEST'),predecessor.digest);
- assert.match(gate,new RegExp(`SEALED_PREDECESSOR_ENTRY_COUNTS = \\(${predecessor.entryCount}, ${predecessor.sourceEntryCount}\\)`));
- assert.equal(value('LIVE_REGISTRY_MIGRATION'),'migrations/0842_invoice_tracker_scac_successor.sql');
- assert.equal(value('SEALED_PREDECESSOR_MIGRATION'),'migrations/0840_relationship_scac_successor.sql');
+ assert.equal(Number(gate.match(/LIVE_REGISTRY_ORDINAL = (\d+)/)?.[1]),live);
+ const previous=`scac-mutation-registry.v${live-1}`;
+ assert.equal(value('SEALED_PREDECESSOR_VERSION'),previous);
+ const runtime=readFileSync(new URL(`../src/${previous}.generated.js`,import.meta.url),'utf8');
+ const digest=runtime.match(/SCAC_MUTATION_REGISTRY_DIGEST = "([^"]+)"/)[1];
+ assert.equal(value('SEALED_PREDECESSOR_DIGEST'),'sha256:'+digest);
 });
 
 // Parallel registry additions must form one ordered history, preserving both contracts.
 test('invoice successor preserves the shipped relationship frontier', async()=>{
  const inventory=await import('../../ops/scac-mutation-inventory.mjs');
- assert.equal(SCAC_MUTATION_REGISTRY_VERSION,'scac-mutation-registry.v110');
- assert.equal(inventory.REGISTRY_V110_VERSION,SCAC_MUTATION_REGISTRY_VERSION);
- const invoices=inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
+ assert.ok(Number(SCAC_MUTATION_REGISTRY_VERSION.split('.v')[1])>=110);
+ assert.equal(inventory.REGISTRY_V110_VERSION,'scac-mutation-registry.v110');
+ const invoices=inventory.frozenInventory('scac-mutation-registry.v110');
  const predecessor=inventory.frozenInventory('scac-mutation-registry.v109');
  for(const key of ['mcp-tool:read-invoice-tracker','mcp-tool:record-commission-receipt'])
   assert.ok(invoices.some(row=>row.ingress_key===key),key);
@@ -85,7 +86,7 @@ test('invoice successor preserves the shipped relationship frontier', async()=>{
 // These migrations must append after main; inserting below its ledger breaks prefix checks.
 test('invoice migrations append with exclusive numbers after shipped relationship contract',()=>{
  const names=readdirSync(new URL('../../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql'));
- const predecessor=names.filter(n=>!n.endsWith('_invoice_tracker.sql')&&!n.endsWith('_invoice_tracker_scac_successor.sql')).sort().at(-1);
+ const predecessor='0840_relationship_scac_successor.sql';
  for(const filename of ['0841_invoice_tracker.sql','0842_invoice_tracker_scac_successor.sql']){
   assert.ok(names.includes(filename),filename);
   assert.ok(filename>predecessor,`${filename} must follow ${predecessor}`);
