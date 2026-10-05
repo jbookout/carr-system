@@ -1,3 +1,5 @@
+import { registryChain } from '../../ops/registry-chain.mjs';
+const migrationPairs = registryChain.atomic_groups.map(group => '(' + group.map(name => '\n    '+JSON.stringify(name)+',').join('')+'\n)').join('\n');
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -19,7 +21,7 @@ test('property evidence does not reuse the shipped feedback migration numbers or
   assert.match(sql, /scac_mutation_registration_v98/);
   assert.match(sql, /scac-mutation-registry\.v99/);
   assert.ok(registeredOperation('read-tour-feedback'));
-  assert.match(read('mcp-server/src/mutation-registry.js'), new RegExp(CURRENT_REGISTRY_VERSION.replaceAll(".", "\\.") + "\\.generated\\.js"));
+  assert.equal(registryChain.versions.at(-1).version, CURRENT_REGISTRY_VERSION);
   assert.match(read('mcp-server/src/scac-mutation-registry.v98.generated.js'), /mcp-tool:read-tour-feedback/);
 });
 
@@ -33,6 +35,5 @@ test('property evidence follows the current SCAC seal with a distinct version', 
   assert.equal(registeredOperation('append-tour-source-evidence').schema_digest,
     frozenInventory('scac-mutation-registry.v99')
       .find(row => row.ingress_key === 'mcp-tool:append-tour-source-evidence').schema_digest);
-  assert.match(read('mcp-server/src/mutation-registry.js'),
-    new RegExp(CURRENT_REGISTRY_VERSION.replaceAll(".", "\\.") + "\\.generated\\.js"));
+  assert.equal(registryChain.versions.at(-1).version, CURRENT_REGISTRY_VERSION);
 });

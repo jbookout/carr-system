@@ -1,3 +1,5 @@
+import { registryChain } from '../../ops/registry-chain.mjs';
+const migrationPairs = registryChain.atomic_groups.map(group => '(' + group.map(name => '\n    '+JSON.stringify(name)+',').join('')+'\n)').join('\n');
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -28,8 +30,6 @@ test('unfinished-work migration follows the exact delivered predecessor in one a
   const sql = read(`migrations/${successor}`);
   for (const path of ['migrations/0825_doc_activity_scac_successor.sql', `migrations/${scope}`])
     assert.ok(sql.includes(createHash('sha256').update(read(path)).digest('hex')), `${path} is pinned`);
-  const migrationRunner = read('tools/migrate.py');
-  const group = /\(\s*"0826_system_work_census_read_scope\.sql",\s*"0827_system_work_scac_successor\.sql",\s*\)/;
-  assert.match(migrationRunner.split('STRICT_ATOMIC_MIGRATION_GROUPS:')[0], group);
-  assert.match(migrationRunner.split('STRICT_ATOMIC_MIGRATION_GROUPS:')[1], group);
+  assert.ok(registryChain.atomic_groups.some(group => group[0] === scope && group[1] === successor));
+  assert.ok(registryChain.strict_atomic_groups.some(group => group[0] === scope && group[1] === successor));
 });

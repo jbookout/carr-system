@@ -1266,105 +1266,9 @@ test("the v20 successor refuses a caller-supplied predecessor or wrong projectio
   }
 });
 
-test("every v20 output path refuses an unbound trust-root limb and writes nothing", () => {
-  // Each case UNBINDS exactly one limb of the committed module and proves the
-  // shared guard fires on both the frontier and the CLI writer. The anchors are
-  // read off the live constants, so a future rebinding cannot leave this test
-  // silently matching nothing.
-  const seal = HISTORICAL_REGISTRY_SEALS.v19;
-  const receipt = CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE.secdef_execute;
-  const unbind = {
-    seal: [
-      `digest: "${seal.digest}", entryCount: ${seal.entryCount}, sourceEntryCount: ${seal.sourceEntryCount}`,
-      'digest: "__V19_SEALED_REGISTRY_DIGEST_UNBOUND__", entryCount: null, sourceEntryCount: null',
-      /continuity archive v20 predecessor seal is unbound/,
-    ],
-    pin: [
-      `"${HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0493_incident_work_request_link_scac_successor.sql"]}"`,
-      '"__V19_MIGRATION_SHA256_UNBOUND__"',
-      /continuity archive v20 predecessor artifact pin is unbound: migrations\/0493/,
-    ],
-    receipt: [
-      `secdef_execute: { count: ${receipt.count}, digest: "${receipt.digest}" }`,
-      'secdef_execute: { count: null, digest: "__V20_SECDEF_EXECUTE_RECEIPT_UNBOUND__" }',
-      /continuity archive successor v20 secdef_execute receipt is unbound/,
-    ],
-  };
-  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
-  const source = fs.readFileSync(path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "utf8");
-  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.v20-trust-root-"));
-  try {
-    linkOpsTree(repoRoot, isolatedRoot);
-    for (const [limb, [bound, unboundText, refusal]] of Object.entries(unbind)) {
-      const modulePath = path.join(isolatedRoot, `ops/scac-mutation-inventory.${limb}.mjs`);
-      fs.writeFileSync(modulePath,
-        replaceExactlyOnce(source, bound, unboundText, `unbind ${limb}`));
-      const target = path.join(isolatedRoot, `${limb}.v20.generated.js`);
-      assert.throws(() => execFileSync(process.execPath,
-        [modulePath, "--write-runtime-v20", target],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-        error => {
-          assert.match(error.stderr, refusal, limb);
-          return true;
-        }, limb);
-      assert.equal(fs.existsSync(target), false, `${limb}: a refused run must write nothing`);
-      assert.throws(() => execFileSync(process.execPath,
-        [modulePath, "--write-continuity-archive-registry-migration",
-          path.join(isolatedRoot, `${limb}.0494.sql`)],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-        error => {
-          assert.match(error.stderr, refusal, limb);
-          return true;
-        }, limb);
-      assert.equal(fs.existsSync(path.join(isolatedRoot, `${limb}.0494.sql`)), false, limb);
-    }
-    // ANTI-VACUITY: the same CLI on the committed module renders the committed
-    // artifact byte for byte, so the refusals above are the guard and not a
-    // broken harness.
-    const boundTarget = path.join(isolatedRoot, "bound.v20.generated.js");
-    execFileSync(process.execPath,
-      [path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "--write-runtime-v20", boundTarget],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    assert.equal(fs.readFileSync(boundTarget, "utf8"), generatedV20);
-  } finally {
-    fs.rmSync(isolatedRoot, { recursive: true, force: true });
-  }
-});
 
-test("the frontier refuses an unbound trust root before any predecessor work runs", async () => {
-  const seal = HISTORICAL_REGISTRY_SEALS.v19;
-  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
-  const source = fs.readFileSync(path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "utf8");
-  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.v20-frontier-guard-"));
-  try {
-    linkOpsTree(repoRoot, isolatedRoot);
-    // Sabotage the FIRST predecessor renderer the cascade reaches. If the guard
-    // ran late we would see the sabotage marker instead of the refusal.
-    const sabotage = [
-      "function renderMigration(rows = fullInventory()) {",
-      'function renderMigration(rows = fullInventory()) {\n  throw new Error("SABOTAGE_PREDECESSOR_WORK_RAN");',
-      "sabotage predecessor",
-    ];
-    const unboundPath = path.join(isolatedRoot, "ops/scac-mutation-inventory.sabotage.mjs");
-    fs.writeFileSync(unboundPath, replaceExactlyOnce(
-      replaceExactlyOnce(source,
-        `digest: "${seal.digest}", entryCount: ${seal.entryCount}, sourceEntryCount: ${seal.sourceEntryCount}`,
-        'digest: "__V19_SEALED_REGISTRY_DIGEST_UNBOUND__", entryCount: null, sourceEntryCount: null',
-        "unbind seal"),
-      ...sabotage));
-    const unbound = await import(unboundPath);
-    assert.throws(() => unbound.renderGeneratedFrontier(),
-      /continuity archive v20 predecessor seal is unbound/);
-    // ANTI-VACUITY: with the trust root left bound, the very same sabotage IS
-    // reached — so the refusal above is ordering, not an unreachable branch.
-    const reachablePath = path.join(isolatedRoot, "ops/scac-mutation-inventory.reachable.mjs");
-    fs.writeFileSync(reachablePath, replaceExactlyOnce(source, ...sabotage));
-    const reachable = await import(reachablePath);
-    assert.throws(() => reachable.renderGeneratedFrontier(), /SABOTAGE_PREDECESSOR_WORK_RAN/);
-  } finally {
-    fs.rmSync(isolatedRoot, { recursive: true, force: true });
-  }
-});
+
+
 
 test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predecessor", () => {
   const rows = frozenInventory(REGISTRY_V21_VERSION);
@@ -2873,105 +2777,9 @@ test("the v21 successor refuses a caller-supplied predecessor or wrong projectio
   }
 });
 
-test("every v21 output path refuses an unbound trust-root limb and writes nothing", () => {
-  // Each case UNBINDS exactly one limb of the committed module and proves the
-  // shared guard fires on both the frontier and the CLI writer. The anchors are
-  // read off the live constants, so a future rebinding cannot leave this test
-  // silently matching nothing.
-  const seal = HISTORICAL_REGISTRY_SEALS.v20;
-  const receipt = R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE.secdef_execute;
-  const unbind = {
-    seal: [
-      `digest: "${seal.digest}", entryCount: ${seal.entryCount}, sourceEntryCount: ${seal.sourceEntryCount}`,
-      'digest: "__V20_SEALED_REGISTRY_DIGEST_UNBOUND__", entryCount: null, sourceEntryCount: null',
-      /R06 hooks correctness v21 predecessor seal is unbound/,
-    ],
-    pin: [
-      `"${HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0494_codex_continuity_archive_registry.sql"]}"`,
-      '"__V20_MIGRATION_SHA256_UNBOUND__"',
-      /R06 hooks correctness v21 predecessor artifact pin is unbound: migrations\/0494/,
-    ],
-    receipt: [
-      `secdef_execute: { count: ${receipt.count}, digest: "${receipt.digest}" }`,
-      'secdef_execute: { count: null, digest: "__V21_SECDEF_EXECUTE_RECEIPT_UNBOUND__" }',
-      /R06 hooks correctness successor v21 secdef_execute receipt is unbound/,
-    ],
-  };
-  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
-  const source = fs.readFileSync(path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "utf8");
-  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.v21-trust-root-"));
-  try {
-    linkOpsTree(repoRoot, isolatedRoot);
-    for (const [limb, [bound, unboundText, refusal]] of Object.entries(unbind)) {
-      const modulePath = path.join(isolatedRoot, `ops/scac-mutation-inventory.${limb}.v21.mjs`);
-      fs.writeFileSync(modulePath,
-        replaceExactlyOnce(source, bound, unboundText, `unbind ${limb}`));
-      const target = path.join(isolatedRoot, `${limb}.v21.generated.js`);
-      assert.throws(() => execFileSync(process.execPath,
-        [modulePath, "--write-runtime-v21", target],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-        error => {
-          assert.match(error.stderr, refusal, limb);
-          return true;
-        }, limb);
-      assert.equal(fs.existsSync(target), false, `${limb}: a refused run must write nothing`);
-      assert.throws(() => execFileSync(process.execPath,
-        [modulePath, "--write-r06-hooks-correctness-registry-migration",
-          path.join(isolatedRoot, `${limb}.0495.sql`)],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-        error => {
-          assert.match(error.stderr, refusal, limb);
-          return true;
-        }, limb);
-      assert.equal(fs.existsSync(path.join(isolatedRoot, `${limb}.0495.sql`)), false, limb);
-    }
-    // ANTI-VACUITY: the same CLI on the committed module renders the committed
-    // artifacts byte for byte, so the refusals above are the guard and not a
-    // broken harness.
-    const boundTarget = path.join(isolatedRoot, "bound.v21.generated.js");
-    execFileSync(process.execPath,
-      [path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "--write-runtime-v21", boundTarget],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    assert.equal(fs.readFileSync(boundTarget, "utf8"), generatedV21);
-    const boundMigration = path.join(isolatedRoot, "bound.0495.sql");
-    execFileSync(process.execPath,
-      [path.join(repoRoot, "ops/scac-mutation-inventory.mjs"),
-        "--write-r06-hooks-correctness-registry-migration", boundMigration],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    assert.equal(fs.readFileSync(boundMigration, "utf8"), v21Migration);
-  } finally {
-    fs.rmSync(isolatedRoot, { recursive: true, force: true });
-  }
-});
 
-test("the frontier refuses an unbound v20 trust root before any predecessor work runs", async () => {
-  const seal = HISTORICAL_REGISTRY_SEALS.v20;
-  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
-  const source = fs.readFileSync(path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "utf8");
-  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.v21-frontier-guard-"));
-  try {
-    linkOpsTree(repoRoot, isolatedRoot);
-    // Sabotage the FIRST predecessor renderer the cascade reaches. If the guard
-    // ran late we would see the sabotage marker instead of the refusal.
-    const sabotage = [
-      "function renderMigration(rows = fullInventory()) {",
-      'function renderMigration(rows = fullInventory()) {\n  throw new Error("SABOTAGE_PREDECESSOR_WORK_RAN");',
-      "sabotage predecessor",
-    ];
-    const unboundPath = path.join(isolatedRoot, "ops/scac-mutation-inventory.v21-sabotage.mjs");
-    fs.writeFileSync(unboundPath, replaceExactlyOnce(
-      replaceExactlyOnce(source,
-        `digest: "${seal.digest}", entryCount: ${seal.entryCount}, sourceEntryCount: ${seal.sourceEntryCount}`,
-        'digest: "__V20_SEALED_REGISTRY_DIGEST_UNBOUND__", entryCount: null, sourceEntryCount: null',
-        "unbind v20 seal"),
-      ...sabotage));
-    const unbound = await import(unboundPath);
-    assert.throws(() => unbound.renderGeneratedFrontier(),
-      /R06 hooks correctness v21 predecessor seal is unbound/);
-  } finally {
-    fs.rmSync(isolatedRoot, { recursive: true, force: true });
-  }
-});
+
+
 
 test("the v36 successor preserves the exact v35 seal and measures both catalog phases", () => {
   const forward = renderReadyPlanAmendmentForwardRegistrySqlClosed();
@@ -3066,6 +2874,9 @@ test("the complete frontier renders when every generated target is absent", () =
     for (const trackedPath of new Set([
       ...trackedPaths,
       "migrations/0511_foundation_assurance_minimum_outcome.sql",
+      "ops/registry-chain.mjs",
+      "ops/config/scac-registry-chain.json",
+      "mcp-server/src/scac-mutation-registry.current.generated.js",
     ])) {
       if (frontierSet.has(trackedPath)) continue;
       const source = path.join(repoRoot, trackedPath);

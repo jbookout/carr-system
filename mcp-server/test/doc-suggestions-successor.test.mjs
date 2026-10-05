@@ -1,3 +1,5 @@
+import { registryChain } from '../../ops/registry-chain.mjs';
+const migrationPairs = registryChain.atomic_groups.map(group => '(' + group.map(name => '\n    '+JSON.stringify(name)+',').join('')+'\n)').join('\n');
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -42,7 +44,7 @@ test('Codex session read has its own sealed successor', () => {
   assert.equal(registeredOperation('list-my-codex-sessions').schema_digest,
     frozenInventory('scac-mutation-registry.v97')
       .find(row => row.ingress_key === 'mcp-tool:list-my-codex-sessions').schema_digest);
-  assert.match(read('mcp-server/src/mutation-registry.js'), new RegExp(CURRENT_REGISTRY_VERSION.replaceAll(".", "\\.") + "\\.generated\\.js"));
+  assert.equal(registryChain.versions.at(-1).version, CURRENT_REGISTRY_VERSION);
 });
 
 // Both branches advanced the registry: Observatory must follow the delivered Jev cap seal.
@@ -90,9 +92,9 @@ test('relationship attribution follows the delivered system-work contract withou
   assert.match(sql, /filename='0839_relationship_deal_links[.]sql' and sha256='[0-9a-f]{64}'/);
   assert.match(sql, /scac_mutation_registration_v108/);
   // v109 stays sealed history; a later successor may own the live selector (Joe 2026-10-05: no version pins on main).
-  const live = Number(read('mcp-server/src/mutation-registry.js').match(/scac-mutation-registry[.]v(\d+)[.]generated[.]js/)[1]);
+  const live = registryChain.versions.at(-1).number;
   assert.ok(live >= 109, `live registry selector v${live} must not precede v109`);
   assert.ok(readdirSync(resolve(root, 'mcp-server/src')).includes('scac-mutation-registry.v109.generated.js'));
-  assert.match(read('tools/migrate.py'),
+  assert.match(migrationPairs,
     /"0839_relationship_deal_links[.]sql",\n\s+"0840_relationship_scac_successor[.]sql"/);
 });

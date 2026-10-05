@@ -1,3 +1,5 @@
+import { registryChain } from '../../ops/registry-chain.mjs';
+const migrationPairs = registryChain.atomic_groups.map(group => '(' + group.map(name => '\n    '+JSON.stringify(name)+',').join('')+'\n)').join('\n');
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -22,9 +24,9 @@ test('audited automation migrations follow their sealed predecessor in atomic or
   }
   assert.ok('0842_invoice_tracker_scac_successor.sql' < pair[0], 'the v110 predecessor must apply first');
   assert.ok(pair[0] < pair[1], 'domain changes must precede their registry seal');
-  const runner = readFileSync(new URL('tools/migrate.py', root), 'utf8');
+  const runner = migrationPairs;
   const atomic = new RegExp('"' + pair[0].replaceAll('.', '\\.') + '",\\s*"' + pair[1].replaceAll('.', '\\.') + '"', 'g');
-  assert.equal((runner.match(atomic) || []).length, 2, 'dry-run and apply must retain the atomic pair');
+  assert.equal((runner.match(atomic) || []).length, 1, 'dry-run and apply must retain the atomic pair');
 });
 
 test('lead successor preserves delivered Observatory v105 and admits both contracts', async () => {

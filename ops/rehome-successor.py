@@ -90,36 +90,6 @@ def commit(repo, message):
     git(repo, "commit", "-F", str(target))
 
 
-def snapshot_bookkeeping(repo, migration, receipt):
-    validate_outputs(repo, ("bin/schema-snapshot.sh", "ops/schema-snapshot-registry-seed-selftest.py"))
-    path = repo / "bin/schema-snapshot.sh"
-    if not path.exists():
-        return
-    text = path.read_text()
-    number = int(receipt['version'].split('.v')[1])
-    previous = number - 1
-    ledger_name = f'REHOME_V{number}_REGISTRY_APPLIED'
-    ledger = (f'{ledger_name}="$("$PSQL" -Atqc \\\n'
-              f'  "select exists (select 1 from schema_migrations where filename=\'{migration.name}\')" \\\n'
-              f'  2>/dev/null)"\ncase "${ledger_name}" in\n'
-              '  t|f) ;;\n  *) echo "schema-snapshot: could not read successor registry ledger state" >&2; exit 1 ;;\nesac\n')
-    found = _LEDGER.search(text)
-    if found is None:
-        raise RehomeError("bin/schema-snapshot.sh: ledger template missing")
-    text = text[:found.start()] + ledger + text[found.start():]
-    marker = f'SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v{previous}_current()"'
-    arm = (f'\nif [ "${ledger_name}" = t ]; then\n'
-           f'  SCAC_CURRENT_NUMBER={number}\n  SCAC_VERSION_COUNT={number}\n'
-           f'  SCAC_CURRENT_ENTRY_COUNT={receipt["entry_count"]}\n  SCAC_CURRENT_SOURCE_COUNT={receipt["source_count"]}\n'
-           f'  SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v{number}.generated.js"\n'
-           f'  SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,\'scac-mutation-registry.v{number}\'"\n'
-           f'  SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,\'scac-mutation-registry.v{previous}\'"\n'
-           f'  SCAC_FULL_SET_SEAL_COUNT={previous}\n'
-           f'  SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v{number}_current()"\nfi')
-    if text.count(marker) != 1:
-        raise RehomeError("bin/schema-snapshot.sh: frontier template ambiguous")
-    path.write_text(text.replace(marker, marker + arm))
-
 
 def prepare(repo, base, approved, main, conflict_paths):
     staging = Path(tempfile.mkdtemp(prefix="successor-integration-")) / "repo"
@@ -200,20 +170,8 @@ def prepare(repo, base, approved, main, conflict_paths):
         domains = [staging / 'migrations' / plan['migration_names'][Path(p).name] for p in pending if p != sql[0]]
         validate_outputs(staging, [str(seal_path.relative_to(staging)), f'mcp-server/src/scac-mutation-registry.v{plan["registry_successor"]}.generated.js'])
         receipt = regenerate(staging, plan, domains, seal_path, staging / matches[0])
-        selector = staging / 'mcp-server/src/mutation-registry.js'
-        if selector.exists():
-            content, count = ACTIVE_IMPORT.subn(rf'\g<1>{plan["registry_successor"]}\2', selector.read_text())
-            if count != 1:
-                raise RehomeError('mcp-server/src/mutation-registry.js: active registry import is ambiguous')
-            selector.write_text(content)
-            regenerated.add('mcp-server/src/mutation-registry.js')
-            check_source = subprocess.run(['node', '--input-type=module', '-e',
-                "import {fullInventory} from './ops/scac-mutation-inventory.mjs';import {TOOLS} from './mcp-server/src/tools.js';process.stdout.write(JSON.stringify(fullInventory(TOOLS)));"],
-                cwd=staging, env=scrubbed_env(), capture_output=True, timeout=120)
-            measured = json.loads((staging / '.git/successor-runtime.json').read_text())['rows']
-            if check_source.returncode or json.loads(check_source.stdout) != measured:
-                raise RehomeError('mcp-server/src/mutation-registry.js: selector changed the sealed source inventory')
-        snapshot_bookkeeping(staging, seal_path, receipt)
+        regenerated.add('mcp-server/src/scac-mutation-registry.current.generated.js')
+        regenerated.add('ops/config/scac-registry-chain.json')
         regenerated.add(f"mcp-server/src/{receipt['version']}.generated.js")
         changed = git(staging, 'diff', '--name-only').decode().splitlines()
         untracked = git(staging, 'ls-files', '--others', '--exclude-standard').decode().splitlines()
