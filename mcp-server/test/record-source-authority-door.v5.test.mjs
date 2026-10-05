@@ -1,3 +1,4 @@
+import { TOOLS } from "../src/tools.js";
 // V5-F01 — the live door (recordSourceAuthorityStoreTools) and the numbered
 // migration, proved offline.
 //
@@ -68,9 +69,8 @@ test("the door serves exactly the store's nine operations under one source name"
   const tools = recordSourceAuthorityStoreTools({ withEnvelope, ToolError });
   assert.deepEqual(Object.keys(tools).sort(), [...V5_F01_OPERATIONS].sort());
   assert.equal(V5_F01_TOOL_REGISTRATION_SOURCE, "record-source-authority");
-  const tools_js = readFileSync(resolve(REPO, "mcp-server/src/tools.js"), "utf8");
-  assert.match(tools_js, /registerTools\(recordSourceAuthorityStoreTools\(\{ withEnvelope, ToolError \}\),\s*"record-source-authority"\)/);
-  assert.match(tools_js, /"record-source-authority": "mcp-server\/src\/record-source-authority-store\.v5\.js"/);
+  for (const name of V5_F01_OPERATIONS)
+    assert.equal(TOOLS[name].registrySource, "mcp-server/src/record-source-authority-store.v5.js");
 });
 
 test("authority flags carry through: policy and hold are humanOnly AND authorityOnly, nothing else is", () => {

@@ -17,10 +17,12 @@ function freezeContract(value, seen = new Set()) {
 
 export function createToolRegistry() {
   const tools = {};
+  const discoveryOrder = new WeakMap();
   function registerTools(additions, source) {
     const duplicates = Object.keys(additions).filter(name => Object.hasOwn(tools, name)).sort();
     if (duplicates.length) throw new Error(`duplicate tool registration from ${source}: ${duplicates.join(',')}`);
     if (!/^mcp-server\/src\/[a-z0-9.-]+\.js$/.test(source)) throw new Error(`invalid tool source: ${source}`);
+    let discoveryOrderOffset = 0;
     for (const tool of Object.values(additions)) {
       const writerClass = !tool.write && !tool.writerConnection ? 'reader' : tool.authorityOnly ? 'authority'
         : tool.writerConnection && !tool.write ? 'writer_read_only' : 'writer';
@@ -32,9 +34,16 @@ export function createToolRegistry() {
         registrySource: { value: source, enumerable: false },
         verbFacts: { value: facts, enumerable: false },
       });
+      // Extraction keeps the public discovery sequence even when declarations
+      // register in domain batches. New declarations append by default.
+      discoveryOrder.set(tool, tool.discoveryOrder ?? (Object.keys(tools).length + discoveryOrderOffset));
+      discoveryOrderOffset++;
       freezeContract(tool);
     }
     Object.assign(tools, additions);
+    const ordered = Object.entries(tools).sort((a, b) => discoveryOrder.get(a[1]) - discoveryOrder.get(b[1]));
+    for (const name of Object.keys(tools)) delete tools[name];
+    Object.assign(tools, Object.fromEntries(ordered));
   }
   return { tools, registerTools };
 }

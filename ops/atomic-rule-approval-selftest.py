@@ -10,7 +10,7 @@ MIGRATION = REPO / "migrations" / "0228_atomic_rule_lifecycle_forward_upgrade.sq
 SCOPE_FIX = REPO / "migrations" / "0247_system_rule_scope_binding.sql"
 BINDING_REPAIR = REPO / "migrations" / "0479_rule_control_binding_writer.sql"
 DELIVERY_REPAIR = REPO / "migrations" / "0482_rule_delivery_binding_writer.sql"
-TOOLS = REPO / "mcp-server" / "src" / "tools.js"
+TOOLS = REPO / "mcp-server" / "src" / "rule-tools.js"
 DB_GATE = REPO / "ops" / "control-plane-db-gate.py"
 LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
 

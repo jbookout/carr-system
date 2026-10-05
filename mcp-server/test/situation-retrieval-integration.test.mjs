@@ -181,7 +181,7 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
   const CLASSIFIED = {
     "capability-program.js": "start-capability-project and siblings — write:true",
     "investigation.js": "ownedOpenRun, reached only by investigation write verbs",
-    "tools.js": "set-national-account-owner, resolve-post-call-candidate, deal-room field update — all write:true",
+    
   };
 
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -224,6 +224,7 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
 
   const unclassified = found.filter(f =>
     !(CLASSIFIED[f.name] ||
+      (["lead-tools.js", "deal-room-tools.js"].includes(f.name) && !Object.values(TOOLS).some(tool => tool.verbFacts.writerClass === "reader" && tool.handler.toString().includes(f.literal))) ||
       (f.name === "relationship-network.js" && /join public\.actor a on a\.id=/.test(f.literal) && !/\ba\.(?:kind|active)\b/.test(f.literal)) ||
       (f.name === "memory.js" && memoryWriteLiteralClassified(f.literal)) ||
       // undo-lead-move is a partner-only writer. Its predecessor association

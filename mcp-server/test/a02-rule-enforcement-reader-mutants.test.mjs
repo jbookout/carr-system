@@ -27,16 +27,19 @@ function relink(source) {
     `from "${pathToFileURL(join(SRC, file)).href}"`);
 }
 async function loadReal(file) {
-  return import(pathToFileURL(join(SRC, file)).href);
+  const mod = await import(pathToFileURL(join(SRC, file)).href);
+  return mod.ruleTools ? { TOOLS: mod.ruleTools(), ToolError: (await import("../src/tool-error.js")).ToolError } : mod;
 }
 async function loadMutant(file, anchor, replacement) {
-  const source = readFileSync(join(SRC, file), "utf8");
-  const count = source.split(anchor).length - 1;
+  const source = readFileSync(join(SRC, file), "utf8").replace(/^\s*discoveryOrder: \d+,\n/gm, "");
+  const pattern = new RegExp(anchor.split('\n').map(line => line.trimStart().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\n[ \t]*'), 'g');
+  const count = [...source.matchAll(pattern)].length;
   assert.equal(count, 1, `mutant anchor must occur exactly once in ${file}: ${JSON.stringify(anchor)}`);
   serial += 1;
   const path = join(WORK, `${serial}-${file.replace(/\.js$/, "")}.mjs`);
-  writeFileSync(path, relink(source.replace(anchor, replacement)));
-  return import(pathToFileURL(path).href);
+  writeFileSync(path, relink(source.replace(pattern, () => replacement)));
+  const mod = await import(pathToFileURL(path).href);
+  return mod.ruleTools ? { TOOLS: mod.ruleTools(), ToolError: (await import("../src/tool-error.js")).ToolError } : mod;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +135,7 @@ test("MUTANT J7 (validation bypassed) is killed", async () => {
 // The fallback verb's handler (tools.js).
 // ---------------------------------------------------------------------------
 
-const TOOLS_FILE = "tools.js";
+const TOOLS_FILE = "rule-tools.js";
 const VERB = "record-rule-enforcement-fallback";
 const FULL_ID = "a0200009-0000-4000-8000-000000000000";
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe",

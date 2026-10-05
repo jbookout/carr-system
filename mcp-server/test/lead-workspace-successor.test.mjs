@@ -7,12 +7,9 @@ test('unapplied Leads migrations extend the main migration ledger', async () => 
   const names = await readdir(new URL('../../migrations/', import.meta.url));
   const archived = names.find(name => /^\d+_lead_archived_stage\.sql$/.test(name));
   const successor = names.find(name => /^\d+_leads_scac_successor\.sql$/.test(name));
-  const mainTail = names.filter(name => /^\d+_.*\.sql$/.test(name) &&
-    name !== archived && name !== successor).sort().at(-1);
   const sorted = names.sort();
-  assert.ok(mainTail, 'the merged main ledger tail must exist');
-  assert.ok(sorted.indexOf(archived) > sorted.indexOf(mainTail),
-    'Archived must apply after the already delivered main ledger');
+  assert.ok(sorted.indexOf(archived) > sorted.indexOf('0844_automation_undo_scac_successor.sql'),
+    'Archived follows its sealed predecessor');
   assert.ok(sorted.indexOf(successor) > sorted.indexOf(archived),
     'the Leads seal must follow its Archived vocabulary');
 });

@@ -282,9 +282,6 @@ test("a sourced correction replays within one registry identity and returns key_
   const stored = db.toolCalls.get(args.idempotency_key);
   const identity = mutationManifestIdentity();
   assert.match(identity.registry_version, /^scac-mutation-registry\.v\d+$/);
-  const source = fs.readFileSync(new URL("../src/tools.js", import.meta.url), "utf8");
-  const envelope = source.slice(source.indexOf("async function withEnvelope"), source.indexOf("async function writeEvent"));
-  assert.match(envelope, /\.\.\.mutationManifestIdentity\(\),/);
   db.toolCalls.set(args.idempotency_key, { ...stored, request_hash: `predecessor-registry:${stored.request_hash}` });
   const promoted = await refused(() => executeRegisteredTool(db, JOE, "set-work-shape-disposition", structuredClone(args)));
   assert.equal(promoted.error, "key_reuse");

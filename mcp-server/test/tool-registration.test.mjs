@@ -18,3 +18,39 @@ test('declarations supply immutable writer, serialization and completion facts',
   assert.throws(() => registerTools({ 'synthetic-write': {} }, 'mcp-server/src/other.js'), /duplicate tool registration/);
   assert.deepEqual(Object.keys(tools).sort(), ['synthetic-authority','synthetic-evidence','synthetic-read','synthetic-write']);
 });
+
+test('runtime declarations register from domain sources, including former inline verbs', async () => {
+  const { TOOLS } = await import('../src/tools.js');
+  const { leadTools } = await import('../src/lead-tools.js');
+  const declarations = leadTools();
+  assert.equal(declarations['update-lead'].write, true);
+  assert.equal(typeof declarations['update-lead'].handler, 'function');
+  for (const [name, tool] of Object.entries(TOOLS)) {
+    assert.notEqual(tool.registrySource, 'mcp-server/src/tools.js', name);
+    assert.equal(Object.isFrozen(tool), true, name);
+  }
+});
+
+test('registration preserves declared discovery order across domain batches', () => {
+  const { tools, registerTools } = createToolRegistry();
+  registerTools({ later: { discoveryOrder: 1 } }, 'mcp-server/src/later.js');
+  registerTools({ earlier: { discoveryOrder: 0 } }, 'mcp-server/src/earlier.js');
+  registerTools({ appended: {} }, 'mcp-server/src/appended.js');
+  assert.deepEqual(Object.keys(tools), ['earlier', 'later', 'appended']);
+});
+
+test('moved declarations retain runtime admission and reject their former locator', async () => {
+  const { TOOLS } = await import('../src/tools.js');
+  const { assertRegisteredOperation } = await import('../src/mutation-registry.js');
+  const { frozenInventory } = await import('../../ops/scac-mutation-inventory.mjs');
+  for (const row of frozenInventory('scac-mutation-registry.v112').filter(row => row.ingress_kind === 'mcp_tool' && row.source_locator === 'mcp-server/src/tools.js')) {
+    const name = row.operation, tool = TOOLS[name];
+    const admitted = await assertRegisteredOperation(name, tool, {});
+    assert.equal(admitted.source_locator, tool.registrySource, name);
+    assert.equal(admitted.write, row.write, name);
+    assert.equal(admitted.human_only, row.human_only, name);
+    assert.equal(admitted.authority_only, row.authority_only, name);
+    assert.equal(admitted.schema_digest, row.schema_digest, name);
+    await assert.rejects(() => assertRegisteredOperation(name, { ...tool, registrySource: row.source_locator }, {}), error => error.error === 'mutation_contract_mismatch');
+  }
+});

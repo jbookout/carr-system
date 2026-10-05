@@ -103,9 +103,7 @@ test("the seam's mode and context are the server's, never the caller's arguments
 });
 
 test("the seam call sits after coercion and before the handler, and maps an enforce refusal by name", () => {
-  const source = readFileSync(new URL("../src/tools.js", import.meta.url), "utf8");
-  const start = source.indexOf("export async function executeRegisteredTool(");
-  const body = source.slice(start, source.indexOf("\nconst TOOL_REGISTRATION_SOURCE", start));
+  const body = executeRegisteredTool.toString();
   const required = body.indexOf("assertRequiredArgs(tool.inputSchema, args);");
   const doorCall = body.indexOf("passBoundaryDoor({ verb: name, write: tool.write === true, actor, args,");
   const handler = body.indexOf("return await tool.handler(client, actor, args);");
@@ -121,9 +119,7 @@ test("the seam call sits after coercion and before the handler, and maps an enfo
 // `context: args.context`, `log: ...`) or a changed value fails here, not just
 // the spellings the previous test happens to name.
 test("the seam passes the door only verb, write, actor, args and now, each from the server", () => {
-  const source = readFileSync(new URL("../src/tools.js", import.meta.url), "utf8");
-  const start = source.indexOf("export async function executeRegisteredTool(");
-  const body = source.slice(start, source.indexOf("\nconst TOOL_REGISTRATION_SOURCE", start));
+  const body = executeRegisteredTool.toString();
   const calls = body.split("passBoundaryDoor(").length - 1;
   assert.equal(calls, 1, "exactly one door call in the dispatch seam");
   const open = body.indexOf("passBoundaryDoor({") + "passBoundaryDoor({".length;

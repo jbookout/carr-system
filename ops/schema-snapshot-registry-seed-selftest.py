@@ -821,24 +821,25 @@ monitor_names = {"LIVE_REGISTRY_VERSION", "LIVE_REGISTRY_ORDINAL", "SEALED_PREDE
 monitor_pins = {node.targets[0].id: ast.literal_eval(node.value)
                 for node in monitor_tree.body if isinstance(node, ast.Assign)
                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in monitor_names}
-assert monitor_pins["LIVE_REGISTRY_VERSION"] == "scac-mutation-registry.v112"
-assert monitor_pins["LIVE_REGISTRY_ORDINAL"] == 112
-assert monitor_pins["SEALED_PREDECESSOR_VERSION"] == "scac-mutation-registry.v111"
-predecessor_runtime = (ROOT / "mcp-server/src/scac-mutation-registry.v111.generated.js").read_text()
+assert monitor_pins["LIVE_REGISTRY_VERSION"] == "scac-mutation-registry.v113"
+assert monitor_pins["LIVE_REGISTRY_ORDINAL"] == CURRENT_NUMBER
+assert monitor_pins["SEALED_PREDECESSOR_VERSION"] == "scac-mutation-registry.v112"
+predecessor_runtime = (ROOT / "mcp-server/src/scac-mutation-registry.v112.generated.js").read_text()
 predecessor_constants = dict(re.findall(r'^export const (SCAC_MUTATION_REGISTRY_\w+) = (.*);$',
                                        predecessor_runtime, re.MULTILINE))
-assert monitor_pins["SEALED_PREDECESSOR_DIGEST"] == "sha256:" + json.loads(predecessor_constants["SCAC_MUTATION_REGISTRY_DIGEST"])
+assert monitor_pins["SEALED_PREDECESSOR_DIGEST"] == (
+    "sha256:" + json.loads(predecessor_constants["SCAC_MUTATION_REGISTRY_DIGEST"]))
 predecessor_seal = json.loads(subprocess.run(
     ["node", "--input-type=module", "-e", """
-    import { registrySeal, frozenInventory, AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE }
+    import { registrySeal, frozenInventory, LEADS_V112_DB_CATALOG_BASELINE }
       from './ops/scac-mutation-inventory.mjs';
-    console.log(JSON.stringify(registrySeal('scac-mutation-registry.v111',
-      frozenInventory('scac-mutation-registry.v111'), AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE)));
+    console.log(JSON.stringify(registrySeal('scac-mutation-registry.v112',
+      frozenInventory('scac-mutation-registry.v112'), LEADS_V112_DB_CATALOG_BASELINE)));
     """], cwd=ROOT, capture_output=True, text=True, check=True).stdout)
 assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
     predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
-assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0844_automation_undo_scac_successor.sql"
-assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0846_leads_scac_successor.sql"
+assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0846_leads_scac_successor.sql"
+assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0847_architecture_worker_registration_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR

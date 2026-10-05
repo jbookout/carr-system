@@ -56,9 +56,8 @@ test('reference-monitor acceptance follows the live frontier and its sealed pred
  assert.equal(Number(gate.match(/LIVE_REGISTRY_ORDINAL = (\d+)/)?.[1]),live);
  const previous=`scac-mutation-registry.v${live-1}`;
  assert.equal(value('SEALED_PREDECESSOR_VERSION'),previous);
- const runtime=readFileSync(new URL(`../src/${previous}.generated.js`,import.meta.url),'utf8');
- const digest=runtime.match(/SCAC_MUTATION_REGISTRY_DIGEST = "([^"]+)"/)[1];
- assert.equal(value('SEALED_PREDECESSOR_DIGEST'),'sha256:'+digest);
+ const runtime=await import(`../src/${previous}.generated.js`);
+ assert.equal(value('SEALED_PREDECESSOR_DIGEST'),`sha256:${runtime.SCAC_MUTATION_REGISTRY_DIGEST}`);
 });
 
 // Parallel registry additions must form one ordered history, preserving both contracts.

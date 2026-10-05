@@ -702,7 +702,7 @@ test("only what arrived is announced — one change never reads back the whole l
 // ---------------------------------------------------------------- wiring
 
 test("client Undo eligibility mirrors the server's revertible field list", async () => {
-  const tools = await file("mcp-server/src/tools.js");
+  const tools = await file("mcp-server/src/deal-room-tools.js");
   assert.deepEqual([...REVERTIBLE_FIELDS].sort(), [...DEAL_ROOM_FIELDS].sort(),
     "an extra client field would offer an Undo the server refuses");
   assert.match(tools, /if \(latest\?\.id !== row\.id\)\s+throw new ToolError\(\{ error: "newer_change_exists"/,

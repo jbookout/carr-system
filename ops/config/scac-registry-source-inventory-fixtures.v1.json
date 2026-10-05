@@ -92157,6 +92157,456 @@
       ],
       "expected_count": 1130,
       "expected_sha256": "60f791621552593fec684555fbea238845834f2c5c93cce79786633761efc42a"
+    },
+    {
+      "version": "v113",
+      "reason": "Register former inline Worker verbs at their domain declaration source, preserving schemas, flags and authority.",
+      "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:accept-workflow": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:activate-guidance-registry": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:activate-rule": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:add-critical-date": {
+          "source_locator": "mcp-server/src/activity-tools.js",
+          "source_digest": "a1ad2a6510a86eeffd046508459d642e6cb094687011356f2ca9c67d33ab1b24"
+        },
+        "mcp-tool:add-deal-note": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:add-industry-event": {
+          "source_locator": "mcp-server/src/industry-event-tools.js",
+          "source_digest": "608c8de392d6ad41501f2154512d99a5a3106a1e4369cba0931ad3ccf189208b"
+        },
+        "mcp-tool:add-loop": {
+          "source_locator": "mcp-server/src/loop-tools.js",
+          "source_digest": "0881a3c89d72b53e807c9c0966e92db54b329ca6794447eea59bd4c97de3e25b"
+        },
+        "mcp-tool:add-party": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:add-premises": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:admit-rule": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:amend-closed-loop": {
+          "source_locator": "mcp-server/src/loop-tools.js",
+          "source_digest": "0881a3c89d72b53e807c9c0966e92db54b329ca6794447eea59bd4c97de3e25b"
+        },
+        "mcp-tool:amend-rule": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:applicable-rules": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:approve-rule": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:attach-to-campaign": {
+          "source_locator": "mcp-server/src/campaign-tools.js",
+          "source_digest": "d68eaaaf405a940ea391719dff3cdae13b2505b62fef85b4440245a7928457ed"
+        },
+        "mcp-tool:call-verb": {
+          "source_locator": "mcp-server/src/introspection-tools.js",
+          "source_digest": "b4bb2c6f33bfaa669ef45bd14ef84a2dc49b0ced4c1375df7358cdd2ed3d3ac5"
+        },
+        "mcp-tool:capture-queue": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:catch-me-up": {
+          "source_locator": "mcp-server/src/search-tools.js",
+          "source_digest": "53e4fc5eb0013070fd33d79d5f68237a88d0e5c020fb13e29ecff2833af2d769"
+        },
+        "mcp-tool:claim-card": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:claim-lead": {
+          "source_locator": "mcp-server/src/lead-tools.js",
+          "source_digest": "1804ac159f1028a7aaa5db1b728d4cf9999f2e062cab3c21e895952d010072df"
+        },
+        "mcp-tool:close-loop": {
+          "source_locator": "mcp-server/src/loop-tools.js",
+          "source_digest": "0881a3c89d72b53e807c9c0966e92db54b329ca6794447eea59bd4c97de3e25b"
+        },
+        "mcp-tool:complete-action": {
+          "source_locator": "mcp-server/src/activity-tools.js",
+          "source_digest": "a1ad2a6510a86eeffd046508459d642e6cb094687011356f2ca9c67d33ab1b24"
+        },
+        "mcp-tool:confirm-merge": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:counterparty-history": {
+          "source_locator": "mcp-server/src/search-tools.js",
+          "source_digest": "53e4fc5eb0013070fd33d79d5f68237a88d0e5c020fb13e29ecff2833af2d769"
+        },
+        "mcp-tool:create-national-account": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:create-national-market-deal": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:deactivate-guidance-registry": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:deal-board": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:deal-room-board": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:decide-guidance-import-batch": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:decline-candidate": {
+          "source_locator": "mcp-server/src/lead-tools.js",
+          "source_digest": "1804ac159f1028a7aaa5db1b728d4cf9999f2e062cab3c21e895952d010072df"
+        },
+        "mcp-tool:detach-decision": {
+          "source_locator": "mcp-server/src/decision-tools.js",
+          "source_digest": "2c3ad34125a00ccaa3ead9fc3b3918e0759d268a97802840dbfd5c076a76d65c"
+        },
+        "mcp-tool:disable-legacy-schedule": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:edit-loop-header": {
+          "source_locator": "mcp-server/src/loop-tools.js",
+          "source_digest": "0881a3c89d72b53e807c9c0966e92db54b329ca6794447eea59bd4c97de3e25b"
+        },
+        "mcp-tool:end-deal-review": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:export-email-domains": {
+          "source_locator": "mcp-server/src/introspection-tools.js",
+          "source_digest": "b4bb2c6f33bfaa669ef45bd14ef84a2dc49b0ced4c1375df7358cdd2ed3d3ac5"
+        },
+        "mcp-tool:find": {
+          "source_locator": "mcp-server/src/search-tools.js",
+          "source_digest": "53e4fc5eb0013070fd33d79d5f68237a88d0e5c020fb13e29ecff2833af2d769"
+        },
+        "mcp-tool:find-and-catch-up": {
+          "source_locator": "mcp-server/src/search-tools.js",
+          "source_digest": "53e4fc5eb0013070fd33d79d5f68237a88d0e5c020fb13e29ecff2833af2d769"
+        },
+        "mcp-tool:find-precedent": {
+          "source_locator": "mcp-server/src/introspection-tools.js",
+          "source_digest": "b4bb2c6f33bfaa669ef45bd14ef84a2dc49b0ced4c1375df7358cdd2ed3d3ac5"
+        },
+        "mcp-tool:find-rule": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:get-call-context": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:get-deal-room": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:governance-queue": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:integrity-digest": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:lead-board": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:lead-hot": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:link-lead-client": {
+          "source_locator": "mcp-server/src/lead-tools.js",
+          "source_digest": "1804ac159f1028a7aaa5db1b728d4cf9999f2e062cab3c21e895952d010072df"
+        },
+        "mcp-tool:link-parties": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:list-industry-events": {
+          "source_locator": "mcp-server/src/industry-event-tools.js",
+          "source_digest": "608c8de392d6ad41501f2154512d99a5a3106a1e4369cba0931ad3ccf189208b"
+        },
+        "mcp-tool:list-verbs": {
+          "source_locator": "mcp-server/src/introspection-tools.js",
+          "source_digest": "b4bb2c6f33bfaa669ef45bd14ef84a2dc49b0ced4c1375df7358cdd2ed3d3ac5"
+        },
+        "mcp-tool:log-activity": {
+          "source_locator": "mcp-server/src/activity-tools.js",
+          "source_digest": "a1ad2a6510a86eeffd046508459d642e6cb094687011356f2ca9c67d33ab1b24"
+        },
+        "mcp-tool:log-capture": {
+          "source_locator": "mcp-server/src/decision-tools.js",
+          "source_digest": "2c3ad34125a00ccaa3ead9fc3b3918e0759d268a97802840dbfd5c076a76d65c"
+        },
+        "mcp-tool:log-decision": {
+          "source_locator": "mcp-server/src/decision-tools.js",
+          "source_digest": "2c3ad34125a00ccaa3ead9fc3b3918e0759d268a97802840dbfd5c076a76d65c"
+        },
+        "mcp-tool:log-outreach": {
+          "source_locator": "mcp-server/src/lead-tools.js",
+          "source_digest": "1804ac159f1028a7aaa5db1b728d4cf9999f2e062cab3c21e895952d010072df"
+        },
+        "mcp-tool:loop-board": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:loop-headers": {
+          "source_locator": "mcp-server/src/loop-tools.js",
+          "source_digest": "0881a3c89d72b53e807c9c0966e92db54b329ca6794447eea59bd4c97de3e25b"
+        },
+        "mcp-tool:measure-placement": {
+          "source_locator": "mcp-server/src/campaign-tools.js",
+          "source_digest": "d68eaaaf405a940ea391719dff3cdae13b2505b62fef85b4440245a7928457ed"
+        },
+        "mcp-tool:merge-vendor-rows": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:morning-brief": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:new-client": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:new-deal": {
+          "source_locator": "mcp-server/src/deal-tools.js",
+          "source_digest": "c781f9bfb221fdceffa364dc9640d1dfef3f7c3ebc0f9b1c2d7a723ebc6764d1"
+        },
+        "mcp-tool:new-lead": {
+          "source_locator": "mcp-server/src/lead-tools.js",
+          "source_digest": "1804ac159f1028a7aaa5db1b728d4cf9999f2e062cab3c21e895952d010072df"
+        },
+        "mcp-tool:new-vendor": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:open-campaign": {
+          "source_locator": "mcp-server/src/campaign-tools.js",
+          "source_digest": "d68eaaaf405a940ea391719dff3cdae13b2505b62fef85b4440245a7928457ed"
+        },
+        "mcp-tool:patch-deal-field": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:prepare-conversation": {
+          "source_locator": "mcp-server/src/search-tools.js",
+          "source_digest": "53e4fc5eb0013070fd33d79d5f68237a88d0e5c020fb13e29ecff2833af2d769"
+        },
+        "mcp-tool:prepare-document": {
+          "source_locator": "mcp-server/src/document-tools.js",
+          "source_digest": "ec9bf8a56ffeaf025ab862933ba69442a2948c89bbac65647e193c95587dead4"
+        },
+        "mcp-tool:presence-lease": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:promote-pool": {
+          "source_locator": "mcp-server/src/lead-tools.js",
+          "source_digest": "1804ac159f1028a7aaa5db1b728d4cf9999f2e062cab3c21e895952d010072df"
+        },
+        "mcp-tool:read-deal-reconciliation": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:read-doc-outcome-cards": {
+          "source_locator": "mcp-server/src/doc-outcome-cards-tools.js",
+          "source_digest": "fb599ed9efc089d320872f6007bf4b26fb561036373e9a73bdabc0ada268736e"
+        },
+        "mcp-tool:read-loop": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:read-v5-a02-rule-enforcement-coverage": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:reassign-deal": {
+          "source_locator": "mcp-server/src/deal-tools.js",
+          "source_digest": "c781f9bfb221fdceffa364dc9640d1dfef3f7c3ebc0f9b1c2d7a723ebc6764d1"
+        },
+        "mcp-tool:record-counter": {
+          "source_locator": "mcp-server/src/deal-tools.js",
+          "source_digest": "c781f9bfb221fdceffa364dc9640d1dfef3f7c3ebc0f9b1c2d7a723ebc6764d1"
+        },
+        "mcp-tool:record-defect": {
+          "source_locator": "mcp-server/src/introspection-tools.js",
+          "source_digest": "b4bb2c6f33bfaa669ef45bd14ef84a2dc49b0ced4c1375df7358cdd2ed3d3ac5"
+        },
+        "mcp-tool:record-executed-lease": {
+          "source_locator": "mcp-server/src/deal-tools.js",
+          "source_digest": "c781f9bfb221fdceffa364dc9640d1dfef3f7c3ebc0f9b1c2d7a723ebc6764d1"
+        },
+        "mcp-tool:record-finding": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:record-gate-zero-read-only-outcome": {
+          "source_locator": "mcp-server/src/gate-zero-tools.js",
+          "source_digest": "94db020a003e45948d4fd18683279fbdec5c44eabf7db6faa54c6e106918d7c9"
+        },
+        "mcp-tool:record-rule-enforcement-fallback": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:register-template": {
+          "source_locator": "mcp-server/src/document-tools.js",
+          "source_digest": "ec9bf8a56ffeaf025ab862933ba69442a2948c89bbac65647e193c95587dead4"
+        },
+        "mcp-tool:resolve-candidate": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:resolve-conflict": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:resolve-post-call-candidate": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:retire-rule": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:revert-deal-field": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:review-deal": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:score-campaign": {
+          "source_locator": "mcp-server/src/campaign-tools.js",
+          "source_digest": "d68eaaaf405a940ea391719dff3cdae13b2505b62fef85b4440245a7928457ed"
+        },
+        "mcp-tool:set-lead": {
+          "source_locator": "mcp-server/src/deal-tools.js",
+          "source_digest": "c781f9bfb221fdceffa364dc9640d1dfef3f7c3ebc0f9b1c2d7a723ebc6764d1"
+        },
+        "mcp-tool:set-market-agent": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:set-national-account-owner": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:set-next-action": {
+          "source_locator": "mcp-server/src/activity-tools.js",
+          "source_digest": "a1ad2a6510a86eeffd046508459d642e6cb094687011356f2ca9c67d33ab1b24"
+        },
+        "mcp-tool:set-next-step": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:source-attribution": {
+          "source_locator": "mcp-server/src/search-tools.js",
+          "source_digest": "53e4fc5eb0013070fd33d79d5f68237a88d0e5c020fb13e29ecff2833af2d769"
+        },
+        "mcp-tool:stale-records": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:stamp-touch": {
+          "source_locator": "mcp-server/src/activity-tools.js",
+          "source_digest": "a1ad2a6510a86eeffd046508459d642e6cb094687011356f2ca9c67d33ab1b24"
+        },
+        "mcp-tool:start-deal-review": {
+          "source_locator": "mcp-server/src/deal-room-tools.js",
+          "source_digest": "1f4bad17bddc6dff35a553acf69c1c8a7d485eb449c7db90a1655ac4ba46cd1a"
+        },
+        "mcp-tool:state-as-of": {
+          "source_locator": "mcp-server/src/introspection-tools.js",
+          "source_digest": "b4bb2c6f33bfaa669ef45bd14ef84a2dc49b0ced4c1375df7358cdd2ed3d3ac5"
+        },
+        "mcp-tool:teach": {
+          "source_locator": "mcp-server/src/rule-tools.js",
+          "source_digest": "ed4358af2859902e0cdf528a8fdc2674241bdbec534c8cc7c8396724ca53b2b1"
+        },
+        "mcp-tool:today-triage": {
+          "source_locator": "mcp-server/src/workspace-tools.js",
+          "source_digest": "1435c743a3de4db3a77471fb9213fa88e3e70b946d434b72f559ee784eae92e6"
+        },
+        "mcp-tool:triage-item": {
+          "source_locator": "mcp-server/src/activity-tools.js",
+          "source_digest": "a1ad2a6510a86eeffd046508459d642e6cb094687011356f2ca9c67d33ab1b24"
+        },
+        "mcp-tool:update-deal": {
+          "source_locator": "mcp-server/src/deal-tools.js",
+          "source_digest": "c781f9bfb221fdceffa364dc9640d1dfef3f7c3ebc0f9b1c2d7a723ebc6764d1"
+        },
+        "mcp-tool:update-decision": {
+          "source_locator": "mcp-server/src/decision-tools.js",
+          "source_digest": "2c3ad34125a00ccaa3ead9fc3b3918e0759d268a97802840dbfd5c076a76d65c"
+        },
+        "mcp-tool:update-document-status": {
+          "source_locator": "mcp-server/src/document-tools.js",
+          "source_digest": "ec9bf8a56ffeaf025ab862933ba69442a2948c89bbac65647e193c95587dead4"
+        },
+        "mcp-tool:update-industry-event": {
+          "source_locator": "mcp-server/src/industry-event-tools.js",
+          "source_digest": "608c8de392d6ad41501f2154512d99a5a3106a1e4369cba0931ad3ccf189208b"
+        },
+        "mcp-tool:update-lead": {
+          "source_locator": "mcp-server/src/lead-tools.js",
+          "source_digest": "1804ac159f1028a7aaa5db1b728d4cf9999f2e062cab3c21e895952d010072df"
+        },
+        "mcp-tool:update-loop": {
+          "source_locator": "mcp-server/src/loop-tools.js",
+          "source_digest": "0881a3c89d72b53e807c9c0966e92db54b329ca6794447eea59bd4c97de3e25b"
+        },
+        "mcp-tool:update-party-contact": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:update-vendor": {
+          "source_locator": "mcp-server/src/party-tools.js",
+          "source_digest": "4bf78480085c17d8038c2e4477552bdd2b0f145961537bf451b4e9fab44eb5ec"
+        },
+        "mcp-tool:who-do-we-know": {
+          "source_locator": "mcp-server/src/search-tools.js",
+          "source_digest": "53e4fc5eb0013070fd33d79d5f68237a88d0e5c020fb13e29ecff2833af2d769"
+        }
+      },
+      "expected_count": 1130,
+      "expected_sha256": "f88836083050475d9e9d0774bb0f616b80b239c0fbb46202683d3b18f4e33b71"
     }
   ],
   "current_source_review": {
@@ -95864,6 +96314,37 @@
       ],
       "expected_count": 1130,
       "expected_sha256": "68823ecb3188bce0e1f283be758da520027c1670401ec38af3088dd7113ed5d2"
+    },
+    "scac-mutation-registry.v113": {
+      "base_version": "v113",
+      "reason": "Carry forward the reviewed migration-runner bytes across the Worker declaration-source successor without changing its authority contract.",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "3f29da1dd58219542b2db2a108c46a4765bbb2e145b36a200cc0daaf922fd8fd",
+          "handler_digest": "3f29da1dd58219542b2db2a108c46a4765bbb2e145b36a200cc0daaf922fd8fd",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1130,
+      "expected_sha256": "8aa907235c6f29b58a15040800bf640172b64d3740b6600f804916acd148a913"
     }
   }
 }

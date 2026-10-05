@@ -19839,6 +19839,28 @@ export function renderLeadsRegistrySql(rows, predecessorSql = null) {
   });
 }
 
+export const WORKER_REGISTRATION_DB_CATALOG_BASELINE = Object.freeze({
+  ...LEADS_V112_DB_CATALOG_BASELINE,
+  // The successor's lookup adds four execute grants, one per runtime role.
+  secdef_execute: { count: 1246, digest: "sha256:6e7ec210c949fbd87f47d04260ae03d9b4ccac569beb7b5439f69f754ed429ae" },
+  projection_version: "scac-db-catalog-projection.v113",
+});
+
+export function renderWorkerRegistrationRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0846_leads_scac_successor.sql",
+    predecessorDigest: "39c22acce1c8d94d693f0b6f858f8a6d68c20f3f9edb8314832a0a0e35aa5a78",
+    domainPath: "migrations/0845_lead_archived_stage.sql",
+    oldVersion: REGISTRY_V112_VERSION,
+    newVersion: "scac-mutation-registry.v113",
+    oldCatalogBaseline: LEADS_V112_DB_CATALOG_BASELINE,
+    newCatalogBaseline: WORKER_REGISTRATION_DB_CATALOG_BASELINE,
+    oldTag: "leads", newTag: "worker_registration",
+    oldLabel: "Leads", newLabel: "Worker registration",
+  });
+}
+
 export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
   return renderAppendedRegistrySql(rows, {
     predecessorSql,
@@ -21407,9 +21429,16 @@ export function renderGeneratedFrontier() {
   artifacts["migrations/0846_leads_scac_successor.sql"] =
     renderLeadsRegistrySql(v112Rows, artifacts["migrations/0844_automation_undo_scac_successor.sql"]);
 
+  const workerRows = frozenInventory("scac-mutation-registry.v113");
+  artifacts["mcp-server/src/scac-mutation-registry.v113.generated.js"] =
+    renderRuntimeProjection(workerRows, { version: "scac-mutation-registry.v113",
+      dbCatalogBaseline: WORKER_REGISTRATION_DB_CATALOG_BASELINE });
+  artifacts["migrations/0847_architecture_worker_registration_scac_successor.sql"] =
+    renderWorkerRegistrationRegistrySql(workerRows, artifacts["migrations/0846_leads_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 118 || runtimeCount !== 109 || Object.keys(artifacts).length !== 227)
+  if (migrationCount !== 119 || runtimeCount !== 110 || Object.keys(artifacts).length !== 229)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -21583,7 +21612,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     "--write-direct-migration-0467": "migrations/0467_siep18_atomic_db_monitor_grants.sql",
     "--write-direct-migration-0470": "migrations/0470_source_merge_authority_projection.sql",
   };
-  if (process.argv[2] === "--bless-full-entry-set-seals-from-local-db") {
+  if (process.argv[2] === "--write-worker-registration-frontier") {
+    const artifacts = renderGeneratedFrontier();
+    for (const path of ["mcp-server/src/scac-mutation-registry.v113.generated.js",
+      "migrations/0847_architecture_worker_registration_scac_successor.sql"]) {
+      await writeFile(resolve(REPO_ROOT, path), artifacts[path]);
+      process.stdout.write(`${path}\n`);
+    }
+  } else if (process.argv[2] === "--bless-full-entry-set-seals-from-local-db") {
     const dsn = process.env.CARR_LOCAL_PG_DSN || "";
     if (!dsn) throw new Error("CARR_LOCAL_PG_DSN is required for local seal blessing");
     const seals = fullEntrySetSealsFromLocalDatabase(dsn);

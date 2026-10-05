@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0846 installs Leads v112 and retains audited automation v111 as history.
+# 0847 relocates Worker registrations and retains Leads v112 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v112"
-LIVE_REGISTRY_ORDINAL = 112
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v111"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v113"
+LIVE_REGISTRY_ORDINAL = 113
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v112"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:ba7578babffacfaf076276ec6293e51678937b5c1f444cbf880cc276328854fa"
+    "sha256:7460d50a2441dec886f1c8c41cdda2b5ed3ba8e40f6dce9c94703ff2f0c68ef1"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2678, 1109)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2703, 1130)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0844_automation_undo_scac_successor.sql"
+    "migrations/0846_leads_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0846_leads_scac_successor.sql"
+    "migrations/0847_architecture_worker_registration_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
