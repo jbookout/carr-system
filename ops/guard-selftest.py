@@ -28,16 +28,18 @@ import sys
 import pathlib
 import shlex
 import tempfile
+from git_env import fixture_env
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GUARD = os.path.join(REPO, "hooks", "guard-unattended.py")
+ENV = fixture_env()
 
 ALLOW, DENY = 0, 2
 
 
 def run(payload):
     p = subprocess.run([sys.executable, GUARD], input=json.dumps(payload),
-                       capture_output=True, text=True, timeout=20)
+                       capture_output=True, text=True, timeout=20, env=ENV)
     return p.returncode, (p.stderr or "").strip()
 
 
@@ -671,7 +673,7 @@ def source_restore_cases():
     with tempfile.TemporaryDirectory(prefix="doctorcre-restore-") as directory:
         root = pathlib.Path(directory)
         def git(*args):
-            return subprocess.check_output(["git", "-C", directory, *args], text=True)
+            return subprocess.check_output(["git", "-C", directory, *args], text=True, env=ENV)
         git("init", "-q", "-b", "main")
         git("config", "user.email", "fixture@example.invalid")
         git("config", "user.name", "Fixture")
