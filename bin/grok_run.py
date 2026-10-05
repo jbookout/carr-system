@@ -78,7 +78,7 @@ def parse_output(lines, cli_version, returncode=0):
         "stopReason": end.get("stopReason"), "num_turns": end.get("num_turns"),
         "cost_usd": end.get("total_cost_usd", end.get("cost_usd")), "cli_version": cli_version,
     }
-    return parsed["report_text"], receipt, parsed["code"]
+    return parsed["text"], receipt, parsed["code"]
 
 
 def main():
@@ -91,8 +91,6 @@ def main():
     parser.add_argument("--timeout-seconds", type=int, default=int(TIMEOUT_S),
                         help="model invocation timeout in seconds (1-1800; default: 180)")
     parser.add_argument("--writable", action="store_true")
-    parser.add_argument("--no-sign-in-alert", action="store_true",
-                        help="The calling health job owns failure notification")
     prompt = parser.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
     prompt.add_argument("--prompt-file", type=Path)
@@ -123,7 +121,7 @@ def main():
         return code
     except PreflightError as error:
         line = str(error)
-        if error.code == 3 and not args.no_sign_in_alert:
+        if error.code == 3:
             try:
                 sign_in_alert()
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
