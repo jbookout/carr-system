@@ -20,4 +20,12 @@ class GateTest(unittest.TestCase):
         self.assertTrue(seen[0][1].endswith('lead-automation.postgres.mjs'))
     def test_fixture_success_is_required(self):
         self.assertEqual(gate.verify({'DATABASE_URL':'postgresql://localhost/db'},lambda args,**kw:subprocess.CompletedProcess(args,0)),0)
+    def test_undo_and_invoice_regressions_are_required(self):
+        seen=[]
+        def run(args,**kwargs):
+            seen.append(Path(args[-1]).name)
+            return subprocess.CompletedProcess(args,1 if seen[-1]=='invoice-review-regressions.postgres.mjs' else 0)
+        self.assertEqual(gate.verify({'DATABASE_URL':'postgresql://127.0.0.1/db'},run),1)
+        self.assertIn('automation-undo-archive-invoice.postgres.mjs',seen)
+        self.assertIn('lead-automation-concurrency.postgres.mjs',seen)
 if __name__=='__main__': unittest.main()

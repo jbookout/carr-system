@@ -1,3 +1,5 @@
+import { canExercisePartnerAuthority } from "./partner-authority.js";
+
 // Local readers submit derived invoice facts. No provider, raw message or send path.
 const normal = value => typeof value === "string" ? value.trim().replace(/\s+/g, " ").toLowerCase() : "";
 const candidateDeals = (invoice,deals) => deals.filter(d=>normal(d.name)===normal(invoice.deal_name));
@@ -59,6 +61,12 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
       where subject_type='deal' and subject_id=$1 and field in ('phase','invoiced_on')
       order by field,recorded_at desc,id desc`,[id])).rows;
   }
+  async function verifyDealEffect(c,id,phase,invoicedOn,priorVersion) {
+    const row=(await c.query("select phase,invoiced_on,version from deal where id=$1",[id])).rows[0];
+    if(!row || row.phase!==phase || dateText(row.invoiced_on)!==dateText(invoicedOn) || row.version<=priorVersion)
+      fail("invoice_deal_effect_not_applied");
+    return row;
+  }
   async function apply(c,actor,args) {
     // Match update-deal's phase advisory-lock -> row-lock order. The shared job
     // acquires invoice rows in occurrence order, serializing competing runs.
@@ -70,7 +78,7 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
     // invoice/deal rows. No new phase lock is acquired under a table lock.
     await c.query("lock table client,deal,premises,premises_space in share mode");
     await c.query(`select p.id from party p where exists(select 1 from client cl where cl.party_id=p.id)
-      order by p.id for share of p`);
+      order by p.id for update of p`);
     await c.query(`select s.id from space s where exists(select 1 from premises_space ps where ps.space_id=s.id)
       order by s.id for share of s`);
     await c.query(`select b.id from building b where exists(select 1 from space s join premises_space ps on ps.space_id=s.id where s.building_id=b.id)
@@ -93,13 +101,14 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
       const d=s.deals.find(d=>d.id===move.deal_id);
       await updateDeal(c,actor,{idempotency_key:`${args.idempotency_key}:invoice:${move.invoice_id}`,
         deal:d.id,base_version:d.version,fields:{phase:"closed",invoiced_on:move.invoiced_on}});
+      const fresh=await verifyDealEffect(c,d.id,"closed",move.invoiced_on,d.version);
       const ids=await fieldEvents(c,d.id);
-      await c.query(`update deal_invoice_email set status='applied',deal_id=$2,prior_phase=$3,prior_invoiced_on=$4,
-        phase_event_id=$5,invoice_event_id=$6,applied_by=$7,applied_at=now(),reason=$8 where id=$1`,
+      const changed=await c.query(`update deal_invoice_email set status='applied',deal_id=$2,prior_phase=$3,prior_invoiced_on=$4,
+        phase_event_id=$5,invoice_event_id=$6,applied_by=$7,applied_at=now(),reason=$8 where id=$1 and status='captured' returning id,status`,
         [move.invoice_id,d.id,d.phase,d.invoiced_on,ids.find(e=>e.field==="phase").id,ids.find(e=>e.field==="invoiced_on").id,actor.id,move.reason]);
+      if(changed.rowCount!==1 || changed.rows[0].status!=="applied") fail("invoice_lifecycle_not_applied");
       await writeEvent(c,actor,"advance-leads","deal",d.id,{old:{phase:d.phase,invoiced_on:dateText(d.invoiced_on)},
         new:{phase:"closed",invoiced_on:move.invoiced_on,invoice_move_id:move.invoice_id,reason:move.reason,evidence_ref:move.evidence_ref},cause:"automation_job"});
-      const fresh=(await c.query("select version from deal where id=$1",[d.id])).rows[0];
       d.version=fresh.version;d.phase="closed";d.invoiced_on=move.invoiced_on;
       results.push(move);
     }
@@ -139,7 +148,7 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
       write:true,humanOnly:true,description:"Restore the phase and invoice date before an invoice close. Record the partner who undid it; refuse newer phase or invoice-date work.",
       inputSchema:{...schema({idempotency_key:{type:"string"},invoice_id:{type:"string",format:"uuid"},base_version:{type:"integer"}}),required:["idempotency_key","invoice_id","base_version"]},
       handler:(c,actor,args)=>withEnvelope(c,actor,"undo-invoice-close",args,async()=>{
-        if(!actor.human) fail("human_approval_required");
+        if(!canExercisePartnerAuthority(actor)) fail("human_approval_required");
         const m=(await c.query("select * from deal_invoice_email where id=$1",[args.invoice_id])).rows[0];
         if(!m || m.status!=="applied") fail("invoice_close_not_applied");
         await lockDealField(c,m.deal_id,"phase");
@@ -150,7 +159,9 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
           ids.find(e=>e.field==="phase")?.id!==m.phase_event_id || ids.find(e=>e.field==="invoiced_on")?.id!==m.invoice_event_id) fail("newer_invoice_change_exists");
         await updateDeal(c,actor,{idempotency_key:`${args.idempotency_key}:restore`,deal:m.deal_id,base_version:d.version,
           fields:{phase:m.prior_phase,invoiced_on:dateText(m.prior_invoiced_on)}});
-        await c.query("update deal_invoice_email set status='undone',undone_at=now(),undone_by=$2 where id=$1",[m.id,actor.id]);
+        await verifyDealEffect(c,m.deal_id,m.prior_phase,m.prior_invoiced_on,d.version);
+        const changed=await c.query("update deal_invoice_email set status='undone',undone_at=now(),undone_by=$2 where id=$1 and status='applied' returning id,status",[m.id,actor.id]);
+        if(changed.rowCount!==1 || changed.rows[0].status!=="undone") fail("invoice_lifecycle_not_applied");
         await writeEvent(c,actor,"undo-invoice-close","deal",m.deal_id,{old:{phase:"closed",invoiced_on:dateText(m.email_date)},new:{phase:m.prior_phase,invoiced_on:dateText(m.prior_invoiced_on),undone_invoice_id:m.id,undone_by:actor.id,reason:`Undid: ${m.reason}`,evidence_ref:m.evidence_ref},cause:"human_correction"});
         return {ok:true,deal_id:m.deal_id,phase:m.prior_phase,invoiced_on:dateText(m.prior_invoiced_on),undone_by:actor.id};
       }),

@@ -554,6 +554,11 @@ async function insertOrgPartyGuarded(c, savepoint, insertSql, insertParams, name
 // validators run before every intake write that turns a contact into a client
 // or vendor (and before a directly-created contact party).  The resulting
 // evidence is then persisted as a `verified` finding in the same envelope.
+function requireLeadStageAuthority(actor,fromStage,toStage) {
+  if ((fromStage === "archived" || toStage === "archived") && !canExercisePartnerAuthority(actor))
+    throw new ToolError({ error: "archive_requires_partner" });
+}
+
 function researchEvidence(raw, requiredFields, gate) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw new ToolError({ error: "research_evidence_required", gate,
@@ -3884,8 +3889,9 @@ export const TOOLS = {
       const guard = await versionGuard(c, "deal", s.id, args.base_version, keys);
       const old = (await c.query(`select ${keys.join(",")} from deal where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
-      await c.query(`update deal set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
+      const changed = await c.query(`update deal set ${sets}, updated_by=$1 where id=$${keys.length + 2} returning id`,
         [actor.id, ...keys.map(k => args.fields[k]), s.id]);
+      if (changed.rowCount !== 1) throw new ToolError({ error: "deal_update_not_applied" });
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] },
@@ -4321,6 +4327,7 @@ export const TOOLS = {
       source_type: { type: "string" }, source_detail: { type: "string" } },
       required: ["idempotency_key","party_id","stage"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "new-lead", args, async () => {
+      requireLeadStageAuthority(actor,null,args.stage);
       // stage and lane are FOREIGN KEYS (lead_stage.slug, lead_lane.slug). They used
       // to go straight into the insert, so a plausible-but-wrong value — `lane:
       // "referral"`, which reads like an obvious lane and is not one — came back as
@@ -4365,6 +4372,7 @@ export const TOOLS = {
       research_evidence: RESEARCH_EVIDENCE_SCHEMA },
       required: ["idempotency_key","pool_id","base_version","stage","research_evidence"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "promote-pool", args, async () => {
+      requireLeadStageAuthority(actor,null,args.stage);
       await versionGuard(c, "candidate_pool", args.pool_id, args.base_version);
       const p = (await c.query(
         `select id, source, source_key, status, dup_tier, dup_ref, name, org_name, vertical,
@@ -4520,6 +4528,11 @@ export const TOOLS = {
           hint: "this outcome closes the lead; a next step would contradict it" });
 
       const s = await resolveSubject(c, args.ref);
+      if (!isOpen && s.type === "lead") {
+        const current=(await c.query("select stage from lead where id=$1 for update",[s.id])).rows[0];
+        requireLeadStageAuthority(actor,current.stage,CLOSING[args.outcome]);
+      }
+
 
       // no_channel is NOT a contact and must never move last_touch: nothing was
       // reached. 'note' is is_contact=false in activity_kind, which is exactly
@@ -4770,8 +4783,7 @@ export const TOOLS = {
       const current = (await c.query("select stage,suppressed from lead where id=$1", [s.id])).rows[0];
       const nextStage = keys.includes("stage") ? args.fields.stage : current.stage;
       const nextSuppressed = keys.includes("suppressed") ? args.fields.suppressed : current.suppressed;
-      if (keys.includes("stage") && (current.stage === "archived" || nextStage === "archived") && !canExercisePartnerAuthority(actor))
-        throw new ToolError({error:"archive_requires_partner"});
+      if (keys.includes("stage")) requireLeadStageAuthority(actor,current.stage,nextStage);
       if (nextStage === "do_not_contact" && nextSuppressed !== true) {
         throw new ToolError({ error: "do_not_contact_requires_suppression",
           hint: "do_not_contact is a standing instruction, not only a funnel label; pass stage='do_not_contact' and suppressed=true together" });

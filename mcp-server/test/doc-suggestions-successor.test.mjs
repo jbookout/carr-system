@@ -89,7 +89,8 @@ test('relationship attribution follows the delivered system-work contract withou
   assert.match(sql, /filename='0827_system_work_scac_successor[.]sql' and sha256='[0-9a-f]{64}'/);
   assert.match(sql, /filename='0839_relationship_deal_links[.]sql' and sha256='[0-9a-f]{64}'/);
   assert.match(sql, /scac_mutation_registration_v108/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry[.]v109[.]generated[.]js/);
+  assert.ok(read('mcp-server/src/mutation-registry.js').includes(
+    `${CURRENT_REGISTRY_VERSION}.generated.js`));
   assert.match(read('tools/migrate.py'),
     /"0839_relationship_deal_links[.]sql",\n\s+"0840_relationship_scac_successor[.]sql"/);
 });

@@ -88,7 +88,7 @@ class Fake {
     throw new Error(`unexpected fake query ${sql}`);
   }
 }
-const human={id:"actor-example",human:true};
+const human={id:"actor-example",slug:"joe",human:true};
 const tools=leadAutomationTools({invoices:{preview:async()=>[],apply:async()=>[]},withEnvelope:async(c,a,v,args,f)=>f(),writeEvent:async(c,...args)=>c.events.push(args),ToolError:class extends Error{constructor(value){super(value.error);}}});
 test("dry runs issue SELECT only, use the same planner and never prepare drafts",async()=>{
   for(const [name,args] of [["lead-stage-preview",{}],["advance-leads",{idempotency_key:"synthetic-preview",dry_run:true}]]){

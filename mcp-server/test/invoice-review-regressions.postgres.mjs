@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import pg from 'pg';
-import {TOOLS} from '../src/tools.js';
+import {TOOLS,executeRegisteredTool} from '../src/tools.js';
 const url=process.env.CARR_CI_DATABASE_URL||process.env.DATABASE_URL;
 if(!url||!['localhost','127.0.0.1'].includes(new URL(url).hostname))throw Error('disposable_loopback_database_required');
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
@@ -28,8 +28,9 @@ async function fixture(t) {
       await o.query('delete from space where id=$1',[space]);
       await o.query('delete from building where id=$1',[building]);
       await o.query('delete from deal where client_id=$1',[client]);
-      await o.query('delete from client where id=$1',[client]);
+      await o.query('delete from client where created_by=$1',[actor.id]);
       await o.query('delete from party where id=$1',[party]);
+      await o.query('delete from record_flag where created_by=$1',[actor.id]);
       await o.query('delete from actor where id=$1',[actor.id]);
       await o.query('commit');
     } finally {await Promise.all(clients.map(c=>c.end()));}
@@ -119,4 +120,82 @@ test('review 5: migrated predecessor approval can be undone, forged associations
   const result=await f.call(f.o,'undo-lead-move',{move_id:move,base_version:version});
   assert.equal(result.stage,'new');
   assert.deepEqual((await f.o.query('select new_value from event where id=$1',[event])).rows[0].new_value,{stage:'qualified',evidence_ref:'local-mail:predecessor',activity_id:activity});
+});
+
+async function leadFixture(f,stage='new') {
+  const id=randomUUID(),ref='L-SYNTH-'+id;
+  await f.o.query("insert into lead(id,registry_ref,party_id,stage,created_by,updated_by)values($1,$2,$3,$4,$5,$5)",[id,ref,f.party,stage,f.actor.id]);
+  return {id,ref};
+}
+for(const slug of ['joe-local','claude'])test('PR1550 1: registered '+slug+' approves archive and successfully undoes lead and invoice',async t=>{
+  const f=await fixture(t),l=await leadFixture(f),activity=randomUUID(),move=randomUUID();
+  const actor={...f.actor,slug,human:false,native_agent_verified:true,sponsoring_human_slug:'joe',via:slug==='joe-local'?'local-token':'oauth-agent'};
+  const call=(verb,args)=>executeRegisteredTool(f.o,actor,verb,{idempotency_key:randomUUID(),...args});
+  await f.o.query("insert into activity(id,occurred_at,actor_id,kind,summary,lead_id,source)values($1,now(),$2,'email_in','Synthetic archive',$3,'local_mail')",[activity,f.actor.id,l.id]);
+  await f.o.query("insert into lead_stage_move(id,lead_id,from_stage,to_stage,activity_id,evidence_ref,strength,status,created_by,reason)values($1,$2,'new','archived',$3,'local-mail:archive','weak','proposed',$4,'Retired')",[move,l.id,activity,f.actor.id]);
+  const v=async()=>(await f.o.query('select version from lead where id=$1',[l.id])).rows[0].version;
+  assert.equal((await call('approve-lead-move',{move_id:move,base_version:await v()})).stage,'archived');
+  assert.equal((await call('undo-lead-move',{move_id:move,base_version:await v()})).stage,'new');
+  const i=await f.capture();await f.run();
+  const dv=(await f.o.query('select version from deal where id=$1',[f.deal])).rows[0].version;
+  assert.equal((await call('undo-invoice-close',{invoice_id:i.invoice_id,base_version:dv})).phase,'legal');
+  assert.equal((await f.o.query('select status from deal_invoice_email where id=$1',[i.invoice_id])).rows[0].status,'undone');
+});
+const research=fields=>({sources:[{url:'https://example.test/synthetic',observed_at:new Date().toISOString()}],field_evidence:Object.fromEntries(fields.map(k=>[k,[0]])),discrepancies:[]});
+test('PR1550 2: every archive stage writer requires partner authority, notes stay editable',async t=>{
+  const f=await fixture(t),l=await leadFixture(f,'archived');
+  const agent={...f.actor,slug:'synthetic-automation',human:false};
+  const call=(verb,args)=>executeRegisteredTool(f.o,agent,verb,{idempotency_key:randomUUID(),...args});
+  await assert.rejects(()=>call('new-lead',{party_id:f.party,stage:'archived'}),/archive_requires_partner/);
+  await assert.rejects(()=>call('promote-pool',{pool_id:randomUUID(),base_version:1,stage:'archived',research_evidence:research(['name','company','phone','specialty','market'])}),/archive_requires_partner/);
+  for(const outcome of ['not_interested','do_not_contact'])await assert.rejects(()=>call('log-outreach',{ref:l.id,outcome,summary:'Synthetic archive exit'}),/archive_requires_partner/);
+  const version=(await f.o.query('select version from lead where id=$1',[l.id])).rows[0].version;
+  assert.equal((await call('update-lead',{lead:l.id,base_version:version,fields:{notes:'Synthetic archived note'}})).ok,true);
+  assert.equal((await f.o.query('select stage from lead where id=$1',[l.id])).rows[0].stage,'archived');
+  assert.equal((await f.call(f.o,'new-lead',{party_id:f.party,stage:'archived'})).ok,true);
+});
+test('PR1550 3: client intake and empty invoice job obey one table-before-party lock order',async t=>{
+  const f=await fixture(t),l=await leadFixture(f),reached=deferred(),resume=deferred();
+  const query=f.a.query.bind(f.a);let paused=false;
+  f.a.query=async(sql,...args)=>{
+    if(!paused&&sql.startsWith('lock table client')){paused=true;reached.resolve();await resume.promise;}
+    return query(sql,...args);
+  };
+  const work=f.run();work.catch(()=>{});await reached.promise;
+  await f.b.query('begin');
+  let intakeFinished=false;
+  const intake=f.call(f.b,'new-client',{party_id:f.party,status:'active_deal',acquisition_source:'Synthetic',research_evidence:research(['practice_name','address','phone','specialty','practitioners','hours'])}).then(async r=>{await f.b.query('commit');intakeFinished=true;return r;},async e=>{await f.b.query('rollback');intakeFinished=true;throw e;});
+  intake.catch(()=>{});
+  // Intake takes the client table before its party foreign-key read. The old
+  // job has already locked this party and forms a cycle when resumed.
+  const deadline=Date.now()+3000;
+  while(!intakeFinished&&Date.now()<deadline){
+    const locked=(await f.o.query("select exists(select 1 from pg_locks where pid=$1 and relation='client'::regclass and mode='RowExclusiveLock' and granted) held",[f.b.processID])).rows[0].held;
+    if(locked)break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  resume.resolve();
+  const results=await Promise.allSettled([work,intake]);
+  assert.deepEqual(results.map(r=>r.status),['fulfilled','fulfilled'],results.map(r=>String(r.reason)).join('\n'));
+});
+for(const table of ['deal','deal_invoice_email'])for(const action of ['apply','undo'])test('PR1550 5: '+action+' refuses zero-row '+table+' effect and rolls back history',async t=>{
+  const f=await fixture(t),i=await f.capture();
+  if(action==='undo')await f.run();
+  await f.o.query('begin');
+  try{
+    const before=(await f.o.query('select phase,invoiced_on,version from deal where id=$1',[f.deal])).rows[0];
+    const status=action==='apply'?'captured':'applied';
+    const events=(await f.o.query('select count(*)::int n from event where actor_id=$1',[f.actor.id])).rows[0].n;
+    const envelopes=(await f.o.query('select count(*)::int n from tool_call where actor_id=$1',[f.actor.id])).rows[0].n;
+    await f.o.query(`create function pg_temp.reject_effect() returns trigger language plpgsql as $$begin if new.id='${table==='deal'?f.deal:i.invoice_id}'::uuid then return null; end if; return new; end$$`);
+    await f.o.query(`create trigger synthetic_reject_effect before update on ${table} for each row execute function pg_temp.reject_effect()`);
+    await f.o.query('savepoint effect');
+    await assert.rejects(()=>f.call(f.o,action==='apply'?'advance-leads':'undo-invoice-close',action==='apply'?{}:{invoice_id:i.invoice_id,base_version:before.version}),/not_applied/);
+    await f.o.query('rollback to savepoint effect');
+    assert.deepEqual((await f.o.query('select phase,invoiced_on,version from deal where id=$1',[f.deal])).rows[0],before);
+    assert.equal((await f.o.query('select status from deal_invoice_email where id=$1',[i.invoice_id])).rows[0].status,status);
+    assert.equal((await f.o.query('select count(*)::int n from event where actor_id=$1',[f.actor.id])).rows[0].n,events);
+    assert.equal((await f.o.query('select count(*)::int n from tool_call where actor_id=$1',[f.actor.id])).rows[0].n,envelopes);
+  }finally{await f.o.query('rollback');}
+  if(action==='apply')assert.equal((await f.run()).invoice_closes.find(m=>m.invoice_id===i.invoice_id).status,'applied');
 });

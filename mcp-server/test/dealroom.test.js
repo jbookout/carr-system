@@ -109,7 +109,7 @@ class FakeClient {
       const deal = this.deals.get(params[2]);
       deal.owner = params[0];
       deal.version += 1;
-      return { rows: [] };
+      return { rowCount: 1, rows: [{ id: deal.id }] };
     }
     if (sql === "select id from actor where slug=$1 and active") {
       const actor = actors[params[0]];
@@ -142,7 +142,7 @@ class FakeClient {
         .split(", ");
       assignments.forEach((assignment, index) => { deal[assignment.split("=")[0]] = params[index + 1]; });
       deal.version += 1;
-      return { rows: [] };
+      return { rowCount: 1, rows: [{ id: deal.id }] };
     }
     if (/^select (phase|owner|attention|next_date) as value from deal/.test(sql)) {
       const field = sql.match(/^select (\w+) as value/)[1];
@@ -168,7 +168,7 @@ class FakeClient {
       deal.parked_at = params[1] === "parked" ? this.now.toISOString() : null;
       deal.parked_by = params[1] === "parked" ? params[4] : null;
       deal.version += 1;
-      return { rows: [] };
+      return { rowCount: 1, rows: [{ id: deal.id }] };
     }
     if (sql.startsWith("select ") && sql.endsWith(" from deal where id=$1")) {
       const fields = sql.slice("select ".length, -" from deal where id=$1".length).split(",");
@@ -180,7 +180,7 @@ class FakeClient {
       const deal = this.deals.get(params[0]);
       deal[field] = params[1];
       deal.version += 1;
-      return { rows: [] };
+      return { rowCount: 1, rows: [{ id: deal.id }] };
     }
     if (sql.startsWith("insert into event")) {
       this.addEvent({ actor: { id: params[1], slug: this.actorSlug(params[1]) }, verb: params[2],
@@ -274,7 +274,7 @@ class FakeClient {
       const deal = this.deals.get(params[0]);
       deal.next_date = params[1];
       deal.version += 1;
-      return { rows: [] };
+      return { rowCount: 1, rows: [{ id: deal.id }] };
     }
     if (sql.includes("dealroom:drop-prior-action")) {
       for (const action of this.nextActions) {

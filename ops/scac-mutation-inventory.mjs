@@ -549,7 +549,8 @@ export const REGISTRY_V106_VERSION = "scac-mutation-registry.v106";
 export const REGISTRY_V107_VERSION = "scac-mutation-registry.v107";
 export const REGISTRY_V108_VERSION = "scac-mutation-registry.v108";
 export const REGISTRY_V109_VERSION = "scac-mutation-registry.v109";
-export const CURRENT_REGISTRY_VERSION = REGISTRY_V109_VERSION;
+export const REGISTRY_V110_VERSION = "scac-mutation-registry.v110";
+export const CURRENT_REGISTRY_VERSION = REGISTRY_V110_VERSION;
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -2043,6 +2044,31 @@ export const RELATIONSHIP_V109_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 1230, digest: "sha256:63bd1bd70454eb6dc6e2b07fc19cc3e0e08430e05a82688ed40ffb173ea336ff" },
 });
 
+// Measured on disposable PostgreSQL with main v109 plus automation schema and v110 grants.
+export const AUTOMATION_UNDO_V110_DB_CATALOG_BASELINE = Object.freeze({
+  "projection_version": "scac-db-catalog-projection.v110",
+  "secdef_execute": {
+    "count": 1234,
+    "digest": "sha256:20b9172e7c6e0c799907abc8d920f0409c910707bd9beba77ca21d8a23bf1bcc"
+  },
+  "relation_dml": {
+    "count": 319,
+    "digest": "sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"
+  },
+  "column_dml": {
+    "count": 12,
+    "digest": "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"
+  },
+  "role_authority": {
+    "count": 13,
+    "digest": "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"
+  },
+  "runtime_dml_grants": {
+    "count": 331,
+    "digest": "sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"
+  }
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -2798,6 +2824,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V107_VERSION]: "v107",
   [REGISTRY_V108_VERSION]: "v108",
   [REGISTRY_V109_VERSION]: "v109",
+  [REGISTRY_V110_VERSION]: "v110",
 });
 
 export function sourceInventoryFixtureDigest(rows) {
@@ -2991,7 +3018,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V44_VERSION, REGISTRY_V45_VERSION, REGISTRY_V46_VERSION,
     REGISTRY_V47_VERSION, REGISTRY_V48_VERSION, REGISTRY_V49_VERSION,
     REGISTRY_V50_VERSION, REGISTRY_V51_VERSION, REGISTRY_V52_VERSION, REGISTRY_V53_VERSION, REGISTRY_V54_VERSION,
-    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION, REGISTRY_V73_VERSION, REGISTRY_V74_VERSION, REGISTRY_V75_VERSION, REGISTRY_V76_VERSION, REGISTRY_V77_VERSION, REGISTRY_V78_VERSION, REGISTRY_V79_VERSION, REGISTRY_V80_VERSION, REGISTRY_V81_VERSION, REGISTRY_V82_VERSION, REGISTRY_V83_VERSION, REGISTRY_V84_VERSION, REGISTRY_V85_VERSION, REGISTRY_V86_VERSION, REGISTRY_V87_VERSION, REGISTRY_V88_VERSION, REGISTRY_V89_VERSION, REGISTRY_V90_VERSION, REGISTRY_V91_VERSION, REGISTRY_V92_VERSION, REGISTRY_V93_VERSION, REGISTRY_V94_VERSION, REGISTRY_V95_VERSION, REGISTRY_V96_VERSION, REGISTRY_V97_VERSION, REGISTRY_V98_VERSION, REGISTRY_V99_VERSION, REGISTRY_V100_VERSION, REGISTRY_V101_VERSION, REGISTRY_V102_VERSION, REGISTRY_V103_VERSION, REGISTRY_V104_VERSION, REGISTRY_V105_VERSION, REGISTRY_V106_VERSION, REGISTRY_V107_VERSION, REGISTRY_V108_VERSION, REGISTRY_V109_VERSION].includes(version))
+    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION, REGISTRY_V73_VERSION, REGISTRY_V74_VERSION, REGISTRY_V75_VERSION, REGISTRY_V76_VERSION, REGISTRY_V77_VERSION, REGISTRY_V78_VERSION, REGISTRY_V79_VERSION, REGISTRY_V80_VERSION, REGISTRY_V81_VERSION, REGISTRY_V82_VERSION, REGISTRY_V83_VERSION, REGISTRY_V84_VERSION, REGISTRY_V85_VERSION, REGISTRY_V86_VERSION, REGISTRY_V87_VERSION, REGISTRY_V88_VERSION, REGISTRY_V89_VERSION, REGISTRY_V90_VERSION, REGISTRY_V91_VERSION, REGISTRY_V92_VERSION, REGISTRY_V93_VERSION, REGISTRY_V94_VERSION, REGISTRY_V95_VERSION, REGISTRY_V96_VERSION, REGISTRY_V97_VERSION, REGISTRY_V98_VERSION, REGISTRY_V99_VERSION, REGISTRY_V100_VERSION, REGISTRY_V101_VERSION, REGISTRY_V102_VERSION, REGISTRY_V103_VERSION, REGISTRY_V104_VERSION, REGISTRY_V105_VERSION, REGISTRY_V106_VERSION, REGISTRY_V107_VERSION, REGISTRY_V108_VERSION, REGISTRY_V109_VERSION, REGISTRY_V110_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -20318,6 +20345,21 @@ export function renderSystemWorkRegistrySql(rows, predecessorSql = null) {
     preflight + sql;
 }
 
+export function renderAutomationUndoRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0840_relationship_scac_successor.sql",
+    predecessorDigest: "50c556fa9090c6158b7d23a9c02ae1873d219bb82454941ec484b1c73d1d56c0",
+    domainPath: "migrations/0841_automation_reason_undo_archive_invoice.sql",
+    oldVersion: REGISTRY_V109_VERSION,
+    newVersion: REGISTRY_V110_VERSION,
+    oldCatalogBaseline: RELATIONSHIP_V109_DB_CATALOG_BASELINE,
+    newCatalogBaseline: AUTOMATION_UNDO_V110_DB_CATALOG_BASELINE,
+    oldTag: "relationship", newTag: "automation_undo",
+    oldLabel: "Relationship", newLabel: "Automation undo",
+  });
+}
+
 export function renderGeneratedFrontier() {
   // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
   // in v21 artifacts, and every input to the guard is a fixed module constant.
@@ -21448,9 +21490,16 @@ export function renderGeneratedFrontier() {
   artifacts["migrations/0840_relationship_scac_successor.sql"] =
     renderRelationshipRegistrySql(v109Rows, artifacts["migrations/0827_system_work_scac_successor.sql"]);
 
+  const v110Rows = frozenInventory(REGISTRY_V110_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v110.generated.js"] =
+    renderRuntimeProjection(v110Rows, { version: REGISTRY_V110_VERSION,
+      dbCatalogBaseline: AUTOMATION_UNDO_V110_DB_CATALOG_BASELINE });
+  artifacts["migrations/0842_automation_undo_scac_successor.sql"] =
+    renderAutomationUndoRegistrySql(v110Rows, artifacts["migrations/0840_relationship_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 115 || runtimeCount !== 106 || Object.keys(artifacts).length !== 221)
+  if (migrationCount !== 116 || runtimeCount !== 107 || Object.keys(artifacts).length !== 223)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -22512,6 +22561,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         dbCatalogBaseline: LEAD_AUTOMATION_V106_DB_CATALOG_BASELINE }));
     await writeFile(resolve("migrations/0812_lead_automation_scac_successor.sql"), renderLeadAutomationRegistrySql(rows));
     process.stdout.write("Lead automation v106 frontier generated\n");
+  } else if (process.argv[2] === "--write-automation-undo-frontier") {
+    const rows = frozenInventory(REGISTRY_V110_VERSION);
+    await writeFile(resolve("mcp-server/src/scac-mutation-registry.v110.generated.js"), renderRuntimeProjection(rows, {
+      version: REGISTRY_V110_VERSION, dbCatalogBaseline: AUTOMATION_UNDO_V110_DB_CATALOG_BASELINE }));
+    await writeFile(resolve("migrations/0842_automation_undo_scac_successor.sql"), renderAutomationUndoRegistrySql(rows));
   } else if (process.argv[2] === "--write-relationship-frontier") {
     const rows = frozenInventory(REGISTRY_V109_VERSION);
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v109.generated.js"),
