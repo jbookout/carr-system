@@ -142,6 +142,31 @@ class CorrectionAuditTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 sweep.write_private(path, result)
 
+    def test_prose_credentials_are_redacted_at_collection_and_storage(self):
+        text = 'Wrong route. Make the password synthetic-portal-value\nThe passphrase is "synthetic phrase"\nAdd password protection.'
+        rows = [{'type': 'user', 'timestamp': '2026-10-01T12:00:00Z',
+                 'message': {'content': text}}]
+        result = self.scan('claude', rows)
+        self.assertNotIn('synthetic-portal-value', result['turns'][0]['text'])
+        self.assertNotIn('synthetic phrase', result['turns'][0]['text'])
+        self.assertIn('Add password protection.', result['turns'][0]['text'])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'records.json'
+            sweep.write_private(path, {'records': [{'human_said': text}]})
+            saved = json.loads(path.read_text())
+            self.assertNotIn('synthetic-portal-value', saved['records'][0]['human_said'])
+            self.assertNotIn('synthetic phrase', saved['records'][0]['human_said'])
+
+    def test_prose_redaction_preserves_policy_and_trailing_correction(self):
+        text = 'Make the new password synthetic-value. You ignored the scope.\nChange the password policy to require MFA. Keep the approved scope.'
+        rows = [{'type': 'user', 'timestamp': '2026-10-01T12:00:00Z',
+                 'message': {'content': text}}]
+        result = self.scan('claude', rows)
+        saved = result['turns'][0]['text']
+        self.assertNotIn('synthetic-value', saved)
+        self.assertIn('You ignored the scope.', saved)
+        self.assertIn('Change the password policy to require MFA. Keep the approved scope.', saved)
+
 
 if __name__ == '__main__':
     unittest.main()

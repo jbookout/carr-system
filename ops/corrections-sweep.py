@@ -44,6 +44,28 @@ MECHANISMS = {'delivery_contract', 'source_version_check', 'context_contract',
               'tool_contract', 'source_enumeration', 'artifact_readback',
               'capture_contract', 'scope_contract', 'proposal'}
 READ_VERBS = {'standing-context', 'find-precedent', 'read-doc-activity'}
+PROSE_CREDENTIALS = re.compile(
+    r'(\b(?:make|set|change|use)\s+(?:(?:the|a|new)\s+)*'
+    r'(?:password|passphrase|api[ _-]?key|access[ _-]?token)\s+(?:(?:to|as)\s+)?|'
+    r'\b(?:password|passphrase|api[ _-]?key|access[ _-]?token)\s+(?:is|was)\s+)'
+    r'(?!\b(?:policy|protection|requirements?|reset|field|to|as)\b)'
+    r'(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|`[^`\r\n]*`|[^\s]+)', re.I)
+
+
+def redact_text(text):
+    text, count = HISTORY._redact_text(text)
+    text, prose_count = PROSE_CREDENTIALS.subn(r'\1<REDACTED>', text)
+    return text, count + prose_count
+
+
+def redact_evidence(value):
+    if isinstance(value, str):
+        return redact_text(value)[0]
+    if isinstance(value, list):
+        return [redact_evidence(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_evidence(item) for key, item in value.items()}
+    return value
 
 
 def user_text(row, family, meta):
@@ -153,7 +175,7 @@ def scan_transcripts(files, since, until, cwd_roots=None):
                             turns[key]['sources'].append(source)
                             counts['copies'] += 1
                             continue
-                        redacted, redactions = HISTORY._redact_text(text)
+                        redacted, redactions = redact_text(text)
                         turns[key] = {'id': key, 'family': family, 'text': redacted,
                                       'sources': [source], 'origin': 'user-role; human attribution needs review',
                                       'candidate': bool(CORRECTION.search(text) or text.lower().strip('.!? ') == 'no'),
@@ -297,7 +319,7 @@ def write_private(path, value):
         raise ValueError('evidence directory must be private (mode 700)')
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
     with os.fdopen(os.open(path, flags, 0o600), 'w') as handle:
-        handle.write(json.dumps(value, ensure_ascii=False, indent=2, default=str) + '\n')
+        handle.write(json.dumps(redact_evidence(value), ensure_ascii=False, indent=2, default=str) + '\n')
 
 
 def main():
