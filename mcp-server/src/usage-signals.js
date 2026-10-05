@@ -22,7 +22,7 @@ export async function usageResponse(request, env, session, dependencies, guardPo
     if (!validUsageEvent(event) || event.partner !== session.actor.slug || Math.abs(Date.parse(event.timestamp) - now) > 5 * 60000) return invalid();
     if (!enabled) return json({ captured: false }, 202);
     event.timestamp = new Date(now).toISOString();
-    const prefix = `doctorcre_usage:v1:${url.origin}:${event.release_sha}:`;
+    const prefix = `doctorcre_usage:v1:${url.origin}:`;
     try {
       await env.OAUTH_KV.put(`${prefix}event:${new Date(now).toISOString()}:${crypto.randomUUID()}`, JSON.stringify(event), {
         expirationTtl: RETENTION_SECONDS, metadata: event,
@@ -36,7 +36,7 @@ export async function usageResponse(request, env, session, dependencies, guardPo
   const keys = [...url.searchParams.keys()];
   if (!/^[a-f0-9]{40}$/.test(sha || '') || keys.some(key => !['release_sha', 'release_started_at'].includes(key)) || new Set(keys).size !== keys.length || started !== null && (!Number.isFinite(Date.parse(started)) || new Date(started).toISOString() !== started || Date.parse(started) > now)) return json({ error: 'invalid_usage_request' }, 400);
   const releaseStart = started === null ? null : Date.parse(started);
-  const prefix = `doctorcre_usage:v1:${url.origin}:${sha}:`;
+  const prefix = `doctorcre_usage:v1:${url.origin}:`;
   try {
     const complete = releaseStart !== null && releaseStart > now - RETENTION_SECONDS * 1000;
     const rows = FEATURES.map(feature => ({ ...feature, uses: { joe: 0, dell: 0 }, last_used: { joe: null, dell: null }, never_used: { joe: complete ? true : null, dell: complete ? true : null } }));
@@ -45,11 +45,11 @@ export async function usageResponse(request, env, session, dependencies, guardPo
     do {
       const page = await env.OAUTH_KV.list({ prefix: `${prefix}event:`, ...(cursor ? { cursor } : {}) });
       for (const { metadata: event } of page.keys) {
-        if (!validUsageEvent(event) || event.release_sha !== sha) continue;
+        if (!validUsageEvent(event)) continue;
         const time = Date.parse(event.timestamp);
-        if (time > now || time <= now - RETENTION_SECONDS * 1000 || releaseStart !== null && time < releaseStart) continue;
+        if (time > now || time <= now - RETENTION_SECONDS * 1000) continue;
         for (const row of [features.get(`${event.event_name}:${event.screen}`), features.get(`${event.event_name}:*`)].filter(Boolean)) {
-          row.never_used[event.partner] = false;
+          if (event.release_sha === sha && (releaseStart === null || time >= releaseStart)) row.never_used[event.partner] = false;
           if (!row.last_used[event.partner] || event.timestamp > row.last_used[event.partner]) row.last_used[event.partner] = event.timestamp;
           if (time >= now - 7 * DAY) row.uses[event.partner]++;
         }
