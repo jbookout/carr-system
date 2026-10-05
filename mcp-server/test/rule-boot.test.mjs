@@ -7,11 +7,18 @@ import { executeRegisteredTool } from "../src/tools.js";
 import { RULE_BOOT_CLASSES } from "../src/rule-boot-classes.js";
 import { paginate, renderRuleBoot, ruleBootPage, RULE_BOOT_PAGE_CHARS } from "../src/rule-boot.js";
 
+test("a missing or stale proof cannot remove live rule text", async () => {
+  const classes = {abcdef12: {cls: "b", on: false, summary: "Test", when: "Test event",
+    statement_sha256: "0".repeat(64)}};
+  const page = await ruleBootPage([{id: "abcdef12", statement: "Current binding text"}], "joe", 1, classes);
+  assert.ok(page.text.includes("Current binding text"));
+});
+
 const JOE = { id: "11111111-1111-4111-8111-111111111111", slug: "joe", human: true, via: "oauth-google" };
 
 const classified = Object.keys(RULE_BOOT_CLASSES).sort();
 const alwaysOnId = classified.find(id => RULE_BOOT_CLASSES[id].on && !RULE_BOOT_CLASSES[id].personal_to);
-const indexOnlyId = classified.find(id => !RULE_BOOT_CLASSES[id].on && !RULE_BOOT_CLASSES[id].personal_to);
+const actionId = classified.find(id => RULE_BOOT_CLASSES[id].cls === "b" && !RULE_BOOT_CLASSES[id].personal_to);
 const joePersonalId = classified.find(id => RULE_BOOT_CLASSES[id].personal_to === "joe");
 
 function row(short, statement, personalTo = null) {
@@ -62,18 +69,18 @@ test("index: every active rule in scope has exactly one index line", () => {
     const lines = index.split("\n").filter(l => l.startsWith(`${id} | `));
     assert.equal(lines.length, 1, `${id} must have exactly one index line`);
   }
-  assert.match(index, new RegExp(`^${indexOnlyId} \\| ${RULE_BOOT_CLASSES[indexOnlyId].cls.toUpperCase()} \\| `, "m"));
+  assert.match(index, new RegExp(`^${actionId} \\| ${RULE_BOOT_CLASSES[actionId].cls.toUpperCase()} \\| `, "m"));
   assert.match(index, /^ffff0001 \| U \| /m, "an unclassified rule is indexed as U");
 });
 
-test("always-on: full statements for always-on and unclassified rules, none for index-only rules", () => {
+test("boot retains action rules until a replacement is proven, including newly taught rules", () => {
   const rows = corpus();
   const { text, always_on_ids: on } = renderRuleBoot(rows, "joe");
   const part1 = text.split("## PART 2")[0];
   assert.ok(on.includes(alwaysOnId));
   assert.ok(part1.includes(rows.find(r => r.id.startsWith(alwaysOnId)).statement), "full text, not a summary");
   assert.ok(part1.includes("END-ffff0001"), "unclassified rules are recall-safe: full text");
-  assert.ok(!part1.includes(`END-${indexOnlyId}`), "an index-only rule is not spent in Part 1");
+  assert.ok(part1.includes(`END-${actionId}`), "an action route is not proof of delivery");
 });
 
 test("sponsor scoping: another sponsor's personal rule never renders", () => {
@@ -128,7 +135,7 @@ test("verb door: standing-context detail=boot serves pages for the authenticated
     e => JSON.stringify(e.payload || e.message || e).includes("page_out_of_range"));
 });
 
-test("the real classification fits the 40k-token budget with every shared rule present", async () => {
+test("the retained classification fits its explicit token budget with every shared rule present", async () => {
   // Lengths only: statements are synthetic, sized from nothing committed. This
   // pins the renderer's overhead, not the corpus; ops/sync-rule-boot-classes.py
   // --check guards the corpus-sized budget in CI.

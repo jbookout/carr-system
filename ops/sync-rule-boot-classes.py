@@ -41,6 +41,9 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.rule_recall import load_proofs, retain_in_boot
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLASSES_PATH = os.path.join(REPO, "ops", "config", "rule-classes.v1.json")
 MAP_PATH = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
@@ -95,11 +98,14 @@ def classes_digest(doc):
 
 def render(doc):
     rules = doc["rules"]
+    proofs = load_proofs(REPO)
     entries = []
     for rid in sorted(rules):
         row = rules[rid]
-        value = {"cls": row["class"], "on": bool(row["always_on"]),
+        value = {"cls": row["class"], "on": retain_in_boot(rid, row, proofs),
                  "summary": row["summary"], "when": row["when"]}
+        if not value["on"]:
+            value["statement_sha256"] = proofs[rid]["statement_sha256"]
         if row.get("personal_to"):
             value["personal_to"] = row["personal_to"]
         entries.append(f"  {json.dumps(rid)}: Object.freeze({json.dumps(value, ensure_ascii=False, sort_keys=True)}),")
@@ -130,6 +136,7 @@ def render(doc):
 def estimate(doc, sponsor=None):
     """(total_chars, tokens, always_on rows sorted largest first) for one sponsor's view."""
     rules = doc["rules"]
+    proofs = load_proofs(REPO)
     total = PREAMBLE_CHARS
     big = []
     for rid in sorted(rules):
@@ -138,7 +145,7 @@ def estimate(doc, sponsor=None):
         if owner and owner != sponsor:
             continue
         total += len(f"{rid} | {row['class'].upper()} | {row['summary']} | {row['when']}\n")
-        if row["always_on"]:
+        if retain_in_boot(rid, row, proofs):
             header = f"### {rid}{' (personal)' if owner else ''}\n"
             total += len(header) + row["chars"] + 2
             big.append((row["chars"], rid))
