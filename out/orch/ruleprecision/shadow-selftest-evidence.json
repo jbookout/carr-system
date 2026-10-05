@@ -1,0 +1,26 @@
+{
+  "schema": "ruleprecision-selftest-evidence/v1",
+  "red": {
+    "command": "python3 ops/ruleprecision-shadow-selftest.py",
+    "exit_code": 1,
+    "failure": "AssertionError: hook.process(payload()) is sentinel before shadow wrapper existed"
+  },
+  "green": [
+    {
+      "command": "python3 ops/ruleprecision-shadow-selftest.py",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 ops/rule-delivery-precision-selftest.py",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 ops/rule-pack-preuse-reselection-selftest.py",
+      "exit_code": 0
+    },
+    {
+      "command": "python3 ops/codex-rule-hooks-selftest.py",
+      "exit_code": 0
+    }
+  ]
+}

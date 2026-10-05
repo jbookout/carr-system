@@ -1179,14 +1179,15 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
             self.assertIn("hooks/rule-pack-preuse-reselection.py", manifests[1])
 
     def test_verified_input_hashes_carry_forward(self):
-        """Frozen labels and unchanged compiler inputs retain their verified bytes."""
+        """Frozen labels retain their bytes; compiler evidence binds current source."""
         deps = self.r["evidence"]["dependencies"]
         for path, digest in {
             "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
             "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
-            "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
         }.items():
             self.assertEqual(deps.get(path), digest, path)
+        self.assertEqual(deps.get("ops/rule_trigger_compile.py"),
+                         sha_file(ROOT / "ops/rule_trigger_compile.py"))
 
 
 CONTROL_KEY = "eval_receipt"

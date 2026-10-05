@@ -1,0 +1,78 @@
+{
+  "all_cases": 163,
+  "all_sessions": 102,
+  "categories": {
+    "clock": 1,
+    "git_diff": 4,
+    "git_log": 7,
+    "git_read": 3,
+    "git_status": 7,
+    "governance_read": 12,
+    "pr_read": 17,
+    "selftest": 1,
+    "source_read": 84,
+    "standing_read": 24,
+    "user_technical": 3
+  },
+  "corpus_rules": 199,
+  "files": {
+    "rule_texts": {
+      "path": "rule-texts.json",
+      "sha256": "8fed435321d7e63a2db6f7be4ce4a3e07e2ada76af3c3b0e2ed9e38701d672d4"
+    },
+    "test": {
+      "case_ids_sha256": "02b0dd34be40a7856eb285d457c3fd9a35b56b1adc07e49889a3b70e526df4c1",
+      "cases": 40,
+      "headline_eligible": 40,
+      "path": "heldout.sealed.jsonl",
+      "sessions": 29,
+      "sha256": "d9e4c89f0054af062980f7e7ddbe69574b4062a35b07c5b0e1ca3d1b05df2cf8",
+      "types": {
+        "tool": 39,
+        "user": 1
+      }
+    },
+    "train": {
+      "case_ids_sha256": "5af9f23ae010e080babb9115f34ab5086f55c1101a696040aa0e1190fb9ac25d",
+      "cases": 123,
+      "headline_eligible": 121,
+      "path": "train.jsonl",
+      "sessions": 73,
+      "sha256": "b7aaed3ab94b24ab54619671b6106ee690c572a8bfd59a31ae92e4727addf8be",
+      "types": {
+        "tool": 121,
+        "user": 2
+      }
+    }
+  },
+  "frozen_before_tuning": true,
+  "jev_calls": 0,
+  "limitations": [
+    "160tool events and3human prompts are an engineering/governance sample, not a representative client-turn corpus.",
+    "Earlier human intent, tool results, assistant prose, and later actions were excluded. Gold is bounded-action; contextual conditions are explicitly disputed.",
+    "Two context-poor human prompts are diagnostic-only and excluded from headline scoring.",
+    "The existing four universal partner-prose labels are retained as an explicit top-level-session audience assumption.",
+    "Independent label audit remains required before claiming product-wide real-turn precision."
+  ],
+  "original_fixture": {
+    "counts": {
+      "test": 72,
+      "train": 168
+    },
+    "id_set_hashes": {
+      "test": "2cba93ae7299d2c0124e7a078d950d0ea7c668bd0059661a444483a158e8efc1",
+      "train": "8f9acb5d8703edb98fe2d951da5c7392e0dd59971bb0beca5c8b6336263bb3dd"
+    },
+    "sha256": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7"
+  },
+  "schema": "ruleprecision-real-turn-manifest/v1",
+  "selector_outputs_used_for_sampling": false,
+  "session_split": "sha256(ruleprecision-real-turn-v1:<sha256(session_filename)[:20]>)[:8] mod10 <3 -> test; otherwise train; assigned before sampling and labeling",
+  "source_revision": "b4dc32fde6c07be4b19497ba0a14e1fcf64c7237",
+  "source_root": "~/.claude/projects CARR-prefixed projects only; no sidechain or nested subagent files",
+  "time_filter": "row timestamp >=2026-09-26",
+  "types": {
+    "tool": 160,
+    "user": 3
+  }
+}

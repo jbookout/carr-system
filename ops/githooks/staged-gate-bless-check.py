@@ -78,6 +78,7 @@ CONTRACTS = ("delegation-gate-hook.json", "hooks.json", "codex-hooks.json",
              "rule-enforcement-map.json", "model-floors.json",
              "session-context-lifecycle.v2.json")
 BASELINE = "ops/config/gate-baseline.json"
+SOURCE_CONTRACTS = ("ops/githooks/path-hygiene-check.py",)
 
 
 def staged_files() -> list[str]:
@@ -99,12 +100,17 @@ def gate_paths(staged: list[str]) -> list[str]:
     contracts = [p for p in staged
                  if p.startswith("ops/config/")
                  and p.split("/")[-1] in CONTRACTS]
-    return hooks + contracts
+    return hooks + contracts + [p for p in staged if p in SOURCE_CONTRACTS]
+
+
+def is_contract(path: str) -> bool:
+    return path in SOURCE_CONTRACTS or (
+        path.startswith("ops/config/") and path.split("/")[-1] in CONTRACTS)
 
 
 def baseline_entry(baseline: dict, path: str) -> str | None:
     name = path.split("/")[-1]
-    table = "contracts" if name in CONTRACTS else "hashes"
+    table = "contracts" if is_contract(path) else "hashes"
     return (baseline.get(table) or {}).get(name)
 
 
@@ -187,7 +193,7 @@ def auto_apply(staged: list[str], touched: list[str]) -> list[str]:
             # reaches sha256 after somebody edits the guard.
             return []
         name = path.split("/")[-1]
-        table = contracts if name in CONTRACTS else hashes
+        table = contracts if is_contract(path) else hashes
         got = hashlib.sha256(blob).hexdigest()
         was = table.get(name)
         if was == got:

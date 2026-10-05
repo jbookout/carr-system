@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "ruleprecision"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|ruleprecision")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -123,6 +123,18 @@ def _headless_rows():
     from pathlib import Path
     from lib.headless_tasks import health_rows
     return health_rows(Path(REPO_ROOT), Path.home())
+
+
+def _ruleprecision_row():
+    sys.path.insert(0, REPO_ROOT)
+    from ops.ruleprecision_health import health_row
+    return health_row(REPO_ROOT, apply=os.environ.get("CARR_RULEPRECISION_HEALTH_APPLY") == "1")
+
+
+if CANONICAL_SECTION == "ruleprecision":
+    _precision_row = _ruleprecision_row()
+    print(_precision_row["line"])
+    sys.exit(int(_precision_row["status"] in ("WARN", "UNKNOWN")))
 
 
 if CANONICAL_SECTION == "headless":
@@ -1331,6 +1343,11 @@ def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION == "all":
+        precision_row = _ruleprecision_row()
+        print("  " + precision_row["line"])
+        if precision_row["status"] in ("WARN", "UNKNOWN"):
+            rc = _red("rule_delivery_precision", precision_row["line"], time_rolling=True)
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)

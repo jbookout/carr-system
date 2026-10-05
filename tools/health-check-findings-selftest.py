@@ -582,6 +582,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
                   _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
+                  _ruleprecision_row=lambda: {"status": "OFF", "line": "OFF fixture rule precision"},
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
@@ -704,6 +705,16 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                 self.assertIn("HEALTH_COMPLETE", out.getvalue())
                 self.assertEqual([row["key"] for row in ns["_FINDINGS"]],
                                  [] if line.startswith("OK") else ["jev_paid_cap"])
+
+    def test_precision_warning_records_a_finding_and_finishes(self):
+        import io, contextlib
+        ns = self.all_namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_ruleprecision_row"] = lambda: {"status": "WARN", "line": "WARN fixture rule precision"}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertIn("HEALTH_COMPLETE", out.getvalue())
+        self.assertEqual([row["key"] for row in ns["_FINDINGS"]], ["rule_delivery_precision"])
 
     def test_canonical_health_records_cap_failures_and_finishes(self):
         import io, contextlib

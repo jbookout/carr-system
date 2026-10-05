@@ -1,0 +1,2858 @@
+{
+  "schema": "ruleprecision-study-source-map/v1",
+  "base_revision": "b4dc32fde6c07be4b19497ba0a14e1fcf64c7237",
+  "read_only_report": "/Users/booko/carr-system/out/orch/rulebench/results.json",
+  "report_sha256": "b941758ee055d9260fb36c005d67f64df22a1361ef2578781381c9becfcf301a",
+  "boot": {
+    "chars": 125442,
+    "digest": "sha256:b2c2d84e9403ba4bb57948e5ae40ca0735c782554861a2cb7cebebb26e83b966",
+    "estimated_tokens": 34845,
+    "full_text_rules": 71,
+    "index_rules": 199,
+    "personal_full": 11,
+    "shared_full": 60
+  },
+  "headline": {
+    "tp": 71,
+    "fp": 191,
+    "precision": 0.27099236641221375,
+    "availability_hits": 583,
+    "applications": 717,
+    "availability": 0.8131101813110181
+  },
+  "per_rule": [
+    {
+      "rule_id": "015183f5",
+      "name": "When classifying or defining terms, state the ordered decision procedure, not just the conclusion.",
+      "boot": true,
+      "gold_applications": 17,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "0156e9fa",
+      "name": "When closing a message to Joe, give one recommended next action, never a menu.",
+      "boot": true,
+      "gold_applications": 56,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "018ce972",
+      "name": "When proposing structural changes to Joe, frame them as cost-now-vs-later window math for fast decisions.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "0c1bac27",
+      "name": "When writing partnership-fit notes, keep them symmetric and visible to both partners",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "0e22e34a",
+      "name": "When creating folders or filenames, keep 3-4 levels deep, descriptive names, no final_v2.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 1,
+      "jit_fp": 1,
+      "jit_precision": 0.5
+    },
+    {
+      "rule_id": "0f38532e",
+      "name": "Near-duplicate of 14181e60: single-source-of-truth doctrine already covered by the DB-first gate.",
+      "boot": false,
+      "gold_applications": 3,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "1021fa84",
+      "name": "When assessing Joe's work patterns, read him as brokerage-first; don't infer unfinished-project habits from build-phase files.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "113b3833",
+      "name": "When looking up anything beyond core memory, run retrieve script first, read only that",
+      "boot": false,
+      "gold_applications": 3,
+      "jit_tp": 1,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "11b2b73b",
+      "name": "When Joe shares UI/UX or design content, mine it and merge applicable parts into ux-doctrine.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "14181e60",
+      "name": "Before writing a .md file, route content to the database via a verb; markdown-first is blocked.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "152ceb65",
+      "name": "When explaining anything with a shape, render it compactly (table/diagram/list) instead of narrating in prose.",
+      "boot": true,
+      "gold_applications": 4,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "173119a8",
+      "name": "Before naming who owns uncommitted work, diff against origin not HEAD, and check the sign",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "179be4b8",
+      "name": "When wrapping up agreed work, finish feasible follow-ups in-session; don't park inconvenient remaining steps.",
+      "boot": true,
+      "gold_applications": 10,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "17ffd587",
+      "name": "Never surface lead-outreach reminders on open-loops, heartbeat or Monday brief; leads live on Lead Board; deal follow-up dates excepted.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "185013c6",
+      "name": "When spawning a subagent or sizing 30+ min work, pick the cheapest fit-map executor and state it.",
+      "boot": false,
+      "gold_applications": 11,
+      "jit_tp": 11,
+      "jit_fp": 7,
+      "jit_precision": 0.6111111111111112
+    },
+    {
+      "rule_id": "19304882",
+      "name": "During decision reviews, invite Joe's framing first and log timing calls and overrides",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 3,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "1b8e7f43",
+      "name": "When a verb or action is blocked, file a loop recording it; never just drop it.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "1c21263c",
+      "name": "When the same problem shape needs fixing four times, stop and fix the instruction, not the instance.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "1c42d80c",
+      "name": "When friction (refusal, error, workaround) hits, fix the root cause in-session; never route around it silently.",
+      "boot": true,
+      "gold_applications": 8,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "1d50a3bb",
+      "name": "When a Stop gate reopens a turn, resend only the missing delta, never the whole message",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "1f3a7372",
+      "name": "When a scheduled run ends, write its findings, decisions, and rulings to the record before it ends.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "1fcaa63a",
+      "name": "When heavy build protocol is invoked, run all its research/plan/review/admission/dispatch phases unprompted.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "1fddcffb",
+      "name": "When deciding what's always-loaded, keep the core to universal needs and push task-specific content to loaded files.",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "204391be",
+      "name": "When a needed record-layer verb is missing, build it via the heavy path, don't just ask",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "20d106f1",
+      "name": "When Joe opens a build, predicts confidently, or rules on structure, surface open items and calibrate.",
+      "boot": false,
+      "gold_applications": 2,
+      "jit_tp": 1,
+      "jit_fp": 2,
+      "jit_precision": 0.3333333333333333
+    },
+    {
+      "rule_id": "2271e684",
+      "name": "Before any terminal technical claim, search to verify; never trust memory for specifics.",
+      "boot": true,
+      "gold_applications": 12,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "236ca227",
+      "name": "Weekends are off for both partners; never plan around or read weekend silence as drift.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "23ea0607",
+      "name": "Never apply a Salesforce row that moves a closed deal backwards to an earlier phase",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "24e10ee8",
+      "name": "When writing a commit message claiming an act, verify the diff actually performs that act.",
+      "boot": false,
+      "gold_applications": 5,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "25fab860",
+      "name": "Never include quote tweets in the weekly social batch; that lane belongs to the daily X reply run.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "25fcddee",
+      "name": "On first attempts at unfamiliar work, interview Joe on ambiguities or show cheap variants before committing.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "27277539",
+      "name": "Never steer Joe to simpler alternatives; explain terms fully and encourage his technical stretch",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "2a3ff869",
+      "name": "When marking a client document sent, default to Microsoft formats unless the partner says otherwise.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "2b66211d",
+      "name": "When fanning out to agents, give verifiers fresh context and scope new fleets before widening.",
+      "boot": false,
+      "gold_applications": 14,
+      "jit_tp": 8,
+      "jit_fp": 8,
+      "jit_precision": 0.5
+    },
+    {
+      "rule_id": "2b889e80",
+      "name": "Before claiming something doesn't exist, name and check every parallel collection, not just one source.",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "2ca2add2",
+      "name": "When capturing from a source, grab every available field; apply client-facing rules only at render",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "2e362970",
+      "name": "Before building anything first-of-its-kind, run a deep research pass before designing or building.",
+      "boot": false,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "2e8b4840",
+      "name": "At confirm-merge, never flag or merge a lead/client pair for the same person as duplicates.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "308ef1de",
+      "name": "Before branching or switching in a shared checkout, claim the working tree or use a worktree instead.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 4,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "30a189fb",
+      "name": "When a task isn't CARR-related, stop and ask if it belongs in Life AI instead",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "347a9ca6",
+      "name": "Never infer safety, scope, or isolation needs from a session's name; judge by observed work.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "3578d799",
+      "name": "When naming a new verb or system noun, use human words a person could guess, not jargon.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "388cc81e",
+      "name": "When matching candidate records across datasets, never merge on a single field; require a second corroborating field.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 1,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "38b15dc6",
+      "name": "Never pack multiple required steps into one sentence; number each clause of an instruction",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "3a9dbafd",
+      "name": "When replying to a partner, never show a bare id; say what the thing is in plain words first.",
+      "boot": true,
+      "gold_applications": 4,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "3d185f2b",
+      "name": "On system builds, Joe iterates to done alone; Dell reviews the finished product, never gates the process.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 3,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "3fa17fa0",
+      "name": "Before drafting re-engagement from notes older than ~60 days, ask Joe whether they're still true.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4039b9b5",
+      "name": "Any qualified seat may write doctrine; store versioning, not a single writer, prevents collisions",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "412d37d3",
+      "name": "When writing about healthcare compliance, spell HIPAA correctly and double-check compliance references.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "424ba0cc",
+      "name": "Never nurture-ping cold or paused clients by default; let ghosting clients go silent.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4399df76",
+      "name": "Treat every LOI template term as a negotiable default, never fixed policy from one client's documents.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "43e2ef76",
+      "name": "Before building anything non-trivial, plan how it will be verified before implementation starts",
+      "boot": true,
+      "gold_applications": 12,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4402973a",
+      "name": "Before regenerating or overwriting drifted content, quarantine it and route it through intake verbs first.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "466a545a",
+      "name": "When grading a source, test each claim against its actual standard; never call resemblance validation.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "48083552",
+      "name": "In every client/prospect meeting, run discovery questions and reflect them back before recommending anything.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "49533583",
+      "name": "When reading Joe's meetings or mail, read the local Apple/Outlook stores, never the Google connector",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "49c627cc",
+      "name": "Before claiming the record layer can't do something, grep the full verb list and read descriptions.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4a53ff82",
+      "name": "Before any first edit to tracked repo files, take an isolated worktree; never edit the canonical tree.",
+      "boot": false,
+      "gold_applications": 9,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4a9188f3",
+      "name": "When a partner corrects, decides, or states a durable fact, teach it immediately, not at session close.",
+      "boot": false,
+      "gold_applications": 16,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4c21d86b",
+      "name": "When merging duplicate parties, the row with a business ref and more corroboration wins",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 1,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "4dd44fd7",
+      "name": "When sending outbound documents, use Word for LOIs/letters and PDF only for spreadsheets.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4e104d4c",
+      "name": "Before claiming a verb is missing, run list-verbs/call-verb; never assume a redeploy is needed.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4f7c348f",
+      "name": "At session start, recite both shared and that partner's personal rule files before any other output.",
+      "boot": true,
+      "gold_applications": 16,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "4fae20f4",
+      "name": "Before calling a rate a baseline, check the window for interventions or migrations first",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "51d9f05f",
+      "name": "When addressing prospects, stay educational and consultative, never aggressive-sales; assume no CARR familiarity.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "5409731b",
+      "name": "Before shipping a new trigger, grant-check every table it reads as the role that fires it.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "54e2bcb9",
+      "name": "Never write a CARR agent's own contact info into a client/vendor/lead contact field; treat it as null.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "557838a5",
+      "name": "When Joe shares an x.com link, read the quoted post and its linked article fully",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "5697071b",
+      "name": "When an Alabama lead or deal arrives, route it to Dell as the licensed party of record.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "57d13061",
+      "name": "For any X/Twitter retrieval, use Grok Build first; Chrome only for Joe's logged-in-only surfaces.",
+      "boot": false,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "57d83b75",
+      "name": "On every new client, verify the intake record against open-source research and report discrepancies.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "58b44ccb",
+      "name": "If the code repo is unreachable, stop and say so; cloud sessions teleport instead",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "58cef3a1",
+      "name": "When correcting Joe's mislabel, find the true intuition first, then correct the label with reasoning.",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "590b11e1",
+      "name": "When adding any health metric, name the bound response to a threshold breach or refuse the metric.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "596f7549",
+      "name": "When a tool error blames a subsystem, verify the claim and check the call for missing arguments first.",
+      "boot": true,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "5be2f462",
+      "name": "Cut empty intensifier words and never invent an opposing view for contrast in partner prose",
+      "boot": true,
+      "gold_applications": 56,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "5cd8d0f6",
+      "name": "When a command is blocked but self-serve fixable, fix the block yourself and run the command.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 6,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "5d44d3f3",
+      "name": "On intake or bulk import, verify every party/deal against primary sources and stamp verification status.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "5e896ed6",
+      "name": "When Joe feeds a link, merge its learnings into doctrine/loops/capture the same session, not just summarize.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 5,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "5e89c211",
+      "name": "Never spend a model call on state, routing, or validation already expressible as a tested predicate",
+      "boot": false,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 11,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "614c1209",
+      "name": "Before marking a deal stale or asking about follow-up, check mail and calendar for contact evidence.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "6172e7d5",
+      "name": "When a session cannot read a video/image source, delegate it to Grok's watch-video skill, then verify.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "61c64d91",
+      "name": "When creating any new asset, assign its shared-vs-personal tier at creation, never retrofit later.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "6330bec8",
+      "name": "Before generating options, name the crux; never jump to options before a cause is found",
+      "boot": true,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "6437ae15",
+      "name": "When Joe shares a source, read it fully and mine it for CARR-applicable insights, never by preview.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "647f843d",
+      "name": "Before opening a loop, name a real external blocker from the closed list; otherwise just do the work.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 1,
+      "jit_fp": 1,
+      "jit_precision": 0.5
+    },
+    {
+      "rule_id": "661d7757",
+      "name": "Jev may participate in all reviews",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "67580c28",
+      "name": "When building or reviewing any CARR surface, use the dark cinematic register, not plain light/grey.",
+      "boot": false,
+      "gold_applications": 9,
+      "jit_tp": 1,
+      "jit_fp": 2,
+      "jit_precision": 0.3333333333333333
+    },
+    {
+      "rule_id": "6901cc3b",
+      "name": "When Doc is missing a capability, find real tooling for it, never design around the gap",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 4,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "6a4e6283",
+      "name": "Before client-facing or public work ships, get an independent fresh-eyes review; fix flags, never caveat; drafts Joe line-reviews exempt.",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "6cfb67f5",
+      "name": "When delegating a task, name the specific model and reasoning effort, never just a vendor name.",
+      "boot": false,
+      "gold_applications": 11,
+      "jit_tp": 11,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "70e372f0",
+      "name": "When calibrating to Dell's style, learn only from what he says/asks/corrects; never assess his personality.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "7105955b",
+      "name": "When closing a renumbered or superseded loop, use dropped and say it was superseded, not abandoned",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "725dff46",
+      "name": "When writing prospect-visible content, credit the vendor network to the team, never to Dell alone.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "72e06bdf",
+      "name": "Never pre-qualify leads before the board; present every lead with an estimated score, Joe qualifies.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "73381d78",
+      "name": "After a config-file change, enumerate and verify every consumer, since format fixes for one can break another.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "737a68d6",
+      "name": "Duplicate of 204391be: a missing record-layer verb should be built immediately, not left manual",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "740bb505",
+      "name": "When projecting a long job's finish, exclude idle dead time, include crash overhead, and state which.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "767f9b41",
+      "name": "On any confirmation question, actually re-verify and report honestly, even if the answer is no.",
+      "boot": true,
+      "gold_applications": 7,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "76a53dfe",
+      "name": "When a markdown write is blocked, route content through record verbs, never redirect it to an unwatched file.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "76fcbed6",
+      "name": "Study each source fully and apply it",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "7e9739f2",
+      "name": "Every reply to Joe must be clear, concise, scannable, and matched in shape to his question",
+      "boot": true,
+      "gold_applications": 56,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "80def9d2",
+      "name": "When building any human-facing surface or choice, follow ux-doctrine: one action, say what changed.",
+      "boot": false,
+      "gold_applications": 3,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "81709f57",
+      "name": "When convening a red team, assign distinct lenses and one seat that re-runs the evidence, never redundant votes.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 11,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "847f9995",
+      "name": "When building or reviewing any unattended/scheduled job, never let it depend on an expiring interactive credential.",
+      "boot": true,
+      "gold_applications": 5,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "86647daf",
+      "name": "When a build or decision changes the shared system, post it to shared files immediately",
+      "boot": false,
+      "gold_applications": 7,
+      "jit_tp": 3,
+      "jit_fp": 8,
+      "jit_precision": 0.2727272727272727
+    },
+    {
+      "rule_id": "88e9b5eb",
+      "name": "When reporting a blocker, name whether it's a refusal or true impossibility; never conflate the two.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "8aefcdce",
+      "name": "Route Outlook/calendar/Teams tasks to Copilot; use Claude for everything else in the pipeline.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 12,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "8c1e6057",
+      "name": "When asking a partner to open, edit, or review a file, include a clickable markdown link to it.",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "8c812bed",
+      "name": "Never publish a partnership-fit summary until Dell's evidence base reaches rough parity with Joe's",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "8cddc6ad",
+      "name": "Before renaming a shared row, count its attachments; if more than one, mint a new row instead.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9293d609",
+      "name": "When building or reviewing a CARR surface, ship real motion and interactivity, not a static page.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "9310827b",
+      "name": "When either partner requests something risky or mistaken, say so with the specific reason before doing it.",
+      "boot": true,
+      "gold_applications": 7,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "94806da2",
+      "name": "When a source will feed doctrine or a record write, read the raw artifact, not a summary",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9530fb1c",
+      "name": "When naming a fix as right, either build it in-session or explicitly recommend against it.",
+      "boot": true,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "95e76c1f",
+      "name": "Deliver criticism as a service Joe asked for; never soften a correction to protect his ego.",
+      "boot": true,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9730f565",
+      "name": "When asserting any date or time, derive it from a real timestamp, never from conversational mood.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "97326357",
+      "name": "A surface capability claim becomes doctrine only after a live test from that surface itself",
+      "boot": true,
+      "gold_applications": 3,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9873a0d2",
+      "name": "When a partner re-explains a how-to twice, propose promoting it to a skill; never convert silently.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "98e74e7c",
+      "name": "When reviewing a source, run a lateral pass against the whole system, not just its stated use case.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "99e951b9",
+      "name": "When adding content under an indexed multi-folder category, update its INDEX.md in the same session.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9b081605",
+      "name": "Auto-send drafts only to Joe's own CARR address; everything else stays a pending draft",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9d80fd2d",
+      "name": "When planning outreach cadence, treat frequency as content; respect a prospect's stated follow-up terms.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9e3fb6d0",
+      "name": "On colleague/competitor content, extract substance to the playbook and analyze craft without ever copying it.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9f15f21a",
+      "name": "For national-account deals, attach each franchisee's own deal to their sub-client, never to the parent brand.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "9ff56260",
+      "name": "Never name a private key path in a command; let the script resolve its own secret",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "a2e78f48",
+      "name": "When a known issue with a known fix is found, repair it immediately and brief; heavy-path still gates.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "a3da3d39",
+      "name": "Ask directly for pending approvals",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "a3f6c7f9",
+      "name": "Diagnose from a real slow task before restructuring; never restructure against a hypothetical.",
+      "boot": true,
+      "gold_applications": 3,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "a6e6ab4e",
+      "name": "When modifying something that already worked, compare before-and-after, not only against the spec.",
+      "boot": true,
+      "gold_applications": 14,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "a7784a18",
+      "name": "Every coding session works in its own worktree and owns delivery through merge and cleanup",
+      "boot": false,
+      "gold_applications": 10,
+      "jit_tp": 2,
+      "jit_fp": 4,
+      "jit_precision": 0.3333333333333333
+    },
+    {
+      "rule_id": "a8c55a47",
+      "name": "Before writing a raw command into docs or instructions, check for and name an existing script instead.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "a8f159ad",
+      "name": "Any structured surface (board, packet, report) ships a real visual of its structure, not text alone.",
+      "boot": false,
+      "gold_applications": 3,
+      "jit_tp": 2,
+      "jit_fp": 5,
+      "jit_precision": 0.2857142857142857
+    },
+    {
+      "rule_id": "a9ecd5b4",
+      "name": "A check compares the artifact to its known-good shape; a success signal must read the artifact, never exit code alone.",
+      "boot": true,
+      "gold_applications": 14,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "ab814a26",
+      "name": "Every taught rule must ship classified as machine-enforceable with a gate, or judgment with a reason",
+      "boot": false,
+      "gold_applications": 3,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "af7de070",
+      "name": "On a classifier block, retry once before handing the command to the partner; it's usually transient.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "b01edd26",
+      "name": "Never hardcode counts or blanket summaries in committed files that a later edit could falsify.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "b1521526",
+      "name": "When sources conflict, rank live partner word, source-of-truth file, newer dated file; never backups; public content only cleared material.",
+      "boot": true,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "b3ea627f",
+      "name": "Never end a message telling Joe a phrase to say back; just do the next step",
+      "boot": true,
+      "gold_applications": 56,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "b42e217e",
+      "name": "Never scope verb capability by which partner holds it; scope only by session risk, not identity.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "b42f11a0",
+      "name": "Size builds for the future trajectory, not today's headcount; never cite current smallness to cut scope.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 4,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "b587f6c2",
+      "name": "For an architecture fork with no deterministic verifier and expensive reversal, convene a frontier-model council.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 12,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "b7ec8f3b",
+      "name": "On the DoctorCRE surface: no descriptive title text, icon-only toggles, drag-not-button kanban moves",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "bbffc139",
+      "name": "When Joe overrules, predicts, compresses, rules, or corrects within work scope, log it to the ledger.",
+      "boot": false,
+      "gold_applications": 17,
+      "jit_tp": 3,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "bc4145f6",
+      "name": "Recommend media matched to one specific observed pattern at a time; never generic self-improvement lists.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "bc9188b4",
+      "name": "Every run commits files it wrote by named path before ending or checkout; never add -A; push; leave others' files.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "bd4a6d22",
+      "name": "When Joe permanently accepts a machine/system state, update the check to pass, never route around it",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "c0b38d80",
+      "name": "When committing a change to a gate script, re-bless the baseline hash in the same commit.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "c1547ed1",
+      "name": "For any new workflow or asset, state where it lives (repo, vault, or both) and why.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "c1db316c",
+      "name": "Always choose the complete, cleanest correct solution first, not an incremental patch.",
+      "boot": true,
+      "gold_applications": 12,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "c20dc3d5",
+      "name": "Before acting on a subagent's material finding, re-run it yourself; don't just relay it",
+      "boot": false,
+      "gold_applications": 20,
+      "jit_tp": 1,
+      "jit_fp": 3,
+      "jit_precision": 0.25
+    },
+    {
+      "rule_id": "c315befa",
+      "name": "When asking a question or presenting a draft, name the specific deal in the question text itself.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "c4a284b2",
+      "name": "For a solved compliance question, start from practitioner convention, then verify it against rule text.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "c53beeaa",
+      "name": "After any record write with long/multiline text, re-read the row and check for swallowed parameter tags.",
+      "boot": false,
+      "gold_applications": 5,
+      "jit_tp": 5,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "c66dc739",
+      "name": "Read Joe's mail from local Mac stores only; never use Gmail API or ask for OAuth",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "c6f69dee",
+      "name": "When staffing an agent, name it by human job title and give it only rules its role needs.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 12,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "c864b8cb",
+      "name": "When several calls are needed, ask one question at a time via an interview box, never batched.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "c8ebeb5b",
+      "name": "When a practice owner sells to a platform, list them as a future-startup lead, never a sell-side pitch.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "ca841807",
+      "name": "Write findings and record updates through database verbs, never as a markdown report",
+      "boot": false,
+      "gold_applications": 8,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "cd84d22a",
+      "name": "When the Claude Code feedback-survey appears, decline the transcript share; it now uploads CLAUDE.md and tools.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "ce12c11e",
+      "name": "Lead with the no-conflict tenant/buyer-only model as the strongest sales hook.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "cff429f5",
+      "name": "Before creating or updating a party with a blank field, research it yourself; never ask Joe first.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "d26d63b0",
+      "name": "When a new contact appears, research everything findable before asking the partner for it",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "d3774a28",
+      "name": "When the conceptual model and file reality diverge, surface it explicitly and let Joe rule.",
+      "boot": false,
+      "gold_applications": 3,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "d5dcfe26",
+      "name": "Before asserting a memo is current or a decision unruled, check for later amendments and search by behavior.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "d7c69aa6",
+      "name": "When calendar intake surfaces an unmatched attendee, search mail, research, and create the record without asking.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "d7e6de46",
+      "name": "Never put client benefit value and commission revenue into the same money field",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "d7f74c93",
+      "name": "Never justify denying model or agent access to CARR material on confidentiality; the boundary is credentials/autonomy.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "d8c9b1f0",
+      "name": "Before raising a machine-found item, confirm it reached the partner already; if not, explain it from scratch.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "d9874334",
+      "name": "Before naming capability as a blocker, prove it's not throughput by testing a smaller request first.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "d9ce2b08",
+      "name": "Before calling anything blocked, verify the fix isn't already applied by testing the actual gate",
+      "boot": true,
+      "gold_applications": 3,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "dcf98880",
+      "name": "When handing Joe verification steps, give precise instructions in full; never simplify them away.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "def3e84e",
+      "name": "Overwrite a superseded artifact with a visible tombstone and queue its deletion via add-loop, never delete silently.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 2,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "df55c398",
+      "name": "When writing any delegated subagent brief, state an explicit data-class boundary excluding encrypted/credential/production data.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 1,
+      "jit_fp": 10,
+      "jit_precision": 0.09090909090909091
+    },
+    {
+      "rule_id": "df8f1da0",
+      "name": "When Joe asks what you think, answer and stop; don't build the thing unasked",
+      "boot": true,
+      "gold_applications": 4,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "e313a3ca",
+      "name": "When you can run a command yourself, run it; don't paste it for the partner to execute.",
+      "boot": true,
+      "gold_applications": 14,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "e4d965d9",
+      "name": "Before refusing, try more than one route and name them; only true authority limits actually stop.",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "e65efc68",
+      "name": "When building any gate, hook, linter, or CI check, write and run its test before the implementation.",
+      "boot": false,
+      "gold_applications": 6,
+      "jit_tp": 1,
+      "jit_fp": 3,
+      "jit_precision": 0.25
+    },
+    {
+      "rule_id": "e8868cbe",
+      "name": "(Full text is in the always-on section; no summary is faithful enough to stand for it.)",
+      "boot": true,
+      "gold_applications": 5,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "eaa31ac5",
+      "name": "Never claim something was handed off, sent, or delivered without naming the specific recipient.",
+      "boot": true,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "ede4c735",
+      "name": "Lint prospect-visible drafts (outreach, social, proposals) hard; internal-only text is exempt.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 11,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "eeb3d106",
+      "name": "When building or reviewing any workstation surface, use pulse rate as a redundant urgency channel, honoring reduced-motion.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 1,
+      "jit_fp": 1,
+      "jit_precision": 0.5
+    },
+    {
+      "rule_id": "efbdfb1a",
+      "name": "Once a non-trivial build works, ask if a materially simpler shape now exists",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f04a05aa",
+      "name": "Give every scheduled task a verifiable done-condition, failure path, watched first run, and dated ledger.",
+      "boot": true,
+      "gold_applications": 12,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f0f9156e",
+      "name": "On any local-vs-cloud fork, design the mobility-first option and present privacy exposure candidly; Joe decides.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f2d58a30",
+      "name": "In every client-facing recommendation, name at least one thing you would not do and why.",
+      "boot": false,
+      "gold_applications": 1,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f47a8fe9",
+      "name": "Verify claims by re-running the query, never by re-reading the report",
+      "boot": true,
+      "gold_applications": 19,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f5bac101",
+      "name": "While Joe and Dell are early-stage, prioritize prospecting and pipeline over polish on low-impact areas.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f5beac20",
+      "name": "Never dismiss useful-but-not-today knowledge; capture it and propose scope expansions for Joe to rule on.",
+      "boot": true,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f5d97b4a",
+      "name": "Drive CoStar only in the desktop app's own Browser pane, never Chrome or its extension.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f673326b",
+      "name": "Do not add unrequested access restrictions",
+      "boot": true,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "f92dfab2",
+      "name": "Every client search packet must include sourced market commentary, never generic or stale figures",
+      "boot": false,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 1,
+      "jit_precision": 0.0
+    },
+    {
+      "rule_id": "fa217e48",
+      "name": "Verify any completion claim against an actual this-session tool result, never against a summary.",
+      "boot": true,
+      "gold_applications": 43,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "faae6748",
+      "name": "Never tell Joe to delete a file; move candidates to _to_delete and let him decide.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "faf1b643",
+      "name": "Nightly, flag vendors whose recorded relationship level disagrees with countable two-way contact/value evidence.",
+      "boot": false,
+      "gold_applications": 0,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "fb110a39",
+      "name": "Reserve Fable for design/judgment; delegate execution work to Opus/Sonnet/Codex/Grok subagents by default",
+      "boot": false,
+      "gold_applications": 13,
+      "jit_tp": 11,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "fb2b263d",
+      "name": "After deciding or building anything, grep other index files for stale phrasing before declaring it propagated.",
+      "boot": false,
+      "gold_applications": 4,
+      "jit_tp": 4,
+      "jit_fp": 0,
+      "jit_precision": 1.0
+    },
+    {
+      "rule_id": "fc21a431",
+      "name": "On any correction from Joe or Dell, capture it as a rule via teach in the same session.",
+      "boot": true,
+      "gold_applications": 18,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    },
+    {
+      "rule_id": "fc4d7753",
+      "name": "When adding structure or outside ideas, apply merit tests: real need, smallest structure, output as tiebreaker.",
+      "boot": true,
+      "gold_applications": 2,
+      "jit_tp": 0,
+      "jit_fp": 0,
+      "jit_precision": null
+    }
+  ],
+  "paths": {
+    "prompt_compiled": {
+      "human": {
+        "f1": 0.0902,
+        "fn": 178,
+        "fp": 64,
+        "precision": 0.1579,
+        "recall": 0.0632,
+        "tp": 12,
+        "tp_in_universe": 12
+      },
+      "notification": {
+        "cases": 9,
+        "cases_with_delivery": 0,
+        "delivered": 0,
+        "delivered_mean": 0.0,
+        "fn": 23,
+        "fp": 0,
+        "tp": 0
+      },
+      "all_tp": 12,
+      "all_fp": 64,
+      "all_precision": 0.15789473684210525,
+      "false_positives": [
+        [
+          "ede4c735",
+          11
+        ],
+        [
+          "d9ce2b08",
+          8
+        ],
+        [
+          "185013c6",
+          7
+        ],
+        [
+          "5e896ed6",
+          5
+        ],
+        [
+          "a8f159ad",
+          5
+        ],
+        [
+          "173119a8",
+          3
+        ],
+        [
+          "c20dc3d5",
+          3
+        ],
+        [
+          "11b2b73b",
+          2
+        ],
+        [
+          "5d44d3f3",
+          2
+        ],
+        [
+          "67580c28",
+          2
+        ],
+        [
+          "725dff46",
+          2
+        ],
+        [
+          "b42f11a0",
+          2
+        ],
+        [
+          "c66dc739",
+          2
+        ],
+        [
+          "2b66211d",
+          1
+        ],
+        [
+          "6901cc3b",
+          1
+        ],
+        [
+          "80def9d2",
+          1
+        ],
+        [
+          "8aefcdce",
+          1
+        ],
+        [
+          "b587f6c2",
+          1
+        ],
+        [
+          "c6f69dee",
+          1
+        ],
+        [
+          "d26d63b0",
+          1
+        ],
+        [
+          "d3774a28",
+          1
+        ],
+        [
+          "e65efc68",
+          1
+        ],
+        [
+          "eeb3d106",
+          1
+        ]
+      ],
+      "outside_labelled": [
+        [
+          "5f8c661d",
+          2
+        ],
+        [
+          "893aeec5",
+          2
+        ],
+        [
+          "7b4ba3aa",
+          1
+        ],
+        [
+          "83b9a362",
+          1
+        ],
+        [
+          "e6e0b0e7",
+          1
+        ]
+      ]
+    },
+    "jit_pretooluse": {
+      "human": {
+        "f1": 0.0897,
+        "fn": 163,
+        "fp": 40,
+        "precision": 0.2,
+        "recall": 0.0578,
+        "tp": 10,
+        "tp_in_universe": 10
+      },
+      "notification": {
+        "cases": 8,
+        "cases_with_delivery": 5,
+        "delivered": 21,
+        "delivered_mean": 2.625,
+        "fn": 16,
+        "fp": 14,
+        "tp": 7
+      },
+      "all_tp": 17,
+      "all_fp": 54,
+      "all_precision": 0.23943661971830985,
+      "false_positives": [
+        [
+          "81709f57",
+          11
+        ],
+        [
+          "8aefcdce",
+          11
+        ],
+        [
+          "b587f6c2",
+          11
+        ],
+        [
+          "2b66211d",
+          7
+        ],
+        [
+          "173119a8",
+          4
+        ],
+        [
+          "b42f11a0",
+          2
+        ],
+        [
+          "bd4a6d22",
+          2
+        ],
+        [
+          "c1547ed1",
+          2
+        ],
+        [
+          "def3e84e",
+          2
+        ],
+        [
+          "e65efc68",
+          2
+        ]
+      ],
+      "outside_labelled": [
+        [
+          "ede4b241",
+          11
+        ]
+      ]
+    },
+    "layered_triggers": {
+      "human": {
+        "f1": 0.1578,
+        "fn": 496,
+        "fp": 134,
+        "precision": 0.3057,
+        "recall": 0.1063,
+        "tp": 59,
+        "tp_in_universe": 59
+      },
+      "notification": {
+        "cases": 8,
+        "cases_with_delivery": 5,
+        "delivered": 63,
+        "delivered_mean": 7.875,
+        "fn": 64,
+        "fp": 40,
+        "tp": 23
+      },
+      "all_tp": 82,
+      "all_fp": 174,
+      "all_precision": 0.3203125,
+      "false_positives": [
+        [
+          "5e89c211",
+          11
+        ],
+        [
+          "81709f57",
+          11
+        ],
+        [
+          "8aefcdce",
+          11
+        ],
+        [
+          "b587f6c2",
+          11
+        ],
+        [
+          "c6f69dee",
+          11
+        ],
+        [
+          "d7f74c93",
+          11
+        ],
+        [
+          "df55c398",
+          10
+        ],
+        [
+          "86647daf",
+          8
+        ],
+        [
+          "2b66211d",
+          7
+        ],
+        [
+          "5cd8d0f6",
+          6
+        ],
+        [
+          "eaa31ac5",
+          5
+        ],
+        [
+          "173119a8",
+          4
+        ],
+        [
+          "308ef1de",
+          4
+        ],
+        [
+          "a7784a18",
+          4
+        ],
+        [
+          "19304882",
+          3
+        ],
+        [
+          "3d185f2b",
+          3
+        ],
+        [
+          "6901cc3b",
+          3
+        ],
+        [
+          "17ffd587",
+          2
+        ],
+        [
+          "1b8e7f43",
+          2
+        ],
+        [
+          "20d106f1",
+          2
+        ],
+        [
+          "2ca2add2",
+          2
+        ],
+        [
+          "38b15dc6",
+          2
+        ],
+        [
+          "4e104d4c",
+          2
+        ],
+        [
+          "76a53dfe",
+          2
+        ],
+        [
+          "8c1e6057",
+          2
+        ],
+        [
+          "a6e6ab4e",
+          2
+        ],
+        [
+          "af7de070",
+          2
+        ],
+        [
+          "b42f11a0",
+          2
+        ],
+        [
+          "bc9188b4",
+          2
+        ],
+        [
+          "bd4a6d22",
+          2
+        ],
+        [
+          "c1547ed1",
+          2
+        ],
+        [
+          "c315befa",
+          2
+        ],
+        [
+          "d8c9b1f0",
+          2
+        ],
+        [
+          "d9874334",
+          2
+        ],
+        [
+          "def3e84e",
+          2
+        ],
+        [
+          "e65efc68",
+          2
+        ],
+        [
+          "0e22e34a",
+          1
+        ],
+        [
+          "23ea0607",
+          1
+        ],
+        [
+          "2e8b4840",
+          1
+        ],
+        [
+          "3a9dbafd",
+          1
+        ],
+        [
+          "4402973a",
+          1
+        ],
+        [
+          "647f843d",
+          1
+        ],
+        [
+          "80def9d2",
+          1
+        ],
+        [
+          "9293d609",
+          1
+        ],
+        [
+          "9873a0d2",
+          1
+        ],
+        [
+          "a8c55a47",
+          1
+        ],
+        [
+          "b7ec8f3b",
+          1
+        ],
+        [
+          "f47a8fe9",
+          1
+        ],
+        [
+          "f92dfab2",
+          1
+        ]
+      ],
+      "outside_labelled": [
+        [
+          "ede4b241",
+          11
+        ]
+      ]
+    },
+    "drift_shadow": {
+      "human": {
+        "f1": null,
+        "fn": 190,
+        "fp": 0,
+        "precision": null,
+        "recall": 0.0,
+        "tp": 0,
+        "tp_in_universe": 0
+      },
+      "notification": {
+        "cases": 9,
+        "cases_with_delivery": 0,
+        "delivered": 0,
+        "delivered_mean": 0.0,
+        "fn": 23,
+        "fp": 0,
+        "tp": 0
+      },
+      "all_tp": 0,
+      "all_fp": 0,
+      "all_precision": null,
+      "false_positives": [],
+      "outside_labelled": []
+    },
+    "drift_if_acting": {
+      "human": {
+        "f1": 0.0786,
+        "fn": 133,
+        "fp": 1204,
+        "precision": 0.0452,
+        "recall": 0.3,
+        "tp": 57,
+        "tp_in_universe": 57
+      },
+      "notification": {
+        "cases": 9,
+        "cases_with_delivery": 4,
+        "delivered": 59,
+        "delivered_mean": 6.556,
+        "fn": 18,
+        "fp": 54,
+        "tp": 5
+      },
+      "all_tp": 62,
+      "all_fp": 1258,
+      "all_precision": 0.04696969696969697,
+      "false_positives": [
+        [
+          "204391be",
+          33
+        ],
+        [
+          "0f38532e",
+          27
+        ],
+        [
+          "a2e78f48",
+          27
+        ],
+        [
+          "a8c55a47",
+          27
+        ],
+        [
+          "b42f11a0",
+          27
+        ],
+        [
+          "bd4a6d22",
+          27
+        ],
+        [
+          "c1547ed1",
+          27
+        ],
+        [
+          "efbdfb1a",
+          27
+        ],
+        [
+          "f0f9156e",
+          27
+        ],
+        [
+          "173119a8",
+          26
+        ],
+        [
+          "3fa17fa0",
+          26
+        ],
+        [
+          "412d37d3",
+          26
+        ],
+        [
+          "424ba0cc",
+          26
+        ],
+        [
+          "4399df76",
+          26
+        ],
+        [
+          "48083552",
+          26
+        ],
+        [
+          "51d9f05f",
+          26
+        ],
+        [
+          "5697071b",
+          26
+        ],
+        [
+          "725dff46",
+          26
+        ],
+        [
+          "72e06bdf",
+          26
+        ],
+        [
+          "9d80fd2d",
+          26
+        ],
+        [
+          "c8ebeb5b",
+          26
+        ],
+        [
+          "ce12c11e",
+          26
+        ],
+        [
+          "f5bac101",
+          26
+        ],
+        [
+          "f2d58a30",
+          25
+        ],
+        [
+          "e65efc68",
+          21
+        ],
+        [
+          "2ca2add2",
+          15
+        ],
+        [
+          "5d44d3f3",
+          15
+        ],
+        [
+          "614c1209",
+          15
+        ],
+        [
+          "d26d63b0",
+          15
+        ],
+        [
+          "faf1b643",
+          15
+        ],
+        [
+          "0c1bac27",
+          12
+        ],
+        [
+          "113b3833",
+          12
+        ],
+        [
+          "1c21263c",
+          12
+        ],
+        [
+          "1fcaa63a",
+          12
+        ],
+        [
+          "25fcddee",
+          12
+        ],
+        [
+          "3578d799",
+          12
+        ],
+        [
+          "3d185f2b",
+          12
+        ],
+        [
+          "61c64d91",
+          12
+        ],
+        [
+          "70e372f0",
+          12
+        ],
+        [
+          "8c812bed",
+          12
+        ],
+        [
+          "9873a0d2",
+          12
+        ],
+        [
+          "179be4b8",
+          11
+        ],
+        [
+          "a3f6c7f9",
+          11
+        ],
+        [
+          "b1521526",
+          11
+        ],
+        [
+          "d9ce2b08",
+          11
+        ],
+        [
+          "f5beac20",
+          11
+        ],
+        [
+          "fc4d7753",
+          11
+        ],
+        [
+          "49533583",
+          10
+        ],
+        [
+          "557838a5",
+          10
+        ],
+        [
+          "6901cc3b",
+          10
+        ],
+        [
+          "9293d609",
+          10
+        ],
+        [
+          "b7ec8f3b",
+          10
+        ],
+        [
+          "c66dc739",
+          10
+        ],
+        [
+          "ede4c735",
+          10
+        ],
+        [
+          "11b2b73b",
+          9
+        ],
+        [
+          "2e362970",
+          9
+        ],
+        [
+          "466a545a",
+          9
+        ],
+        [
+          "57d13061",
+          9
+        ],
+        [
+          "5e896ed6",
+          9
+        ],
+        [
+          "6172e7d5",
+          9
+        ],
+        [
+          "6437ae15",
+          9
+        ],
+        [
+          "81709f57",
+          9
+        ],
+        [
+          "86647daf",
+          9
+        ],
+        [
+          "8aefcdce",
+          9
+        ],
+        [
+          "98e74e7c",
+          9
+        ],
+        [
+          "9e3fb6d0",
+          9
+        ],
+        [
+          "b587f6c2",
+          9
+        ],
+        [
+          "c4a284b2",
+          9
+        ],
+        [
+          "c6f69dee",
+          9
+        ],
+        [
+          "df55c398",
+          9
+        ],
+        [
+          "eeb3d106",
+          9
+        ],
+        [
+          "fb2b263d",
+          9
+        ],
+        [
+          "185013c6",
+          8
+        ],
+        [
+          "4a9188f3",
+          8
+        ],
+        [
+          "80def9d2",
+          8
+        ],
+        [
+          "a8f159ad",
+          8
+        ],
+        [
+          "c1db316c",
+          8
+        ],
+        [
+          "fb110a39",
+          8
+        ],
+        [
+          "fc21a431",
+          8
+        ],
+        [
+          "015183f5",
+          7
+        ],
+        [
+          "740bb505",
+          7
+        ],
+        [
+          "def3e84e",
+          7
+        ],
+        [
+          "2b66211d",
+          5
+        ],
+        [
+          "67580c28",
+          3
+        ],
+        [
+          "c20dc3d5",
+          3
+        ],
+        [
+          "018ce972",
+          1
+        ],
+        [
+          "19304882",
+          1
+        ],
+        [
+          "20d106f1",
+          1
+        ],
+        [
+          "bbffc139",
+          1
+        ],
+        [
+          "bc4145f6",
+          1
+        ],
+        [
+          "d3774a28",
+          1
+        ]
+      ],
+      "outside_labelled": [
+        [
+          "ede4b241",
+          9
+        ]
+      ]
+    }
+  },
+  "sources": [
+    {
+      "path": "hooks/rule-pack-preuse-reselection.py",
+      "sha256": "74e2581abc6efbe1382f153bbf64efe8edec7355833d1c177771b53345369ef3"
+    },
+    {
+      "path": "ops/rule_trigger_delivery.py",
+      "sha256": "773911b40433f70242b7b85eb33c64a487e8be20dd6c9f2ba28ac70daf10edb1"
+    },
+    {
+      "path": "ops/rule_trigger_compile.py",
+      "sha256": "26e0595e793aaba54df070f206edfa9d72f33d861f77741e0f3947bf7dbccdce"
+    },
+    {
+      "path": "lib/rule_delivery_preuse.py",
+      "sha256": "3a4e46653d2255561a2b171b4762dce6d74581eb7f2156cce6afc320e26adee2"
+    },
+    {
+      "path": "lib/rule_routes.py",
+      "sha256": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760"
+    },
+    {
+      "path": "hooks/rule-pack-drift-gate.py",
+      "sha256": "bfbc7690a79836c798dcf18e0f67cb531bd938a6424c9a4296816307ce4cfa68"
+    },
+    {
+      "path": "lib/rule_boot_gate.py",
+      "sha256": "3c94b7d6fa2c59f97a9f0da91605206cb72507145cd3745e158ddae4fa58cc1e"
+    },
+    {
+      "path": "lib/claude_rule_delivery_dedupe.py",
+      "sha256": "6b37b3e0cd950410332fcc4099c17b61650d87eb63158bf550c5d259ca0540b4"
+    },
+    {
+      "path": "ops/rule_delivery_eval.py",
+      "sha256": "e59e392ec3cceae4df58d9aed14887c5e901105730e06020466b261b4803efc2"
+    },
+    {
+      "path": "ops/config/rule-routes.v1.json",
+      "sha256": "1d94a8dab3d249fd86da466743dc3b904e6e27d2cd289de108d9cbb0c9fadbb5"
+    },
+    {
+      "path": "ops/config/rule-jit-triggers.v1.json",
+      "sha256": "b0b23e68c4121e649b82f5d7f93704f1574e2a7ce798a5e3d823b1322c04dd59"
+    },
+    {
+      "path": "ops/config/rule-classes.v1.json",
+      "sha256": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23"
+    },
+    {
+      "path": "ops/config/hooks.json",
+      "sha256": "7f4362fc94256909badd26922e73a577197605c0de5f1cecf426f9f44f860bc9"
+    },
+    {
+      "path": "ops/config/codex-hooks.json",
+      "sha256": "6083b2166ff7388882e23cf46e86b543eb3853b27bbac02cd2612368ab0aeb8b"
+    },
+    {
+      "path": "ops/config/rule-enforcement-map.json",
+      "sha256": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308"
+    },
+    {
+      "path": "ops/rule-jit-compile.py",
+      "sha256": "2eb77551ddc1d49b73e5f91e7beefd2e8af345996a2aab5ea7218294c7b15f20"
+    },
+    {
+      "path": "mcp-server/src/doctrine.js",
+      "sha256": "7b034306e97f1485ec072fd597770dd3fc3f2069682f51e2040e6d23d60b927f"
+    },
+    {
+      "path": "mcp-server/src/rule-boot.js",
+      "sha256": "66618dede44730f86d950d46a4a1ea262e018b4d0493129344c0eb30a9c916b4"
+    },
+    {
+      "path": "tools/flash-run.py",
+      "sha256": "e655629d3154f47f80a05cab0c1ee585e607be3fb0792f5ca529a0d82ca1f84e"
+    },
+    {
+      "path": "tools/flash-prompt-rules.py",
+      "sha256": "6657d1d2a4ba0ea32d521a2eb34612aba792221221657934eeb91f512be96caf"
+    },
+    {
+      "path": "tools/room-bridge/engineering_dispatch_adapter.py",
+      "sha256": "7117bf15b0e583957b4cae44ad1bdbcf5b8eb74bcb5f3cac97b768306de5e5c7"
+    }
+  ],
+  "code_changes_not_in_base": [
+    "hooks/rule-pack-preuse-reselection.py"
+  ],
+  "corrected_gold_is_separate": true,
+  "candidate_test_tuning": false,
+  "research_sources": [
+    {
+      "url": "https://scikit-learn.org/stable/modules/classification_threshold.html",
+      "full_substantive_body_read": true
+    },
+    {
+      "url": "https://scikit-learn.org/stable/modules/calibration.html",
+      "full_substantive_body_read": true
+    },
+    {
+      "url": "https://raw.githubusercontent.com/scikit-learn/scikit-learn/1.4.2/doc/tutorial/text_analytics/working_with_text_data.rst",
+      "full_substantive_body_read": true
+    },
+    {
+      "url": "https://www.sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html",
+      "full_substantive_body_read": true
+    },
+    {
+      "url": "https://www.sbert.net/examples/cross_encoder/applications/README.html",
+      "full_substantive_body_read": true
+    },
+    {
+      "url": "https://code.claude.com/docs/en/hooks-guide",
+      "full_substantive_body_read": true
+    }
+  ],
+  "live_corpus_sha256": "9fc1b0c33ee3c6820c15a46baca6ea32a85449ad4911bae78e94af25c5a4c4f9",
+  "statement_drift": [
+    {
+      "id": "5d44d3f3",
+      "static_statement_sha256": "53bd861e5b21c99ad9212063f6627083995854470a2dfcbf9a4f6765e2593f67",
+      "live_statement_sha256": "3e54a88797d9a11cfc1c0daa69c1ef703f49870e87c2a95b90c522e8d64d6881"
+    },
+    {
+      "id": "9f15f21a",
+      "static_statement_sha256": "67eafdb44a9fd0f2ace7bda62fb8b6e33ed47c75b4da5f19025825f0cd6297ed",
+      "live_statement_sha256": "928b037fe9f855c21f47dac62a52ad70e26e14c13e07f20e6aba32b802a0d2a0"
+    },
+    {
+      "id": "54e2bcb9",
+      "static_statement_sha256": "42c77825890fdf115205805e79bb41dcd1059974c3db6f3c95ceeac791bc562f",
+      "live_statement_sha256": "c4dbf35a10c98f08554bd48573c12d1686d87d4cb7b8c72f33f281e83bac1923"
+    },
+    {
+      "id": "d7e6de46",
+      "static_statement_sha256": "ee41f5ce68dd3aa356a2d8506cf74583362f692f005d18459e4f204a8e402149",
+      "live_statement_sha256": "69d5261d7b51cfbfa4e1d64ed1a077cf383298482a420e2eb5c1f5a9b1ba24b9"
+    },
+    {
+      "id": "23ea0607",
+      "static_statement_sha256": "eef07a1529ea6a0dbc26206c00b961c0e5be8d30061fca5ce45ebab03a28538c",
+      "live_statement_sha256": "ae7f29b56815db8768df5e850c6a2e9595f07d45c48071ae2c3649a2299d8c29"
+    },
+    {
+      "id": "8cddc6ad",
+      "static_statement_sha256": "42ba535101f6de8b53477e7ba85f98f641669fdab688e9f54e50bbd6d917798d",
+      "live_statement_sha256": "9b4f6a3bfba1278353d6e06729d1e9731960349b2a1dd6fd461a436117846c00"
+    },
+    {
+      "id": "cff429f5",
+      "static_statement_sha256": "fddd7dfa8b5377c2ce16f921a8c6b521aac9aeb476f6421da8cd96315bf5af85",
+      "live_statement_sha256": "226f3808398d0e80335798edd85e0a7f11c18965efe56ea76fc78442d0c02e4d"
+    },
+    {
+      "id": "38b15dc6",
+      "static_statement_sha256": "b9b27df19cd12b33565b931f11d322b9375756de7849f532e8a608533b6f9a2f",
+      "live_statement_sha256": "ec9698b8fd2f27b3284c38e80f5417e0d18b0d50b76e147e0c54e5ef72ef0343"
+    }
+  ],
+  "new_current_ids": [
+    "661d7757",
+    "76fcbed6",
+    "a3da3d39",
+    "f673326b"
+  ],
+  "retired_or_out_of_live_ids": [
+    "1f750181",
+    "3b0cd546",
+    "5f8c661d",
+    "6ec7312d",
+    "76a1ae2b",
+    "7b4ba3aa",
+    "7e4ca905",
+    "83b9a362",
+    "893aeec5",
+    "ba5730c5",
+    "bddb0e7b",
+    "cf1c13a6",
+    "defee176",
+    "e6e0b0e7",
+    "ede4b241"
+  ]
+}

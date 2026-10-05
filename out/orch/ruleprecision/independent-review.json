@@ -1,0 +1,38 @@
+{
+  "status": "pass",
+  "patch": "/Users/booko/carr-system/.claude/worktrees/ruleprecision-shadow-review/out/ruleprecision-review-2.patch",
+  "changed_files": [
+    "lib/ruleprecision_shadow.py",
+    "ops/ruleprecision_health.py",
+    "ops/ruleprecision-health-selftest.py"
+  ],
+  "findings_fixed": [
+    "stale selector health clearance",
+    "implicit health production writes",
+    "imported action parser omitted from selector fingerprint",
+    "malformed live rows escaped UNKNOWN",
+    "injected failed or mismatched close ACK falsely cleared local state",
+    "owner render and outside-monitor blocker mismatch"
+  ],
+  "validation": {
+    "health_tests": 12,
+    "shadow_privacy_concurrency": "passed",
+    "mypy_files": 4,
+    "production_writes": 0
+  },
+  "scope_limits": [
+    "selector tuning not reviewed",
+    "live quality not measured",
+    "production response path not executed"
+  ],
+  "comment_pass": {
+    "deleted_internal_comment_lines": 6,
+    "restored": 0,
+    "open_constraints": 0
+  },
+  "source_contract": {
+    "read_loop": "flat loop_id and integer version",
+    "write_ack": "ok true and matching loop identity; close status matches resolution",
+    "blocker": "other_lane with status-specific source or audit delivery"
+  }
+}

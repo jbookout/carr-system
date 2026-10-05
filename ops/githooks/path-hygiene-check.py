@@ -28,11 +28,18 @@ import sys
 MAX_DIRECTORY_DEPTH = 4
 BAD_VERSION_NAME = re.compile(r"(?:^|[_-])(?:final|v\d+)(?:$|[_.-])", re.I)
 VENDORED_TREE_PREFIXES = ("plugins/pstack/skills/",)
+# Requested report name and immutable experiment receipts, not draft revisions.
+MEASUREMENT_ARTIFACT_PATHS = frozenset(
+    "out/orch/ruleprecision/" + name for name in (
+        "ci-final-result.json", "final-fixed-test.json", "final-lock.json",
+        "final-readback.json", "final-real-test.json", "final.html",
+        "predicate-v1-train.json", "render-final.py"))
 
 
 def violations(paths: list[str]) -> list[str]:
     bad = []
     for path in paths:
+        is_measurement = path in MEASUREMENT_ARTIFACT_PATHS
         is_vendored = path.startswith(VENDORED_TREE_PREFIXES) and path == path.strip() and "\\" not in path
         path = path.strip().replace("\\", "/")
         if not path:
@@ -44,7 +51,7 @@ def violations(paths: list[str]) -> list[str]:
         depth = len(parts) - 1
         if depth > MAX_DIRECTORY_DEPTH and not is_vendored:
             bad.append(f"{path}: {depth} folder levels (maximum is {MAX_DIRECTORY_DEPTH})")
-        if BAD_VERSION_NAME.search(parts[-1]):
+        if BAD_VERSION_NAME.search(parts[-1]) and not is_measurement:
             bad.append(f"{path}: draft/final version filename is forbidden")
     return bad
 

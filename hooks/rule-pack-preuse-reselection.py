@@ -741,8 +741,8 @@ def _route_delivery(payload: dict, rows: list[dict], routed: list[str],
     return _context(text)
 
 
-def process(payload: dict, *, runner: Callable = subprocess.run,
-            adviser: Callable[[str], list[dict]] | None = None) -> dict | None:
+def _process_today(payload: dict, *, runner: Callable = subprocess.run,
+                   adviser: Callable[[str], list[dict]] | None = None) -> dict | None:
     if payload.get("hook_event_name") == "UserPromptSubmit":
         return _process_prompt(payload, runner, adviser)
     if _matches(payload):
@@ -786,6 +786,18 @@ def process(payload: dict, *, runner: Callable = subprocess.run,
             table = merge_trigger_delivery(rows)[2] if rows else []
             return _context(rule_routes.notice_error(sorted(set(routed) | set(table))))
     return _table_delivery(payload, rows, runner)
+
+
+def process(payload: dict, *, runner: Callable = subprocess.run,
+            adviser: Callable[[str], list[dict]] | None = None) -> dict | None:
+    output = _process_today(payload, runner=runner, adviser=adviser)
+    if os.environ.get("CARR_RULEPRECISION_SHADOW") == "1":
+        try:
+            from lib.ruleprecision_shadow import observe
+            observe(REPO, payload, output)
+        except Exception:
+            pass
+    return output
 
 
 def _table_delivery(payload: dict, rows: list[dict], runner: Callable) -> dict | None:
