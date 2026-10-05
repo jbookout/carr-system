@@ -39,6 +39,11 @@
 # com.carr.fetch-allowlist.plist exists as its own job rather than being
 # inherited from the nightly chain.
 PRIMARY_ONLY = {
+    "com.carr.cliproxyapi.plist",
+    "com.carr.fix-train.plist",
+    "local.carr-progress-board.plist",
+    "local.ds4-flash-next.plist",
+    "local.flash-desk.plist",
     "com.carr.job-watchdog.plist",
     "com.carr.videopipeline.plist",
     # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
@@ -83,7 +88,16 @@ PRIMARY_ONLY = {
 # already gets the same effect from a chain the second machine must not run.
 SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 
+# MacBook rehearsal remains scheduled after promotion; host identity owns it.
+HOST_ONLY = {"com.carr.studio-failover-rehearsal.plist": "macbook"}
+
 
 def allowed_on_machine(filename: str, primary: bool) -> bool:
+    if filename in HOST_ONLY:
+        import json
+        import socket
+        from pathlib import Path
+        config = json.loads((Path(__file__).resolve().parents[1] / 'ops/config/studio-failover.v1.json').read_text())
+        return socket.gethostname() == config['hosts'][HOST_ONLY[filename]]['hostname']
     return not ((filename in PRIMARY_ONLY and not primary)
                 or (filename in SECONDARY_ONLY and primary))

@@ -120,7 +120,7 @@ STRUCTURAL_KEYS = {
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
 }
-ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity"}
+ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity", "studio_failover_evidence"}
 
 
 def _find_function(name: str) -> ast.FunctionDef:
@@ -578,6 +578,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         mod = ast.Module(body=[_find_function("_canonical_health"),
                                _find_function("_jev_paid_cap_row")], type_ignores=[])
         ns.update(os=os, re=re, sys=sys, time=time, REPO_ROOT=str(HEALTH_CHECK_PATH.parent.parent),
+                  _studio_failover_row=lambda: {'status': 'ok', 'line': 'OK fixture Studio failover'},
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),

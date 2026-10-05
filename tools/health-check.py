@@ -1327,10 +1327,33 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+def _studio_failover_row():
+    spec = importlib.util.spec_from_file_location(
+        'studio_failover_health', os.path.join(REPO_ROOT, 'ops/studio-failover-health.py'))
+    if spec is None or spec.loader is None:
+        raise ImportError('Studio failover health loader unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.check(reconcile_loop=True)
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION == "all":
+        try:
+            _failover = _studio_failover_row()
+            print('  ' + _failover['line'])
+            if _failover['status'] == 'warn':
+                rc = _red('studio_failover', _failover['line'])
+        except Exception:
+            _failover_line = ('WARN Studio failover evidence unreadable · on breach: '
+                              'ops/studio-failover-health.py --reconcile opens/updates one loop; '
+                              'owner orchestrator; restore the evidence reader and rerun MacBook dry-run; '
+                              'verify a fresh current-contract receipt; auto-clear on that receipt')
+            print('  ' + _failover_line)
+            rc = _red('studio_failover_evidence', _failover_line, hard_error=True)
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)

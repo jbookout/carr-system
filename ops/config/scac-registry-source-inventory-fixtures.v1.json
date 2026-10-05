@@ -92157,6 +92157,14 @@
       ],
       "expected_count": 1130,
       "expected_sha256": "60f791621552593fec684555fbea238845834f2c5c93cce79786633761efc42a"
+    },
+    {
+      "version": "v113",
+      "reason": "Studio failover adds one finite authority capability. Existing source ingress contracts remain unchanged.",
+      "remove": [],
+      "upsert": [],
+      "expected_count": 1130,
+      "expected_sha256": "60f791621552593fec684555fbea238845834f2c5c93cce79786633761efc42a"
     }
   ],
   "current_source_review": {
@@ -95864,6 +95872,37 @@
       ],
       "expected_count": 1130,
       "expected_sha256": "68823ecb3188bce0e1f283be758da520027c1670401ec38af3088dd7113ed5d2"
+    },
+    "scac-mutation-registry.v113": {
+      "base_version": "v113",
+      "reason": "Bind the atomic Leads migration pair bookkeeping without changing script authority. Studio failover preserves each existing administration contract while binding the atomic 0847/0848 migration-runner pair.",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "6b63445e445acb374f373a4c5d38993ed54dd8b5614d4914de5c4da23d774c60",
+          "handler_digest": "6b63445e445acb374f373a4c5d38993ed54dd8b5614d4914de5c4da23d774c60",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1130,
+      "expected_sha256": "86c81c123fbcafc8121f9ad13eb522ed88019fea55e1fcb190c1351a43f88299"
     }
   }
 }
