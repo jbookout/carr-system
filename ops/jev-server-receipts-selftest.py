@@ -81,7 +81,7 @@ def client_routes_through_the_worker():
             "session_id": "s", "model": "jev-1.13.0", "state_sha256": "a" * 64,
             "prompt_sha256": None, "usage": {"input_tokens": 3, "output_tokens": 1},
             "answers": {"diagnosis_q": {"type": "noul", "noul": 0.7}}}))
-    tsc.read_api_key = lambda *a: (_ for _ in ()).throw(AssertionError("server path read a local credential"))
+    tsc.read_api_key = lambda *a: "offline-reservation-key"
     log = _write([], ".jsonl")
     try:
         result = tsc.ask({"x": 1}, {"diagnosis_q": tsc.noul("is it?")}, facets=["diagnosis"],
@@ -91,7 +91,9 @@ def client_routes_through_the_worker():
     finally:
         os.unlink(log)
     ok = (seen.get("verb") == "ask-jev" and seen["args"]["purpose"] == "call"
-          and seen["args"]["facets"] == ["diagnosis"] and seen["args"]["idempotency_key"]
+          and seen["args"]["facets"] == ["diagnosis"]
+          and seen["args"]["idempotency_key"].startswith("jev1.")
+          and "offline-reservation-key" not in json.dumps(seen)
           and result["server_receipt"]["receipt_id"] == "srv-1"
           and result["answers"]["diagnosis_q"]["noul"] == 0.7
           and result["usage"] == {"input_tokens": 3, "output_tokens": 1}

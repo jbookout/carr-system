@@ -2,6 +2,22 @@
   "schema": "carr-jev-call-sites/v1",
   "about": "The only call sites allowed to make a paid Jev call, read by ops/typesafe_client.py before any transport. An unregistered caller, a call without the site's attribution, or a site marked unattended=off inside a CARR_JEV_WORKER=off worker is refused and logged, never paid. Budgets are per UTC hour and per UTC day per site, under hourly_paid_call_cap and jev-cost-guard's daily_paid_call_cap. `caller` is the module that called ask()/judge() (file name without .py) or an explicit caller= string. A new paid call path fails ops/jev-call-sites-selftest.py until it has an entry here. Audit and per-site decisions: the 2026-10-04 PR 'Jev: system-wide call audit, call-site registry and budgets'.",
   "hourly_paid_call_cap": 200,
+  "transport_sources": {
+    "ops/typesafe_client.py": "shared_admission",
+    "mcp-server/src/jev-call-receipt.js": "worker_reservation_proof",
+    "mcp-server/src/dealroom-web.js": "worker_reservation_proof",
+    "mcp-server/src/program6-routine-controller.js": "worker_reservation_proof",
+    "installed:out/orch/jevrv/jev_diff_review.py": "worker_reservation_proof"
+  },
+  "installed_launcher_roots": ["out/orch", "~/.codex/skills", "~/.claude/skills", "~/.agents/skills"],
+  "consumer_transports": {
+    "installed:~/.codex/skills/jev-browser-select/usage.py": {
+      "source_repo": "jbookout/software-factory",
+      "source_path": "capabilities/jev-browser-select/usage.py",
+      "required_control": "shared_admission",
+      "rollout": "Source delivery does not install this helper; verify the installed copy before enabling paid calls."
+    }
+  },
   "sites": [
     {
       "caller": "rule_trigger_delivery",

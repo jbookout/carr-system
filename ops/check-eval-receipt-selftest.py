@@ -216,10 +216,15 @@ def evidence_paths(receipt: dict) -> set[str]:
 
 
 def mirror(receipt: dict, dest: Path) -> None:
-    """Copy every file the receipt's evidence binds, plus the registry, into dest."""
+    """Replay the historical receipt at its source revision, not today's tree."""
+    revision = subprocess.run(
+        ["git", "log", "-1", "--format=%H", "--", f"{RD}/receipt.json"],
+        cwd=ROOT, env=fixture_env(), check=True, capture_output=True, text=True).stdout.strip()
     for rel in evidence_paths(receipt) | {"evals/surfaces.json"}:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / rel, dest / rel)
+        data = subprocess.run(["git", "show", f"{revision}:{rel}"], cwd=ROOT,
+                              env=fixture_env(), check=True, capture_output=True).stdout
+        (dest / rel).write_bytes(data)
     if not (dest / ".git").exists():
         env = fixture_env()
         subprocess.run(["git", "init", "-q", str(dest)], env=env, check=True, capture_output=True)
@@ -940,7 +945,13 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
 
     def test_checked_in_receipt_passes_against_its_own_evidence(self):
         self.assertEqual(self.r["schema_version"], 2)
-        self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", ROOT), [])
+        self.assertEqual(self.errors(), [])
+
+    def test_current_dependency_cannot_replace_historical_evidence(self):
+        path = self.root / "ops/typesafe_client.py"
+        path.write_bytes(path.read_bytes() + b"\n# changed dependency\n")
+        self.assertTrue(any("ops/typesafe_client.py" in error and "sha256" in error
+                            for error in self.errors()))
 
     def test_repeated_validation_reuses_immutable_baseline_across_roots(self):
         # One baseline snapshot per commit/harness, even for separate fixtures.

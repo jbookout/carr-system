@@ -4,10 +4,10 @@
 // WHY THE WORKER AND NOT THE CALLER. Jev enforcement gates used to credit
 // evidence the gated model could write: the session transcript and
 // out/jev-calls.jsonl. The model shares one OS user with the hooks, so any
-// local log or local credential is forgeable. Here the only party holding the
-// TypeSafe key is the Worker (env.TYPESAFE_API_KEY, bound by hand), the
-// receipt is appended by the Worker's writer transaction, and recorded_at is
-// the database clock.
+// local log or local credential is forgeable. The Worker appends the receipt
+// in its writer transaction, and recorded_at is the database clock. Paid
+// callers also hold the account key to sign their shared admission reservation;
+// the pending attempt ledger consumes each signed reservation once.
 //
 // DETECTABLE, NOT PREVENTED. This store raises the cost of forging a Jev call;
 // it does not make forgery impossible. The model's OS user can read the
@@ -51,14 +51,9 @@ import { judgeBinding, providerFor } from "./judge-provider.js";
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const USER_AGENT = "carr-worker-jev-proxy/1.0";
 const DEFAULT_MODEL = "jev-latest";
-// Total upstream budget, every attempt and the retry wait included. The local
+// One reserved vendor attempt, with a total upstream budget. The local
 // client budgets ~14s for the whole path under a 20s UserPromptSubmit hook.
 const TOTAL_BUDGET_MS = 10000;
-const MAX_429_RETRIES = 1;
-const RETRY_AFTER_CAP_MS = 5000;
-const RETRY_AFTER_DEFAULT_MS = 1000;
-// A retry is only worth making with at least this much budget left after the wait.
-const MIN_ATTEMPT_MS = 1000;
 const MAX_ERROR_BODY_CHARS = 300;
 const JEV_CACHE_SECONDS = 60;
 const MAX_STATE_CHARS = 96000;
@@ -110,6 +105,25 @@ export async function sha256Hex(text) {
 
 export async function canonicalSha256(value) {
   return sha256Hex(canonicalJson(value));
+}
+
+async function verifyAdmission(key, token, session, now) {
+  const parts = typeof token === "string" ? token.split(".") : [];
+  if (parts.length !== 3 || parts[0] !== "jev1" || !/^[a-f0-9]{64}$/.test(parts[2]))
+    throw new LeafToolError({ error: "jev_admission_required" });
+  try {
+    const signer = await crypto.subtle.importKey("raw", new TextEncoder().encode(key),
+      { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const signature = Uint8Array.from(parts[2].match(/../g), byte => parseInt(byte, 16));
+    const valid = await crypto.subtle.verify("HMAC", signer, signature, new TextEncoder().encode(parts[1]));
+    const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(
+      atob(parts[1].replaceAll("-", "+").replaceAll("_", "/")), c => c.charCodeAt(0))));
+    if (!valid || !Array.isArray(payload) || payload.length !== 5 || payload[0] !== 1 ||
+        !Number.isInteger(payload[1]) || payload[1] * 1000 <= now || payload[1] * 1000 > now + 30000 ||
+        typeof payload[2] !== "string" || !payload[2] || typeof payload[3] !== "string" || !payload[3] ||
+        payload[4] !== session)
+      throw new Error("invalid admission");
+  } catch { throw new LeafToolError({ error: "jev_admission_required" }); }
 }
 
 function isPlainObject(value) {
@@ -201,19 +215,6 @@ export function calibrationBlock(questions, answered, modelRequested, stateSha) 
     state_sha256: stateSha, questions: perQuestion };
 }
 
-function retryAfterMs(response) {
-  const raw = response?.headers?.get?.("retry-after");
-  if (raw === null || raw === undefined || String(raw).trim() === "") return RETRY_AFTER_DEFAULT_MS;
-  const seconds = Number(String(raw).trim());
-  let ms;
-  if (Number.isFinite(seconds)) ms = seconds * 1000;
-  else {
-    const when = Date.parse(String(raw));
-    ms = Number.isFinite(when) ? when - Date.now() : RETRY_AFTER_DEFAULT_MS;
-  }
-  return Math.min(RETRY_AFTER_CAP_MS, Math.max(0, ms));
-}
-
 function upstreamFailure(status, reason, body, key) {
   let text = typeof body === "string" ? body : "";
   // An upstream that echoes the request back must not carry the key out.
@@ -225,18 +226,17 @@ function upstreamFailure(status, reason, body, key) {
 
 // Returns the Worker's Jev caller, or null when the Worker holds no key.
 // mcp.js calls it before the writer transaction opens (prefetchJevAnswer).
-// `options` exists for tests (sleep, now, budgetMs); production passes none.
+// Production supplies reserveAttempt; tests also inject time and transport.
 export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   const key = env?.TYPESAFE_API_KEY;
   if (typeof key !== "string" || key.trim() === "") return null;
-  const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
   const now = options.now ?? (() => Date.now());
   const budgetMs = options.budgetMs ?? TOTAL_BUDGET_MS;
   const cache = options.cache ?? (typeof caches !== "undefined" ? caches.default : null);
   const reserveAttempt = options.reserveAttempt;
   const cacheKeyFor = async body =>
     new Request(`https://jev-cache-v2.invalid/${await sha256Hex(`${key}\n${body}`)}`);
-  const jevAsk = async function ({ state, model, questions, transport_mode }) {
+  const jevAsk = async function ({ state, model, questions, transport_mode, idempotency_key, session_id }) {
     const body = JSON.stringify({ state, model, questions });
     // The Cache API is shared across Worker isolates in a colo. Only the
     // answer is cached; the key contains digests of the request and account.
@@ -259,72 +259,60 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
     // skips cache reads and permits exactly one vendor attempt.
     if (transport_mode === "cache_only")
       throw new LeafToolError({ error: "jev_cache_miss" });
+    await verifyAdmission(key, idempotency_key, session_id, now());
+    if (!reserveAttempt) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
     let reservedAttempt;
-    if (reserveAttempt) {
-      try { reservedAttempt = await reserveAttempt(); }
-      catch { throw new LeafToolError({ error: "jev_receipt_store_unavailable" }); }
-      if (typeof reservedAttempt?.key !== "string" || !reservedAttempt.key ||
-          typeof reservedAttempt?.receipt_id !== "string" || !reservedAttempt.receipt_id)
-        throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
+    try { reservedAttempt = await reserveAttempt(); }
+    catch { throw new LeafToolError({ error: "jev_receipt_store_unavailable" }); }
+    if (typeof reservedAttempt?.key !== "string" || !reservedAttempt.key ||
+        typeof reservedAttempt?.receipt_id !== "string" || !reservedAttempt.receipt_id)
+      throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
+    const remaining = budgetMs;
+    if (remaining <= 0) throw upstreamFailure(null, "timeout", "", key);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remaining);
+    let response;
+    try {
+      response = await fetchImpl(ENDPOINT, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${key}`,
+          "content-type": "application/json",
+          "user-agent": USER_AGENT,
+        },
+        body,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      // Never the error's own message: a fetch failure can quote its request.
+      throw upstreamFailure(null, controller.signal.aborted || error?.name === "AbortError"
+        ? "timeout" : "network", "", key);
     }
-    const deadline = now() + budgetMs;
-    for (let attempt = 0; ; attempt++) {
-      const remaining = deadline - now();
-      if (remaining <= 0) throw upstreamFailure(null, "timeout", "", key);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), remaining);
-      let response;
-      try {
-        response = await fetchImpl(ENDPOINT, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${key}`,
-            "content-type": "application/json",
-            "user-agent": USER_AGENT,
-          },
-          body,
-          signal: controller.signal,
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        // Never the error's own message: a fetch failure can quote its request.
-        throw upstreamFailure(null, controller.signal.aborted || error?.name === "AbortError"
-          ? "timeout" : "network", "", key);
+    try {
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw upstreamFailure(response.status, "http_status", text, key);
       }
-      try {
-        if (transport_mode !== "paid_once" && response.status === 429 && attempt < MAX_429_RETRIES) {
-          const wait = retryAfterMs(response);
-          if (deadline - now() - wait >= MIN_ATTEMPT_MS) {
-            clearTimeout(timer);
-            await response.text().catch(() => "");
-            await sleep(wait);
-            continue;
-          }
-        }
-        if (!response.ok) {
-          const text = await response.text().catch(() => "");
-          throw upstreamFailure(response.status, "http_status", text, key);
-        }
-        let parsed;
-        try { parsed = await response.json(); }
-        catch { throw upstreamFailure(response.status, controller.signal.aborted ? "timeout" : "invalid_json", "", key); }
-        if (!isPlainObject(parsed) || !isPlainObject(parsed.answers) || typeof parsed.model !== "string" ||
-            parsed.model.trim() === "")
-          throw upstreamFailure(response.status, "invalid_answer_shape", "", key);
-        const answer = {
-          model: parsed.model,
-          answers: parsed.answers,
-          usage: isPlainObject(parsed.usage) ? parsed.usage : null,
-          ...(reservedAttempt ? { attempt: reservedAttempt } : {}),
-        };
-        return answer;
-      } catch (error) {
-        if (error instanceof LeafToolError) throw error;
-        throw upstreamFailure(response?.status ?? null,
-          controller.signal.aborted ? "timeout" : "network", "", key);
-      } finally {
-        clearTimeout(timer);
-      }
+      let parsed;
+      try { parsed = await response.json(); }
+      catch { throw upstreamFailure(response.status, controller.signal.aborted ? "timeout" : "invalid_json", "", key); }
+      if (!isPlainObject(parsed) || !isPlainObject(parsed.answers) || typeof parsed.model !== "string" ||
+          parsed.model.trim() === "")
+        throw upstreamFailure(response.status, "invalid_answer_shape", "", key);
+      const answer = {
+        model: parsed.model,
+        answers: parsed.answers,
+        usage: isPlainObject(parsed.usage) ? parsed.usage : null,
+        attempt: reservedAttempt,
+      };
+      return answer;
+    } catch (error) {
+      if (error instanceof LeafToolError) throw error;
+      throw upstreamFailure(response?.status ?? null,
+        controller.signal.aborted ? "timeout" : "network", "", key);
+    } finally {
+      clearTimeout(timer);
     }
   };
   // Only the caller that committed the matching receipt may promote an answer.
@@ -344,7 +332,7 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
 // Vendor failure leaves linked unknown spend, never an orphan or credited answer.
 export async function reserveJevCallAttempt(client, actor, args) {
   const { stateJson, questions, facets, model } = validateAskJevArgs(args);
-  const key = `jev-attempt:${crypto.randomUUID()}`;
+  const key = `jev-attempt:${args.idempotency_key}`;
   await client.query("begin");
   try {
     const row = (await client.query(
@@ -436,6 +424,7 @@ export async function prefetchJevAnswer(args, ask, workClass = "system_work") {
   providerFor(workClass);
   try {
     return { ok: true, result: await judgeBinding(ask, workClass)({ state, model, questions,
+      idempotency_key: args.idempotency_key, session_id: args.session_id,
       ...(args.transport_mode !== undefined ? { transport_mode: args.transport_mode } : {}) }) };
   } catch (error) {
     if (error instanceof LeafToolError) return { ok: false, error: error.payload };
@@ -450,7 +439,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
       // mcp.js asks Jev for tools carrying this flag before it opens the writer
       // transaction, and hands the answer over as client.jevPrefetched.
       jevProxy: true,
-      description: "Ask Jev (TypeSafe) through the Worker and record a server-timestamped, append-only receipt of the call before the answers are returned. The Worker holds the TypeSafe key; the caller never does. purpose 'call' is an ordinary Jev question set; purpose 'build_advisory' requires state.partner_request (a string) and also records prompt_sha256. Returns the answers, the answered model, usage, the receipt id, the server's recorded_at, and a calibration block (each answer's full distribution and entropy in bits, the requested and answered model, whether the requested model is pinned, and the state digest). Refuses jev_proxy_unconfigured when the Worker holds no key, jev_upstream_failed when Jev does not answer within 10 seconds.",
+      description: "Ask Jev (TypeSafe) through the Worker and record a server-timestamped, append-only receipt of the call before the answers are returned. Paid calls require the shared client reservation proof in idempotency_key; cache-only calls remain free. purpose 'call' is an ordinary Jev question set; purpose 'build_advisory' requires state.partner_request (a string) and also records prompt_sha256. Returns the answers, the answered model, usage, the receipt id, the server's recorded_at, and a calibration block (each answer's full distribution and entropy in bits, the requested and answered model, whether the requested model is pinned, and the state digest). Refuses jev_proxy_unconfigured when the Worker holds no key, jev_upstream_failed when Jev does not answer within 10 seconds.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {

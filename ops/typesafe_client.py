@@ -59,6 +59,8 @@ KNOWN_HOSTS in hooks/guard-unattended.py.
 """
 
 import hashlib
+import hmac
+import base64
 import glob
 import importlib.util
 import json
@@ -598,17 +600,34 @@ def _worker_upstream(stderr):
 
 
 def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
-               transport_mode, runner=None, upstream=None):
+               transport_mode, runner=None, upstream=None, caller=None):
     """Ask the Worker's ask-jev verb. Returns (result, None) on success, where
     result is {"model", "answers", "usage", "server_receipt": {...}}, or
-    (None, <category>) on any failure. Never raises. When the Worker's own
+    (None, <category>) on transport failure. Admission failures raise before
+    transport. When the Worker's own
     vendor call failed, a passed `upstream` dict gets its status and reason."""
     script = _local_verb_script()
     node = _node_binary()
     if runner is None and (script is None or node is None):
         return None, "node_or_local_verb_missing"
+    idempotency_key = str(uuid.uuid4())
+    probe = None
+    if transport_mode != "cache_only":
+        caller = caller or _caller_name()
+        kind = _question_kind(questions)
+        prompt = _prompt_sha256({"state": state, "model": model, "questions": questions})
+        registry, site = _admit_paid_call(caller, session_id, questions, facets, kind, prompt)
+        credential = read_api_key()
+        probe = _reserve_paid_call(questions, facets, caller, kind, prompt, registry, site)
+        # The existing idempotency key carries one shared reservation, not a
+        # second counter. The Worker consumes it before its single fetch.
+        payload = base64.urlsafe_b64encode(json.dumps(
+            [1, int(time.time()) + 30, idempotency_key, caller, session_id],
+            ensure_ascii=False, separators=(",", ":")).encode()).decode().rstrip("=")
+        signature = hmac.new(credential.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        idempotency_key = f"jev1.{payload}.{signature}"
     args = {
-        "idempotency_key": str(uuid.uuid4()),
+        "idempotency_key": idempotency_key,
         "session_id": session_id,
         "purpose": purpose,
         "state": state,
@@ -630,8 +649,16 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         return None, "server_call_failed"
     if proc.returncode != 0:
         category = _server_error_category(proc.stderr)
-        if category == "vendor_failed_at_worker" and upstream is not None:
-            upstream["status"], upstream["reason"] = _worker_upstream(proc.stderr)
+        if category == "vendor_failed_at_worker":
+            status, reason = _worker_upstream(proc.stderr)
+            if upstream is not None:
+                upstream["status"], upstream["reason"] = status, reason
+            try:
+                _after_worker_vendor_failure(status, reason, caller)
+            except TypeSafeError:
+                # Preserve the transport diagnostic; admission on the next
+                # entry now sees the same hold as the direct fallback.
+                pass
         return None, category
     try:
         out = json.loads(proc.stdout)
@@ -641,7 +668,7 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
             or not isinstance(out.get("answers"), dict)
             or not isinstance(out.get("receipt_id"), str)):
         return None, "server_response_malformed"
-    return {
+    result = {
         "model": out.get("model"),
         "answers": out["answers"],
         "usage": out.get("usage") if isinstance(out.get("usage"), dict) else None,
@@ -649,7 +676,28 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         "server_receipt": {k: out.get(k) for k in (
             "receipt_id", "recorded_at", "purpose", "session_id",
             "state_sha256", "prompt_sha256")},
-    }, None
+    }
+    if transport_mode != "cache_only" and not result["cache_hit"] and usable_judgment(result, questions):
+        _finish_credit_probe(probe)
+    return result, None
+
+
+def _command():
+    """Versioned stdin adapter for installed launchers and factory callers."""
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict) or set(payload) - {
+                "state", "questions", "model", "caller", "session_id", "api_key"}:
+            raise TypeSafeError("request_invalid")
+        result = ask(**payload)
+        response = {"schema": "carr-jev-admission/v1", "ok": True, "result": result}
+    except TypeSafeError as error:
+        response = {"schema": "carr-jev-admission/v1", "ok": False,
+                    "error": getattr(error, "code", "jev_unavailable")}
+    except (ValueError, TypeError):
+        response = {"schema": "carr-jev-admission/v1", "ok": False, "error": "request_invalid"}
+    print(json.dumps(response))
+    return 0 if response["ok"] else 1
 
 
 # Both transports consume the same maintained request policy. Adapter code
@@ -1871,22 +1919,20 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             server_error = "worker_breaker_open"
         elif served is None and server_error == "cache_miss":
             try:
-                worker_probe = _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
-                                                  registry, site)
-            except TypeSafeError as error:
-                # A free direct-cache answer may still exist after a Worker
-                # cache miss. No transport may run if this reservation failed.
-                reservation_error = error
-            else:
                 remaining = server_deadline - time.monotonic()
                 if remaining <= 0:
                     raise TypeSafeError("deadline passed during daily cap accounting")
                 upstream = {}
                 served, server_error = server_ask(
                     state, questions, model=model, facets=facets, purpose=purpose,
-                    session_id=dispatch_binding[0] or "unbound",
+                    session_id=dispatch_binding[0] or "unbound", caller=caller,
                     timeout=remaining, transport_mode="paid_once", runner=server_runner,
                     upstream=upstream)
+            except TypeSafeError as error:
+                # A free direct-cache answer may still exist after a Worker
+                # cache miss. No transport may run if this reservation failed.
+                reservation_error = error
+            else:
                 if served is None:
                     status, reason = upstream.get("status"), upstream.get("reason")
                     _append_call_receipt(questions, facets,
@@ -1917,8 +1963,6 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                 ok=valid, cache_hit=cache_hit, calibration=calibration, session=session_id)
             if not valid:
                 raise TypeSafeError("TypeSafe returned an unusable judgment")
-            if not cache_hit:
-                _finish_credit_probe(worker_probe)
             served["calibration"] = calibration
             return served
         # Preserve the caller's total budget through the direct fallback.
