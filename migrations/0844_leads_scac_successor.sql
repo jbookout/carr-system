@@ -4,7 +4,7 @@ declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
   if not exists(select 1 from public.schema_migrations where filename='0827_system_work_scac_successor.sql' and sha256='5fdf0a6e85a1eebbb8fc8eecc7a516a550bb8c675b713000340b79f5f2a57f58') then
     raise exception 'Leads v109 requires exact applied 0827'; end if;
-  if not exists(select 1 from public.schema_migrations where filename='0833_lead_archived_stage.sql' and sha256='87968ce940428d7921d0bde4ade8be224f8a16748af49691c77dac751220dbea') then
+  if not exists(select 1 from public.schema_migrations where filename='0843_lead_archived_stage.sql' and sha256='87968ce940428d7921d0bde4ade8be224f8a16748af49691c77dac751220dbea') then
     raise exception 'Leads v109 requires exact Archived vocabulary'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v108';
   if v.registry_digest is distinct from 'sha256:df4cac1a057a7ea8231a0ceeaeb8c7ebaf5a78f24cf52f3ad16177077de07a38' or v.entry_count<>2664

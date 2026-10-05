@@ -32,7 +32,7 @@ SEALED_PREDECESSOR_ENTRY_COUNTS = (2664, 1110)
 SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0827_system_work_scac_successor.sql"
 )
-LIVE_REGISTRY_MIGRATION = "migrations/0834_leads_scac_successor.sql"
+LIVE_REGISTRY_MIGRATION = "migrations/0844_leads_scac_successor.sql"
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
 LIVE_REGISTRATION_FN = f"ops.scac_mutation_registration_v{LIVE_REGISTRY_ORDINAL}"

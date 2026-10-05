@@ -19886,7 +19886,7 @@ export function renderLeadsRegistrySql(rows, predecessorSql = null) {
   const predecessorDigest = "5fdf0a6e85a1eebbb8fc8eecc7a516a550bb8c675b713000340b79f5f2a57f58";
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v109 predecessor migration pin drifted");
-  const domainPath = "migrations/0833_lead_archived_stage.sql";
+  const domainPath = "migrations/0843_lead_archived_stage.sql";
   const domainDigest = sha256(readFileSync(resolve(REPO_ROOT, domainPath), "utf8"));
   const oldCatalogBaseline = SYSTEM_WORK_V108_DB_CATALOG_BASELINE;
   const newCatalogBaseline = LEADS_V109_DB_CATALOG_BASELINE;
@@ -21495,7 +21495,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v109.generated.js"] =
     renderRuntimeProjection(v109Rows, { version: REGISTRY_V109_VERSION,
       dbCatalogBaseline: LEADS_V109_DB_CATALOG_BASELINE });
-  artifacts["migrations/0834_leads_scac_successor.sql"] =
+  artifacts["migrations/0844_leads_scac_successor.sql"] =
     renderLeadsRegistrySql(v109Rows, artifacts["migrations/0827_system_work_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -22567,7 +22567,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v109.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V109_VERSION,
         dbCatalogBaseline: LEADS_V109_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0834_leads_scac_successor.sql"), renderLeadsRegistrySql(rows));
+    await writeFile(resolve("migrations/0844_leads_scac_successor.sql"), renderLeadsRegistrySql(rows));
     process.stdout.write("Leads v109 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);

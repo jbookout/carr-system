@@ -17,7 +17,7 @@ test('Leads extends the delivered system-work seal without rewriting its immutab
     assert.equal(createHash('sha256').update(read(path)).digest('hex'), expected,
       `${path} must retain the delivered predecessor bytes`);
   }
-  const leads = read('migrations/0834_leads_scac_successor.sql');
+  const leads = read('migrations/0844_leads_scac_successor.sql');
   assert.match(leads, /filename='0827_system_work_scac_successor\.sql' and sha256='5fdf0a6e85a1eebbb8fc8eecc7a516a550bb8c675b713000340b79f5f2a57f58'/);
   assert.match(leads, /scac_mutation_registration_v108\('sha256:[0-9a-f]{64}','mcp-tool:update-lead'\)/);
   assert.match(leads, /scac-mutation-registry\.v109/);

@@ -1339,7 +1339,7 @@ if [ "$SYSTEM_WORK_REGISTRY_APPLIED" = t ] && [ "$DOC_ACTIVITY_REGISTRY_APPLIED"
 fi
 
 LEADS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0834_leads_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0844_leads_scac_successor.sql')" \
   2>/dev/null)"
 case "$LEADS_REGISTRY_APPLIED" in
   t|f) ;;
