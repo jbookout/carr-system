@@ -10,6 +10,8 @@ import threading
 import socket
 import subprocess
 import io
+import signal
+import time
 from contextlib import redirect_stderr, redirect_stdout
 import unittest
 from unittest.mock import patch
@@ -112,6 +114,146 @@ class ShardTests(unittest.TestCase):
         for n in (-1, 3, True):
             with self.assertRaises(ValueError):
                 shards.select_programs(n)
+
+    def test_signalled_setup_and_acceptance_retain_failure_reports(self):
+        for path in ("initdb", "tools/migrate.py", "ops/ci.sh", SERIAL[0], SERIAL[2]):
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                with self.subTest(path=path, signal=sig):
+                    class Signalled(Runner):
+                        def run(self, command, **kwargs):
+                            result = super().run(command, **kwargs)
+                            if any(str(x).endswith(path) for x in command):
+                                return pg.CommandResult(-sig, "CANARY_SECRET", "CANARY_CLIENT_IDENTIFIER")
+                            return result
+                    rc, runner = self.run_lane(1, Signalled(), report=True)
+                    self.assertNotEqual(rc, 0)
+                    report = json.loads(runner.report_bytes)
+                    self.assertEqual(report["returncode"], 128 + sig)
+                    self.assertTrue(report["cleanup"])
+                    if path in SERIAL:
+                        self.assertEqual(report["tests"][-1]["returncode"], 128 + sig)
+                    else:
+                        self.assertEqual(report["tests"], [])
+                    for sentinel in (b"CANARY_SECRET", b"CANARY_CLIENT_IDENTIFIER"):
+                        self.assertNotIn(sentinel, runner.report_bytes)
+                    reports = self.reports()
+                    reports[1] = report
+                    with self.assertRaises(ValueError):
+                        self.aggregate(reports)
+
+    def test_sigterm_lane_stops_descendants_before_cleanup_report(self):
+        grandchild = """import os, signal, sys, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(sys.argv[1]).write_text(str(os.getpid()))
+time.sleep(20)
+Path(sys.argv[2]).write_text('finished')
+"""
+        child = """import subprocess, sys, time
+subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]],
+                 start_new_session=sys.argv[4] == 'escaped')
+time.sleep(30)
+"""
+        for mode in ("group", "escaped"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                pidfile, marker = tmp / "pid", tmp / "completed"
+                report, root = tmp / "report.json", tmp / "cluster"
+                fixture = f"""import importlib.util, os, signal, sys
+from pathlib import Path
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('fixture', {str(Path(__file__).resolve())!r})
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+pg = fixture.pg
+class RealAcceptance(fixture.Runner):
+    def run(self, command, **kwargs):
+        if str(command[-1]).endswith(fixture.SERIAL[0]):
+            return pg.SubprocessRunner().run([sys.executable, '-c', {child!r},
+                {grandchild!r}, {str(pidfile)!r}, {str(marker)!r}, {mode!r}], **kwargs)
+        return super().run(command, **kwargs)
+signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+bins = pg.PostgresBinaries(*(Path('/fake') / x for x in ('initdb', 'pg_ctl', 'createdb', 'psql')))
+with (patch.object(pg, 'port_is_available', return_value=True),
+      patch.object(pg, 'find_postgres_binaries', return_value=bins),
+      patch.object(pg.tempfile, 'mkdtemp', return_value={str(root)!r}),
+      patch.object(pg, 'shadow_source_binding', return_value=(
+          {{'head': 'a'*40, 'tree': 'b'*40}},
+          {{'postgres': '17.6', 'python': '3.14.0', 'node': 'v26.0.0'}}))):
+    rc = pg.run_local_ci(repo=fixture.REPO, ci_class='migration', port=55433,
+                         runner=RealAcceptance(), shard=1, report_path=Path({str(report)!r}))
+sys.exit(rc)
+"""
+                lane = subprocess.Popen([sys.executable, "-c", fixture],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, start_new_session=True)
+                descendant = None
+                try:
+                    deadline = time.monotonic() + 10
+                    while not pidfile.exists() and lane.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(pidfile.exists(), "acceptance grandchild did not start")
+                    descendant = int(pidfile.read_text())
+                    lane.send_signal(signal.SIGTERM)
+                    stdout, stderr = lane.communicate(timeout=15)
+                    self.assertEqual(lane.returncode, 130, stdout + stderr)
+                    observed = json.loads(report.read_text())
+                    self.assertEqual(observed["returncode"], 130)
+                    self.assertTrue(observed["cleanup"])
+                    status = subprocess.run(["ps", "-o", "stat=", "-p", str(descendant)],
+                                            capture_output=True, text=True, timeout=5).stdout.strip()
+                    self.assertTrue(not status or status.startswith("Z"),
+                                    "cleanup acknowledged while acceptance descendant remains active")
+                    self.assertFalse(marker.exists())
+                    self.assertFalse(root.exists())
+                finally:
+                    if lane.poll() is None:
+                        os.killpg(lane.pid, signal.SIGKILL)
+                        lane.communicate(timeout=5)
+                    if descendant is not None:
+                        try:
+                            os.kill(descendant, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+    def test_unconfirmed_process_cleanup_retains_cluster_and_refuses_aggregate(self):
+        class Unconfirmed(Runner):
+            cleanup_confirmed = False
+            def run(self, command, **kwargs):
+                if str(command[-1]).endswith(SERIAL[0]):
+                    raise KeyboardInterrupt
+                return super().run(command, **kwargs)
+        with tempfile.TemporaryDirectory() as tmp:
+            root, report = Path(tmp) / "cluster", Path(tmp) / "report.json"
+            bins = pg.PostgresBinaries(*(Path("/fake") / x for x in ("initdb", "pg_ctl", "createdb", "psql")))
+            with (patch.dict(os.environ, {}, clear=True),
+                  patch.object(pg, "port_is_available", return_value=True),
+                  patch.object(pg, "find_postgres_binaries", return_value=bins),
+                  patch.object(pg.tempfile, "mkdtemp", return_value=str(root)),
+                  patch.object(pg, "shadow_source_binding", return_value=(
+                      {"head": "a" * 40, "tree": "b" * 40},
+                      {"postgres": "17.6", "python": "3.14.0", "node": "v26.0.0"}))):
+                self.assertEqual(pg.run_local_ci(repo=REPO, ci_class="migration", port=55433,
+                                                runner=Unconfirmed(), shard=1, report_path=report), 130)
+            observed = json.loads(report.read_text())
+            self.assertFalse(observed["cleanup"])
+            self.assertTrue(root.exists())
+            reports = self.reports()
+            reports[1] = observed
+            with self.assertRaises(ValueError):
+                self.aggregate(reports)
+
+    def test_real_subprocess_capture_exit_status_environment_and_cwd(self):
+        runner = pg.SubprocessRunner()
+        result = runner.run([sys.executable, "-c",
+                             "import os,sys; print(os.environ['LANE_SENTINEL']); "
+                             "print(os.getcwd(), file=sys.stderr); sys.exit(9)"],
+                            env={"LANE_SENTINEL": "synthetic"}, cwd=REPO, capture=True)
+        self.assertEqual(result, pg.CommandResult(9, "synthetic\n", f"{REPO}\n"))
+        result = runner.run([sys.executable, "-c",
+                             "import os,signal; os.kill(os.getpid(),signal.SIGTERM)"], capture=True)
+        self.assertEqual(result.returncode, -signal.SIGTERM)
+        self.assertTrue(runner.cleanup_confirmed)
 
     def reports(self):
         reports = []
