@@ -325,10 +325,13 @@ def _denial(nouns):
 def _denies_defect(message, noun):
     for sentence in re.split(r"[.;\n]", message):
         for denial in re.finditer(rf"\b{_denial(re.escape(noun))}\b", sentence, re.I):
-            # Earlier non-detection explains how a later review found the bug.
+            # A historical qualifier must attach to this non-detection.
             if (re.match(r"did\s+not\b", denial.group(0), re.I)
-                    and re.search(r"\b(?:earlier|previously|before\s+(?:this|the)\s+review)\b",
-                                  sentence, re.I)):
+                    and (re.search(r"\b(?:earlier|previously)\s*$"
+                                   r"|\bearlier\s+(?:tests?|checks?|reviews?|investigations?)\s*$",
+                                   sentence[:denial.start()], re.I)
+                         or re.match(r"\s+(?:earlier|previously|before\s+(?:this|the)\s+review)\b",
+                                     sentence[denial.end():], re.I))):
                 continue
             return True
     return False

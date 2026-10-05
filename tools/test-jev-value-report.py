@@ -151,6 +151,21 @@ class CostTests(unittest.TestCase):
 
 
 class ValueTests(unittest.TestCase):
+    def test_temporal_marker_in_another_clause_does_not_erase_current_denial(self):
+        for statement in (
+                "Earlier suspicion was incorrect: this investigation did not find a bug.",
+                "Previously we suspected a bug, but this investigation did not identify any bug.",
+                "Earlier tests passed and this investigation did not confirm a bug.",
+                "This investigation did not find a bug, though earlier tests failed.",
+                "Before this review we suspected a bug; this investigation did not find a bug."):
+            with self.subTest(statement=statement):
+                commit = {"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                          "subject": "Fix suspected bug Jev flagged", "body": statement}
+                self.assertIsNone(jvr.positive_attribution(commit))
+                report = jvr.build_report(sources(commits=[commit]), START, END)
+                self.assertEqual(report["totals"]["outcomes_verified"], 0)
+                self.assertFalse(any(s["evidence"] for s in report["sites"].values()))
+
     def test_earlier_non_detection_preserves_explicit_positive_attribution(self):
         for statement in ("Our tests did not find any bug before this review.",
                           "Earlier tests did not identify a bug.",
