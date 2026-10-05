@@ -30,7 +30,8 @@ class RestRefresh(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.env = patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": self.tmp.name,
-                                         "PROGRESS_BOARD_SKIP_PROBE": "1"})
+                                         "PROGRESS_BOARD_SKIP_PROBE": "1",
+                                         "PROGRESS_BOARD_PR_FRESH_SECONDS": "0"})
         self.env.start()
         os.environ.pop("PROGRESS_BOARD_SKIP_GH", None)
         self.calls = []
@@ -93,6 +94,22 @@ class RestRefresh(unittest.TestCase):
             self.assertTrue(self.calls[0][1].endswith("/pulls/1"))
             self.assertTrue(any("/check-runs?" in c[1] for c in self.calls))
             self.assertTrue(any("/statuses?" in c[1] for c in self.calls))
+
+    def test_watchdog_burst_reuses_fresh_open_pr_reads(self):
+        # 2026-10-04: one job-watchdog scan made 100+ board mutations, each
+        # re-rendering every open PR, and emptied the 5,000/hr REST pool.
+        self.board("demo", {"a": {"pr": 1, "repo": REPO, "status": "running"}})
+        with patch.dict(os.environ, {"PROGRESS_BOARD_PR_FRESH_SECONDS": "120"}), \
+                patch.object(B, "gh_json", self.github), patch.object(B, "gh_binary", return_value="gh"):
+            B.render("demo")
+            first = len(self.calls)
+            self.assertGreater(first, 0)
+            for _ in range(50):
+                B.render("demo")
+            self.assertEqual(len(self.calls), first, "fresh open-PR reads must not refetch")
+            with patch.object(B.time, "time", return_value=B.time.time() + 121):
+                B.render("demo")
+            self.assertGreater(len(self.calls), first, "a stale read must refetch")
 
     def test_read_failure_keeps_last_state_and_marks_snapshot_stale(self):
         self.board("demo", {"a": {"pr": 1, "repo": REPO, "status": "running"}})

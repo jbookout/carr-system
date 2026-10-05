@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import sys
 import tempfile
 import urllib.request
@@ -693,6 +694,14 @@ def rest_checks(repo: str, head: str) -> list[dict[str, Any]]:
             for c in checks] + list(contexts.values())
 
 
+def pr_fresh_seconds() -> float:
+    """Seconds an open-PR observation is reused (PROGRESS_BOARD_PR_FRESH_SECONDS, default 120; 0 disables)."""
+    try:
+        return max(0.0, float(os.environ.get("PROGRESS_BOARD_PR_FRESH_SECONDS", "120")))
+    except ValueError:
+        return 120.0
+
+
 class GitHubReadPass:
     def __init__(self) -> None:
         self.path = board_dir() / ".github-pr-cache.json"
@@ -705,6 +714,22 @@ class GitHubReadPass:
             if path.name.startswith("."):
                 continue
             self.seed((read_json_file(path).get("tasks") or {}).values())
+
+    def fresh_path(self) -> Path:
+        return board_dir() / ".github-pr-fresh.json"
+
+    def fresh_at(self, identity: str) -> float:
+        try:
+            return float(read_json_file(self.fresh_path()).get(identity) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def mark_fresh(self, identity: str) -> None:
+        # Kept beside the PR cache, not inside it: the cache holds GitHub's facts.
+        with board_lock("github-pr-fresh"):
+            stamps = read_json_file(self.fresh_path())
+            stamps[identity] = time.time()
+            atomic_write(self.fresh_path(), json.dumps(stamps, sort_keys=True) + "\n")
 
     def reconcile(self) -> None:
         self.saved = {identity: info for identity, info in read_json_file(self.path).items()
@@ -770,6 +795,14 @@ class GitHubReadPass:
         old = self.saved.get(identity)
         if old and old.get("state") == "MERGED" and not old.get("_legacy_terminal"):
             return old, None
+        # An open PR read moments ago is reused instead of re-fetched. Every board
+        # mutation renders every open PR, so one job-watchdog scan (100+ mutations)
+        # spent the whole 5,000/hr REST pool in minutes on 2026-10-04. Discovery
+        # rows (raw) still carry their own version evidence and are checked below.
+        window = pr_fresh_seconds()
+        if (window and raw is None and old and not old.get("_legacy_terminal")
+                and 0 <= time.time() - self.fresh_at(identity) < window):
+            return old, None
         cached = self.results.get(identity)
         if cached:
             info, error = cached
@@ -828,6 +861,7 @@ class GitHubReadPass:
                 raise RuntimeError("gh returned a malformed PR payload")
             info["_observation"] = observation
             result = (self.save(identity, info), None)
+            self.mark_fresh(identity)
         except (RuntimeError, TypeError, ValueError, AttributeError, KeyError) as exc:
             self.reconcile()
             old = self.saved.get(identity) or old

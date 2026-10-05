@@ -11,6 +11,8 @@ import io
 import json
 import importlib.util
 import os
+# These tests assert per-render GitHub sync; the production reuse window is covered in test-progress-board-rest.py.
+os.environ["PROGRESS_BOARD_PR_FRESH_SECONDS"] = "0"
 import plistlib
 import shutil
 import subprocess
