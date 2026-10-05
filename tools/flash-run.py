@@ -473,16 +473,11 @@ RULE_SITUATION = ("A local coding model (Flash) is about to write code for ONE s
 
 
 def pick_rules(task, situation=RULE_SITUATION, **judge):
-    """Jev's pick of the taught rules that bind to this one task: (rules, error_note).
+    """Return authoritative rules and a visible note for pending semantic advice.
 
-    The roster is the whole active corpus, not the partner-message pack layer: Flash
-    runs with no boot rule load and none of the enforcing hooks, so a rule those would
-    have delivered reaches it here or not at all. `judge` passes rank/ask/client/titles/
-    deadline through to judge_budgeted (tests inject the paid requests there).
-
-    Fails open but visibly: an unavailable, partial or out-of-time judgment keeps
-    whatever was judged, and the note names the gap so the run log can tell it apart
-    from "no rule binds"."""
+    Flash has no boot load or enforcing hooks, so the selector considers the whole
+    active corpus. Injected judgment arguments use the same bounded batch interface.
+    """
     try:
         selector = _lib("rule_trigger_delivery")
         corpus = selector.load_rules()
@@ -493,10 +488,14 @@ def pick_rules(task, situation=RULE_SITUATION, **judge):
     rules = [{**by_id[row["id"]], **row}
              for row in sorted(picked.values(), key=lambda r: (-r["probability"], r["id"]))]
     gaps = [f"{key}={report[key]}" for key, healthy in
-            (("rank_status", ("ok", "not_needed")), ("bind_status", ("judged", "none")))
+            (("rank_status", ("ok", "not_needed", "deterministic_shortlist")),
+             ("bind_status", ("judged", "none")))
             if report.get(key) not in healthy]
     if report.get("deadline_hit"):
         gaps.append(f"deadline hit, unjudged={report.get('unjudged', [])}")
+    if report.get("review_required"):
+        candidates = ", ".join(sorted(report.get("advisory_candidates") or {}))
+        gaps.append(f"review required for rule suggestions: {candidates}")
     note = ("rule judgment degraded: " + "; ".join(gaps))[:300] if gaps else None
     return rules[:MAX_TASK_RULES], note
 
@@ -770,6 +769,11 @@ def cmd_run(a):
 
     amb = intake.check_ambiguity(task)
     row["ambiguity"] = amb.get("verdict")
+    if amb.get("verdict") in ("review_required", "unavailable") or (amb.get("escalate") and amb.get("verdict") != "ambiguous"):
+        row.update(outcome="intake_review_required", intake_advice=amb)
+        _say("ambiguity judgment requires review: " + json.dumps(amb.get("detail"))[:600])
+        _append(RUNS_LOG, row)
+        return 3
     if amb.get("verdict") == "ambiguous" and not a.force:
         _say("the task looks ambiguous: " + json.dumps(amb.get("detail"))[:600])
         _say("clarify it, or pass --force to run anyway")
@@ -780,6 +784,11 @@ def cmd_run(a):
     files = [f for f in _tracked_files(cwd)][:4000]
     route = intake.route_task(task, files=None, has_tests=bool(a.test))
     row["route"] = route.get("verdict")
+    if route.get("verdict") in ("review_required", "unavailable") or (route.get("escalate") and route.get("verdict") != "escalate"):
+        row.update(outcome="route_review_required", intake_advice=route)
+        _say("route judgment requires review: " + json.dumps(route.get("detail"))[:600])
+        _append(RUNS_LOG, row)
+        return 4
     if route.get("verdict") == "escalate" and not a.force:
         _say("routed away from the local model: " + json.dumps(route.get("detail"))[:600])
         row["outcome"] = "routed_escalate"
@@ -788,7 +797,13 @@ def cmd_run(a):
         _append(RUNS_LOG, row)
         return 4
 
-    effort = a.effort or intake.pick_effort(task).get("verdict")
+    effort_check = None if a.effort else intake.pick_effort(task)
+    if effort_check and (effort_check.get("escalate") or effort_check.get("verdict") not in ("low", "medium", "high")):
+        row.update(outcome="effort_review_required", intake_advice=effort_check)
+        _say("effort judgment requires review: " + json.dumps(effort_check.get("detail"))[:600])
+        _append(RUNS_LOG, row)
+        return 4
+    effort = a.effort or effort_check.get("verdict")
     if effort not in ("low", "medium", "high"):
         effort = "low"
     ctx = intake.pick_context(task, cwd)
@@ -838,8 +853,14 @@ def cmd_run(a):
         chosen_id = best.get("verdict")
         row["selection"] = {"verdict": chosen_id, "confidence": best.get("confidence"),
                             "escalate": best.get("escalate"),
+                            "advice": best.get("detail"),
                             "attempts": [{"id": c["id"], "test_exit_code": c["test_exit_code"],
                                           "elapsed_s": c["elapsed_s"]} for c in candidates]}
+        if best.get("escalate") or chosen_id == "review_required":
+            row["outcome"] = "selection_review_required"
+            _say("candidate selection requires review; evidence retained in the run log")
+            _append(RUNS_LOG, row)
+            return 5
         chosen = next((c for c in candidates if c["id"] == chosen_id), None)
         if chosen is None and attempts == 1 and candidates and candidates[0]["patch"].strip() \
                 and not a.test:

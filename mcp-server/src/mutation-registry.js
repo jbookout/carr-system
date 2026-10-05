@@ -4,8 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v109 admits audited undo, partner archive proposals and invoice closes.
-// v108 admits unfinished system-work after the delivered Doc activity contract.
+// v110 admits invoices after the delivered relationship v109 contract.
 // v103 admits rule lookup and atomic teach supersession.
 // v102 seals confirm-merge as a human identity act; machines are refused.
 // v101 admits partner catch-up and its scoped watermark store.
@@ -201,8 +200,9 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v109.generated.js";
+} from "./scac-mutation-registry.v110.generated.js";
 
+// v107 admits exact referral attribution after lead automation.
 // v106 admits evidence-driven lead stages and approval-only drafts.
 // v105 admits bounded newest Observatory reads and preserves bridge polling.
 // v104 preserves the capped Jev Worker contract.

@@ -65,6 +65,7 @@ test("a change set takes its highest tier", () => {
 test("the generated module carries the committed map unchanged", () => {
   assert.equal(REVIEW_TIERS_SOURCE, "ops/config/review-tiers.v1.json");
   assert.equal(REVIEW_TIERS.default_tier, MAP.default_tier);
+  assert.deepEqual(REVIEW_TIERS.tunable_scalars, MAP.tunable_scalars);
   const strip = rows => rows.map(({ why, ...rest }) => rest);
   assert.deepEqual(REVIEW_TIERS.rules.map(row => ({ ...row })), strip(MAP.rules));
   assert.deepEqual(REVIEW_TIERS.noise_exclusions.map(row => ({ ...row })), strip(MAP.noise_exclusions));

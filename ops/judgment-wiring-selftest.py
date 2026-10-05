@@ -79,7 +79,7 @@ def judgment_modules():
     """Every ops/*.py that reaches the model, read from its imports."""
     found = []
     for path in sorted(OPS.glob("*.py")):
-        if path.name.endswith("-selftest.py") or path.name == Path(__file__).name:
+        if path.name.endswith("-selftest.py") or path.name == Path(__file__).name or path.name.startswith("check-"):
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))

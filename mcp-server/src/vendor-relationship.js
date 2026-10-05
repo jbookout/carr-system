@@ -1,3 +1,4 @@
+import { exactDealAssociations } from "./relationship-network.js";
 // Trust uses verified deal history; missing coverage never becomes zero.
 export function computedTrust(stats, now) {
   if (!stats?.coverage_verified_at || !Number.isInteger(stats.deals_worked) || !Number.isInteger(stats.won) || !Number.isInteger(stats.lost)) return 'Unrated';
@@ -84,20 +85,25 @@ export function mergeRelationshipFields(survivor, loser) {
 }
 // Exact IDs only. Neither a relationship edge nor a matching name proves a
 // vendor worked a deal. Historical Salesforce records remain canonical deals.
+// Counts come from the party's exact associations, the same set the network
+// snapshot reads. Coverage holds only while every live vendor row for the party
+// is verified. Association writes invalidate those attestations atomically.
 export const vendorRelationshipJoin = `left join lateral (
   select max(e.occurred_at) as last_deal_at,
     json_build_object(
-      'coverage_verified_at', v.deal_history_verified_at,
+      'coverage_verified_at', max(c.oldest),
       'deals_referred', count(distinct e.deal_id) filter (where e.role='referred'),
       'deals_worked', count(distinct e.deal_id) filter (where e.role='worked'),
-      'won', count(distinct e.deal_id) filter (where e.role='worked' and d.outcome='won'),
-      'lost', count(distinct e.deal_id) filter (where e.role='worked' and d.outcome='lost'),
+      'won', count(distinct e.deal_id) filter (where e.role='worked' and e.outcome='won'),
+      'lost', count(distinct e.deal_id) filter (where e.role='worked' and e.outcome='lost'),
       'first_worked_at', min(e.occurred_at) filter (where e.role='worked'),
       'last_contacted_at', (select max(a.occurred_at) from public.activity a where a.vendor_id=v.id and a.kind in ('call','email_out','email_in','meeting','text')),
       'last_contact_note', (select a.summary from public.activity a where a.vendor_id=v.id and a.kind in ('call','email_out','email_in','meeting','text') order by a.occurred_at desc,a.id desc limit 1),
       'override', v.trust_override,
       'recent_entries', (select coalesce(json_agg(t.entry order by t.occurred_at desc), '[]'::json) from (select a.occurred_at, json_build_object('id',a.id,'kind',a.kind,'when',a.occurred_at,'summary',a.summary,'detail',a.detail) as entry from public.activity a where a.vendor_id=v.id order by a.occurred_at desc,a.id desc limit 20) t),
-      'introductions', (select coalesce(json_agg(json_build_object('id',l.id,'kind',l.kind,'from_name',fp.name,'to_name',tp.name,'note',l.note,'occurred_at',l.occurred_on,'via_party',l.via_party) order by l.created_at desc), '[]'::json) from public.party_link l join public.party fp on fp.id=l.from_party join public.party tp on tp.id=l.to_party where (l.from_party=p.id or l.to_party=p.id or l.via_party=p.id) and l.kind in ('intro','intro_received','introduced','can_introduce','intro_requested') and fp.merged_into is null and tp.merged_into is null and fp.deleted_at is null and tp.deleted_at is null)
+      'introductions', (select coalesce(json_agg(json_build_object('id',l.id,'kind',l.kind,'from_name',fp.name,'to_name',tp.name,'note',l.note,'occurred_at',l.occurred_on,'via_party',l.via_party) order by l.created_at desc), '[]'::json) from public.party_link l join public.party fp on fp.id=l.from_party join public.party tp on tp.id=l.to_party left join public.party bp on bp.id=l.via_party where (l.from_party=p.id or l.to_party=p.id or l.via_party=p.id) and l.kind in ('intro','intro_received','introduced','can_introduce','intro_requested') and fp.merged_into is null and tp.merged_into is null and fp.deleted_at is null and tp.deleted_at is null and (l.via_party is null or (bp.merged_into is null and bp.deleted_at is null)))
     ) as payload
-  from jsonb_to_recordset(coalesce(v.deal_evidence, '[]'::jsonb)) as e(deal_id uuid,role text,occurred_at timestamptz,evidence_kind text,evidence_ref text) join public.deal d on d.id=e.deal_id join public.client dc on dc.id=d.client_id and dc.merged_into is null join public.party dp on dp.id=dc.party_id and dp.merged_into is null and dp.deleted_at is null
+  from (select case when bool_and(s.deal_history_verified_at is not null) then min(s.deal_history_verified_at) end oldest
+    from public.vendor s where s.party_id=v.party_id and s.merged_into is null) c
+  left join (${exactDealAssociations}) e on e.party_id=v.party_id
 ) vr on true`;

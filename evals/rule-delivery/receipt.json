@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:8a4a4bf981eacd0654e4d9d03ce7947219d9fafe826cce1573935b3a7a3115c1",
+    "configuration_fingerprint": "sha256:014966d863e972c42370031a1d2a08db84c6cd7bca8dedb804320e8f173bf63e",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a108dd-a5f5-7b30-9ed6-0c11a7dad3a1",
+    "native_session_ref": "01a10b58-ff3f-7d12-9991-48e7da320455",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -20,7 +20,7 @@
     "total": 338,
     "train": 212
   },
-  "change": "Preserve compiled human action cues at SURFACE_AT, exclude bare house words and suppress keyword delivery on complete machine envelopes.",
+  "change": "Remove the retired parity command route and refresh source-bound deterministic rule-delivery evidence for PR 1546.",
   "cost": {
     "baseline_usd_per_case": 0.0,
     "candidate_usd_per_case": 0.0
@@ -152,12 +152,12 @@
       "lib/rule_delivery_shadow.py": "b39b504ff0bf77819b578a12f97821bc3da2e8226e90b5f17d3a40ccb1cb7417",
       "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
       "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
-      "ops/config/jev-cost-guard.v1.json": "f8da9d20d6019c5bd9528683c61594dca09f07488d66ce998c53ae8bc3c24089",
+      "ops/config/jev-cost-guard.v1.json": "8920873a41078dca949d8e31f50705e1330bcfa087b5260c22693f220488a2f8",
       "ops/config/rule-classes.v1.json": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23",
       "ops/config/rule-enforcement-map.json": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
       "ops/config/rule-jev-triggers.v1.json": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
       "ops/config/rule-jit-triggers.v1.json": "b0b23e68c4121e649b82f5d7f93704f1574e2a7ce798a5e3d823b1322c04dd59",
-      "ops/config/rule-routes.v1.json": "6bd10a8e9801debf21c81d8371c2eddb7052d3cc08a7d7abc23b814fd37f7114",
+      "ops/config/rule-routes.v1.json": "1d94a8dab3d249fd86da466743dc3b904e6e27d2cd289de108d9cbb0c9fadbb5",
       "ops/config/rule-selection-corpus.v1.json": "90f0e31475f1cd2c445475f8742de3dc94b62a2474d581fcefb5429a5eae102f",
       "ops/config/rule-triage.v1.json": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c",
       "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
@@ -167,7 +167,7 @@
       "ops/rule_delivery_eval.py": "ee881cb42a56b997bfd660ba50b61f6b3982343f15f82d45fd3b7303b6bac382",
       "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
       "ops/rule_trigger_delivery.py": "3b231db2919624a85b6dd2dcecd56afc15ec84a4fd9df0082f45abce9e1b2b77",
-      "ops/typesafe_client.py": "b5a0555d7b2a787ae18629882664f308153fcb1ff3aae1d587b56e169eeb5641",
+      "ops/typesafe_client.py": "798286fa008b772ba846c28249da0ce054dda88317288f134c58ae354fb20e6d",
       "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
     },
     "expectations": {
@@ -194,17 +194,18 @@
       "result": "pass"
     }
   },
-  "measured_on": "2026-10-04",
+  "measured_on": "2026-10-05",
   "min_useful_gain": 0.7,
   "noise_floor": 0.3,
   "notes": [
-    "Existing frozen split has historical reuse; intervals are descriptive, not new untouched holdout evidence.",
-    "Human test recall decreases 0.625 percentage points; its interval is [-2.143, 0] points. The point estimate meets the existing <=1 point constraint; this does not establish noninferiority at that margin with 95% confidence.",
-    "All-traffic recall decreases due to suppressing compiled cues on complete machine envelopes. Do not describe all-traffic recall as preserved.",
-    "No live-provider or production deployment measurement. The regression property separately exercises spent deadlines and synthetic provider failures.",
-    "Native /claude-api slash commands are unavailable in this runtime. Used the existing production-function replay and programmatic grader, without a model call. The test split was scored but no new test transcripts were read to propose the fix.",
-    "Complete-envelope prompt false deliveries: test 14 -> 0; train 40 -> 1. Both exceed the original 70% reduction target. Prompt-clean is measured before tool events.",
-    "Evidence: the baseline arm is the tree at c11c1153 (main before PR #1325) and the candidate arm is this tree, both replayed by the same harness; make_report.py receipt --baseline-ref c11c1153a59ff90f7d348f11330c97a25cb0f2f9 regenerates both cohorts, which match PR #1325's recorded replay case for case. Per-arm intervals resample cases in case-id order, so they no longer depend on cohort row order; point estimates and paired delta intervals are unchanged."
+    "The receipt retains the established pre-PR-1325 baseline c11c1153a59ff90f7d348f11330c97a25cb0f2f9. Both arms were freshly replayed with the retained production-function harness; dependency bindings now include the retired parity-route removal.",
+    "A separate replay against reviewed PR 1546 head 388e5d9ae02bea8d572bb7a4040984c986c3bdeb measured zero change in all three dimensions, with zero provider cost. This cleanup claims no quality or cost improvement.",
+    "Existing frozen cases have historical reuse; results are descriptive regression evidence, not new untouched holdout or live-provider evidence.",
+    "Human test recall point loss against the established baseline is 0.625 percentage points; its paired interval is [-2.143, 0] points. This does not establish noninferiority at the one-point margin with 95% confidence.",
+    "All-traffic recall against that historical baseline decreases through suppression of compiled cues on complete machine envelopes; do not claim all-traffic recall is preserved against it.",
+    "The native /claude-api slash commands are unavailable in this runtime. The existing deterministic replay and programmatic grader regenerated source-bound evidence without a model call.",
+    "Frozen expectations and split remain unchanged. No production deployment or live-model quality improvement is claimed.",
+    "The merged-source replay also preserves the measured complete-envelope prompt false-delivery reduction: test 14 to 0 and train 40 to 1 against the established historical baseline."
   ],
   "primary_dimension": "envelope-prompt-clean-delivery",
   "repeats": 2,
@@ -233,6 +234,6 @@
   "surface": "rule-delivery",
   "verdict": {
     "decision": "ship",
-    "statement": "Envelope clean delivery improves; human recall and precision intervals include zero. Human recall point loss is within the existing one-point constraint. This is deterministic regression evidence only; historical holdout reuse and uncertainty are disclosed."
+    "statement": "Fresh replay against the established pre-PR-1325 baseline preserves the accepted envelope clean-delivery gain. Human recall and precision intervals include zero; the recall point loss remains within the existing one-point constraint. The PR 1546 cleanup itself is at parity with its reviewed head and claims no quality gain."
   }
 }

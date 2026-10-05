@@ -1,6 +1,7 @@
 import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, existsSync } from 'node:fs';
 import path from 'node:path';
@@ -21,21 +22,51 @@ for (const config of ['pg_config', '/opt/homebrew/opt/postgresql@17/bin/pg_confi
 const id = n => `aa000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const actor = { id: id(1), slug: 'joe', human: true, via: 'dealroom-cookie', client_id: 'dealroom-pwa' };
 
-test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && 'PostgreSQL unavailable' }, async t => {
-  const dir = mkdtempSync('/tmp/local-deals-');
+test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && !process.env.CARR_CI_DATABASE_URL && 'PostgreSQL unavailable' }, async t => {
+  const ciDsn = process.env.CARR_CI_DATABASE_URL;
+  const dir = ciDsn ? null : mkdtempSync('/tmp/local-deals-');
+  let admin;
+  let database;
   let running = false;
   let c;
-  const releaseBudget = await acquirePostgresFixtureGroup();
+  // A provided CI cluster is owned and budgeted by its caller.
+  const releaseBudget = ciDsn ? async () => {} : await acquirePostgresFixtureGroup();
   try {
-    execFileSync(path.join(bin, 'initdb'), ['-D', dir, '-U', 'fixture', '--auth=trust', '--no-locale'], { stdio: 'pipe' });
-    execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-l', path.join(dir, 'server.log'), '-o', `-k ${dir} -h ''`, '-w', 'start'], { stdio: 'pipe' });
-    running = true;
-    c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres',
+    let connection;
+    if (ciDsn) {
+      const url = new URL(ciDsn);
+      assert.ok(['postgres:', 'postgresql:'].includes(url.protocol));
+      assert.ok(['127.0.0.1', 'localhost'].includes(url.hostname), 'fixture requires disposable loopback PostgreSQL');
+      admin = new pg.Client({ connectionString: ciDsn });
+      await admin.connect();
+      const name = `local_deals_${randomUUID().replaceAll('-', '')}`;
+      await admin.query(`create database "${name}" template template0`);
+      database = name;
+      url.pathname = `/${database}`;
+      connection = { connectionString: url.href };
+    } else {
+      execFileSync(path.join(bin, 'initdb'), ['-D', dir, '-U', 'fixture', '--auth=trust', '--no-locale'], { stdio: 'pipe' });
+      execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-l', path.join(dir, 'server.log'), '-o', `-k ${dir} -h ''`, '-w', 'start'], { stdio: 'pipe' });
+      running = true;
+      connection = { host: dir, user: 'fixture', database: 'postgres' };
+    }
+    c = new pg.Client({ ...connection,
       // Preserve PostgreSQL microseconds, as the production HTTP driver does.
       types: { getTypeParser: (oid, format) => oid === 1184 ? value => value : pg.types.getTypeParser(oid, format) },
     });
     await c.connect();
-    await c.query('create role carr_reader; create role carr_writer;');
+    if (process.env.CARR_CI_DATABASE_URL) {
+      const isolated = (await c.query('select current_database() name')).rows[0].name;
+      assert.match(isolated, /^local_deals_/);
+      assert.notEqual(isolated, new URL(process.env.CARR_CI_DATABASE_URL).pathname.slice(1));
+      assert.equal((await c.query("select to_regclass('public.deal') existing")).rows[0].existing, null);
+    }
+    // Roles belong to the cluster; an isolated database does not provide them.
+    // Preserve existing shared-cluster roles and their attributes.
+    await c.query(`do $$ begin
+      begin create role carr_reader; exception when duplicate_object then null; end;
+      begin create role carr_writer; exception when duplicate_object then null; end;
+    end $$;`);
     // Use the committed table definitions and caller views, without production data.
     for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict', 'critical_date', 'lease', 'activity', 'premises', 'negotiation_round', 'document', 'commission', 'capture_post_call_action', 'building', 'space', 'premises_space']) {
       const table = schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))?.[0];
@@ -281,7 +312,7 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
 
     await t.test('canonical SQL proof rejects missing evidence and wrong undo identity/value', async () => {
       const definition = (await c.query("select pg_get_viewdef('v_deal_room_phase_change'::regclass,true) as sql")).rows[0].sql.replace(/;\s*$/, '');
-      const runProof = () => execFileSync(path.join(bin, 'psql'), ['-X', '-h', dir, '-U', 'fixture', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-f', path.join(root, 'mcp-server/test/local-deals-postgres.sql')], { stdio: 'pipe' });
+      const runProof = () => execFileSync(bin ? path.join(bin, 'psql') : 'psql', ['-X', '-h', c.connectionParameters.host, '-p', String(c.connectionParameters.port), '-U', c.connectionParameters.user, '-d', c.connectionParameters.database, '-v', 'ON_ERROR_STOP=1', '-f', path.join(root, 'mcp-server/test/local-deals-postgres.sql')], { stdio: 'pipe', env: { ...process.env, PGPASSWORD: c.connectionParameters.password || '' } });
       runProof();
       const columns = ['deal_id', 'event_id', 'prior_phase', 'phase', 'automatic', 'reason', 'evidence_date', 'recorded_at'];
       const mutations = [
@@ -308,6 +339,10 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
   } finally {
     try {
       if (c) await c.end();
+      if (admin) {
+        try { if (database) await admin.query(`drop database "${database}"`); }
+        finally { await admin.end(); }
+      }
       if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' });
     } finally {
       await releaseBudget();
