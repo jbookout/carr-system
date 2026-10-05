@@ -827,13 +827,20 @@ PYEOF
   # status checks force update-branch before merge, and update-branch raises
   # `synchronize`, a PR that fell behind main re-runs this and turns red until
   # renumbered. An unreadable base exits 2, which fails like any nonzero.
+  # migration-safety-gate JOINED 2026-10-05 (gap #18): every ADDED migration
+  # carries a rollback note in its header and declares any destructive or
+  # long-locking statement (expand-contract / lock-review line), and
+  # db/schema.sql's ledger names every migration with its runner checksum, so the
+  # reference schema cannot fall behind the migrations again. Static, no DB; the
+  # migration class proves the snapshot by actually building it.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
              rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
              boot-budget-check sync-core-rule-ids rule-route-coverage \
-             sync-rule-boot-classes check-eval-receipt migration-order-gate check-jev-conformance; do
+             sync-rule-boot-classes check-eval-receipt migration-order-gate \
+             migration-safety-gate check-jev-conformance; do
     [ -f "ops/$inv.py" ] || continue
     local inv_args=()
     case "$inv" in
@@ -1966,7 +1973,31 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
       return
     fi
 
-    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate program(s) pass (each program reports its own assertions)"
+    # THE SHADOW RUN (gap #18, 2026-10-05). Once db/schema.sql must carry every
+    # migration, nothing is pending above it, so the load above cannot test a
+    # new migration. ops/migration-shadow.py starts from the BASE branch's
+    # snapshot (production's structure) on its own PostgreSQL 18 cluster,
+    # applies this change's migrations, and requires the committed snapshot to
+    # be exactly the result. PostgreSQL 18 because production runs 18; a 17
+    # server drops production's named NOT NULL constraints from the dump.
+    local shadow_rc=0 shadow_note
+    "$PY" ops/migration-shadow.py ${CARR_SHADOW_ARTIFACT_DIR:+--artifact-dir "$CARR_SHADOW_ARTIFACT_DIR"} \
+      > "$LOGDIR/migration-shadow.log" 2>&1 || shadow_rc=$?
+    _mstep shadow
+    case "$shadow_rc" in
+      0) shadow_note="; $(sed -n 's/^migration-shadow: \([0-9]* pending migration(s) applied\).*/\1/p' "$LOGDIR/migration-shadow.log" | head -1) on a PostgreSQL 18 shadow and db/schema.sql matches" ;;
+      3) if [ "$STRICT" = "1" ]; then
+           cat "$LOGDIR/migration-shadow.log" >&2
+           bad migration "the migration shadow needs PostgreSQL 18 server binaries (CI installs postgresql-18)"
+           return
+         fi
+         shadow_note="; migration shadow not run (no PostgreSQL 18 here)" ;;
+      *) tail -60 "$LOGDIR/migration-shadow.log" >&2
+         bad migration "migration shadow: pending migrations did not apply over the base snapshot, or db/schema.sql is not what they produce"
+         return ;;
+    esac
+
+    ok migration "committed schema loads; ${n:-0} pending migration(s) apply; app-role grants verified live; trigger reads granted; $db_gate_count db acceptance gate program(s) pass (each program reports its own assertions)$shadow_note"
   else
     tail -15 "$LOGDIR/migration-grants.log" >&2
     bad migration "the app roles' grants did not survive into the built database"
