@@ -7,6 +7,8 @@ import tempfile
 import unittest
 
 spec = importlib.util.spec_from_file_location('sweep', Path(__file__).with_name('corrections-sweep.py'))
+if spec is None or spec.loader is None:
+    raise RuntimeError('correction collector could not be loaded')
 sweep = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sweep)
 
