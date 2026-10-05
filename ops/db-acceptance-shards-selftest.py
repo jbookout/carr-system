@@ -150,11 +150,17 @@ time.sleep(20)
 Path(sys.argv[2]).write_text('finished')
 """
         child = """import subprocess, sys, time
-subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]],
-                 start_new_session=sys.argv[4] == 'escaped')
+command = [sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]]
+if sys.argv[4] == 'reparented':
+    intermediate = "import subprocess,sys; subprocess.Popen(sys.argv[1:], start_new_session=True)"
+    subprocess.run([sys.executable, '-c', intermediate, *command], check=True)
+    from pathlib import Path
+    Path(sys.argv[2] + '.reparented').write_text('intermediate exited')
+else:
+    subprocess.Popen(command, start_new_session=sys.argv[4] == 'escaped')
 time.sleep(30)
 """
-        for mode in ("group", "escaped"):
+        for mode in ("group", "escaped", "reparented"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
                 tmp = Path(tmp)
                 pidfile, marker = tmp / "pid", tmp / "completed"
@@ -169,8 +175,12 @@ pg = fixture.pg
 class RealAcceptance(fixture.Runner):
     def run(self, command, **kwargs):
         if str(command[-1]).endswith(fixture.SERIAL[0]):
-            return pg.SubprocessRunner().run([sys.executable, '-c', {child!r},
-                {grandchild!r}, {str(pidfile)!r}, {str(marker)!r}, {mode!r}], **kwargs)
+            real = pg.SubprocessRunner()
+            try:
+                return real.run([sys.executable, '-c', {child!r},
+                    {grandchild!r}, {str(pidfile)!r}, {str(marker)!r}, {mode!r}], **kwargs)
+            finally:
+                self.cleanup_confirmed = real.cleanup_confirmed
         return super().run(command, **kwargs)
 signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
 bins = pg.PostgresBinaries(*(Path('/fake') / x for x in ('initdb', 'pg_ctl', 'createdb', 'psql')))
@@ -194,18 +204,30 @@ sys.exit(rc)
                         time.sleep(0.02)
                     self.assertTrue(pidfile.exists(), "acceptance grandchild did not start")
                     descendant = int(pidfile.read_text())
+                    if mode == "reparented":
+                        reparented = Path(str(pidfile) + '.reparented')
+                        while not reparented.exists() and lane.poll() is None and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        self.assertTrue(reparented.exists(), "intermediate did not exit before cancellation")
                     lane.send_signal(signal.SIGTERM)
                     stdout, stderr = lane.communicate(timeout=15)
                     self.assertEqual(lane.returncode, 130, stdout + stderr)
                     observed = json.loads(report.read_text())
                     self.assertEqual(observed["returncode"], 130)
-                    self.assertTrue(observed["cleanup"])
+                    if mode == "reparented":
+                        self.assertFalse(observed["cleanup"], "reparented ownership cannot be confirmed")
+                        self.assertTrue(root.exists(), "unconfirmed cleanup must retain resources")
+                        reports = self.reports()
+                        reports[1] = observed
+                        with self.assertRaises(ValueError):
+                            self.aggregate(reports)
                     status = subprocess.run(["ps", "-o", "stat=", "-p", str(descendant)],
                                             capture_output=True, text=True, timeout=5).stdout.strip()
-                    self.assertTrue(not status or status.startswith("Z"),
-                                    "cleanup acknowledged while acceptance descendant remains active")
+                    if mode != "reparented":
+                        self.assertTrue(not status or status.startswith("Z"),
+                                        "discoverable acceptance descendant remains active")
                     self.assertFalse(marker.exists())
-                    self.assertFalse(root.exists())
+                    self.assertEqual(root.exists(), not observed["cleanup"])
                 finally:
                     if lane.poll() is None:
                         os.killpg(lane.pid, signal.SIGKILL)
@@ -215,6 +237,10 @@ sys.exit(rc)
                             os.kill(descendant, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+
+    def test_sigterm_fixture_ignores_hosted_parent_environment(self):
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            self.test_sigterm_lane_stops_descendants_before_cleanup_report()
 
     def test_unconfirmed_process_cleanup_retains_cluster_and_refuses_aggregate(self):
         class Unconfirmed(Runner):
