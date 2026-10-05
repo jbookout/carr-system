@@ -90,16 +90,12 @@ class CheckerCases(SuccessorCommands):
         self.commit(target)
         self.check(approved, False)
 
-    def test_known_count_only_change_is_owned(self):
+    def test_historical_snapshot_assertion_counts_are_domain(self):
         target = "ops/schema-snapshot-registry-seed-selftest.py"
-        self.write(target, 'assert "SCAC_CURRENT_NUMBER=109" in GENERATOR\nassert domain\n')
+        self.write(target, 'assert "SCAC_CURRENT_NUMBER=9" in GENERATOR\nassert domain\n')
         self.commit(target)
         approved = self.head()
         self.write(target, 'assert "SCAC_CURRENT_NUMBER=110" in GENERATOR\nassert domain\n')
-        self.commit(target)
-        self.check(approved, True)
-        approved = self.head()
-        self.write(target, 'assert "SCAC_CURRENT_NUMBER=111" in GENERATOR\nassert changed_domain\n')
         self.commit(target)
         self.check(approved, False)
 
@@ -232,6 +228,78 @@ class CheckerCases(SuccessorCommands):
         for value in ("--help", "deadbeef", "HEAD"):
             result = self.command("successor-only-diff.py", value, self.head())
             self.assertNotEqual(result.returncode, 0, value)
+
+    def test_historical_json_changes_and_deletions_are_domain(self):
+        for target, content, modified in (
+            ('ops/config/scac-registry-full-entry-set-seals.json',
+             {'scac-mutation-registry.v1': 'sha256:' + 'a'*64},
+             {'scac-mutation-registry.v1': 'sha256:' + 'b'*64}),
+            ('ops/config/scac-registry-source-inventory-fixtures.v1.json',
+             {'base': {'rows': []}, 'patches': [{'version': 'v2', 'remove': [], 'upsert': []}]},
+             {'base': {'rows': []}, 'patches': [{'version': 'v2', 'remove': ['historical'], 'upsert': []}]}),
+        ):
+            import json
+            self.git('switch', '-q', 'main')
+            self.write(target, json.dumps(content))
+            self.commit(target)
+            self.git('fetch', '-q', 'origin')
+            self.git('switch', '-q', 'feature')
+            self.git('merge', '-q', 'main')
+            approved = self.head()
+            self.write(target, json.dumps(modified))
+            self.commit(target)
+            self.check(approved, False)
+            self.git('restore', '--source', approved, '--staged', '--worktree', '--', target)
+            self.commit(target)
+            approved = self.head()
+            (self.repo / target).unlink()
+            self.commit(target)
+            self.check(approved, False)
+
+    def test_shadowed_inventory_variable_is_domain(self):
+        target = 'mcp-server/test/siep-11-mutation-registry.test.mjs'
+        source = "test('scope', () => {\n  const rows = frozenInventory(REGISTRY_V109_VERSION);\n  {\n  const rows = unrelatedData;\n  assert.equal(rows.length, 1);\n  }\n});\n"
+        self.write(target, source)
+        self.commit(target)
+        approved = self.head()
+        self.write(target, source.replace('rows.length, 1', 'rows.length, 2'))
+        self.commit(target)
+        self.check(approved, False)
+
+    def test_shadowed_inventory_function_is_domain(self):
+        target = 'mcp-server/test/siep-11-mutation-registry.test.mjs'
+        source = "test('scope', () => {\n  const frozenInventory = unrelatedData;\n  assert.equal(frozenInventory(REGISTRY_V109_VERSION).length, 1);\n});\n"
+        self.write(target, source)
+        self.commit(target)
+        approved = self.head()
+        self.write(target, source.replace('.length, 1', '.length, 2'))
+        self.commit(target)
+        self.check(approved, False)
+
+    def test_only_a_validated_inventory_append_is_owned(self):
+        import json
+        from successor_ownership import is_owned_file
+        target = 'ops/config/scac-registry-source-inventory-fixtures.v1.json'
+        before = (ROOT / target).read_bytes()
+        fixture = json.loads(before)
+        previous = fixture['patches'][-1]
+        fixture['patches'].append(dict(version=f"v{int(previous['version'][1:]) + 1}",
+            reason='Unchanged successor rows.', remove=[], upsert=[],
+            expected_count=previous['expected_count'], expected_sha256=previous['expected_sha256']))
+        self.assertTrue(is_owned_file(target, before, json.dumps(fixture).encode()))
+        fixture['patches'][-1]['expected_sha256'] = '0'*64
+        self.assertFalse(is_owned_file(target, before, json.dumps(fixture).encode()))
+
+    def test_historical_inventory_boolean_type_is_immutable(self):
+        import json
+        from successor_ownership import is_owned_file
+        target = 'ops/config/scac-registry-source-inventory-fixtures.v1.json'
+        before = (ROOT / target).read_bytes()
+        fixture = json.loads(before)
+        row = fixture['base']['rows'][0]
+        self.assertIsInstance(row['authority_only'], bool)
+        row['authority_only'] = int(row['authority_only'])
+        self.assertFalse(is_owned_file(target, before, json.dumps(fixture).encode()))
 
 
 if __name__ == "__main__":

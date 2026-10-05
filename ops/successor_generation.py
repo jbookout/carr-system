@@ -14,6 +14,7 @@ import sys
 import tempfile
 
 from git_env import scrubbed_env
+from successor_ownership import validate_outputs, JSON_ARTIFACTS
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -67,11 +68,18 @@ def render_sql(template, predecessor, rows, baseline, entry_set, dependencies):
     sql = sql.replace(f"<>{predecessor['entry_count']}", f"<>{count}")
     sql = sql.replace(f"<>{predecessor['source_count']}", f"<>{len(rows)}")
     sql = sql.replace(f",{predecessor['entry_count']},{predecessor['source_count']},", f",{count},{len(rows)},")
+    comparisons = {}
     for key in ("secdef_execute", "relation_dml", "column_dml", "role_authority"):
         old, new = predecessor["catalog"][key], baseline[key]
-        sql = sql.replace(f"observed_count<>{old['count']}", f"observed_count<>{new['count']}")
-        sql = sql.replace(f"observed_digest<>'{old['digest']}'", f"observed_digest<>'{new['digest']}'")
-        sql = sql.replace(f"observed_count={old['count']} and observed_digest='{old['digest']}'", f"observed_count={new['count']} and observed_digest='{new['digest']}'")
+        operator = '=' if key == 'role_authority' else '<>'
+        join = 'and' if key == 'role_authority' else 'or'
+        before = f"observed_count{operator}{old['count']} {join} observed_digest{operator}'{old['digest']}'"
+        after = f"observed_count{operator}{new['count']} {join} observed_digest{operator}'{new['digest']}'"
+        if sql.count(before) != 1:
+            raise ValueError(f"successor SQL category comparison drifted: {key}")
+        comparisons[before] = after
+    sql = re.sub('|'.join(re.escape(value) for value in comparisons),
+                 lambda match: comparisons[match[0]], sql)
     old, new = predecessor["catalog"]["runtime_dml_grants"], baseline["runtime_dml_grants"]
     sql = replace_once(sql,
         f"(grant_snapshot->>'entry_count')::integer={old['count']} and\n    grant_snapshot->>'grant_digest'='{old['digest']}'",
@@ -150,8 +158,19 @@ def disposable_database(repo):
                         raise ValueError(f"disposable database teardown unconfirmed; retained {root}")
 
 
+def predecessor_rows(repo, version):
+    result = subprocess.run(['node', '--input-type=module', '-e',
+        "import {frozenInventory} from './ops/scac-mutation-inventory.mjs';process.stdout.write(JSON.stringify(frozenInventory(process.argv[1])));", version],
+        cwd=repo, env=scrubbed_env(), capture_output=True, timeout=120)
+    if result.returncode:
+        raise ValueError('canonical frozen predecessor inventory refused generation')
+    return json.loads(result.stdout)
+
+
 def regenerate(repo, plan, domain_paths, successor_path, predecessor_path):
     import psycopg
+    validate_outputs(repo, [*JSON_ARTIFACTS, str(successor_path.relative_to(repo)),
+        f"mcp-server/src/scac-mutation-registry.v{plan['registry_successor']}.generated.js", '.git/successor-runtime.json'])
     with disposable_database(repo) as (dsn, env, run):
         run(["psql", dsn, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", repo / "db/schema.sql"])
         last_main = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", plan["base"], "--", "migrations"], cwd=repo, env=scrubbed_env()).decode().splitlines()
@@ -202,18 +221,7 @@ def regenerate(repo, plan, domain_paths, successor_path, predecessor_path):
         seal_path.write_text(json.dumps(seals, indent=2) + "\n")
         fixture_path = repo / "ops/config/scac-registry-source-inventory-fixtures.v1.json"
         fixture = json.loads(fixture_path.read_text())
-        prior_rows = {row['ingress_key']: dict(row) for row in fixture['base']['rows']}
-        for patch in fixture['patches']:
-            for key in patch['remove']:
-                prior_rows.pop(key, None)
-            for row in patch['upsert']:
-                prior_rows[row['ingress_key']] = dict(row)
-            for key, fields in patch.get('row_replacements', {}).items():
-                prior_rows[key].update(fields)
-            for locator, value in patch.get('source_digest_replacements', {}).items():
-                for row in prior_rows.values():
-                    if row['source_locator'] == locator:
-                        row['source_digest'] = value
+        prior_rows = {row['ingress_key']: row for row in predecessor_rows(repo, version)}
         fixture['patches'].append({
             'version': f"v{plan['registry_successor']}",
             'reason': 'Regenerated from live source and disposable current-main catalog.',

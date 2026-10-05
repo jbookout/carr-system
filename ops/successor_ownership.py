@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One fail-closed ownership policy for successor recovery and approval checks.
 
-Whole-file ownership requires an exact generated path; SQL additionally must
-be new relative to the branch base and carry its generator marker. Mixed files
+Generated ownership requires an exact path and immutable historical JSON. SQL
+must be new relative to the branch base and carry its generator marker. Mixed files
 retain domain bytes and remove only syntactically bounded bookkeeping.
 """
 import json
@@ -24,27 +24,87 @@ COUNT_NAMES = r"SCAC_(?:CURRENT_NUMBER|VERSION_COUNT|TOTAL_ENTRY_COUNT|CURRENT_E
 ACTIVE_IMPORT = re.compile(r'(?m)^(} from "\./scac-mutation-registry\.v)[1-9][0-9]*(\.generated\.js";)$')
 
 
+def _generated_json(path, content):
+    if content is None:
+        return None
+    def unambiguous_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise OwnershipError(f"{path}: duplicate generated JSON key {key}")
+            value[key] = item
+        return value
+    try:
+        value = json.loads(content, object_pairs_hook=unambiguous_object)
+    except (ValueError, UnicodeError) as exc:
+        raise OwnershipError(f"{path}: malformed generated JSON") from exc
+    if not isinstance(value, dict):
+        raise OwnershipError(f"{path}: generated JSON must be an object")
+    return value
+
+
+def validate_outputs(repo, paths):
+    """Refuse nonregular sinks and symlink ancestors before any write."""
+    import stat
+    root = repo.resolve(strict=True)
+    for name in paths:
+        target = repo / name
+        if not target.is_relative_to(repo) or '..' in target.relative_to(repo).parts:
+            raise OwnershipError(f"{name}: output escapes staging")
+        for part in [target, *target.parents]:
+            if part == repo:
+                break
+            if part.is_symlink():
+                raise OwnershipError(f"{name}: symlink output or ancestor")
+        if not target.resolve().is_relative_to(root):
+            raise OwnershipError(f"{name}: output escapes staging")
+        if target.exists() and not stat.S_ISREG(target.stat().st_mode):
+            raise OwnershipError(f"{name}: output is not a regular file")
+
+
+def _same_json(left, right):
+    return json.dumps(left, sort_keys=True, separators=(',', ':')) == json.dumps(right, sort_keys=True, separators=(',', ':'))
+
+
 def is_owned_file(path, before, after):
     """Return whole-file ownership. None means absent, never an unreadable blob."""
     if REGISTRY_JS.fullmatch(path):
         return path == "mcp-server/src/scac-mutation-registry.generated.js" or before is None and after is not None
     if path in JSON_ARTIFACTS:
-        for content in (before, after):
-            if content is not None:
-                try:
-                    def unambiguous_object(pairs):
-                        result = {}
-                        for key, value in pairs:
-                            if key in result:
-                                raise OwnershipError(f"{path}: duplicate generated JSON key {key}")
-                            result[key] = value
-                        return result
-                    value = json.loads(content, object_pairs_hook=unambiguous_object)
-                except (ValueError, UnicodeError) as exc:
-                    raise OwnershipError(f"{path}: malformed generated JSON") from exc
-                if not isinstance(value, dict):
-                    raise OwnershipError(f"{path}: generated JSON must be an object")
-        return True
+        old, new = (_generated_json(path, content) for content in (before, after))
+        if old is None or new is None:
+            return False
+        if path.endswith('full-entry-set-seals.json'):
+            if any(key not in new or not _same_json(new[key], value) for key, value in old.items()):
+                return False
+            numbers = []
+            for key, value in new.items():
+                match = re.fullmatch(r'scac-mutation-registry.v([1-9][0-9]*)', key)
+                if not match or not isinstance(value, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', value):
+                    return False
+                numbers.append(int(match[1]))
+            return sorted(numbers) == list(range(1, max(numbers, default=0) + 1))
+        if not _same_json({k: v for k, v in old.items() if k != 'patches'}, {k: v for k, v in new.items() if k != 'patches'}):
+            return False
+        previous, patches = old.get('patches'), new.get('patches')
+        if not isinstance(previous, list) or not isinstance(patches, list) or not _same_json(patches[:len(previous)], previous):
+            return False
+        if len(patches) == len(previous):
+            return True
+        # Use the canonical decoder to validate the appended counts and digests.
+        from pathlib import Path
+        import subprocess
+        from git_env import scrubbed_env
+        script = """import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+const payload=fs.readFileSync(0,'utf8');const read=fs.readFileSync;
+fs.readFileSync=(path,...args)=>String(path).endsWith('scac-registry-source-inventory-fixtures.v1.json')?payload:read(path,...args);
+syncBuiltinESMExports();
+const {frozenInventory,CURRENT_REGISTRY_VERSION}=await import('./ops/scac-mutation-inventory.mjs');
+frozenInventory(CURRENT_REGISTRY_VERSION);
+"""
+        result = subprocess.run(['node', '--input-type=module', '-e', script], input=after,
+            cwd=Path(__file__).resolve().parents[1], env=scrubbed_env(), capture_output=True, timeout=120)
+        return result.returncode == 0
     if GENERATED_SQL.fullmatch(path) and before is None and after is not None:
         return bool(re.match(rb"\A-- GENERATED by ops/[A-Za-z0-9_.-]+(?:\. Review; never hand-edit\.)?\r?\n", after))
     return False
@@ -107,24 +167,6 @@ def _snapshot_domain(text):
 
 
 
-def _inventory_count_tokens(text):
-    result = []
-    bound = set()
-    declaration = re.compile(r"  const (rows|v[0-9]+Rows) = frozenInventory\(REGISTRY_V[0-9]+_VERSION\);")
-    count = re.compile(r"(  assert\.equal\()(?P<operand>rows|v[0-9]+Rows|frozenInventory\(REGISTRY_V[0-9]+_VERSION\))(\.length, )([0-9]+)(\);)(\n?)")
-    for line in text.splitlines(keepends=True):
-        if line.startswith("test("):
-            bound.clear()
-        declared = declaration.fullmatch(line.rstrip("\n"))
-        if declared:
-            bound.add(declared[1])
-        matched = count.fullmatch(line)
-        if matched and (matched["operand"] in bound or matched["operand"].startswith("frozenInventory(")):
-            line = matched[1] + matched[2] + matched[3] + "<count>" + matched[5] + matched[6]
-        result.append(line)
-    return "".join(result)
-
-
 def domain_bytes(path, content):
     """Project mixed-file bytes without widening ownership to the whole file."""
     if content is None or b"\0" in content:
@@ -137,10 +179,4 @@ def domain_bytes(path, content):
         text = ACTIVE_IMPORT.sub(r'\g<1><number>\2', text)
     elif path == "bin/schema-snapshot.sh":
         text = _snapshot_domain(text)
-    elif path == "ops/schema-snapshot-registry-seed-selftest.py":
-        text = re.sub(rf'(?m)^(assert "{COUNT_NAMES}=)[0-9]+(" in GENERATOR)$', r'\g<1><count>\2', text)
-        text = re.sub(r'(?m)^(assert set\(FULL_SET_SEALS\) == \{f"scac-mutation-registry\.v\{version\}" for version in range\(1, )[0-9]+(\)\})$', r'\g<1><count>\2', text)
-    elif path == "mcp-server/test/siep-11-mutation-registry.test.mjs":
-        # Only inventory cardinalities, never an arbitrary assertion operand.
-        text = _inventory_count_tokens(text)
     return text.encode("utf-8")

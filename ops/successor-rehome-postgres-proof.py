@@ -32,7 +32,9 @@ class DisposableRehome(unittest.TestCase):
         # Model this PR delivered on main: the decoder is a source prerequisite,
         # never a bookkeeping rewrite of the caller's generator code.
         shutil.copyfile(ROOT / 'ops/scac-mutation-inventory.mjs', repo / 'ops/scac-mutation-inventory.mjs')
-        git('add', '--', 'ops/scac-mutation-inventory.mjs')
+        for path in ('ops/schema-snapshot-registry-seed-selftest.py', 'mcp-server/test/siep-11-mutation-registry.test.mjs'):
+            shutil.copyfile(ROOT / path, repo / path)
+        git('add', '--', 'ops/scac-mutation-inventory.mjs', 'ops/schema-snapshot-registry-seed-selftest.py', 'mcp-server/test/siep-11-mutation-registry.test.mjs')
         message = repo / '.git/fixture-message'
         message.write_text('Fixture generated-frontier decoder on main\n')
         git('commit', '-q', '-F', str(message))
@@ -82,6 +84,25 @@ class DisposableRehome(unittest.TestCase):
             f"assert.equal(CURRENT_REGISTRY_VERSION,'scac-mutation-registry.v{version}');frozenInventory(CURRENT_REGISTRY_VERSION);"],
             cwd=repo, env=env, capture_output=True, text=True)
         self.assertEqual(frontier.returncode, 0, frontier.stderr)
+        modules = repo / 'mcp-server/node_modules'
+        modules.symlink_to(ROOT / 'mcp-server/node_modules', target_is_directory=True)
+        for command in (
+            [sys.executable, 'ops/schema-snapshot-registry-seed-selftest.py'],
+            ['node', '--test', 'mcp-server/test/siep-11-mutation-registry.test.mjs'],
+        ):
+            with self.subTest(command=command):
+                checked = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True, timeout=600)
+                self.assertEqual(checked.returncode, 0, checked.stdout[-12000:] + checked.stderr[-6000:])
+        seal_file = repo / 'ops/config/scac-registry-full-entry-set-seals.json'
+        sealed_bytes = seal_file.read_bytes()
+        try:
+            seal_file.write_text(json.dumps({key: value for key, value in seals.items()
+                if key != f'scac-mutation-registry.v{version}'}))
+            missing = subprocess.run([sys.executable, 'ops/schema-snapshot-registry-seed-selftest.py'],
+                cwd=repo, env=env, capture_output=True, text=True, timeout=120)
+            self.assertNotEqual(missing.returncode, 0, 'missing current seal must fail the snapshot check')
+        finally:
+            seal_file.write_bytes(sealed_bytes)
         self.assertEqual(git('status', '--porcelain'), '')
         fixture = json.loads((repo / 'ops/config/scac-registry-source-inventory-fixtures.v1.json').read_text())
         main_fixture = json.loads(git('show', 'main:ops/config/scac-registry-source-inventory-fixtures.v1.json'))

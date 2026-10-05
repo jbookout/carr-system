@@ -14,11 +14,10 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import re
 import importlib.util
 
 from git_env import scrubbed_env
-from successor_ownership import domain_bytes, is_owned_file, REGISTRY_JS, _LEDGER, ACTIVE_IMPORT
+from successor_ownership import domain_bytes, is_owned_file, REGISTRY_JS, _LEDGER, ACTIVE_IMPORT, validate_outputs, JSON_ARTIFACTS
 from successor_generation import regenerate
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -85,29 +84,31 @@ def manifest(repo: Path, git_dir: Path, approved: str, main: str, rewritten: lis
     return target
 
 
-def commit(repo, message, amend=False):
+def commit(repo, message):
     target = Path(git(repo, "rev-parse", "--absolute-git-dir").decode().strip()) / "successor-message"
     target.write_text(message + "\n")
-    git(repo, "commit", *( ["--amend"] if amend else []), "-F", str(target))
+    git(repo, "commit", "-F", str(target))
 
 
 def snapshot_bookkeeping(repo, migration, receipt):
+    validate_outputs(repo, ("bin/schema-snapshot.sh", "ops/schema-snapshot-registry-seed-selftest.py"))
     path = repo / "bin/schema-snapshot.sh"
     if not path.exists():
         return
     text = path.read_text()
     number = int(receipt['version'].split('.v')[1])
     previous = number - 1
-    ledger = ('REHOME_REGISTRY_APPLIED="$("$PSQL" -Atqc \\\n'
+    ledger_name = f'REHOME_V{number}_REGISTRY_APPLIED'
+    ledger = (f'{ledger_name}="$("$PSQL" -Atqc \\\n'
               f'  "select exists (select 1 from schema_migrations where filename=\'{migration.name}\')" \\\n'
-              '  2>/dev/null)"\ncase "$REHOME_REGISTRY_APPLIED" in\n'
+              f'  2>/dev/null)"\ncase "${ledger_name}" in\n'
               '  t|f) ;;\n  *) echo "schema-snapshot: could not read successor registry ledger state" >&2; exit 1 ;;\nesac\n')
     found = _LEDGER.search(text)
     if found is None:
         raise RehomeError("bin/schema-snapshot.sh: ledger template missing")
     text = text[:found.start()] + ledger + text[found.start():]
     marker = f'SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v{previous}_current()"'
-    arm = ('\nif [ "$REHOME_REGISTRY_APPLIED" = t ]; then\n'
+    arm = (f'\nif [ "${ledger_name}" = t ]; then\n'
            f'  SCAC_CURRENT_NUMBER={number}\n  SCAC_VERSION_COUNT={number}\n'
            f'  SCAC_CURRENT_ENTRY_COUNT={receipt["entry_count"]}\n  SCAC_CURRENT_SOURCE_COUNT={receipt["source_count"]}\n'
            f'  SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v{number}.generated.js"\n'
@@ -118,13 +119,6 @@ def snapshot_bookkeeping(repo, migration, receipt):
     if text.count(marker) != 1:
         raise RehomeError("bin/schema-snapshot.sh: frontier template ambiguous")
     path.write_text(text.replace(marker, marker + arm))
-    test = repo / 'ops/schema-snapshot-registry-seed-selftest.py'
-    if test.exists():
-        content = test.read_text()
-        for key, value in (("CURRENT_NUMBER", number), ("VERSION_COUNT", number), ("CURRENT_ENTRY_COUNT", receipt['entry_count']), ("CURRENT_SOURCE_COUNT", receipt['source_count']), ("FULL_SET_SEAL_COUNT", previous)):
-            content = re.sub(rf'(?m)^(assert "SCAC_{key}=)[0-9]+(" in GENERATOR)$', rf'\g<1>{value}\2', content)
-        content = re.sub(r'(assert set\(FULL_SET_SEALS\) == \{f"scac-mutation-registry\.v\{version\}" for version in range\(1, )[0-9]+(\)\})', rf'\g<1>{number+1}\2', content)
-        test.write_text(content)
 
 
 def prepare(repo, base, approved, main, conflict_paths):
@@ -142,6 +136,10 @@ def prepare(repo, base, approved, main, conflict_paths):
     unresolved = git(staging, "diff", "--name-only", "--diff-filter=U").decode().splitlines()
     if unresolved != conflict_paths:
         raise RehomeError("merge changed since preflight; staging retained at " + str(staging))
+    sinks = ['bin/schema-snapshot.sh', 'ops/schema-snapshot-registry-seed-selftest.py',
+             'mcp-server/test/siep-11-mutation-registry.test.mjs', 'mcp-server/src/mutation-registry.js', *JSON_ARTIFACTS]
+    sinks += git(staging, 'ls-files', '--', 'migrations', 'mcp-server/src/*generated.js').decode().splitlines()
+    validate_outputs(staging, sinks)
     for path in conflict_paths:
         theirs = file_at(repo, main, path)
         if theirs is None:
@@ -200,6 +198,7 @@ def prepare(repo, base, approved, main, conflict_paths):
             raise RehomeError("cannot identify current-main successor SQL template")
         seal_path = staging / 'migrations' / plan['migration_names'][Path(sql[0]).name]
         domains = [staging / 'migrations' / plan['migration_names'][Path(p).name] for p in pending if p != sql[0]]
+        validate_outputs(staging, [str(seal_path.relative_to(staging)), f'mcp-server/src/scac-mutation-registry.v{plan["registry_successor"]}.generated.js'])
         receipt = regenerate(staging, plan, domains, seal_path, staging / matches[0])
         selector = staging / 'mcp-server/src/mutation-registry.js'
         if selector.exists():
@@ -257,13 +256,20 @@ def rehome(repo: Path) -> Path:
         if refused:
             raise RehomeError("conflict outside successor ownership: " + ", ".join(refused))
         staging, rewritten = prepare(repo, base, approved, main, conflict_paths)
-        if git(repo, 'rev-parse', 'HEAD').decode().strip() != approved or git(repo, 'status', '--porcelain').strip():
+        if git(repo, 'symbolic-ref', '--quiet', '--short', 'HEAD', allowed=(0, 1)).decode().strip() != branch or git(repo, 'rev-parse', 'HEAD').decode().strip() != approved or git(repo, 'status', '--porcelain').strip():
             raise RehomeError('worktree changed during preparation; staging retained at ' + str(staging))
         git(repo, 'fetch', '--quiet', 'origin', 'main')
         if git(repo, 'rev-parse', 'origin/main').decode().strip() != main:
             raise RehomeError('main changed during preparation; staging retained at ' + str(staging))
         git(repo, 'fetch', '--quiet', str(staging), 'HEAD')
-        git(repo, 'merge', '--ff-only', 'FETCH_HEAD')
+        new = git(repo, 'rev-parse', 'FETCH_HEAD').decode().strip()
+        ref = 'refs/heads/' + branch
+        if git(repo, 'symbolic-ref', '--quiet', 'HEAD', allowed=(0, 1)).decode().strip() != ref:
+            raise RehomeError('selected branch changed during promotion; staging retained at ' + str(staging))
+        git(repo, 'update-ref', ref, new, approved)
+        if git(repo, 'symbolic-ref', '--quiet', 'HEAD', allowed=(0, 1)).decode().strip() != ref:
+            raise RehomeError('selected branch changed before worktree update; staging retained at ' + str(staging))
+        git(repo, 'read-tree', '-u', '-m', approved, new)
         return manifest(repo, git_dir, approved, main, rewritten)
 
 
