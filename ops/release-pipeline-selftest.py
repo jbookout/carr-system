@@ -2609,6 +2609,73 @@ class ClearFailedRetirement(Base):
         self.assert_retry_available()
 
 
+class ControllerFreshness(Base):
+    """The tick runs from the canonical checkout. When that checkout lags
+    origin/main (fleet-sync refuses to fast-forward over local changes), the
+    pipeline must hold instead of releasing main with older controller code:
+    2026-10-05 burned app f04c9ab8 running `release:production` without the
+    `app-build` step main already had."""
+
+    def setUp(self):
+        super().setUp()
+        self.fx.commit({"ops/release-pipeline.py": "v1\n"})
+        live = {"sha": self.fx.base}
+        self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"])
+
+    def push_from_elsewhere(self, files: dict[str, str]) -> str:
+        other = self.fx.tmp / "other"
+        if not other.exists():
+            git(self.fx.tmp, "clone", "-q", str(self.fx.origin), str(other))
+            git(other, "config", "user.email", "t@example.invalid")
+            git(other, "config", "user.name", "t")
+        git(other, "pull", "-q", "--ff-only", "origin", "main")
+        for rel, text in files.items():
+            (other / rel).parent.mkdir(parents=True, exist_ok=True)
+            (other / rel).write_text(text)
+        git(other, "add", "-A")
+        git(other, "commit", "-q", "-m", "c")
+        git(other, "push", "-q", "origin", "HEAD:main")
+        return git(other, "rev-parse", "HEAD")
+
+    def test_a_checkout_behind_main_holds_without_burning_the_sha_then_ships_once_current(self):
+        released = self.fx.state()["worker"]["last_released_sha"]
+        sha = self.push_from_elsewhere({"ops/release-pipeline.py": "v2\n", "mcp-server/src/a.js": "1"})
+        verbs: list = []
+        runner = FakeRunner()
+        self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 3)
+        self.assertEqual(runner.calls, [])
+        held = self.fx.records()[-1]
+        self.assertEqual((held["status"], held["reason"]), ("blocked", "controller_stale"))
+        self.assertIn("ops/release-pipeline.py", held["detail"])
+        self.assertFalse(self.fx.state()["worker"].get("failed_sha"))
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], released)
+        loops = [a for v, a in verbs if v == "add-loop"]
+        self.assertEqual(len(loops), 1)
+        self.assertEqual(loops[0]["owner"], "Claude")
+        self.assertNotIn("credential", loops[0]["blocker_detail"])
+        again: list = []
+        self.assertEqual(self.fx.pipeline(FakeRunner(), verbs=again).tick(["worker"]), 3)
+        self.assertEqual(again, [])   # one loop per stale episode
+
+        git(self.fx.repo, "pull", "-q", "--ff-only", "origin", "main")
+        live = {"sha": released}
+        self.assertEqual(self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"]), 0)
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], sha)
+        self.assertNotIn("controller_stale", self.fx.state().get("filed_blockers", {}))
+
+    def test_an_uncommitted_controller_edit_holds_the_app_lane_too(self):
+        (self.fx.repo / "ops/release-pipeline.py").write_text("local edit\n")
+        self.push_from_elsewhere({"src/worker.js": "1"})
+        cfg = self.fx.config()
+        cfg["app"]["enabled"] = True
+        runner = FakeRunner()
+        pipe = self.fx.pipeline(runner, cfg=cfg)
+        pipe.http = lambda _u: {"source_commit": self.fx.base, "environment": "production"}
+        self.assertEqual(pipe.tick(["app"]), 3)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.records()[-1]["reason"], "controller_stale")
+
+
 class Blockers(Base):
     def test_changed_notification_does_not_reuse_an_incompatible_record_key(self):
         held = rp.blocker_loop("CLOUDFLARE_API_TOKEN", "token missing")
