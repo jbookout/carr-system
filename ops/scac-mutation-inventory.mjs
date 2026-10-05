@@ -19871,7 +19871,7 @@ export function renderAutomationUndoRegistrySql(rows, predecessorSql = null) {
   const predecessorDigest = "2013b4ec0a6cfbb1f9fc0c2e29307e95ad3b7c49960435cf21a49382425ec507";
   if (sha256(predecessor) !== predecessorDigest)
     throw new Error("v107 predecessor migration pin drifted");
-  const domainPath = "migrations/0822_automation_reason_undo_archive_invoice.sql";
+  const domainPath = "migrations/0831_automation_reason_undo_archive_invoice.sql";
   const domainDigest = sha256(readFileSync(resolve(REPO_ROOT, domainPath), "utf8"));
   const oldCatalogBaseline = LEAD_AUTOMATION_V106_DB_CATALOG_BASELINE;
   const newCatalogBaseline = AUTOMATION_UNDO_V107_DB_CATALOG_BASELINE;
@@ -19951,7 +19951,7 @@ export function renderAutomationUndoRegistrySql(rows, predecessorSql = null) {
     `  if not exists(select 1 from public.schema_migrations where filename='${predecessorPath.split("/").at(-1)}' and sha256='${predecessorDigest}') then\n` +
     `    raise exception 'Automation undo v107 requires exact applied 0812'; end if;\n` +
     `  if not exists(select 1 from public.schema_migrations where filename='${domainPath.split("/").at(-1)}' and sha256='${domainDigest}') then\n` +
-    `    raise exception 'Automation undo v107 requires exact applied 0822'; end if;\n` +
+    `    raise exception 'Automation undo v107 requires exact applied 0831'; end if;\n` +
     `  select * into v from ops.scac_mutation_registry_version where registry_version='${REGISTRY_V106_VERSION}';\n` +
     `  if v.registry_digest is distinct from '${oldSeal.digest}' or v.entry_count<>${oldSeal.entryCount}\n` +
     `    or v.source_entry_count<>${oldSeal.sourceEntryCount} or v.entry_set_digest is distinct from '${oldEntrySet}'\n` +
@@ -21274,7 +21274,7 @@ export function renderGeneratedFrontier() {
   artifacts["mcp-server/src/scac-mutation-registry.v107.generated.js"] =
     renderRuntimeProjection(v107Rows, { version: REGISTRY_V107_VERSION,
       dbCatalogBaseline: AUTOMATION_UNDO_V107_DB_CATALOG_BASELINE });
-  artifacts["migrations/0823_automation_undo_scac_successor.sql"] =
+  artifacts["migrations/0832_automation_undo_scac_successor.sql"] =
     renderAutomationUndoRegistrySql(v107Rows, artifacts["migrations/0812_lead_automation_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
@@ -22339,7 +22339,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(resolve("mcp-server/src/scac-mutation-registry.v107.generated.js"),
       renderRuntimeProjection(rows, { version: REGISTRY_V107_VERSION,
         dbCatalogBaseline: AUTOMATION_UNDO_V107_DB_CATALOG_BASELINE }));
-    await writeFile(resolve("migrations/0823_automation_undo_scac_successor.sql"), renderAutomationUndoRegistrySql(rows));
+    await writeFile(resolve("migrations/0832_automation_undo_scac_successor.sql"), renderAutomationUndoRegistrySql(rows));
     process.stdout.write("Automation undo v107 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);

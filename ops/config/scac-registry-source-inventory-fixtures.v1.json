@@ -84936,8 +84936,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "b8020982c972e1fe609d6a90eb37ff309f1c30df87d09106955110e53de42dec",
-          "handler_digest": "b8020982c972e1fe609d6a90eb37ff309f1c30df87d09106955110e53de42dec",
+          "schema_digest": "bc9d95e3dbbf66010981b7b6a058fc0e3ac89ff15404681fcefec9e409833aaf",
+          "handler_digest": "bc9d95e3dbbf66010981b7b6a058fc0e3ac89ff15404681fcefec9e409833aaf",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -87988,7 +87988,7 @@
         }
       ],
       "expected_count": 1112,
-      "expected_sha256": "25c45b5f34b47198f0ed9fa0e6fcaf33643cce9e9430041a899d963986ea91ca"
+      "expected_sha256": "fa306f35ff3fea9f6d9f01d527a8246520e9d96144ec4b86d0c7fad99d74cdc6"
     }
   ],
   "current_source_review": {
@@ -91130,8 +91130,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "b8020982c972e1fe609d6a90eb37ff309f1c30df87d09106955110e53de42dec",
-          "handler_digest": "b8020982c972e1fe609d6a90eb37ff309f1c30df87d09106955110e53de42dec",
+          "schema_digest": "bc9d95e3dbbf66010981b7b6a058fc0e3ac89ff15404681fcefec9e409833aaf",
+          "handler_digest": "bc9d95e3dbbf66010981b7b6a058fc0e3ac89ff15404681fcefec9e409833aaf",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -91172,7 +91172,7 @@
         }
       ],
       "expected_count": 1112,
-      "expected_sha256": "25c45b5f34b47198f0ed9fa0e6fcaf33643cce9e9430041a899d963986ea91ca"
+      "expected_sha256": "fa306f35ff3fea9f6d9f01d527a8246520e9d96144ec4b86d0c7fad99d74cdc6"
     }
   }
 }

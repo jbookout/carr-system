@@ -1314,7 +1314,7 @@ fi
 
 
 AUTOMATION_UNDO_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0823_automation_undo_scac_successor.sql')" \
+  "select exists (select 1 from schema_migrations where filename='0832_automation_undo_scac_successor.sql')" \
   2>/dev/null)"
 case "$AUTOMATION_UNDO_REGISTRY_APPLIED" in
   t|f) ;;

@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0823 seals audited automation v107 over the delivered lead automation v106.
+# 0832 seals audited automation v107 over the delivered lead automation v106.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v107"
 LIVE_REGISTRY_ORDINAL = 107
@@ -35,7 +35,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0812_lead_automation_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0823_automation_undo_scac_successor.sql"
+    "migrations/0832_automation_undo_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
