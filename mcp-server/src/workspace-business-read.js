@@ -1,3 +1,4 @@
+import { networkStatement, projectNetwork } from './relationship-network.js';
 import { vendorRelationshipJoin, enrichRelationship } from "./vendor-relationship.js";
 // Journey 1 business workspace: the Clients and Vendors READ model.
 //
@@ -105,7 +106,7 @@ export function parseBusinessApiPath(pathname) {
 }
 
 export function isBusinessApiPath(pathname) {
-  return parseBusinessApiPath(pathname) !== null;
+  return pathname === "/api/v1/business/relationships" || parseBusinessApiPath(pathname) !== null;
 }
 
 function requireExactKeys(searchParams, allowed, viewerSlug) {
@@ -728,11 +729,21 @@ export async function readBusinessRecord({ client, actor, tenant = organizationT
  * dealroom-web.js needs no database knowledge of its own, and so a test can
  * replace the whole reader with an injected function.
  */
+export async function readRelationshipNetwork({client,actor,tenant=organizationTenantForActor(actor),params,now=()=>new Date()}) {
+  assertAudience(actor,tenant);
+  if (params.get('contract') !== 'relationship-network.v1' || params.getAll('contract').length !== 1 || [...params.keys()].some(key => key !== 'contract')) throw businessError('QUERY_INVALID');
+  try { const result = await client.query(networkStatement); return projectNetwork(result.rows[0]?.snapshot,now().toISOString()); }
+  catch(error) { throw classifyReadError(error); }
+}
+
 export function createWorkspaceBusinessReader() {
   return async (env, actor, request, correlationId) => {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
     const url = new URL(request.url);
+    if (url.pathname === '/api/v1/business/relationships') {
+      return readRelationshipNetwork({client,actor,params:url.searchParams});
+    }
     const route = parseBusinessApiPath(url.pathname);
     if (!route) throw businessError("RECORD_NOT_FOUND");
     const resolved = correlationId || env.CORRELATION_ID;

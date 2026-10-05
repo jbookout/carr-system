@@ -106,7 +106,7 @@ test("every base relation this module reads is schema-qualified, in every statem
   // The exact dependency list, and nothing else appearing unannounced.
   const relations = [...new Set(statements.flatMap(relationsIn))].sort();
   assert.deepEqual(relations, [
-    "public.activity", "public.deal", "public.party_link", "public.actor", "public.client", "public.client_status", "public.client_type", "public.party",
+    "public.activity", "public.deal", "public.party_link", "public.party_link_deal", "public.actor", "public.client", "public.client_status", "public.client_type", "public.party",
     "public.vendor", "public.vendor_category", "public.vendor_disposition",
     "public.vendor_relationship_level", "public.vendor_stage",
   ].sort());
