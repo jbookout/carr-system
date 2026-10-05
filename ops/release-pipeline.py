@@ -188,6 +188,7 @@ from typing import Any, Callable, Iterable
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+from lib.github_reader import GitHubReader, GitHubUnreadable  # noqa: E402
 from lib.secret_redaction import redact_text, sensitive_env_values  # noqa: E402
 CONFIG_PATH = REPO / "ops" / "config" / "release-pipeline.v1.json"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -307,36 +308,18 @@ def http_json(url: str, timeout: int = 30) -> Any:
 
 
 class GitHub:
-    """Read-only GitHub lookups through the authenticated `gh` CLI."""
-
-    # A failed read is retried after each delay before the lane blocks. On
-    # 2026-10-04 four Worker blocks were one-off `gh api` failures that the
-    # same call answered seconds later from another shell.
-    RETRY_DELAYS = (5, 15)
+    """Read-only GitHub lookups through lib/github_reader (the authenticated
+    `gh` CLI, transient failures retried, errors redacted)."""
 
     def __init__(self, repo: str, env: dict[str, str]):
         self.repo, self.env = repo, env
+        self.reader = GitHubReader(env=env, timeout=300)
 
     def api(self, path: str, paginate: bool = False) -> Any:
-        argv = ["gh", "api", *(["--paginate", "--slurp"] if paginate else []), path]
-        for delay in (*self.RETRY_DELAYS, None):
-            proc = subprocess.run(argv, env=self.env, stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=300)
-            if proc.returncode == 0 or delay is None:
-                break
-            time.sleep(delay)
-        if proc.returncode != 0:
-            # Redact the whole stderr before keeping its tail, so a cut can
-            # never leave half a token that the patterns no longer match.
-            err = redact_text(proc.stderr or "", known_secrets=sensitive_env_values(self.env))
-            tail = " ".join(err.split())[-200:]
-            raise Blocked("github_unreadable",
-                          f"gh api {path.split('?')[0]} exited {proc.returncode} after "
-                          f"{len(self.RETRY_DELAYS) + 1} attempts" + (f": {tail}" if tail else ""))
-        data = json.loads(proc.stdout or "null")
-        if paginate:   # --slurp yields one list per page
-            return [item for page in (data or []) for item in (page or [])]
-        return data
+        try:
+            return self.reader.api(path, paginate=paginate)
+        except GitHubUnreadable as exc:
+            raise Blocked("github_unreadable", str(exc)) from exc
 
     def pr_for_commit(self, sha: str) -> dict | None:
         rows = self.api(f"repos/{self.repo}/commits/{sha}/pulls") or []
