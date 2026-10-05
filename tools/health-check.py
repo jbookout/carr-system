@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "builds"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|builds")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -1327,10 +1327,37 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+def _build_duration_row():
+    checker = os.path.join(REPO_ROOT, 'ops', 'build-duration-check.py')
+    args = [sys.executable, checker, '--health']
+    if CANONICAL_SECTION == 'builds' and CANONICAL_FIXTURE:
+        args.extend(['--fixture', CANONICAL_FIXTURE])
+    result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+    lines = result.stdout.strip().splitlines()
+    if result.returncode not in (0, 1) or not lines:
+        return ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled checker; "
+                "verify ops/build-duration-check.py --health; auto-clear after fresh complete scan", 1)
+    return lines[0], result.returncode
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
-    rc = 0
+    build_rc = 0
+    if CANONICAL_SECTION in ('all', 'builds'):
+        try:
+            build_line, build_rc = _build_duration_row()
+        except (OSError, subprocess.TimeoutExpired):
+            build_line, build_rc = ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled "
+                                   "checker; verify ops/build-duration-check.py --health; "
+                                   "auto-clear after fresh complete scan", 1)
+        print('  ' + build_line)
+        if build_rc:
+            _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)
+        if CANONICAL_SECTION == 'builds':
+            print(_HEALTH_COMPLETION_MARKER)
+            return build_rc
+    rc = build_rc
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)
