@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -27,6 +28,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
   const dir = mkdtempSync('/tmp/doc-catchup-');
   let running = false;
   const clients = [];
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try {
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
     // Hosted Postgres uses UTC; the catchup date contract uses America/Chicago.
@@ -256,9 +258,13 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       assert.equal((await section('critical_dates',await context())).state,'empty');
     }
   } finally {
-    for (const c of clients) await c.end();
-    if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio:'pipe' });
-    mkdirSync('/tmp/_to_delete',{ recursive:true });
-    renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
+    try {
+      for (const c of clients) await c.end();
+      if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio:'pipe' });
+      mkdirSync('/tmp/_to_delete',{ recursive:true });
+      renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
+    } finally {
+      await releaseBudget();
+    }
   }
 });
