@@ -225,6 +225,15 @@ def check_npm(package, env):
     return digest(sorted(assertions))
 
 
+def trial_environment(env, trial):
+    result = dict(env)
+    for key, name in (('HOME', 'home'), ('XDG_CONFIG_HOME', 'config'), ('TMPDIR', 'tmp')):
+        directory = trial/name
+        directory.mkdir(parents=True, mode=0o700)
+        result[key] = str(directory)
+    return result
+
+
 def benchmark(repo, repeats, target):
     env = {'PATH': os.environ.get('PATH',''), 'LANG':'C.UTF-8', 'LC_ALL':'C',
            'CI':'1', 'WRANGLER_SEND_METRICS':'false', 'F03_PARITY_REQUIRE_PYTHON':'1'}
@@ -260,12 +269,13 @@ def benchmark(repo, repeats, target):
                     trial = root/f'trial-{repetition}-{mode}-{cold}'
                     command(['git','clone','--quiet','--shared','--no-checkout',str(repo),str(trial)],root,env)
                     command(['git','checkout','--quiet','--detach',head],trial,env)
+                    check_env = trial_environment(env, trial)
                     store = trial/'store'
                     if target == 'pip':
                         venv = trial/'trial-venv'
-                        command([sys.executable,'-m','venv',str(venv)],trial,env)
+                        command([sys.executable,'-m','venv',str(venv)],trial,check_env)
                         python = str(venv/'bin/python')
-                        installer = command([python,'-m','pip','--version'],trial,env).split()[1]
+                        installer = command([python,'-m','pip','--version'],trial,check_env).split()[1]
                         lock = repo/'requirements.lock'; install_root=store
                     else:
                         lock = repo/target/'package-lock.json'; install_root=trial/target/'node_modules'
@@ -279,17 +289,17 @@ def benchmark(repo, repeats, target):
                     mark('restore_and_validate_cache')
                     if target == 'pip':
                         command([python,'-m','pip','install','--disable-pip-version-check','--cache-dir',str(store),
-                                 '-r','requirements.lock'],trial,env)
+                                 '-r','requirements.lock'],trial,check_env)
                     elif not hit or mode != 'tree':
-                        command(['npm','--prefix',target,'ci','--cache',str(store),'--no-audit','--no-fund'],trial,env)
+                        command(['npm','--prefix',target,'ci','--cache',str(store),'--no-audit','--no-fund'],trial,check_env)
                     mark('locked_install')
                     # Always validate lock resolution after setup, including a
                     # restored installed tree. No restored passing verdict.
                     if target == 'pip':
-                        dependency = digest(json.loads(command([python,'-m','pip','list','--format=json'],trial,env,require_output=True)))
-                        command([python,'-m','pip','check'],trial,env)
+                        dependency = digest(json.loads(command([python,'-m','pip','list','--format=json','--disable-pip-version-check'],trial,check_env,require_output=True)))
+                        command([python,'-m','pip','check'],trial,check_env)
                     else:
-                        dependency = npm_dependencies(command(['npm','--prefix',target,'ls','--all','--json'],trial,env,require_output=True))
+                        dependency = npm_dependencies(command(['npm','--prefix',target,'ls','--all','--json'],trial,check_env,require_output=True))
                     mark('validate_dependencies')
                     if cold and mode != 'fresh':
                         save_tree(store if mode=='store' else install_root,cache,identity)
@@ -297,10 +307,10 @@ def benchmark(repo, repeats, target):
                     setup_seconds = time.monotonic()-started
                     if target == 'pip':
                         output = command([python,'-c',
-                            "import json, psycopg, openpyxl, PIL, lxml.etree, fitz; print(json.dumps({'imports':'passed'}))"],trial,env,require_output=True)
+                            "import json, psycopg, openpyxl, PIL, lxml.etree, pymupdf; print(json.dumps({'imports':'passed'}))"],trial,check_env,require_output=True)
                         check = digest(json.loads(output))
                     else:
-                        check = check_npm(trial/target,env)
+                        check = check_npm(trial/target,check_env)
                     mark('checks')
                     shutil.rmtree(trial)
                     if not cold and cache.exists():

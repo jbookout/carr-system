@@ -61,6 +61,15 @@ class SetupReplays(unittest.TestCase):
             (source/'PG_VERSION').write_text('17')
             with self.assertRaises(mod.Refusal): mod.save_tree(source, root/'cluster', self.identity())
 
+    def test_each_trial_has_an_independent_home_config_and_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            first=mod.trial_environment({'PATH':os.environ.get('PATH','')},root/'first')
+            second=mod.trial_environment({'PATH':os.environ.get('PATH','')},root/'second')
+            for key in ('HOME','XDG_CONFIG_HOME','TMPDIR'):
+                Path(first[key],'state').write_text('fixture mutation')
+                self.assertFalse(Path(second[key],'state').exists())
+
     def test_external_symlink_cannot_be_saved(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); source=root/'source'; source.mkdir()
