@@ -730,13 +730,26 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                          ("jev_spend_alert", "failed", 1))
 
     def test_loader_errors_are_contained_in_canonical_health_and_cli(self):
+        self.assert_loader_failure_findings({"jev_cap_client", "jev_site_client"})
+
+    def test_healthy_site_loader_is_exercised_when_cap_loader_fails(self):
+        self.assert_loader_failure_findings({"jev_cap_client"})
+
+    def assert_loader_failure_findings(self, failing_loaders):
         import io, contextlib, importlib.util, runpy, sys
-        from unittest.mock import patch
+        from unittest.mock import Mock, patch
         original = importlib.util.spec_from_file_location
         def fail_cap_loader(name, *args, **kwargs):
-            if name in ("jev_cap_client", "jev_site_client"):
+            if name in failing_loaders:
                 raise ImportError("fixture missing client configuration")
-            return original(name, *args, **kwargs)
+            spec = original(name, *args, **kwargs)
+            if name == "jev_site_client":
+                # This CLI section also reads site budgets. Keep that independent
+                # observation healthy instead of consulting the machine's cap log.
+                spec.loader = Mock(exec_module=lambda client: setattr(
+                    client, "spend_by_site_health",
+                    lambda: "OK jev spend by site — fixture"))
+            return spec
         with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
             ns = self.namespace()
             with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -752,7 +765,12 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
             self.assertIn("UNKNOWN jev paid cap", narrow.getvalue())
             self.assertIn("ImportError", narrow.getvalue())
             rows = json.loads(findings.read_text())["findings"]
-            self.assertEqual({row["key"] for row in rows}, {"jev_paid_cap", "jev_site_budget"})
+            expected = {"jev_paid_cap"}
+            if "jev_site_client" in failing_loaders:
+                expected.add("jev_site_budget")
+            else:
+                self.assertIn("OK jev spend by site — fixture", narrow.getvalue())
+            self.assertEqual({row["key"] for row in rows}, expected)
             self.assertTrue(all(row["hard_error"] for row in rows))
             [finding] = [row for row in rows if row["key"] == "jev_paid_cap"]
             self.assertEqual(finding["key"], "jev_paid_cap")
