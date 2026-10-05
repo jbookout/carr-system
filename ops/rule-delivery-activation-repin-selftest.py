@@ -35,7 +35,7 @@ def main():
         root = Path(temp)
         data, socket = root / "data", root / "socket"
         socket.mkdir()
-        subprocess.run([binaries.initdb, "-D", data, "--encoding=UTF8", "-A", "trust", "-U", "fixture"],
+        subprocess.run([binaries.initdb, "-D", data, "-A", "trust", "-U", "fixture", "--encoding=UTF8"],
                        check=True, capture_output=True, env=env, timeout=20)
         try:
             subprocess.run([binaries.pg_ctl, "-D", data, "-l", root / "pg.log", "-o",
