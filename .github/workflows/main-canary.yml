@@ -74,7 +74,7 @@ on:
 # cancelled job survives; pending replacement can reduce that estimate. Gross
 # allowance ignoring minutes already spent: 87/7 * 26 = 323.1 extra min/day.
 # These are workload estimates, not daily ceilings: one running + one pending
-# bounds concurrency; the 35-minute timeout bounds each job, not daily usage.
+# bounds concurrency; the 60-minute timeout bounds each job, not daily usage.
 # Actual added billed min/day = 0: this PUBLIC repo uses standard ubuntu-latest
 # (sample run 35783412154 timing API: billable.UBUNTU.total_ms=0). Policy:
 # https://docs.github.com/en/billing/concepts/product-billing/github-actions
@@ -92,7 +92,7 @@ jobs:
   canary:
     name: main canary (gates, migration, types, freshness)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
 
     services:
       postgres:

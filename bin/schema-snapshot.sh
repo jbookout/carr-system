@@ -1361,6 +1361,30 @@ if [ "$INVOICE_TRACKER_REGISTRY_APPLIED" = t ] && [ "$RELATIONSHIP_REGISTRY_APPL
   echo "schema-snapshot: invoice tracker v110 is applied without v109 predecessor" >&2; exit 1
 fi
 
+AUTOMATION_UNDO_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0844_automation_undo_scac_successor.sql')" \
+  2>/dev/null)"
+case "$AUTOMATION_UNDO_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read audited automation v111 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ] && [ "$INVOICE_TRACKER_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: audited automation v111 is applied without v110 predecessor" >&2
+  exit 1
+fi
+
+LEADS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0846_leads_scac_successor.sql')" \
+  2>/dev/null)"
+case "$LEADS_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read Leads v112 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$LEADS_REGISTRY_APPLIED" = t ] && [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Leads v112 is applied without v111 predecessor" >&2
+  exit 1
+fi
+
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v34 registry surface exists. A snapshot taken between the two would be taken
@@ -3265,6 +3289,28 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v109'"
                                        SCAC_FULL_SET_SEAL_COUNT=109
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v110_current()"
+                                     if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=111
+                                       SCAC_VERSION_COUNT=111
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v111'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v111'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v111.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v111'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v110'"
+                                       SCAC_FULL_SET_SEAL_COUNT=110
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v111_current()"
+                                     if [ "$LEADS_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=112
+                                       SCAC_VERSION_COUNT=112
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v112'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v112'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v112.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v112'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v111'"
+                                       SCAC_FULL_SET_SEAL_COUNT=111
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v112_current()"
+                                     fi
+                                     fi
                                      fi
                                      fi
                                      fi
