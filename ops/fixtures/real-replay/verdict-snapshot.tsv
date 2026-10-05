@@ -714,7 +714,7 @@ guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:995d89a284a1	deny	recursive/f
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	scenarios:5c0000000005	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
-jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=375 announce=66
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=374 announce=67
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:005d482ca566	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:010a4c03c18b	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:03e198646e6d	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
@@ -725,6 +725,7 @@ jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:106ba50bf4f1	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:12993081a8ac	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:1c14d7cd0107	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
+jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:24e45f35da6a	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2846baa603e1	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2a66692e0056	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:2d46204312ac	announce	[jev boundary_judgment] unavailable: Jev boundary judgment unavailable; inspect this result manually
