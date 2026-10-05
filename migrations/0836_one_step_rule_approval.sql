@@ -57,6 +57,10 @@ begin
     raise exception using message='Pack delivery must name at least one pack.', detail='{"error":"rule_delivery_invalid"}';
   end if;
 end $$;
+
+-- The invoker-rights activation trigger reads these delivery columns for every
+-- role that can write rules; authority login roles inherit carr_authority.
+grant select (rule_id,load_layer) on ops.rule_load_layer to carr_authority;
 revoke all on function ops.validate_rule_delivery(jsonb) from public;
 grant execute on function ops.validate_rule_delivery(jsonb) to carr_writer,carr_authority;
 

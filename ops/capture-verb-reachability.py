@@ -174,7 +174,8 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         return skip(f"gate_runtime_role is unavailable ({exc}), so the grant half cannot run")
 
-    dsn = (os.environ.get("DATABASE_URL", "")
+    dsn = (os.environ.get("CARR_CAPTURE_DATABASE_URL", "")
+           or os.environ.get("DATABASE_URL", "")
            or os.environ.get("CARR_LOCAL_PG_DSN", "")
            or os.environ.get("CARR_CI_DATABASE_URL", ""))
     if not dsn:

@@ -17,7 +17,13 @@ async function fixture(run) {
         create role carr_authority_joe login;
       end if;
     end $$`);
+    await c.query(`do $$ begin
+      if not exists (select 1 from pg_roles where rolname='carr_authority_dell') then
+        create role carr_authority_dell login;
+      end if;
+    end $$`);
     await c.query('grant carr_authority to carr_authority_joe');
+    await c.query('grant carr_authority to carr_authority_dell');
     // The reconstructed schema has no production rows; seed only this
     // transaction's named pack fixtures before exercising Joe's role.
     await c.query(`insert into ops.rule_pack(pack,title,description,triggers,source)
@@ -43,6 +49,15 @@ async function teach(c, actor, extra = {}) {
   });
 }
 const approveArgs = rule_id => ({ rule_id, idempotency_key: randomUUID(), reason: 'Joe approves this rule' });
+
+test('real PostgreSQL: every rule-writing authority can read the activation delivery binding', { skip: !dsn }, async () => fixture(async c => {
+  await c.query('reset session authorization');
+  for (const role of ['carr_authority', 'carr_authority_joe', 'carr_authority_dell']) {
+    await c.query(`set local role ${role}`);
+    await c.query('select rule_id,load_layer from ops.rule_load_layer limit 0');
+    await c.query('reset role');
+  }
+}));
 
 test('approve-rule translates SQL refusals into ToolError with a readable reason', async () => {
   const c = { query: async sql => {

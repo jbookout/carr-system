@@ -35,7 +35,8 @@ with tempfile.TemporaryDirectory() as root:
     token = Path(root) / 'synthetic-token.env'
     token.touch()
     dsn = 'postgres://carr_ci@127.0.0.1:55432/carr_ci'
-    env = {'CARR_MCP_ENV': str(token), 'CARR_CI_DATABASE_URL': dsn}
+    env = {'CARR_MCP_ENV': str(token), 'CARR_CAPTURE_DATABASE_URL': dsn,
+           'CARR_CI_DATABASE_URL': 'postgres://carr_ci@127.0.0.1:55432/empty_migration_target'}
     with patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, {
         'gate_runtime_role': types.SimpleNamespace(rollback_only_connection=rollback_only)
     }), patch.object(probe, 'probe_capture_path', return_value=(True, 'seeded schema refusal')):

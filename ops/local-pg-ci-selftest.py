@@ -264,11 +264,13 @@ check("true pre-0450 fingerprint is captured", events[8][-1] == "--fingerprint-o
 check("migration class runs through canonical CI", events[9][-2:] == ("--only", "migration"))
 check(
     "contract probes read initialized reference while migration retains an empty target",
-    child_envs[9].get("CARR_LOCAL_PG_DSN")
+    child_envs[9].get("CARR_CAPTURE_DATABASE_URL")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci_a2_pre"
     and child_envs[9].get("CARR_CI_DATABASE_URL")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci",
 )
+check("initialized contract reference is not exposed to unrelated live fixtures",
+      "CARR_LOCAL_PG_DSN" not in child_envs[9])
 check(
     "F03 PostgreSQL acceptance runs immediately after canonical CI",
     events[10][-1].endswith("tools/test-f03-production-migration.py"),
