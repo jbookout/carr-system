@@ -1,0 +1,14 @@
+{
+  "repository": "jbookout/software-factory",
+  "revision": "c072c283efd7002037f98b111ca3a43baf4d0592",
+  "files": {
+    "scripts/doc-drift/check.py": "035ac5d68f8c91af8b2b992068511d6837d0ea76db238c6eb1ae39bad901695b",
+    "scripts/doc-drift/requirements.txt": "0969da99a0bc2a1b71ed50584560f4588a37567ac63af3ddbaf3c4617ca5621a",
+    "scripts/doc-drift/ci.py": "8434782fec3f79d3afd09b897a140dd943c9d75af6944f750b770468f64ad72c",
+    "scripts/doc-drift/README.md": "5f6520cc2e6b1bb1602d843a111a57ce14a035177de5afa55d527dba9ecf90c0",
+    "scripts/doc-drift/loops.py": "c3af24b2f9eb76e8f04c48802bdd5ef0a13a8abacd96c336e3fd3654a62efd9c",
+    "test/doc_drift/test_loops.py": "f7b87b864980d528083dafb2b0737636ff69c88eb84b8073cc2b5daba09ffb04",
+    "test/doc_drift/test_ci.py": "8cf4da4e8599c16944de85b8d87ecf515328763973db8c6233b24b580c031599",
+    "test/doc_drift/test_checker.py": "aeb83ff02f9fcf9ecdc0b490d852b5f2a0cb240018068cf25134b898aeb0e882"
+  }
+}

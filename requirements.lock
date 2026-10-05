@@ -4,8 +4,9 @@
 # human-facing declaration with its environment markers; this is its
 # resolved output. Regenerate after changing requirements.txt:
 #     ops/ci-dep-check.py --write-lock
-# requirements.txt sha256: 9aa627933ab52a7dcaf09252acd6a8935228a4e2ab002955ecfb4e2f7f05577a
+# requirements.txt sha256: b07f1e51e3aa07c5361f529dbe374bbddd8b49b782b54876853038855d5a3ef2
 
+PyYAML==6.0.3
 Pygments==2.20.0
 ast_serialize==0.7.0 ; python_version >= "3.10"
 et_xmlfile==2.0.0
