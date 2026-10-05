@@ -80,3 +80,13 @@ test('missing release provenance leaves never-used history unknown', async () =>
   assert.equal(body.coverage, 'retained_window');
   assert.equal(body.features[0].never_used.joe, null);
 });
+
+test('weekly uses and last use survive app releases while never-used describes the current release', async () => {
+  const env = { OAUTH_KV: new Kv() }, previous = now - 86400000;
+  await usageResponse(post(event({ release_sha: 'b'.repeat(40), screen: 'deals', timestamp: new Date(previous).toISOString() })), env, session, { now: () => previous }, guard);
+  const response = await usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}&release_started_at=${new Date(now - 1000).toISOString()}`), env, session, { now: () => now }, guard);
+  const row = (await response.json()).features.find(row => row.id === 'deals:view');
+  assert.deepEqual(row.uses, { joe: 1, dell: 0 });
+  assert.equal(row.last_used.joe, '2026-10-04T12:00:00.000Z');
+  assert.equal(row.never_used.joe, true);
+});
