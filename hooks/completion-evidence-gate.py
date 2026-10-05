@@ -367,6 +367,7 @@ SYNTHETIC_CODEX_USER_PREFIXES = (
     "The following is the Codex agent history",
     "<environment_context>",
     "<app-context>",
+    "# AGENTS.md instructions for ",
 )
 CARR_PATH_MARKERS = (
     "/carr-system/", "/carr-system", "my drive/carr ai", "my\\ drive/carr\\ ai",
@@ -583,7 +584,7 @@ def verification(name, value):
 
 def last_human_index(recs):
     for idx in range(len(recs) - 1, -1, -1):
-        if not is_synthetic_user_record(recs[idx]) and text(recs[idx], {"user", "human"}).strip():
+        if human_order_text(recs[idx]).strip():
             return idx
     return -1
 
@@ -744,6 +745,25 @@ def order_text(value):
     value = MACHINE_TAG.sub(" ", value or "")
     value = CODE_SPAN.sub(" ", value)
     return MACHINE_LINE.sub(" ", value)
+
+
+def human_order_text(rec):
+    """Normalize task text before selecting turns or extracting their clauses."""
+    if is_synthetic_user_record(rec):
+        return ""
+    msg = message(rec)
+    if (msg.get("role") or rec.get("type")) not in {"user", "human"}:
+        return ""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return order_text(content)
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(order_text(block["text"]) for block in content
+                     if isinstance(block, dict)
+                     and block.get("type") in {"text", "input_text", "output_text"}
+                     and isinstance(block.get("text"), str)
+                     and not block["text"].lstrip().startswith(SYNTHETIC_CODEX_USER_PREFIXES))
 
 
 class Clause:
@@ -962,7 +982,7 @@ def order_clauses(value, turn=0):
 def human_turns(recs):
     """Absolute indices of genuine human turns, oldest first."""
     return [idx for idx, rec in enumerate(recs)
-            if not is_synthetic_user_record(rec) and text(rec, {"user", "human"}).strip()]
+            if human_order_text(rec).strip()]
 
 
 def receipt_index(recs):
@@ -1059,7 +1079,7 @@ def standing_clauses(recs, turns):
     """
     if not turns:
         return [], {}
-    said = [order_text(text(recs[idx], {"user", "human"})) for idx in turns]
+    said = [human_order_text(recs[idx]) for idx in turns]
     bounds, clauses = {}, []
     for position, idx in enumerate(turns):
         end = (turns[position + 1] - 1) if position + 1 < len(turns) else len(recs) - 1
