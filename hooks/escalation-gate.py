@@ -13,8 +13,9 @@ RULE aa411351 (taught 2026-08-09) draws the gate BY AUDIENCE, NOT BY DIFFICULTY:
     System decides everything internal — schema, records, renders, jobs, config,
                   rules, refactors, agent/skill design, its own procedure
 
-So a question whose subject is internal is not a question. It is a decision the
-session was supposed to make. This hook refuses it and says so.
+Internal implementation choices are the session's to make. Direct approval of
+a named rule, build or plan is Joe's (rule a3da3d39, 2026-10-04), even when its
+subject is internal; that AskUserQuestion must reach him in the same turn.
 
 ═══════════════════════════════════════════════════════════════════════════════
 THE THING THAT NEARLY BROKE A WORKING SKILL, AND WHY THIS IS NOT A BLANKET DENY
@@ -37,7 +38,7 @@ be switched off within a week, which is the same outcome as never building it.
     ASKING JOE TO DECIDE SOMETHING INTERNAL   -> refuse; he delegated that
     ASKING JOE WHAT HE ALONE KNOWS            -> allow; research cannot reach it
 
-FOUR ALLOW CLASSES, all narrow, none self-granted by the session:
+ALLOW CLASSES, all narrow, none self-granted by the session:
   1. FACT CAPTURE — what happened, what they said, who was there, how it went,
      a grade or verdict on a real-world event. Detected by past-tense/event
      vocabulary about the world rather than about the system.
@@ -49,6 +50,9 @@ FOUR ALLOW CLASSES, all narrow, none self-granted by the session:
   4. BOUNDARY CHANGE — anything that weakens a gate, widens permissions, edits
      hooks, or expands what the system may do unattended. See below; this is
      the one place the council overruled Joe's own framing, on purpose.
+  5. DIRECT APPROVAL — a named rule, restoration/retirement, build or plan,
+     asked explicitly with approve/not approve or approve/do not approve
+     option labels. Applies per AskUserQuestion item, never to parked loops.
 
 THE CONSTITUTIONAL CARVE-OUT. Joe's instruction was "internal is yours". Both
 council chairs independently, without being asked, refused that at exactly one
@@ -141,6 +145,34 @@ INTERNAL = re.compile(
     r"|sort order|sort by|ordering|sorting)\b",
     re.I)
 
+# Read approval intent only from the question stem and option LABELS. A word
+# buried in a header/description must not turn an approach choice into consent.
+APPROVAL_REQUEST = re.compile(
+    r"^(?:joe[, :]\s*)?(?:(?:do|would|will|can) you|should (?:you|joe)) "
+    r"(?:not )?approve\s+|^(?:approve|do not approve|don't approve)\s+", re.I)
+ARTIFACT_NAME = r"(?!(?:the|a|an|proposed|new|this|that|which|what|how)\b)[\w-]+(?:\s+[\w-]+){0,7}"
+APPROVAL_ARTIFACT = re.compile(
+    r"(?:restor(?:e|ing)|retir(?:e|ing)|(?:restoration|retirement) of)\s+"
+    r"(?:the\s+)?" + ARTIFACT_NAME + r"\s+rule"
+    r"|(?:the\s+)?(?:proposed\s+)?" + ARTIFACT_NAME + r"\s+rule"
+    r"|build(?:ing)?\s+(?:all\s+|the\s+)?" + ARTIFACT_NAME +
+    r"|(?:the\s+)?" + ARTIFACT_NAME + r"\s+(?:build|plan)", re.I)
+
+
+def direct_approval(question):
+    """A consent request for a named rule/build/plan, not an approach choice."""
+    stem = str(question.get("question", "")).strip().rstrip("?").strip()
+    request = APPROVAL_REQUEST.match(stem)
+    if request:
+        stem = stem[request.end():]
+    else:
+        labels = {re.sub(r"\s*\(recommended\)$", "", str(o.get("label", "")),
+                         flags=re.I).strip().lower()
+                  for o in (question.get("options") or []) if isinstance(o, dict)}
+        if "approve" not in labels or not labels.intersection({"don't approve", "do not approve"}):
+            return False
+    return APPROVAL_ARTIFACT.fullmatch(stem) is not None
+
 
 def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -231,7 +263,8 @@ def classify_per_item(tool_input, human_last):
                 parts.append(str(o.get("label", "")))
                 parts.append(str(o.get("description", "")))
         blob = "\n".join(p for p in parts if p)
-        allow, why = classify(blob, human_last)
+        allow, why = ((True, "direct_approval_is_joes") if direct_approval(q)
+                      else classify(blob, human_last))
         if not allow:
             return False, why      # one internal item refuses the whole call
         if blob.strip():
@@ -280,7 +313,8 @@ REASON = (
     "This gate does NOT block: asking him what only he knows (what happened in "
     "a meeting, what someone said, a vendor grade), anything client-facing, "
     "public-facing, money or irreversible, or anything that would widen the "
-    "system's own authority. Those still reach him."
+    "system's own authority, or direct approval of a named rule, build or plan "
+    "(rule a3da3d39). Those still reach him."
 )
 
 LOOP_REASON = (
