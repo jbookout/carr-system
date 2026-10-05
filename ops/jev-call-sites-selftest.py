@@ -388,6 +388,18 @@ class BudgetTests(Harness):
             with self.assertRaisesRegex(client.TypeSafeError, "daily paid call cap"):
                 self.ask("2")
 
+    def test_shared_cap_holds_across_overlapping_site_limits(self):
+        self.write_registry([site("hook_site", hourly_budget=3, daily_budget=3),
+                             site("job_site", hourly_budget=3, daily_budget=3)], hourly=100)
+        with patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=2):
+            self.ask("first site")
+            self.ask("second site", caller="job_site")
+            for caller in ("hook_site", "job_site"):
+                with self.assertRaises(client.JevCallRefused) as caught:
+                    self.ask("exhausted", caller=caller)
+                self.assertEqual(caught.exception.code, "daily_paid_call_cap")
+        self.assertEqual(len(self.requests), 2)
+
 
 class QuietNoticeTests(Harness):
     def test_cap_reached_surfaces_one_line_per_session_per_window(self):
@@ -755,9 +767,9 @@ class RegistryCoverageTests(unittest.TestCase):
         registry = client.load_call_sites(REGISTRY_PATH)
         self.assertLessEqual(registry["hourly_paid_call_cap"] * 24,
                              client.JEV_COST_CONFIG["daily_paid_call_cap"] * 24)
-        total = sum(e["daily_budget"] for e in registry["sites"].values())
-        self.assertLessEqual(total, client.JEV_COST_CONFIG["daily_paid_call_cap"],
-                             "site daily budgets must fit inside the global daily cap")
+        for entry in registry["sites"].values():
+            self.assertLessEqual(entry["daily_budget"], client.JEV_COST_CONFIG["daily_paid_call_cap"],
+                                 "each site limit sits beneath the shared admission cap")
 
     def test_every_paid_call_source_is_registered(self):
         registry = client.load_call_sites(REGISTRY_PATH)

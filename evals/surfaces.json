@@ -19,6 +19,8 @@
       "id": "jev-judgments",
       "description": "Jev question families, typed-judgment prompts and the TypeSafe client that carries them.",
       "globs": [
+        "jevlint.json",
+        "ops/jevlint_review.py",
         "ops/jev_*.py",
         "ops/typesafe_client.py",
         "tools/judge/interface.py",
