@@ -357,7 +357,7 @@ HUMAN_ONLY_WRITE_ACTION_EXACT = {
 CLAUSE_REASON = "unaccounted clause"
 FLOOR_REASONS = ("terminal completion claim has no fresh verification",
                  "delivery claim names no recipient")
-JEV_REQUIREMENT_REASON = "jev requirement judged unmet"
+JEV_REQUIREMENT_REASON = "explicit acceptance criterion unmet"
 
 CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity__")
 NESTED_CARR_CALL = re.compile(
@@ -1358,13 +1358,11 @@ def evaluate(recs, ledger=None):
 
 
 def jev_requirements_advisory(payload, recs):
-    """ops/jev_requirements.py asks Jev whether each requirement of the last
-    human request is met by this turn's diff, records the answer in
-    out/jev-judge.jsonl, and returns None or {"advisory": str|None, "unmet":
-    [...]}. It decides nothing itself -- main() is what turns an `unmet`
-    requirement into a reopened turn, and only when the close does not
-    already name that requirement as not done. Every failure returns None,
-    the abstention path: no requirement report is ever read as met."""
+    """Evaluate the last request's explicit criteria against its artifacts.
+
+    Semantic acceptance returns a review advisory. A missing report never
+    establishes acceptance. main() owns the reopened-turn decision.
+    """
     try:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -1397,14 +1395,8 @@ def main():
         blocked, reason = evaluate(recs, ledger)
         jev = jev_requirements_advisory(payload, recs)
 
-        # JEV ACTS BELOW LOW_AT (Joe, 2026-09-24, decision 5ec806a4: "every
-        # jev check in the system too is not a shadow"). Only tried when the
-        # deterministic layer above did not already reopen the turn for its
-        # own reason -- one reopening is enough, and the deterministic finding
-        # is reported first because it is what the session actually changed,
-        # not a probability about it. The ONE escape is the same one the
-        # clause layer gives: the close already says the requirement is not
-        # done, reusing RESIDUAL/terms_match rather than a second detector.
+        # Failed explicit criteria reopen only when the clause layer has not
+        # already done so. Naming the residual uses the same predicate.
         jev_identity = None
         if not blocked and isinstance(jev, dict):
             final = ledger.get("final", "")
@@ -1417,8 +1409,8 @@ def main():
                     continue
                 jev_identity = candidate
                 blocked = True
-                reason = (f'requirement judged unmet by Jev (p={item["probability"]:.2f}): '
-                          f'"{item["text"]}" — no receipt and the close does not say '
+                reason = (f'explicit acceptance criterion unmet: '
+                          f'"{item["text"]}" ({item.get("reason", "receipt missing")}) — the close does not say '
                           "it is not done")
                 break
 
