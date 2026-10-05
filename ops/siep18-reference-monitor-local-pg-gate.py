@@ -21,7 +21,7 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0834 installs Leads v109 and seals delivered system-work v108 as history.
+# 0844 installs Leads v109 and seals delivered system-work v108 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
 LIVE_REGISTRY_VERSION = "scac-mutation-registry.v109"
 LIVE_REGISTRY_ORDINAL = 109
