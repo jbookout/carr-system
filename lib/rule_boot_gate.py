@@ -65,6 +65,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import time
 
@@ -526,17 +527,22 @@ def fetch_instructions(pages, digest=None, pages_total=None):
     first = pages[0] if pages else 1
     head = (f"digest {str(digest)[7:19]}, " if digest else "") + (
         f"{pages_total} page(s)" if pages_total else "")
+    formatted = (f"cd {shlex.quote(REPO)} && ./run.sh call standing-context "
+                 f"'{{\"detail\":\"boot\",\"page\":{first}}}' | python3 -m json.tool")
     return (
         f"RULE BOOT: this context must read the CARR rules ({head}) before any other tool.\n"
         f"Fetch each missing page ({shown}), one call per page, then continue:\n"
         f"  MCP (CARR connector):  standing-context with {{\"detail\":\"boot\",\"page\":{first}}}\n"
         f"  Bash: {os.path.join(REPO, 'run.sh')} call standing-context "
         f"'{{\"detail\":\"boot\",\"page\":{first}}}'\n"
+        f"  Bash full-JSON formatter (literal repair command): {formatted}\n"
         "Until then only these calls, other standing-context calls, the read-only rule verbs "
         "(applicable-rules, resolve-doctrine-rules, read-doctrine, search-doctrine, doctrine-index, "
         "doctrine-sections) and ToolSearch will run. A leading `cd <absolute repo path> &&` and a pipe "
-        "into a formatter (jq, python3 -c from the repo root, head) keep it a fetch if the whole JSON "
-        "prints; anything run after the fetch (&&, ;, ||, &) does not. "
+        "into `jq .` or `python3 -m json.tool` (Python only from a repo root) keep it a fetch "
+        "if the whole JSON prints. Use the literal formatter command above; arbitrary Python "
+        "-c programs are not allowed. Anything run after "
+        "the fetch (&&, ;, ||, &) does not count. "
         "This can never lock you out: a fetch that "
         f"fails unlocks you with a notice, and after {DENY_CAP} holds without a fetch the gate "
         "stops holding this context.")
