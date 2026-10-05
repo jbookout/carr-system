@@ -452,10 +452,8 @@ def transcript_chunks(transcript: dict[str, Any], limit: int = 24000,
 
 
 def _topic_chunks(transcript: dict[str, Any]) -> list[dict[str, Any]]:
-    """Share one optional judgment budget across every cut, then split greedily."""
-    deadline = time.monotonic() + post_call_jev.TOPIC_CUT_BUDGET_SECONDS
-    return transcript_chunks(transcript, choose_cut=lambda segments, options:
-        post_call_jev.topic_cut(segments, options, deadline=deadline))
+    """Use deterministic size cuts while semantic topic effects are disabled."""
+    return transcript_chunks(transcript)
 
 
 def merge_chunk_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:

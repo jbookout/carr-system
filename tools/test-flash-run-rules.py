@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Contract tests for Flash's per-task rule delivery (pick_rules / rules_block).
+"""Flash rule delivery uses the full corpus and exposes semantic advice for review.
 
-ops/rule_trigger_delivery.judge_budgeted ranks the whole active corpus and judges the
-shortlist for ONE Flash task; flash-run appends the picks to each attempt's system
-prompt. Delivery must fail open but visibly: an unavailable or partial judgment leaves
-the attempt with whatever was judged, and the note names the gap for the run log.
-
-These drive the real selector module; only the two paid requests (rank, bind) are
-injected, so the roster, the status report and the hydration are the production ones.
+The selector runs through its production interface with an offline binding transport.
+Suggestions never become an authoritative system-prompt block.
 """
 
 from __future__ import annotations
@@ -15,6 +10,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import tempfile
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -52,24 +49,18 @@ def check(name, fn):
 
 
 class Paid:
-    """The two paid requests, scripted. Records the pool the ranker was offered."""
+    def __init__(self, noul=0.9, bind_raises=None, drop=()):
+        self.noul, self.bind_raises, self.drop = noul, bind_raises, set(drop)
+        self.calls = []
 
-    def __init__(self, ranked=(), noul=0.9, rank_raises=None, bind_raises=None, drop=()):
-        self.ranked, self.noul = list(ranked), noul
-        self.rank_raises, self.bind_raises, self.drop = rank_raises, bind_raises, set(drop)
-        self.pool, self.situations = [], []
-
-    def rank(self, text, pool, limit, client):
-        self.situations.append(text)
-        self.pool = [rule["id"] for rule in pool]
-        if self.rank_raises:
-            raise self.rank_raises
-        return [rule_id for rule_id in self.ranked if rule_id in self.pool][:limit], 1, "jev"
+    def rank(self, *args, **kwargs):
+        raise AssertionError("shortlisting must be deterministic")
 
     def ask(self, state, questions):
+        self.calls.append((state, questions))
         if self.bind_raises:
             raise self.bind_raises
-        return {"model": "jev", "answers": {
+        return {"model": "jev-1.13.0", "answers": {
             key: {"noul": self.noul} for key in questions
             if key.removeprefix("bind_") not in self.drop}}
 
@@ -84,62 +75,63 @@ class FakeClient:
 
 
 def roster_is_the_whole_active_corpus():
-    paid = Paid(ranked=VERIFY_RULES)
-    rules, note = fr.pick_rules("build a CI check for the export", **paid.judge())
-    assert note is None, note
-    corpus = {rule["id"] for rule in rtd.load_rules()}
+    corpus = rtd.load_rules()
     pack = {rule["id"] for rule in rtc.pack_rules()}
-    assert set(paid.pool) == corpus, (len(paid.pool), len(corpus))
-    assert len(corpus) > len(pack), (len(corpus), len(pack))
+    observed = []
+    def select(text, rules, always, **kwargs):
+        observed.extend(rules)
+        return {}, {"rank_status": "ok", "bind_status": "none"}
+    with patch.object(rtd, "judge_budgeted", side_effect=select), patch.object(fr, "_lib", return_value=rtd):
+        rules, note = fr.pick_rules("build a CI check for the export")
+    assert note is None and rules == [], (rules, note)
+    assert {rule["id"] for rule in observed} == {rule["id"] for rule in corpus}
     for rule_id in VERIFY_RULES:
-        assert rule_id not in pack, rule_id
-        assert rule_id in paid.pool, rule_id
-    assert {rule["id"] for rule in rules} == set(VERIFY_RULES), rules
+        assert rule_id not in pack
+        assert rule_id in {rule["id"] for rule in observed}
 
 
-def describes_the_real_situation_and_hydrates_text():
-    paid = Paid(ranked=["a9ecd5b4"])
-    rules, _ = fr.pick_rules("write a gate hook", **paid.judge())
-    # The situation must say Flash does no git or delivery, or session-level rules
-    # (worktree-per-session, own-the-merge) get picked for a disposable copy.
-    assert "no git" in paid.situations[0] and "write a gate hook" in paid.situations[0]
-    statement = {rule["id"]: rule["statement"] for rule in rtd.load_rules()}["a9ecd5b4"]
-    assert rules[0]["statement"] == statement, rules
-    assert statement[:80] in fr.rules_block(rules)
+def semantic_advice_is_visible_but_never_delivered():
+    paid = Paid()
+    rules, note = fr.pick_rules("compare artifact against what it should be before and after", **paid.judge())
+    assert rules == [] and fr.rules_block(rules) is None, rules
+    assert note and "review required" in note, note
+    assert len(paid.calls) == 1, paid.calls
+    state, _ = paid.calls[0]
+    assert "no git" in state["situation"] and "compare artifact" in state["situation"]
+    assert "a9ecd5b4" in state["rules"], sorted(state["rules"])
+    assert "a9ecd5b4" in note, note
 
 
 def bind_outage_is_reported_not_an_empty_success():
-    paid = Paid(ranked=VERIFY_RULES, bind_raises=TimeoutError("jev timed out"))
+    paid = Paid(bind_raises=TimeoutError("jev timed out"))
     rules, note = fr.pick_rules("build a CI check", **paid.judge())
     assert rules == [], rules
     assert note and "unavailable" in note, note
+    assert len(paid.calls) == 1
 
 
-def partial_bind_keeps_matches_and_names_the_gap():
-    paid = Paid(ranked=VERIFY_RULES, drop=["a6e6ab4e"])
-    rules, note = fr.pick_rules("build a CI check", **paid.judge())
-    assert [rule["id"] for rule in rules] == ["a9ecd5b4"], rules
-    assert note and "partial" in note, note
+def partial_bind_exposes_review_and_the_gap():
+    paid = Paid(drop=["a9ecd5b4"])
+    rules, note = fr.pick_rules("compare artifact against what it should be before and after", **paid.judge())
+    assert rules == [], rules
+    assert note and "partial" in note and "review required" in note, note
 
 
-def rank_outage_falls_back_and_says_so():
-    paid = Paid(rank_raises=RuntimeError("ranker down"))
-    rules, note = fr.pick_rules("compare the known-good backup artifact before and after",
-                                **paid.judge())
-    assert note and "unavailable_overlap_fallback" in note, note
-    assert rules, "the overlap shortlist is still judged"
+def low_scores_are_an_empty_success():
+    rules, note = fr.pick_rules("build a CI check", **Paid(noul=0.1).judge())
+    assert rules == [] and note is None, (rules, note)
 
 
 def deadline_is_reported():
-    paid = Paid(ranked=VERIFY_RULES)
+    paid = Paid()
     rules, note = fr.pick_rules("build a CI check", deadline=0.0, **paid.judge())
-    assert rules == [], rules
+    assert rules == [] and not paid.calls, (rules, paid.calls)
     assert note and "deadline" in note, note
 
 
 def fails_open_when_the_selector_breaks():
     rules, note = fr.pick_rules("fix a bug", titles=object(),
-                                rank=Paid(ranked=VERIFY_RULES).rank, ask=Paid().ask,
+                                rank=Paid().rank, ask=Paid().ask,
                                 client=FakeClient())
     assert rules == [], rules
     assert note and "AttributeError" in note, note
@@ -157,15 +149,16 @@ def block_carries_statement_and_caps_length():
     assert "WRITE THE TEST BEFORE THE THING" in block
 
 
-check("roster is the whole active corpus, not the pack layer", roster_is_the_whole_active_corpus)
-check("describes Flash's real situation and hydrates rule text", describes_the_real_situation_and_hydrates_text)
-check("a binding outage is reported, not an empty success", bind_outage_is_reported_not_an_empty_success)
-check("a partial binding keeps matches and names the gap", partial_bind_keeps_matches_and_names_the_gap)
-check("a ranking outage falls back and says so", rank_outage_falls_back_and_says_so)
-check("a deadline is reported", deadline_is_reported)
-check("fails open when the selector breaks", fails_open_when_the_selector_breaks)
-check("no rules -> no block", block_is_empty_without_rules)
-check("block carries rule text and caps its size", block_carries_statement_and_caps_length)
+with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=tmp):
+    check("roster is the whole active corpus, not the pack layer", roster_is_the_whole_active_corpus)
+    check("semantic advice is visible but never delivered", semantic_advice_is_visible_but_never_delivered)
+    check("a binding outage is reported, not an empty success", bind_outage_is_reported_not_an_empty_success)
+    check("a partial binding exposes review and the gap", partial_bind_exposes_review_and_the_gap)
+    check("low scores are an empty success", low_scores_are_an_empty_success)
+    check("a deadline is reported", deadline_is_reported)
+    check("fails open when the selector breaks", fails_open_when_the_selector_breaks)
+    check("no rules -> no block", block_is_empty_without_rules)
+    check("block carries rule text and caps its size", block_carries_statement_and_caps_length)
 
 if FAILURES:
     print(f"flash-run rules: {len(FAILURES)} FAILED")
