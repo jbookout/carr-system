@@ -156,7 +156,11 @@ APPROVAL_REQUEST = re.compile(
 NAME_START = (
     r"(?!(?:the|a|an|proposed|new|this|that|it|them|these|those|"
     r"use|using|choose|choosing|pick|picking|select|selecting|"
-    r"run|running|schedule|scheduling|build|building|\w+ing)\b)"
+    r"run|running|schedule|scheduling|build|building|add|adding|"
+    r"create|creating|configure|configuring|edit|editing|change|changing|"
+    r"remove|removing|replace|replacing|modify|modifying|refactor|refactoring|"
+    r"migrate|migrating|install|installing|rename|renaming|delete|deleting|"
+    r"drop|dropping|update|updating|implement|implementing)\b)"
 )
 NAME_WORD = r"(?!(?:for|in|with|at|by|on|to|as)\b)[\w-]+"
 NAME_PHRASE = NAME_START + NAME_WORD + r"(?:\s+" + NAME_WORD + r"){0,7}"
