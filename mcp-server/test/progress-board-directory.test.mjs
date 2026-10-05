@@ -60,3 +60,14 @@ test("summary counts status values without exposing task data and tolerates lega
     blocked: { status: "blocked" }, unknown: { status: "custom" }, prototype: { status: "__proto__" },
   } } }).task_counts, JSON.parse('{"__proto__":1,"blocked":1,"custom":1,"queued":2}'));
 });
+
+
+test("stale cards count separately from active work", () => {
+  const row = { board_id: "demo", snapshot_json: { tasks: {
+    old: { status: "running", activity_status: "stale" },
+    queued: { status: "queued", activity_status: "stale" },
+    review: { status: "review", activity_status: "stale" },
+    current: { status: "running" }, blocked: { status: "blocked" },
+  } } };
+  assert.deepEqual(progressBoardSummary(row).task_counts, { blocked: 1, running: 1, stale: 3 });
+});
