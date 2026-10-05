@@ -177,6 +177,16 @@ class ValueTests(unittest.TestCase):
                 report = jvr.build_report(sources(commits=[commit]), START, END)
                 self.assertEqual(report["totals"]["outcomes_verified"], 1)
 
+    def test_historical_adverb_before_test_subject_preserves_positive_attribution(self):
+        for statement in ("Earlier, our tests did not find any bug.",
+                          "Previously, our tests did not identify a bug."):
+            with self.subTest(statement=statement):
+                commit = {"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                          "subject": "Fix bug Jev found", "body": statement}
+                report = jvr.build_report(sources(commits=[commit]), START, END)
+                self.assertEqual((jvr.positive_attribution(commit) is not None,
+                                  report["totals"]["outcomes_verified"]), (True, 1))
+
     def test_negative_investigation_and_coincident_verdict_do_not_earn_credit(self):
         for denial in ("No bug found", "Investigation did not find a bug",
                        "Investigation did not identify any bug",
