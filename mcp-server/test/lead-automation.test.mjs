@@ -175,10 +175,14 @@ test("lead successor preserves human-only party merges and all v105 MCP contract
   const after = frozenInventory("scac-mutation-registry.v106");
   const byKey = new Map(boundInventoryRows(after).map(row => [row.ingress_key, row]));
   for (const row of boundInventoryRows(before).filter(row => row.ingress_key.startsWith("mcp-tool:"))) assert.deepEqual(byKey.get(row.ingress_key), row);
-  // Later frontiers carry the lead automation contracts forward unchanged.
+  // The workspace extends contact evidence; automation authority stays sealed.
   const current = new Map(boundInventoryRows(frozenInventory(CURRENT_REGISTRY_VERSION)).map(row => [row.ingress_key, row]));
-  for (const name of ["advance-leads", "approve-lead-draft", "approve-lead-move", "record-lead-contact"])
+  for (const name of ["advance-leads", "approve-lead-draft", "approve-lead-move"])
     assert.deepEqual(current.get(`mcp-tool:${name}`), byKey.get(`mcp-tool:${name}`));
+  const { schema_digest: beforeSchema, ...beforeContact } = byKey.get("mcp-tool:record-lead-contact");
+  const { schema_digest: currentSchema, ...currentContact } = current.get("mcp-tool:record-lead-contact");
+  assert.deepEqual(currentContact, beforeContact);
+  assert.notEqual(currentSchema, beforeSchema);
   assert.equal(registeredOperation("confirm-merge").human_only, true);
   for (const name of ["advance-leads", "approve-lead-draft", "approve-lead-move"])
     assert.ok(registeredOperation(name), `${name} must remain registered`);

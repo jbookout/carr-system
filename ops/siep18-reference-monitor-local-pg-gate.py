@@ -21,21 +21,21 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0844 installs automation v111 and retains delivered invoice v110 as history.
+# 0846 installs Leads v112 and retains audited automation v111 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v111"
-LIVE_REGISTRY_ORDINAL = 111
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v110"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v112"
+LIVE_REGISTRY_ORDINAL = 112
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v111"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:6af38d1b5900e64e138b4830b5d6efb4f533a577577f2ff8e36294997c97c0ec"
+    "sha256:ba7578babffacfaf076276ec6293e51678937b5c1f444cbf880cc276328854fa"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2675, 1112)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2678, 1109)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0842_invoice_tracker_scac_successor.sql"
+    "migrations/0844_automation_undo_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0844_automation_undo_scac_successor.sql"
+    "migrations/0846_leads_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

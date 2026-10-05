@@ -17,10 +17,10 @@ test('Leads extends the delivered system-work seal without rewriting its immutab
     assert.equal(createHash('sha256').update(read(path)).digest('hex'), expected,
       `${path} must retain the delivered predecessor bytes`);
   }
-  const leads = read('migrations/0844_leads_scac_successor.sql');
-  assert.match(leads, /scac_mutation_registration_v109\('sha256:[0-9a-f]{64}','mcp-tool:codex-read-recovery'\)/);
-  assert.match(leads, /scac-mutation-registry\.v110/);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v110\.generated\.js/);
+  const leads = read('migrations/0846_leads_scac_successor.sql');
+  assert.match(leads, /scac_mutation_registration_v111\('sha256:[0-9a-f]{64}','mcp-tool:codex-read-recovery'\)/);
+  assert.match(leads, /scac-mutation-registry\.v112/);
+  assert.ok(Number(read('mcp-server/src/mutation-registry.js').match(/scac-mutation-registry[.]v(\d+)[.]generated[.]js/)[1]) >= 112);
 });
 
 test('Leads extends the delivered relationship v109 frontier without rewriting it', () => {
@@ -31,9 +31,9 @@ test('Leads extends the delivered relationship v109 frontier without rewriting i
   };
   for (const [path, expected] of Object.entries(delivered))
     assert.equal(createHash('sha256').update(read(path)).digest('hex'), expected, path);
-  assert.match(read('mcp-server/src/mutation-registry.js'), /scac-mutation-registry\.v110\.generated\.js/);
-  const leads = read('migrations/0844_leads_scac_successor.sql');
-  assert.match(leads, /0840_relationship_scac_successor\.sql/);
-  assert.match(leads, /scac_mutation_registration_v109\(/);
-  assert.match(leads, /scac-mutation-registry\.v110/);
+  assert.ok(Number(read('mcp-server/src/mutation-registry.js').match(/scac-mutation-registry[.]v(\d+)[.]generated[.]js/)[1]) >= 112);
+  const leads = read('migrations/0846_leads_scac_successor.sql');
+  assert.match(leads, /0844_automation_undo_scac_successor\.sql/);
+  assert.match(leads, /scac_mutation_registration_v111\(/);
+  assert.match(leads, /scac-mutation-registry\.v112/);
 });
