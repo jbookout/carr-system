@@ -56,6 +56,8 @@ def map_digest(doc):
     body = json.dumps({"default_tier": doc["default_tier"], "rules": _strip(doc["rules"]),
                        "noise_exclusions": _strip(doc["noise_exclusions"]),
                        "never_exclude": _strip(doc["never_exclude"]),
+                       "test_files": _strip(doc.get("test_files", [])),
+                       "change_size": doc.get("change_size"),
                        "tunable_scalars": doc.get("tunable_scalars", [])},
                       sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -87,6 +89,8 @@ def render_module(doc):
         *block("rules", doc["rules"]),
         *block("noise_exclusions", doc["noise_exclusions"]),
         *block("never_exclude", doc["never_exclude"]),
+        *block("test_files", doc.get("test_files", [])),
+        "  change_size: Object.freeze(" + json.dumps(doc["change_size"]) + "),",
         "});",
         "",
     ]
@@ -98,7 +102,7 @@ def probe_paths(doc):
     near miss per rule, so each match kind is exercised in both languages."""
     with open(BASELINE_PATH, encoding="utf-8") as handle:
         probes = list(json.load(handle)["paths"])
-    for row in doc["rules"] + doc["noise_exclusions"] + doc["never_exclude"]:
+    for row in doc["rules"] + doc["noise_exclusions"] + doc["never_exclude"] + doc.get("test_files", []):
         pattern, kind = row["pattern"], row["match"]
         if kind == "path":
             probes += [pattern, pattern + ".bak", "x/" + pattern]
@@ -120,15 +124,32 @@ def probe_paths(doc):
 
 def render_vectors(doc):
     rt = _reader()
-    vectors = [{"path": p, "tier": rt.tier_for_path(p, doc), "noise": rt.is_review_noise(p, doc)}
+    vectors = [{"path": p, "tier": rt.tier_for_path(p, doc), "noise": rt.is_review_noise(p, doc), "test": rt.is_test_file(p, doc)}
                for p in probe_paths(doc)]
-    return json.dumps({
+    value = {
         "schema_version": "review-tier-vectors.v1",
         "generated_by": "ops/sync-review-tiers.py",
         "source": SOURCE_REL,
         "map_digest": map_digest(doc),
         "vectors": vectors,
-    }, indent=1) + "\n"
+        "change_vectors": [
+            {"changes": [{"path": "lib/example.py", "additions": 2, "deletions": 1},
+                         {"path": "tests/test_example.py", "additions": 400}],
+             "summary": {"code_lines": 3, "test_lines": 400, "change_size": "small",
+                         "code_paths": ["lib/example.py"], "test_paths": ["tests/test_example.py"]}, "path_tier": 1},
+            {"changes": [{"path": "tests/test_example.py", "additions": 400}],
+             "summary": {"code_lines": 0, "test_lines": 400, "change_size": "small",
+                         "code_paths": [], "test_paths": ["tests/test_example.py"]}, "path_tier": 1},
+            {"changes": [{"path": "ops/example-selftest.py", "additions": 400}],
+             "summary": {"code_lines": 0, "test_lines": 400, "change_size": "small",
+                         "code_paths": [], "test_paths": ["ops/example-selftest.py"]}, "path_tier": 3},
+        ],
+    }
+    value["policy_digest"] = "sha256:" + hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    for row in value["change_vectors"]:
+        row["decision"] = rt.review_decision(row["changes"], base="a" * 40, head="b" * 40,
+            policy_revision="c" * 40, diff_digest="sha256:" + "d" * 64, doc=doc)
+    return json.dumps(value, indent=1) + "\n"
 
 
 def _read(path):

@@ -17,6 +17,8 @@ import {
   REVIEW_TIERS,
   REVIEW_TIERS_SOURCE,
   isReviewNoise,
+  isTestFile,
+  reviewChangeSize,
   reviewTierForPath,
   reviewTierForPaths,
 } from "../src/review-tiers.js";
@@ -40,9 +42,10 @@ test("every path the controller refused before the map is still refused", () => 
 
 test("the JS reader agrees with the Python reader on every vector", () => {
   assert.ok(VECTORS.length > 0);
-  for (const { path, tier, noise } of VECTORS) {
+  for (const { path, tier, noise, test: testFile } of VECTORS) {
     assert.equal(reviewTierForPath(path), tier, path);
     assert.equal(isReviewNoise(path), noise, path);
+    assert.equal(isTestFile(path), testFile, path);
   }
 });
 
@@ -70,10 +73,28 @@ test("the generated module carries the committed map unchanged", () => {
   assert.deepEqual(REVIEW_TIERS.rules.map(row => ({ ...row })), strip(MAP.rules));
   assert.deepEqual(REVIEW_TIERS.noise_exclusions.map(row => ({ ...row })), strip(MAP.noise_exclusions));
   assert.deepEqual(REVIEW_TIERS.never_exclude.map(row => ({ ...row })), strip(MAP.never_exclude));
+  assert.deepEqual(REVIEW_TIERS.test_files.map(row => ({ ...row })), strip(MAP.test_files));
+  assert.deepEqual(REVIEW_TIERS.change_size, MAP.change_size);
 });
 
 test("a path that is not a string is refused rather than treated as tier 1", () => {
   assert.equal(reviewTierForPath(undefined), 3);
   assert.equal(reviewTierForPath(""), 3);
   assert.ok(mergeRefuses(""));
+});
+
+test("test classification is evidence and preserves path tiers", async () => {
+  const { isTestFile } = await import("../src/review-tiers.js");
+  assert.equal(isTestFile("ops/example-selftest.py"), true);
+  assert.equal(reviewTierForPath("ops/example-selftest.py"), 3);
+  assert.equal(isTestFile("tests/package-lock.json"), true);
+  assert.equal(isReviewNoise("tests/package-lock.json"), false);
+  assert.equal(isTestFile("src/example.test.tsx.bak"), false);
+});
+
+test("code and test change vectors match the Python reader", () => {
+  for (const row of readRepoJson("ops/fixtures/review-tiers/tier-vectors.v1.json").change_vectors) {
+    assert.deepEqual(reviewChangeSize(row.changes), row.summary);
+    assert.equal(reviewTierForPaths(row.changes.map(c => c.path)), row.path_tier);
+  }
 });
