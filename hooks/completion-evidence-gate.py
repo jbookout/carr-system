@@ -1358,7 +1358,7 @@ def evaluate(recs, ledger=None):
 
 
 def jev_requirements_advisory(payload, recs):
-    """Evaluate explicit criteria against retained artifact/check receipts.
+    """Evaluate the last request's explicit criteria against its artifacts.
 
     Semantic acceptance returns a review advisory. A missing report never
     establishes acceptance. main() owns the reopened-turn decision.

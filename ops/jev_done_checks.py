@@ -1,7 +1,8 @@
 """Completion and review predicates. Semantic residuals explicitly need review.
 
 No model or model-result cache participates in these checks. A path tier is a
-contract, a check receipt is evidence, and free-text acceptance is unresolved.
+contract, an artifact the verifier reads is evidence, and free-text acceptance
+is unresolved.
 """
 import ast
 import importlib.util
@@ -156,7 +157,7 @@ def _collect_items(task_text, transcript_path, changed_paths, failure_output):
     return items
 
 
-def check_test_quality(test_source, code_under_test, task_text, *, client=None, judge_module=None):
+def check_test_quality(test_source, code_under_test, task_text):
     if not test_source or not TEST_MARKERS.search(test_source):
         return _result("test_quality","not_triggered")
     try:
@@ -176,7 +177,7 @@ def check_test_quality(test_source, code_under_test, task_text, *, client=None, 
                    advice="Behavioral coverage and stated edge cases need review.")
 
 
-def check_done_claim(final_message, evidence, *, client=None, judge_module=None):
+def check_done_claim(final_message, evidence):
     if not final_message or not DONE_CLAIM.search(final_message):
         return _result("done_claim","no_claim")
     evidence = evidence or {}
@@ -197,15 +198,14 @@ def check_done_claim(final_message, evidence, *, client=None, judge_module=None)
                        advice="Completion conflicts with unresolved check failures.")
     if evidence.get("test_history_truncated"):
         return _result("done_claim","needs_review",escalate=True,advice="Omitted check runs need review.")
-    receipt = _sibling_lib("acceptance_checks").evaluate(evidence.get("criteria"),evidence,
-                                                       root=evidence.get("root",REPO))
+    receipt = _sibling_lib("acceptance_checks").evaluate(evidence.get("criteria"),root=evidence.get("root",REPO))
     verdict = {"passed":"supported","failed":"unsupported","needs_review":"needs_review"}[receipt["status"]]
     return _result("done_claim",verdict,escalate=verdict == "needs_review",detail=receipt,
                    advice="Completion criteria need review." if verdict == "needs_review" else
                           "Completion criteria are not met." if verdict == "unsupported" else None)
 
 
-def triage_review(diff_text, task_text, *, client=None, judge_module=None, cache_path=None, now=None):
+def triage_review(diff_text, task_text):
     files = split_diff_by_file(diff_text)
     results = {}
     for path in files:
@@ -220,7 +220,7 @@ def triage_review(diff_text, task_text, *, client=None, judge_module=None, cache
                    detail={"files":results},advice="Review the diff at its path-contract tiers." if files else None)
 
 
-def fact_check(claim_text, doctrine_passages, *, client=None, judge_module=None):
+def fact_check(claim_text, doctrine_passages):
     passages = [p for p in doctrine_passages or [] if isinstance(p,dict) and p.get("ref") and p.get("text")]
     if not claim_text or not passages:
         return _result("fact_check","unsupported",advice="Claim or source passages missing.")
@@ -229,8 +229,7 @@ def fact_check(claim_text, doctrine_passages, *, client=None, judge_module=None)
                    advice="Semantic support or contradiction needs review.")
 
 
-def build_handoff(task_text, transcript_path, changed_paths, failure_output=None, *,
-                  max_chars=12000, client=None, judge_module=None):
+def build_handoff(task_text, transcript_path, changed_paths, failure_output=None, *, max_chars=12000):
     items = _collect_items(task_text,transcript_path,changed_paths,failure_output)
     # Task and current failure come first; then diffs and newest notes. Never
     # drop the task because a later small item fits the remaining space.
@@ -252,8 +251,7 @@ def build_handoff(task_text, transcript_path, changed_paths, failure_output=None
     return {"pack":"\n\n".join(parts),"kept":kept,"dropped":dropped}
 
 
-def inspect_stop_boundary(final_message, evidence, diff_text, task_text, session_id,
-                          *, client=None, judge_module=None, state_dir=None, receipt_path=None):
+def inspect_stop_boundary(final_message, evidence, diff_text, task_text, session_id):
     # Predicates are cheap and read current evidence on every call. No stale
     # model-result cache can suppress a newly failed check.
     results = [check_done_claim(final_message,evidence),triage_review(diff_text,task_text)]

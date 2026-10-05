@@ -329,28 +329,12 @@ def strip_noise(text):
     return text
 
 
-def _jev_hands_off():
-    """ops/jev_handoff.hands_off, or None when the module cannot load. A gate
-    must never fail because its judgment is missing; it falls back to the
-    keyword patterns it always had."""
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "jev_handoff", os.path.join(REPO, "ops", "jev_handoff.py"))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.hands_off
-    except Exception:
-        return None
-
-
-def scan(assistant, human_last, denied=(), jev=None):
+def scan(assistant, human_last, denied=()):
     """Return (fired, findings). findings = list of (klass, name).
 
-    `jev`, when given, is ops/jev_handoff.hands_off: Jev reads the whole message
-    and catches a handoff written as prose the keyword patterns do not match
-    (Joe, 2026-09-23: "if you can run it yourself you should do that before you
-    ever ask me"). None in the offline selftest, so the suite stays network-free.
+    Command handoffs are found by the fence and HANDOFF_PROSE patterns only.
+    A handoff written as prose those patterns miss is not machine-detected;
+    no observed capability or permission evidence exists here to decide it.
     """
     findings = []
     prose = strip_noise(assistant)
@@ -370,10 +354,6 @@ def scan(assistant, human_last, denied=(), jev=None):
         for name, pat in HANDOFF_PROSE:
             if pat.search(prose):
                 findings.append(("command_handoff", name))
-        if jev is not None:
-            keyword = any(k == "command_handoff" for k, _ in findings)
-            if jev(assistant, surface="stop", existing_decision=keyword) and not keyword:
-                findings.append(("command_handoff", "jev"))
 
     # (1)+(3) OFFLOAD — exempt if the human asked for a choice, or if the
     # decision is genuinely a protected class that belongs to Joe by rule.
@@ -614,8 +594,7 @@ def main():
         if not assistant:
             sys.exit(0)
 
-        fired, findings = scan(assistant, last_human, denied_commands(recs, start),
-                               jev=None if payload.get("session_id") == "selftest" else _jev_hands_off())
+        fired, findings = scan(assistant, last_human, denied_commands(recs, start))
 
         # WR-000019 S8: the writing shadow check runs regardless of whether
         # any OTHER conduct class fired — it is measuring its own catch rate

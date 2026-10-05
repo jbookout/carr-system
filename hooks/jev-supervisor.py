@@ -367,11 +367,10 @@ def stop(payload, run):
             final = ""
     done = _lib("jev_done_checks")
     evidence = _last_test_evidence(transcript) if transcript else {}
+    # The pre-launch contract's artifacts are read from disk by the predicate
+    # itself; the payload carries no evidence a session could author.
     criteria = _lib_acceptance_contract(task).get("criteria")
     if criteria:
-        supplied = payload.get("acceptance_evidence")
-        if isinstance(supplied, dict):
-            evidence.update({k: supplied[k] for k in ("artifacts", "checks") if k in supplied})
         evidence.update({"criteria": criteria, "claim_scope": "current_completion", "root": root or cwd})
     diff = ""
     if root:

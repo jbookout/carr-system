@@ -317,41 +317,21 @@ ATTEMPT_FIRST_REASON = (
     "yourself you should do that before you ever ask me.\"")
 
 
-def _jev_hands_off():
-    """ops/jev_handoff.hands_off, or None when it cannot load (fail open to
-    the keyword patterns)."""
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "jev_handoff", os.path.join(REPO, "ops", "jev_handoff.py"))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.hands_off
-    except Exception:
-        return None
-
-
-def hands_off_unattempted(blob, human_last, denied, jev=None):
+def hands_off_unattempted(blob, human_last, denied):
     """Return the finding name when the question hands Joe an untried command,
-    else None. Keyword patterns first; Jev reads the prose they miss."""
+    else None. Keyword patterns only: prose they miss is not machine-detected."""
     if not blob.strip():
         return None
     if human_last and HUMAN_WANTS_COMMAND.search(human_last):
         return None
     if denied and handoff_was_denied(blob, denied):
         return None
-    keyword = None
     if FENCE.search(blob) or BARE_FENCE_CMD.search(blob) or INLINE_CMD.search(blob):
-        keyword = "command"
-    else:
-        for name, pat in HANDOFF_PROSE:
-            if pat.search(blob):
-                keyword = name
-                break
-    if jev is not None:
-        if jev(blob, surface="ask", existing_decision=keyword is not None) and not keyword:
-            return "jev"
-    return keyword
+        return "command"
+    for name, pat in HANDOFF_PROSE:
+        if pat.search(blob):
+            return name
+    return None
 
 
 def read_turn(path, limit=400):
@@ -414,7 +394,7 @@ def main():
         if is_ask:
             blob = question_text(ti)
             finding = hands_off_unattempted(
-                blob, human_last, denied_commands(recs, start), jev=None if payload.get("session_id") == "selftest" else _jev_hands_off())
+                blob, human_last, denied_commands(recs, start))
             if finding:
                 audit({
                     "ts": now(),

@@ -32,69 +32,107 @@ class DeterministicTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
 
+    def receipt(self, name):
+        return {'path':name,'sha256':hashlib.sha256((self.root/name).read_bytes()).hexdigest()}
+
     def test_receipt_reads_bytes_and_expected_json_not_just_status(self):
         from lib.acceptance_checks import evaluate
         artifact = self.root / 'result.json'
         artifact.write_text('{"count":2}')
         criteria = [{'id':'count', 'kind':'json_equals', 'path':'result.json', 'pointer':'/count', 'value':2}]
-        evidence = {'artifacts':[{'path':'result.json', 'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}]}
-        self.assertEqual(evaluate(criteria, evidence, root=self.root)['status'], 'passed')
+        receipts = [self.receipt('result.json')]
+        self.assertEqual(evaluate(criteria, root=self.root, receipts=receipts)['status'], 'passed')
         artifact.write_text('{"count":1}')
-        self.assertEqual(evaluate(criteria, evidence, root=self.root)['status'], 'failed')
-        evidence['artifacts'][0]['sha256'] = hashlib.sha256(artifact.read_bytes()).hexdigest()
-        self.assertEqual(evaluate(criteria, evidence, root=self.root)['status'], 'failed')
+        self.assertEqual(evaluate(criteria, root=self.root, receipts=receipts)['status'], 'failed')
+        self.assertEqual(evaluate(criteria, root=self.root, receipts=[self.receipt('result.json')])['status'], 'failed')
+
+    def test_observed_artifacts_need_no_worker_receipt(self):
+        from lib.acceptance_checks import evaluate
+        (self.root/'result.json').write_text('{"count":2}')
+        criterion = {'id':'count', 'kind':'json_equals', 'path':'result.json', 'pointer':'/count', 'value':2}
+        self.assertEqual(evaluate([criterion], root=self.root)['status'], 'passed')
+        self.assertEqual(evaluate([{**criterion,'value':3}], root=self.root)['status'], 'failed')
+        self.assertEqual(evaluate([{**criterion,'path':'missing'}], root=self.root)['status'], 'failed')
 
     def test_empty_or_semantic_criteria_never_authorize_completion(self):
         from lib.acceptance_checks import evaluate
         for criteria in ([], ['make it delightful'], [{'kind':'semantic','text':'good'}]):
-            self.assertEqual(evaluate(criteria, {}, root=self.root)['status'], 'needs_review')
+            self.assertEqual(evaluate(criteria, root=self.root)['status'], 'needs_review')
 
-    def test_check_receipts_bind_command_source_and_output(self):
+    def test_check_criteria_cannot_be_satisfied_by_claimed_results(self):
         from lib.acceptance_checks import evaluate
-        criteria = [{'id':'ci','kind':'check','command':'ops/ci.sh','source_sha':'a'*40,'output_contains':'CI passed'}]
-        row = {'command':'ops/ci.sh','source_sha':'a'*40,'exit_code':0,'output':'CI passed'}
-        evidence = {'checks':[row]}
-        self.assertEqual(evaluate(criteria,evidence,root=self.root)['status'],'passed')
-        for field, value in [('command','other'),('source_sha','b'*40),('exit_code',1),('output','failed')]:
-            with self.subTest(field=field):
-                self.assertEqual(evaluate(criteria,{'checks':[{**row,field:value}]},root=self.root)['status'],'failed')
+        criterion = {'id':'ci','kind':'check','command':'false','source_sha':'a'*40,'output_contains':'tests passed'}
+        result = evaluate([criterion], root=self.root)
+        self.assertEqual(result['status'], 'needs_review')
 
     def test_artifact_expected_digest_and_containment(self):
         from lib.acceptance_checks import evaluate
         path=self.root/'output';path.write_text('content')
         digest=hashlib.sha256(path.read_bytes()).hexdigest()
-        evidence={'artifacts':[{'path':'output','sha256':digest}]}
+        receipts=[self.receipt('output')]
         criterion={'id':'output','kind':'artifact','path':'output'}
-        self.assertEqual(evaluate([criterion],evidence,root=self.root)['status'],'needs_review')
-        self.assertEqual(evaluate([{**criterion,'sha256':digest}],evidence,root=self.root)['status'],'passed')
-        self.assertEqual(evaluate([{**criterion,'sha256':'0'*64}],evidence,root=self.root)['status'],'failed')
+        self.assertEqual(evaluate([criterion],root=self.root,receipts=receipts)['status'],'needs_review')
+        self.assertEqual(evaluate([{**criterion,'sha256':digest}],root=self.root,receipts=receipts)['status'],'passed')
+        self.assertEqual(evaluate([{**criterion,'sha256':'0'*64}],root=self.root,receipts=receipts)['status'],'failed')
         for path_value in ('../outside', str(self.root.parent/'outside')):
-            self.assertEqual(evaluate([{**criterion,'path':path_value}],evidence,root=self.root)['status'],'failed')
+            self.assertEqual(evaluate([{**criterion,'path':path_value}],root=self.root,receipts=receipts)['status'],'failed')
 
     def test_duplicate_receipts_and_unknown_criterion_never_pass(self):
         from lib.acceptance_checks import evaluate
         path=self.root/'output';path.write_text('content')
-        receipt={'path':'output','sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+        receipt=self.receipt('output')
         criterion={'id':'output','kind':'contains','path':'output','text':'content'}
-        self.assertEqual(evaluate([criterion],{'artifacts':[receipt,receipt]},root=self.root)['status'],'failed')
-        self.assertEqual(evaluate([criterion,criterion],{'artifacts':[receipt]},root=self.root)['status'],'failed')
-        self.assertEqual(evaluate([{'id':'semantic','kind':'good'}],{},root=self.root)['status'],'needs_review')
+        self.assertEqual(evaluate([criterion],root=self.root,receipts=[receipt,receipt])['status'],'failed')
+        self.assertEqual(evaluate([criterion,criterion],root=self.root,receipts=[receipt])['status'],'failed')
+        self.assertEqual(evaluate([{'id':'semantic','kind':'good'}],root=self.root)['status'],'needs_review')
 
     def test_json_boolean_does_not_equal_integer_and_escaped_pointer_matches(self):
         from lib.acceptance_checks import evaluate
         path=self.root/'output';path.write_text('{"a/b":{"~flag":true}}')
-        evidence={'artifacts':[{'path':'output','sha256':hashlib.sha256(path.read_bytes()).hexdigest()}]}
         criterion={'id':'output','kind':'json_equals','path':'output','pointer':'/a~1b/~0flag','value':True}
-        self.assertEqual(evaluate([criterion],evidence,root=self.root)['status'],'passed')
-        self.assertEqual(evaluate([{**criterion,'value':1}],evidence,root=self.root)['status'],'failed')
+        self.assertEqual(evaluate([criterion],root=self.root)['status'],'passed')
+        self.assertEqual(evaluate([{**criterion,'value':1}],root=self.root)['status'],'failed')
 
-    def test_check_latest_same_command_source_resolves_but_boolean_exit_fails(self):
+    def test_json_comparison_is_type_strict_at_every_depth(self):
         from lib.acceptance_checks import evaluate
-        criterion={'id':'ci','kind':'check','command':'ci','source_sha':'a'*40,'output_contains':'passed'}
-        passed={'command':'ci','source_sha':'a'*40,'exit_code':0,'output':'passed'}
-        failed={**passed,'exit_code':1}
-        for rows,expected in [([failed,passed],'passed'),([passed,failed],'failed'),([{**passed,'exit_code':False}],'failed')]:
-            self.assertEqual(evaluate([criterion],{'checks':rows},root=self.root)['status'],expected)
+        path=self.root/'output'
+        cases=[('{"count":true}',{'count':1},'failed'),('{"count":1}',{'count':True},'failed'),
+               ('[[0,false]]',[[0,0]],'failed'),('{"x":1.0}',{'x':1},'failed'),
+               ('{"a":[1,{"b":null}]}',{'a':[1,{'b':None}]},'passed')]
+        for text,expected,status in cases:
+            with self.subTest(text=text,expected=expected):
+                path.write_text(text)
+                criterion={'id':'output','kind':'json_equals','path':'output','pointer':'','value':expected}
+                self.assertEqual(evaluate([criterion],root=self.root)['status'],status)
+
+    def test_json_pointer_array_tokens_follow_rfc6901(self):
+        from lib.acceptance_checks import evaluate
+        path=self.root/'output';path.write_text('{"list":[0,1],"~":{"/":2}}')
+        for pointer,value,status in [('/list/1',1,'passed'),('/list/-1',1,'failed'),('/list/+1',1,'failed'),
+                                     ('/list/01',1,'failed'),('/list/-',1,'failed'),('/list/2',1,'failed'),
+                                     ('/~0/~1',2,'passed'),('/~2',2,'failed'),('list',1,'failed')]:
+            with self.subTest(pointer=pointer):
+                criterion={'id':'output','kind':'json_equals','path':'output','pointer':pointer,'value':value}
+                self.assertEqual(evaluate([criterion],root=self.root)['status'],status)
+
+    def test_nonregular_artifact_fails_without_blocking(self):
+        import os, subprocess
+        fifo=self.root/'fifo';os.mkfifo(fifo)
+        script=('import json,sys;sys.path.insert(0,sys.argv[1]);from lib.acceptance_checks import evaluate;'
+                'print(json.dumps(evaluate([{"id":"x","kind":"contains","path":"fifo","text":"x"}],root=sys.argv[2])))')
+        run=subprocess.run([sys.executable,'-c',script,str(REPO),str(self.root)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(json.loads(run.stdout)['status'],'failed',run.stderr)
+        (self.root/'dir').mkdir()
+        from lib.acceptance_checks import evaluate
+        self.assertEqual(evaluate([{'id':'d','kind':'contains','path':'dir','text':'x'}],root=self.root)['status'],'failed')
+
+    def test_artifact_read_honors_deadline(self):
+        import time
+        from lib.acceptance_checks import evaluate
+        (self.root/'output').write_text('content')
+        criterion={'id':'output','kind':'contains','path':'output','text':'content'}
+        result=evaluate([criterion],root=self.root,deadline=time.monotonic()-1)
+        self.assertEqual(result['status'],'failed')
 
     def test_progress_changing_results_edits_and_dedupe(self):
         watch=load('jev_session_watch')
@@ -127,6 +165,24 @@ class DeterministicTests(unittest.TestCase):
                 kwargs={'artifact_before':{'x':'same'},'artifact_after':{'x':'same'}} if unchanged_artifacts else {}
                 result=watch.watch_progress(str(path),'task',client=NoModel(),state_dir=str(self.root/str(unchanged_artifacts)),**kwargs)
                 self.assertEqual(result['verdict'],'stuck')
+
+    def test_pending_calls_never_pull_pre_edit_results_across_an_edit(self):
+        watch=load('jev_session_watch')
+        def use(i,name='Read',inp=None):
+            return {'type':'assistant','message':{'content':[{'type':'tool_use','id':i,'name':name,'input':inp or {'file_path':'x'}}]}}
+        def result(i,text):
+            return {'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':i,'content':text}]}}
+        events=[]
+        for i in range(3):
+            events += [use(f'r{i}'),result(f'r{i}','same')]
+        events += [use('edit','Edit',{}),result('edit','edited')]
+        events += [use(f'p{i}',inp={'file_path':f'y{i}'}) for i in range(4)]
+        path=self.root/'pending';path.write_text('\n'.join(json.dumps(e) for e in events))
+        self.assertEqual(watch.watch_progress(str(path),'task',state_dir=str(self.root/'p'))['verdict'],'ok')
+        # Results that arrive out of order after the edit still count, once.
+        events += [result('p3','late'),result('p1','late')]
+        path.write_text('\n'.join(json.dumps(e) for e in events))
+        self.assertEqual(watch.watch_progress(str(path),'task',state_dir=str(self.root/'q'))['verdict'],'ok')
 
     def test_progress_detects_repeat_without_artifact_delta(self):
         watch = load('jev_session_watch')
@@ -167,38 +223,54 @@ class DeterministicTests(unittest.TestCase):
 
     def test_done_claim_needs_criteria_and_keeps_unresolved_test_failures(self):
         done = load('jev_done_checks')
-        self.assertEqual(done.check_done_claim('Done',{'test_exit_code':0},client=NoModel())['verdict'],'needs_review')
+        self.assertEqual(done.check_done_claim('Done',{'test_exit_code':0})['verdict'],'needs_review')
         evidence = {'claim_scope':'tests','test_history':[{'command':'a','exit_code':1},{'command':'b','exit_code':0}]}
-        self.assertEqual(done.check_done_claim('Tests passed',evidence,client=NoModel())['verdict'],'unsupported')
+        self.assertEqual(done.check_done_claim('Tests passed',evidence)['verdict'],'unsupported')
         evidence['test_history'].append({'command':'a','exit_code':0})
-        self.assertEqual(done.check_done_claim('Tests passed',evidence,client=NoModel())['verdict'],'needs_review')
+        self.assertEqual(done.check_done_claim('Tests passed',evidence)['verdict'],'needs_review')
 
     def test_semantic_test_quality_and_facts_abstain(self):
         done = load('jev_done_checks')
-        self.assertEqual(done.check_test_quality('def test_x():\n assert call() == 2','','',client=NoModel())['verdict'],'needs_review')
-        self.assertEqual(done.fact_check('X works',[{'ref':'x','text':'X works'}],client=NoModel())['verdict'],'needs_review')
+        self.assertEqual(done.check_test_quality('def test_x():\n assert call() == 2','','')['verdict'],'needs_review')
+        self.assertEqual(done.fact_check('X works',[{'ref':'x','text':'X works'}])['verdict'],'needs_review')
 
     def test_identical_calls_are_not_tautologies(self):
         done = load('jev_done_checks')
-        self.assertEqual(done.check_test_quality('def test_x():\n assert call() == call()','','',client=NoModel())['verdict'],'needs_review')
+        self.assertEqual(done.check_test_quality('def test_x():\n assert call() == call()','','')['verdict'],'needs_review')
 
-    def test_requirement_criteria_are_evaluated_without_llm(self):
+    def test_requirement_contract_completes_through_installed_stop_payload(self):
         req = load('jev_requirements')
-        result = req.evaluate_requirements([{'id':'output','kind':'artifact','path':'missing'}],{},root=self.root)
+        (self.root/'result.json').write_text('{"count":2}')
+        prompt = json.dumps({'acceptance_contract':{'criteria':[
+            {'id':'count','kind':'json_equals','path':'result.json','pointer':'/count','value':2}]}})
+        recs = [{'type':'user','message':{'content':prompt}}]
+        payload = {'cwd':str(self.root),'transcript_path':str(self.root/'t.jsonl'),'session_id':'s',
+                   'hook_event_name':'Stop','stop_hook_active':False}
+        self.assertEqual(req.check(payload,recs)['status'],'passed')
+        (self.root/'result.json').write_text('{"count":1}')
+        result = req.check(payload,recs)
         self.assertEqual(result['status'],'failed')
-        self.assertEqual(req.evaluate_requirements(['fix the thing'],{},root=self.root)['status'],'needs_review')
+        self.assertEqual(result['unmet'][0]['text'],'count')
 
-    def test_handoff_matches_exact_action_and_denial(self):
-        handoff = load('jev_handoff')
-        evidence = {'action':'python ops/x.py','attempts':[], 'capability':'available','permission':'allowed'}
-        self.assertEqual(handoff.evaluate_handoff(evidence)['status'],'unattempted')
-        evidence['attempts']=[{'action':'python other.py','status':'permission_denied'}]
-        self.assertEqual(handoff.evaluate_handoff(evidence)['status'],'unattempted')
-        evidence['attempts']=[{'action':'python ops/x.py','status':'permission_denied'}]
-        self.assertEqual(handoff.evaluate_handoff(evidence)['status'],'human_required')
-        evidence['attempts']=[{'action':'python ops/x.py','status':'timeout'}]
-        self.assertEqual(handoff.evaluate_handoff(evidence)['status'],'needs_review')
-        self.assertIsNone(handoff.judge('Please run the install',surface='stop',judge_module=NoModel()))
+    def test_no_inert_handoff_or_requirement_compatibility_interfaces(self):
+        import inspect
+        self.assertFalse((REPO/'ops/jev_handoff.py').exists())
+        for hook in ('conduct-stop-gate','escalation-gate'):
+            text=(REPO/'hooks'/(hook+'.py')).read_text()
+            self.assertNotIn('jev_handoff',text,hook)
+        req=load('jev_requirements')
+        for name in ('changed_paths','test_output','evaluate_requirements','MUTATION_TOOLS','TEST_COMMAND'):
+            self.assertFalse(hasattr(req,name),name)
+        self.assertEqual(list(inspect.signature(req.check).parameters),['payload','recs'])
+        done=load('jev_done_checks')
+        for function in (done.triage_review,done.inspect_stop_boundary,done.check_done_claim,
+                         done.check_test_quality,done.fact_check,done.build_handoff):
+            params=set(inspect.signature(function).parameters)
+            self.assertFalse(params & {'client','judge_module','cache_path','now','state_dir','receipt_path'},function.__name__)
+        notebook=load('jev_notebook')
+        for function in (notebook.recall_mistakes,notebook.classify_kind):
+            params=set(inspect.signature(function).parameters)
+            self.assertFalse(params & {'client','judge','shortlist'},function.__name__)
 
     def test_tolls_use_path_contract_dependencies_not_transport(self):
         tolls = load('jev_change_tolls')
@@ -216,36 +288,66 @@ class DeterministicTests(unittest.TestCase):
         path = self.root/'notebook'
         notebook.record_mistake('import','edit code','ModuleNotFoundError: widgets','install it',source='fixture',notebook_path=str(path))
         notebook.record_mistake('path','edit code','missing src/data.json','fix path',source='fixture',notebook_path=str(path))
-        self.assertEqual(notebook.recall_mistakes('ModuleNotFoundError: widgets',client=NoModel(),notebook_path=str(path))['verdict'],[0])
-        self.assertEqual(notebook.recall_mistakes('edit code',client=NoModel(),notebook_path=str(path))['verdict'],[])
-        self.assertEqual(notebook.classify_kind('unknown failure','',client=NoModel(),notebook_path=str(path))['verdict'],'needs_review')
+        self.assertEqual(notebook.recall_mistakes('ModuleNotFoundError: widgets',notebook_path=str(path))['verdict'],[0])
+        self.assertEqual(notebook.recall_mistakes('edit code',notebook_path=str(path))['verdict'],[])
+        self.assertEqual(notebook.classify_kind('unknown failure','',notebook_path=str(path))['verdict'],'needs_review')
+
+    def completion(self, instructions, artifacts, **extra):
+        from lib.headless_tasks import verify_completion
+        receipt = self.root/'receipt'
+        receipt.write_text(json.dumps({'schema':'carr-headless-completion/v1','task_id':'t','run_id':'r',
+                                       'outcome':'completed','artifacts':artifacts,**extra}))
+        return verify_completion(receipt,'t','r',instructions)
 
     def test_headless_typed_acceptance_never_asks_model(self):
-        from lib.headless_tasks import verify_completion
         output = self.root/'output'; output.write_text('{"count":2}')
         criteria = [{'id':'count','kind':'json_equals','path':str(output),'pointer':'/count','value':2}]
         instructions = json.dumps({'acceptance_contract':{'criteria':criteria}})
-        receipt = self.root/'receipt'
-        receipt.write_text(json.dumps({'schema':'carr-headless-completion/v1','task_id':'t','run_id':'r','outcome':'completed',
-                'artifacts':[{'path':str(output),'sha256':hashlib.sha256(output.read_bytes()).hexdigest()}]}))
+        artifacts = [{'path':str(output),'sha256':hashlib.sha256(output.read_bytes()).hexdigest()}]
         with patch('ops.jev_judge.judge',side_effect=AssertionError('paid')):
-            self.assertEqual(verify_completion(receipt,'t','r',instructions),'completed')
+            self.assertEqual(self.completion(instructions,artifacts),'completed')
             with self.assertRaisesRegex(ValueError,'needs review'):
-                verify_completion(receipt,'t','r','make it good')
+                self.completion('make it good',artifacts)
 
-    def test_supervisor_passes_typed_contract_and_check_receipts(self):
+    def test_headless_worker_check_claims_are_not_acceptance(self):
+        unrelated = self.root/'notes'; unrelated.write_text('unrelated')
+        artifacts = [{'path':str(unrelated),'sha256':hashlib.sha256(unrelated.read_bytes()).hexdigest()}]
+        criterion = {'id':'ci','kind':'check','command':'false','source_sha':'a'*40,'output_contains':'tests passed'}
+        instructions = json.dumps({'acceptance_contract':{'criteria':[criterion]}})
+        forged = {'command':'false','source_sha':'a'*40,'exit_code':0,'output':'tests passed'}
+        # A current-run forgery and a replay of an old successful claim both fail.
+        for checks in ([forged], [{**forged,'run_id':'old-run'}]):
+            with self.subTest(checks=checks), self.assertRaises(ValueError):
+                self.completion(instructions,artifacts,checks=checks)
+
+    def test_headless_nonregular_artifact_fails_without_blocking(self):
+        import os, subprocess
+        fifo=self.root/'fifo';os.mkfifo(fifo)
+        script=('import json,sys;sys.path.insert(0,sys.argv[1]);from pathlib import Path;'
+                'from lib.headless_tasks import verify_completion\n'
+                'r=Path(sys.argv[2])/"receipt";r.write_text(json.dumps({"schema":"carr-headless-completion/v1","task_id":"t",'
+                '"run_id":"r","outcome":"completed","artifacts":[{"path":sys.argv[3],"sha256":"0"*64}]}))\n'
+                'try:\n verify_completion(r,"t","r","{}")\nexcept ValueError as e:\n print("refused",e)')
+        run=subprocess.run([sys.executable,'-c',script,str(REPO),str(self.root),str(fifo)],capture_output=True,text=True,timeout=10)
+        self.assertIn('refused',run.stdout,run.stderr)
+
+    def test_supervisor_stop_observes_contract_artifacts_from_installed_payload(self):
         spec=importlib.util.spec_from_file_location('typed_supervisor',REPO/'hooks/jev-supervisor.py')
         hook=importlib.util.module_from_spec(spec);spec.loader.exec_module(hook)
-        criterion={'id':'ci','kind':'check','command':'ci','source_sha':'a'*40,'output_contains':'passed'}
+        (self.root/'result.json').write_text('{"count":2}')
+        criterion={'id':'count','kind':'json_equals','path':'result.json','pointer':'/count','value':2}
         prompt=json.dumps({'acceptance_contract':{'criteria':[criterion]}})
         from types import SimpleNamespace
         captured=[]
         def inspect(final,evidence,*args):captured.append(evidence);return []
-        receipts={'checks':[{'command':'ci','source_sha':'a'*40,'exit_code':0,'output':'passed'}]}
+        payload={'last_assistant_message':'Done','cwd':str(self.root),'session_id':'s','hook_event_name':'Stop',
+                 'transcript_path':str(self.root/'missing.jsonl')}
         with patch.object(hook,'_task',return_value=prompt),patch.object(hook,'_git_root',return_value=None),patch.object(hook,'_lib',return_value=SimpleNamespace(inspect_stop_boundary=inspect)):
-            hook.stop({'last_assistant_message':'Done','acceptance_evidence':receipts},hook.Run())
+            hook.stop(payload,hook.Run())
         done=load('jev_done_checks')
         self.assertEqual(done.check_done_claim('Done',captured[0])['verdict'],'supported')
+        (self.root/'result.json').write_text('{"count":3}')
+        self.assertEqual(done.check_done_claim('Done',captured[0])['verdict'],'unsupported')
 
     def test_supervisor_runs_deterministic_stop_without_paid_registration(self):
         spec = importlib.util.spec_from_file_location('det_supervisor', REPO/'hooks/jev-supervisor.py')
@@ -255,14 +357,16 @@ class DeterministicTests(unittest.TestCase):
             hook.main()
         stop.assert_called_once()
 
-    def test_slice_matches_typed_criterion_binding_only(self):
+    def test_slice_matches_production_member_projection(self):
         marker = load('slice-done-marker').Marker(call=NoModel(),git_run=NoModel())
-        member = {'id':'member','commit_sha':'a'*40,'slice_id':'V5-F08','subject':'does everything',
-                  'acceptance_receipts':[{'schema':'slice-acceptance/v1','slice_id':'V5-F08','criterion':'criterion',
-                    'source_sha':'a'*40,'status':'passed','candidate_passes':True,'evidence_ref':'server-check:1'}]}
-        self.assertEqual(marker.match({'proposed_id':'V5-F08'},['criterion'],[member]),{'criterion':'member'})
-        member['acceptance_receipts'][0]['source_sha']='b'*40
-        self.assertEqual(marker.match({'proposed_id':'V5-F08'},['criterion'],[member]),{'criterion':None})
+        def member(i):
+            # Exactly the six fields ops.read_slice_done_state projects.
+            return {'id':f'member-{i}','release_key':'rel','commit_sha':str(i)*40,'pr_number':i,
+                    'subject':'does everything','attribution':'explicit'}
+        item={'proposed_id':'V5-F08'}
+        self.assertEqual(marker.match(item,['a','b'],[member(1)]),{'a':'member-1','b':'member-1'})
+        self.assertEqual(marker.match(item,['a'],[member(1),member(2)]),{'a':None})
+        self.assertEqual(marker.match(item,['a'],[]),{'a':None})
 
 
 if __name__ == '__main__':

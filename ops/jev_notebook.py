@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NOTEBOOK_PATH = os.path.join(REPO,"out","jev-mistake-notebook.jsonl")
 DEFAULT_LIMIT = 3
-SHORTLIST = 20
 
 def _read_all(path=NOTEBOOK_PATH):
     """Every row in the notebook, oldest first. Missing file is an empty log."""
@@ -76,8 +75,7 @@ def _signatures(text):
     return errors | paths
 
 
-def recall_mistakes(task_text, *, limit=DEFAULT_LIMIT, client=None, judge=None,
-                     notebook_path=NOTEBOOK_PATH, shortlist=SHORTLIST):
+def recall_mistakes(task_text, *, limit=DEFAULT_LIMIT, notebook_path=NOTEBOOK_PATH):
     query = _signatures(task_text)
     rows = _read_all(notebook_path)
     scored = [(len(query & _signatures(row.get("what_went_wrong","")+"\n"+row.get("task_text",""))),i,row)
@@ -89,7 +87,7 @@ def recall_mistakes(task_text, *, limit=DEFAULT_LIMIT, client=None, judge=None,
                       "reason":"exact error/artifact match" if chosen else "no exact error/artifact match"}}
 
 
-def classify_kind(what_went_wrong, task_text, *, client=None, judge=None, notebook_path=NOTEBOOK_PATH):
+def classify_kind(what_went_wrong, task_text, *, notebook_path=NOTEBOOK_PATH):
     query = _signatures(what_went_wrong)
     kinds = {row.get("kind") for row in _read_all(notebook_path) if isinstance(row,dict) and row.get("kind")
              and query & _signatures(row.get("what_went_wrong",""))}

@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """Offline suite for ops/jev_done_checks.py. No credential, no network, no spend.
 
-A fake jev_judge (and a fake typesafe client) stand in for the vendor, so the
-suite checks the contract every caller of ops/jev_done_checks.py relies on:
-each public function returns a plain dict, never raises, fires only on its
-deterministic trigger, and falls back to verdict "unavailable" when Jev cannot
-be reached. build_handoff is checked separately, against its own
-{"pack", "kept", "dropped"} contract.
+The module asks no model, so nothing stands in for a vendor. build_handoff is
+checked against its {"pack", "kept", "dropped"} contract; only git is stubbed.
 """
 
 import importlib.util
@@ -31,62 +27,10 @@ SPEC.loader.exec_module(jdc)
 
 # --------------------------------------------------------------- fakes
 
-class FakeClient:
-    """Stands in for ops/typesafe_client.py's question builders."""
-
-    @staticmethod
-    def noul(instructions, true=None, false=None):
-        return {"type": "noul", "instructions": instructions}
-
-    @staticmethod
-    def choice(instructions, options):
-        return {"type": "choice", "instructions": instructions, "options": dict(options)}
-
-    @staticmethod
-    def score(instructions, levels):
-        return {"type": "score", "instructions": instructions, "levels": list(levels)}
-
-
 class FakeGitEnv:
     @staticmethod
     def scrubbed_env():
         return dict(fixture_env())
-
-
-class FakeJudge:
-    """Stands in for ops/jev_judge.py. `answers` maps question-id -> answer body."""
-
-    def __init__(self, answers=None, error=None):
-        self.answers = answers or {}
-        self.error = error
-        self.rows = []
-        self.calls = 0
-        self.last = None
-
-    def _client(self):
-        return FakeClient
-
-    def judge(self, subject, questions, *, timeout=None, client=None, api_key=None):
-        self.calls += 1
-        self.last = (subject, questions)
-        if self.error:
-            raise self.error
-        out = {}
-        for qid, q in questions.items():
-            body = self.answers.get(qid)
-            if body is None:
-                if q["type"] == "noul":
-                    body = {"type": "noul", "noul": 0.5}
-                elif q["type"] == "choice":
-                    body = {"type": "choice", "choice": "__none__", "confidence": 0.5}
-                else:
-                    body = {"type": "score", "score": 0.0, "confidence": 0.5}
-            out[qid] = body
-        return {"answers": out, "model": "fake", "usage": {}, "elapsed_ms": 1}
-
-    def record(self, kind, subject_ref, answer, existing_decision=None, *, note=None, error=None):
-        self.rows.append({"kind": kind, "subject_ref": subject_ref, "note": note,
-                          "error": error is not None})
 
 
 # --------------------------------------------------------- #13 test quality
@@ -169,22 +113,20 @@ def write_transcript(path, notes):
 
 class HandoffTests(unittest.TestCase):
     def test_empty_inputs_yield_empty_pack(self):
-        result = jdc.build_handoff("", None, [], None, judge_module=FakeJudge())
+        result = jdc.build_handoff("", None, [], None)
         self.assertEqual(result, {"pack": "", "kept": [], "dropped": []})
 
-    def test_under_budget_keeps_everything_with_no_call(self):
+    def test_under_budget_keeps_everything(self):
         repo = make_repo()
         transcript = os.path.join(repo, "transcript.jsonl")
         write_transcript(transcript, ["Working on the widget change."])
-        fake = FakeJudge()
         cwd = os.getcwd()
         try:
             os.chdir(repo)
             result = jdc.build_handoff("Add widget2().", transcript, ["widget.py"],
-                                       None, judge_module=fake)
+                                       None)
         finally:
             os.chdir(cwd)
-        self.assertEqual(fake.calls, 0)
         self.assertIn("task", result["kept"])
         self.assertIn("diff:widget.py", result["kept"])
         self.assertEqual(result["dropped"], [])
@@ -194,38 +136,34 @@ class HandoffTests(unittest.TestCase):
         repo = make_repo()
         transcript = os.path.join(repo, "transcript.jsonl")
         write_transcript(transcript, ["An old, unrelated aside about lunch plans."])
-        fake = FakeJudge()
         cwd = os.getcwd()
         try:
             os.chdir(repo)
             result = jdc.build_handoff("Add widget2().", transcript, ["widget.py"], None,
-                                       max_chars=250, judge_module=fake)
+                                       max_chars=250)
         finally:
             os.chdir(cwd)
-        self.assertEqual(fake.calls, 0)
         self.assertTrue(any(n.startswith("assistant_note_0") for n in result["dropped"]))
         self.assertIn("task", result["kept"])
         self.assertIn("diff:widget.py", result["kept"])
         self.assertLessEqual(len(result["pack"]), 250)
 
-    def test_jev_unavailable_falls_back_to_deterministic_priority(self):
+    def test_over_budget_keeps_task_and_failure_first(self):
         repo = make_repo()
         transcript = os.path.join(repo, "transcript.jsonl")
         write_transcript(transcript, ["note one", "note two", "note three"])
-        fake = FakeJudge(error=RuntimeError("down"))
         cwd = os.getcwd()
         try:
             os.chdir(repo)
             result = jdc.build_handoff("Add widget2().", transcript, ["widget.py"],
-                                       "Traceback: boom", max_chars=80, judge_module=fake)
+                                       "Traceback: boom", max_chars=80)
         finally:
             os.chdir(cwd)
         self.assertIn("task", result["kept"])
         self.assertTrue(len(result["pack"]) <= 80)
 
     def test_failure_output_is_collected(self):
-        result = jdc.build_handoff("Fix the bug.", None, [], "Traceback: KeyError",
-                                   judge_module=FakeJudge())
+        result = jdc.build_handoff("Fix the bug.", None, [], "Traceback: KeyError")
         self.assertIn("last_failure", result["kept"])
         self.assertIn("KeyError", result["pack"])
 

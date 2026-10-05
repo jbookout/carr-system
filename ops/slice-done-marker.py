@@ -36,7 +36,8 @@ WHAT ONE RUN DOES, per catalog slice (the catalog is doctrine
      wording (ops.slice_criterion_allowed_kinds), and the bind door refuses
      anything else. For a criterion still unbound (and never bound by a
      partner): a live_check / accepted_record kind is bound as allowed; a
-     shipped_release kind is bound only to ONE release member with a typed server acceptance receipt for that exact criterion, and that binding is a
+     shipped_release kind is proposed only when the slice has exactly ONE
+     shipped release member, and that binding is a
      PROPOSAL the server never treats as effective until a partner confirms
      it (the Worker holds no GitHub credential, so the server cannot verify
      the PR itself). An empty allowlist (refusals, runtime outcomes) binds
@@ -147,10 +148,6 @@ def git(*args: str) -> str:
     return proc.stdout
 
 
-
-
-
-
 # ── the marker ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -182,19 +179,17 @@ class Marker:
     # -- membership ----------------------------------------------------------
     def attributed_commits(self, catalog_ids: set[str]) -> list[dict]:
         raw = self.git("log", "--first-parent", f"--since={HISTORY_SINCE}",
-                       "--format=%H%x1f%s%x1f%b%x1e", "origin/main")
+                       "--format=%H%x1f%s%x1e", "origin/main")
         commits = []
         for rec in raw.split("\x1e"):
             parts = rec.strip("\n").split("\x1f")
             if len(parts) < 2 or not re.fullmatch(r"[0-9a-f]{40}", parts[0].strip()):
                 continue
             sha, subject = parts[0].strip(), parts[1].strip()
-            body = parts[2].strip() if len(parts) > 2 else ""
             for sid, how in attribute(subject, catalog_ids):
                 pr = PR_NUMBER.search(subject)
                 commits.append({"slice_id": sid, "commit_sha": sha, "subject": subject[:400],
-                                "pr_number": int(pr.group(1)) if pr else None, "attribution": how,
-                                "body": body[:600]})
+                                "pr_number": int(pr.group(1)) if pr else None, "attribution": how})
         return commits
 
     def sync_membership(self, catalog_ids: set[str], known: set[tuple[str, str, str]],
@@ -227,34 +222,20 @@ class Marker:
                 "idempotency_key": ikey("members", key, sorted((m["slice_id"], m["commit_sha"]) for m in members)),
                 "release_key": key, "members": members})
             written += len(members)
-        self._bodies = {c["commit_sha"]: c["body"] for c in commits}
         return written
 
-    # -- Jev ---------------------------------------------------------------
+    @staticmethod
+    def match(item: dict, criteria: list[str], members: list[dict]) -> dict[str, str | None]:
+        """Propose the slice's sole shipped release member for each criterion.
 
-
-    def match(self, item: dict, criteria: list[str], members: list[dict]) -> dict[str, str | None]:
-        """Match exact typed server acceptance receipts to a delivered member.
-
-        Commit subjects are membership hints, never acceptance evidence. Missing
-        or ambiguous acceptance returns None and leaves the criterion in review.
+        The server already scopes members to this slice; their subjects are
+        membership hints, never acceptance. A proposal is not effective until
+        a partner confirms it, and two or more members are ambiguous, so the
+        criterion stays unbound for review.
         """
-        result = {}
-        sid = item.get("proposed_id")
-        for criterion in criteria:
-            candidates = set()
-            for member in members:
-                if member.get("slice_id") != sid:
-                    continue
-                for receipt in member.get("acceptance_receipts",[]):
-                    if (isinstance(receipt,dict) and receipt.get("schema") == "slice-acceptance/v1"
-                            and receipt.get("slice_id") == sid and receipt.get("criterion") == criterion
-                            and receipt.get("source_sha") == member.get("commit_sha")
-                            and receipt.get("status") == "passed" and receipt.get("candidate_passes") is True
-                            and receipt.get("evidence_ref") and member.get("id")):
-                        candidates.add(member["id"])
-            result[criterion] = next(iter(candidates)) if len(candidates) == 1 else None
-        return result
+        ids = [m.get("id") for m in members]
+        sole = ids[0] if len(ids) == 1 and isinstance(ids[0], str) and ids[0] else None
+        return {c: sole for c in criteria}
 
     # -- one slice ---------------------------------------------------------
     def read(self, slice_id: str) -> dict:
@@ -300,7 +281,7 @@ class Marker:
             allowed = kinds[c].get("allowed_kinds") or []
             if "shipped_release:" in allowed:
                 if matched.get(c):
-                    self._bind(sid, c, "shipped_release", None, "typed acceptance receipt: proposed PR, "
+                    self._bind(sid, c, "shipped_release", None, "sole shipped member of the slice: proposed PR, "
                                "awaiting partner confirmation", member=matched[c])
                     bound_any = True
                     would[c] = f"a shipped_release proposal on member {matched[c]}"
@@ -342,7 +323,7 @@ class Marker:
                     and k.get("binding_source") == "registration":
                 # Still waiting on a shipped change: in progress, not blocked.
                 refs[c] = None
-                missing.append(f"{c} -> typed acceptance missing or ambiguous; needs review")
+                missing.append(f"{c} -> no sole shipped change of this slice to propose yet")
             elif kind == "unbound":
                 refs[c] = None
                 unbound.append(f"{c} -> " + ("unbound by a partner" if k.get("binding_source") == "binding:authority"

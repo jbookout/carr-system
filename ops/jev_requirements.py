@@ -1,20 +1,13 @@
 """Requirements from explicit acceptance contracts; semantic clauses need review."""
 import importlib.util
-import json
 import os
 import re
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-BUDGET_SECONDS = 6.0
 MAX_REQUIREMENTS = 12
 MAX_REQUIREMENT_CHARS = 300
-MAX_TEST_CHARS = 2000
-MAX_FILES = 20
 
-
-MUTATION_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
-TEST_COMMAND = re.compile(r"pytest|selftest|\btest\b|ci\.sh|npm\s+(?:run\s+)?test|node\s+--test", re.I)
 
 GREETING = re.compile(
     r"^(?:hi|hey|hello|yo|good\s+(?:morning|afternoon|evening)|thanks|thank\s+you|thx|cheers)\b", re.I)
@@ -30,7 +23,6 @@ FENCE = re.compile(r"```.*?```", re.S)
 # read as the partner's words.
 HARNESS_MARKERS = ("<system-reminder>", "<task-notification>", "[SYSTEM NOTIFICATION",
                    "<local-command", "<command-name>", "Caveat:", "<user-prompt-submit-hook>")
-
 
 
 def _keep(sentence):
@@ -103,54 +95,13 @@ def _human_text(rec):
     return stripped or None
 
 
-def last_turn(recs):
-    """(prompt, records after it, turn start timestamp) for the last human prompt."""
-    for idx in range(len(recs) - 1, -1, -1):
-        text = _human_text(recs[idx])
+def last_request(recs):
+    """The text of the last human prompt, or None."""
+    for rec in reversed(recs):
+        text = _human_text(rec)
         if text:
-            return text, recs[idx + 1:], recs[idx].get("timestamp")
-    return None, [], None
-
-
-def _tool_uses(recs):
-    for rec in recs:
-        if rec.get("type") != "assistant":
-            continue
-        content = _content(rec)
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    yield block
-
-
-def changed_paths(turn):
-    paths = []
-    for block in _tool_uses(turn):
-        if block.get("name") in MUTATION_TOOLS:
-            data = block.get("input") or {}
-            path = data.get("file_path") or data.get("notebook_path")
-            if path and path not in paths:
-                paths.append(path)
-    return paths[:MAX_FILES]
-
-
-def test_output(turn):
-    """Tail of the last Bash result whose command looks like a test run, or None."""
-    wanted = {b.get("id") for b in _tool_uses(turn)
-              if b.get("name") == "Bash" and TEST_COMMAND.search(str((b.get("input") or {}).get("command", "")))}
-    found = None
-    for rec in turn:
-        content = _content(rec)
-        if rec.get("type") != "user" or not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in wanted:
-                body = block.get("content")
-                if isinstance(body, list):
-                    body = "\n".join(b.get("text", "") for b in body if isinstance(b, dict))
-                found = str(body or "")
-    return found[-MAX_TEST_CHARS:] if found else None
-
+            return text
+    return None
 
 
 def _acceptance():
@@ -160,12 +111,13 @@ def _acceptance():
     return module
 
 
-def evaluate_requirements(criteria, evidence, *, root=REPO):
-    return _acceptance().evaluate(criteria,evidence,root=root)
+def check(payload, recs):
+    """Evaluate the last human request's explicit contract; prose needs review.
 
-
-def check(payload, recs, *, judge_module=None, llm=None, budget=BUDGET_SECONDS):
-    prompt, turn, since = last_turn(recs or [])
+    The contract's artifacts are read from the session's working directory.
+    Nothing in the hook payload or the assistant's close counts as evidence.
+    """
+    prompt = last_request(recs or [])
     if not prompt:
         return None
     acceptance = _acceptance()
@@ -176,10 +128,7 @@ def check(payload, recs, *, judge_module=None, llm=None, budget=BUDGET_SECONDS):
             return None
         return {"status":"needs_review","advisory":"Semantic requirement acceptance needs review.",
                 "unmet":[],"needs_review":requirements}
-    # Evidence is supplied by the caller, never inferred from the assistant's
-    # close or a matching word in its diff.
-    evidence = (payload or {}).get("acceptance_evidence") or {}
-    result = acceptance.evaluate(criteria,evidence,root=(payload or {}).get("cwd",REPO))
+    result = acceptance.evaluate(criteria,root=(payload or {}).get("cwd") or REPO)
     unmet = [{"index":i+1,"text":str(criteria[i].get("id",i)),"reason":row["reason"]}
              for i,row in enumerate(result["criteria"]) if row["status"] == "failed"]
     return {**result,"unmet":unmet,"advisory":"Acceptance needs review." if result["status"] == "needs_review" else None}

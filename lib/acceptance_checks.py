@@ -1,16 +1,24 @@
-"""Evaluate caller-owned acceptance criteria against retained artifacts and checks.
+"""Evaluate caller-owned acceptance criteria against artifacts the verifier reads.
 
-Criteria are supplied before execution, never learned from output. Evidence is
-data, not authority. This module reads artifacts; it never executes commands or
-models. Unknown criteria abstain, missing or contradictory evidence fails.
+Criteria are supplied before execution, never learned from output. This module
+reads artifacts; it never executes commands or models. A worker's claim that a
+check ran is not evidence, so there is no check predicate: a criterion of any
+kind other than the artifact predicates abstains. Missing, unreadable or
+contradictory evidence fails.
 """
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
+import time
 
 MAX_BYTES = 96000
 SHA = re.compile(r'[0-9a-f]{64}')
+ARRAY_INDEX = re.compile(r'0|[1-9][0-9]*')
+POINTER_ESCAPE = re.compile(r'~(?![01])')
+CHUNK = 65536
 
 
 def contract(instructions):
@@ -32,6 +40,33 @@ Natural language is deliberately not compiled into a permission to complete.
         return {}
 
 
+def read_regular(path, limit, *, deadline=None):
+    """At most limit+1 bytes of a regular file, or ValueError.
+
+    Opening never waits for a writer (a FIFO or device is refused after open,
+    so a swap between check and open cannot block), and reads stop at the
+    deadline.
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ValueError('artifact read deadline expired')
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError('artifact is not a regular file')
+        chunks, size = [], 0
+        while size <= limit:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ValueError('artifact read deadline expired')
+            chunk = os.read(fd, min(CHUNK, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        return b''.join(chunks)
+    finally:
+        os.close(fd)
+
+
 def _path(value, root):
     path = Path(value)
     path = (path if path.is_absolute() else root / path).resolve()
@@ -40,26 +75,49 @@ def _path(value, root):
 
 
 def _pointer(value, pointer):
+    """RFC 6901: only '~0'/'~1' escapes; array tokens are canonical indexes."""
+    if not isinstance(pointer, str) or (pointer and not pointer.startswith('/')):
+        raise ValueError('invalid JSON pointer')
     if pointer == '':
         return value
-    if not isinstance(pointer, str) or not pointer.startswith('/'):
-        raise ValueError('invalid JSON pointer')
     for part in pointer[1:].split('/'):
+        if POINTER_ESCAPE.search(part):
+            raise ValueError('invalid JSON pointer escape')
         key = part.replace('~1', '/').replace('~0', '~')
-        value = value[int(key)] if isinstance(value, list) else value[key]
+        if isinstance(value, list):
+            if not ARRAY_INDEX.fullmatch(key) or int(key) >= len(value):
+                raise ValueError('JSON pointer array index unresolved')
+            value = value[int(key)]
+        elif isinstance(value, dict):
+            if key not in value:
+                raise ValueError('JSON pointer member unresolved')
+            value = value[key]
+        else:
+            raise ValueError('JSON pointer traverses a scalar')
     return value
 
 
-def evaluate(criteria, evidence, *, root='.'):
+def _json_equal(actual, expected):
+    """Equality with JSON types at every depth: true is not 1, 1.0 is not 1."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(actual, dict):
+        return actual.keys() == expected.keys() and all(_json_equal(actual[k], expected[k]) for k in actual)
+    if isinstance(actual, list):
+        return len(actual) == len(expected) and all(map(_json_equal, actual, expected))
+    return actual == expected
+
+
+def evaluate(criteria, *, root='.', receipts=None, deadline=None):
     """Return {status: passed|failed|needs_review, criteria: [{id,status,reason}]}.
 
-Supported predicates: artifact (existence/optional expected digest), contains
-(literal required output), json_equals (RFC6901 pointer and expected value),
-check (exact command, source revision, exit code and required output). A check
-receipt's zero exit alone cannot pass. No supplied evidence changes a criterion.
+Supported predicates: artifact (expected digest), contains (literal required
+output) and json_equals (RFC 6901 pointer and expected JSON value). The
+verifier reads each artifact itself. When receipts is a list, a worker named
+its artifacts, and each criterion also needs exactly one matching receipt whose
+digest equals the bytes read; with None the caller is the observer.
 """
     root = Path(root).resolve()
-    evidence = evidence if isinstance(evidence, dict) else {}
     if not isinstance(criteria, list) or not criteria:
         return {'status':'needs_review','criteria':[], 'reason':'explicit acceptance criteria required'}
     rows, seen, cache = [], set(), {}
@@ -76,19 +134,19 @@ receipt's zero exit alone cannot pass. No supplied evidence changes a criterion.
             kind = criterion.get('kind')
             if kind in {'artifact','contains','json_equals'}:
                 path = _path(criterion['path'], root)
-                matches = [item for item in evidence.get('artifacts', [])
-                           if isinstance(item, dict) and _path(item.get('path',''),root) == path]
-                if len(matches) != 1 or not SHA.fullmatch(str(matches[0].get('sha256',''))):
-                    raise ValueError('one digest-bound artifact receipt required')
                 if path not in cache:
-                    with path.open('rb') as handle:
-                        cache[path] = handle.read(MAX_BYTES + 1)
+                    cache[path] = read_regular(path, MAX_BYTES, deadline=deadline)
                 raw = cache[path]
                 if not raw or len(raw) > MAX_BYTES:
                     raise ValueError('artifact empty or over byte budget')
                 digest = hashlib.sha256(raw).hexdigest()
-                if digest != matches[0]['sha256']:
-                    raise ValueError('artifact digest mismatch')
+                if receipts is not None:
+                    matches = [item for item in receipts
+                               if isinstance(item, dict) and _path(item.get('path',''),root) == path]
+                    if len(matches) != 1 or not SHA.fullmatch(str(matches[0].get('sha256',''))):
+                        raise ValueError('one digest-bound artifact receipt required')
+                    if digest != matches[0]['sha256']:
+                        raise ValueError('artifact digest mismatch')
                 if criterion.get('sha256') and digest != criterion['sha256']:
                     raise ValueError('expected artifact digest mismatch')
                 if kind == 'contains':
@@ -97,30 +155,13 @@ receipt's zero exit alone cannot pass. No supplied evidence changes a criterion.
                         raise ValueError('required literal output missing')
                 if kind == 'json_equals':
                     actual = _pointer(json.loads(raw), criterion['pointer'])
-                    expected = criterion['value']
-                    if type(actual) is not type(expected) or actual != expected:
+                    if not _json_equal(actual, criterion['value']):
                         raise ValueError('expected JSON value mismatch')
                 if kind == 'artifact' and not criterion.get('sha256'):
                     status, reason = 'needs_review', 'artifact identity alone does not establish acceptance; expected digest required'
                 else:
                     status, reason = 'passed', 'artifact read and predicate matched'
-            elif kind == 'check':
-                command, source = criterion['command'], criterion['source_sha']
-                expected = criterion['output_contains']
-                if not all(isinstance(v,str) and v for v in (command,source,expected)):
-                    raise ValueError('exact command, source and required output needed')
-                matches = [item for item in evidence.get('checks', []) if isinstance(item, dict)
-                           and item.get('command') == command and item.get('source_sha') == source]
-                # Last matching run resolves an earlier failure of the SAME check.
-                if not matches:
-                    raise ValueError('bound check receipt missing')
-                latest = matches[-1]
-                if type(latest.get('exit_code')) is not int or latest['exit_code'] != 0:
-                    raise ValueError('check did not pass')
-                if not isinstance(latest.get('output'),str) or expected not in latest['output']:
-                    raise ValueError('required check output missing')
-                status, reason = 'passed', 'bound check receipt and output matched'
-        except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             status, reason = 'failed', str(exc)
         rows.append({'id':cid,'status':status,'reason':reason})
     status = ('failed' if any(r['status'] == 'failed' for r in rows) else

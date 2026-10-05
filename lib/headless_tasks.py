@@ -266,21 +266,25 @@ def verify_completion(path: Path, task_id: str, run_id: str, task_instructions: 
     artifacts = value.get('artifacts')
     if not isinstance(artifacts, list) or not artifacts:
         raise ValueError('completion evidence missing')
+    from lib.acceptance_checks import contract, evaluate, read_regular
     remaining = 96000 - len(task_instructions.encode('utf-8'))
     for item in artifacts:
         artifact = Path(item['path'])
-        if artifact.resolve() == path.resolve() or not artifact.is_file():
+        if artifact.resolve() == path.resolve():
             raise ValueError('completion artifact missing')
         # Validate every claimed artifact, including ones not used by a criterion.
-        with artifact.open('rb') as handle:
-            raw = handle.read(max(0, remaining)+1)
+        try:
+            raw = read_regular(artifact, max(0, remaining), deadline=deadline)
+        except OSError:
+            raise ValueError('completion artifact missing') from None
         if not raw or len(raw) > remaining:
-            raise ValueError('completion evidence empty or exceeds judgment budget')
+            raise ValueError('completion evidence empty or exceeds verification budget')
         remaining -= len(raw)
         if hashlib.sha256(raw).hexdigest() != item['sha256']:
             raise ValueError('completion artifact digest')
-    # Only criteria in the pre-launch contract can authorize acceptance.
-    from lib.acceptance_checks import contract, evaluate
+    # Only criteria in the pre-launch contract can authorize acceptance. The
+    # worker's receipt names artifacts; any claim it makes about checks it ran
+    # is not read, because nothing independent observed that execution.
     if deadline is not None and time.monotonic() >= deadline:
         raise ValueError('completion deadline expired')
     acceptance = contract(task_instructions)
@@ -291,7 +295,7 @@ def verify_completion(path: Path, task_id: str, run_id: str, task_instructions: 
         criteria = [{**item, 'path':item['path'].replace('{receipt}', str(path.resolve()))}
                     if isinstance(item, dict) and isinstance(item.get('path'), str) else item
                     for item in criteria]
-    result = evaluate(criteria, {'artifacts':artifacts, 'checks':value.get('checks',[])}, root='/')
+    result = evaluate(criteria, root='/', receipts=artifacts, deadline=deadline)
     if deadline is not None and time.monotonic() >= deadline:
         raise ValueError('completion deadline expired')
     if result['status'] == 'needs_review':

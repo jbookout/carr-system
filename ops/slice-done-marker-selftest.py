@@ -94,8 +94,6 @@ class FakeServer:
         self.portfolio_receipt = PORTFOLIO_RECEIPT
         self.portfolio_intact = True
         self.portfolio_effects = 0
-        self.acceptance = True
-        self.acceptance_source = True
 
     def __call__(self, verb, args):
         self.calls.append((verb, json.loads(json.dumps(args))))
@@ -116,12 +114,7 @@ class FakeServer:
         for m in args["members"]:
             if not any(x["release_key"] == args["release_key"] and x["commit_sha"] == m["commit_sha"]
                        and x["slice_id"] == m["slice_id"] for x in self.members):
-                criteria = next(c['checkable_done'] for c in self.catalog if c['proposed_id'] == m['slice_id'])
-                receipts = [{'schema':'slice-acceptance/v1','slice_id':m['slice_id'],'criterion':c,
-                             'source_sha':m['commit_sha'] if self.acceptance_source else '0'*40,
-                             'status':'passed','candidate_passes':True,'evidence_ref':'server-check:fixture'}
-                            for c in criteria if allowed_kinds(c) == ['shipped_release:']] if self.acceptance else []
-                self.members.append({**m, 'acceptance_receipts':receipts, "release_key": args["release_key"], "id": f"mem-{len(self.members)}"})
+                self.members.append({**m, "release_key": args["release_key"], "id": f"mem-{len(self.members)}"})
         return {"ok": True}
 
     def v_register_slice_criteria_from_catalog(self, args):
@@ -255,8 +248,10 @@ class FakeServer:
 
     def v_read_slice_completion(self, args):
         sid = args["slice_id"]
+        # Exactly the projection ops.read_slice_done_state returns.
         members = [{"id": m["id"], "release_key": m["release_key"], "commit_sha": m["commit_sha"],
-                    "pr_number": m.get("pr_number"), "subject": m["subject"], "slice_id":m["slice_id"], "acceptance_receipts":m.get("acceptance_receipts",[])} for m in self.members
+                    "pr_number": m.get("pr_number"), "subject": m["subject"],
+                    "attribution": m["attribution"]} for m in self.members
                    if m["slice_id"] == sid]
         criteria = []
         for c in self.registered.get(sid, []):
@@ -285,7 +280,7 @@ def fake_git(commits, reach):
     """commits: [(sha, subject)] newest first; reach: {release_sha: set(commit shas)}."""
     def run(*args):
         if args[0] == "log":
-            return "".join(f"{sha}\x1f{subject}\x1fbody of {subject}\x1e" for sha, subject in commits)
+            return "".join(f"{sha}\x1f{subject}\x1e" for sha, subject in commits)
         if args[0] == "rev-list":
             return "\n".join(sorted(reach.get(args[-1], set())))
         raise AssertionError(args)
@@ -340,7 +335,7 @@ class Run(unittest.TestCase):
                            "member": member_of(server, "V5-F08"), "via": "automation"}])
         # J303's merge is in no complete release yet.
         self.assertEqual(out["V5-J303"].status, "in_progress")
-        self.assertIn("typed acceptance missing or ambiguous; needs review", out["V5-J303"].reason)
+        self.assertIn("no sole shipped change of this slice to propose yet", out["V5-J303"].reason)
         # A runtime outcome no kind can show stays unbound: blocked, named.
         self.assertEqual(out["V5-R01"].status, "blocked")
         self.assertIn("Joe pilot observed for two weeks -> no server-resolvable evidence kind", out["V5-R01"].reason)
@@ -418,20 +413,15 @@ class Run(unittest.TestCase):
         self.assertEqual(out["V5-J303"].wrote, "skipped")
         self.assertEqual(server.writes()[before:], [])
 
-    def test_a_none_match_proposes_nothing(self):
+    def test_two_shipped_members_are_ambiguous_and_propose_nothing(self):
         server = FakeServer()
-        server.acceptance = False
-        out = by_id(marker(server).run())
+        second = "e" * 40
+        commits = COMMITS + [(second, "V5-F08 backup scanner follow-up (#11)")]
+        reach = {REL1: {SHA_F08, SHA_S00, second}, REL2: {SHA_F08, SHA_R03, SHA_S00, second}}
+        out = by_id(marker(server, commits, reach).run())
         self.assertNotIn(("V5-F08", F08_SHIP), server.bindings)
         self.assertEqual(out["V5-F08"].status, "in_progress")
-        self.assertIn(f"{F08_SHIP} -> typed acceptance missing or ambiguous; needs review", out["V5-F08"].reason)
-
-    def test_a_low_confidence_match_proposes_nothing(self):
-        server = FakeServer()
-        server.acceptance_source = False
-        out = by_id(marker(server).run())
-        self.assertNotIn(("V5-F08", F08_SHIP), server.bindings)
-        self.assertEqual(out["V5-F08"].status, "in_progress")
+        self.assertIn(f"{F08_SHIP} -> no sole shipped change of this slice to propose yet", out["V5-F08"].reason)
 
     def test_server_refusal_of_the_proposal_is_recorded_as_in_progress(self):
         server = FakeServer()

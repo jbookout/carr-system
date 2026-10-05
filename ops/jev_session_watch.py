@@ -320,12 +320,13 @@ def watch_progress(transcript_path, task_text, *, client=None, log_path=None, st
     """
     check_id = "stuck_and_drift"
     calls = tool_calls(_tail_events(transcript_path))
-    completed = [c for c in calls if c.get("result") is not None]
     if artifact_before is not None and artifact_after is not None and artifact_before != artifact_after:
         return _result(check_id, "ok", None, False, {"artifact_delta": True})
     unchanged = artifact_before is not None and artifact_after is not None and artifact_before == artifact_after
     stale = len(calls) if unchanged else _calls_since_last_edit(calls)
-    window = completed[-min(LOOP_WINDOW, stale):] if stale else []
+    # Cut the call sequence at the edit before dropping pending calls, so a
+    # call still awaiting its result never pulls a pre-edit result forward.
+    window = [c for c in calls[len(calls) - stale:] if c.get("result") is not None][-LOOP_WINDOW:]
     counts = {}
     for call in window:
         key = (call["name"], normalize_input(call["input"]), call["result"])

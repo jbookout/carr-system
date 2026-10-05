@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
-"""Offline suite for ops/jev_notebook.py. No credential, no network, no spend.
-
-Every judgment arrives through an injected fake, so this runs on a hosted
-runner with nothing configured. Covers: deterministic append-only recording,
-the token-overlap shortlist, the two-request recall (Choice then Noul
-confirmation), the "none relevant" and unavailable fallbacks, and kind
-classification against an existing roster plus the "new kind" escape.
-"""
+"""Offline suite for ops/jev_notebook.py: append-only recording and exact
+error/artifact recall. The module asks no model, so nothing is faked."""
 
 import importlib.util
 import json
@@ -22,46 +16,8 @@ nb = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(nb)
 
 
-class FakeJudge:
-    """Stands in for ops/jev_judge.py. Returns queued responses in call order,
-    one per judge() call, so a two-request recall can be scripted exactly."""
-
-    JudgeUnavailable = RuntimeError
-    SHADOW_LOG = "unused-in-tests"
-
-    def __init__(self, responses=None, fail_at=None):
-        self.responses = list(responses or [])
-        self.fail_at = set(fail_at or ())
-        self.calls = []
-        self.records = []
-
-    def judge(self, subject, questions, **kwargs):
-        idx = len(self.calls)
-        self.calls.append((subject, questions))
-        if idx in self.fail_at:
-            raise self.JudgeUnavailable("synthetic outage")
-        return self.responses[idx]
-
-    def record(self, kind, subject_ref, answer, existing_decision=None, **kwargs):
-        row = {"kind": kind, "subject_ref": subject_ref, "answer": answer,
-               "existing_decision": existing_decision, **kwargs}
-        self.records.append(row)
-        return row
-
-
-class FakeClient:
-    @staticmethod
-    def choice(instructions, options):
-        return {"type": "choice", "instructions": instructions, "criteria": dict(options)}
-
-    @staticmethod
-    def noul(instructions, true=None, false=None):
-        return {"type": "noul", "instructions": instructions,
-                "criteria": {"true": true, "false": false}}
-
-
 class RecordMistakeTests(unittest.TestCase):
-    def test_appends_a_row_and_never_calls_jev(self):
+    def test_appends_a_row(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "notebook.jsonl"
             row = nb.record_mistake("off-by-one", "reverse a list", "used i instead of i-1",
@@ -90,27 +46,18 @@ class RecallEmptyTests(unittest.TestCase):
     def test_empty_notebook_returns_no_lines_and_does_not_escalate(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "notebook.jsonl"
-            out = nb.recall_mistakes("do a thing", notebook_path=str(path),
-                                      client=FakeClient, judge=FakeJudge([]))
+            out = nb.recall_mistakes("do a thing", notebook_path=str(path))
             self.assertEqual(out["detail"]["lines"], [])
             self.assertFalse(out["escalate"])
 
-    def test_no_token_overlap_returns_no_lines_without_asking_jev(self):
+    def test_no_exact_signature_overlap_returns_no_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "notebook.jsonl"
             nb.record_mistake("k", "parse json pointer paths", "forgot null check",
                                "added null check", source="s", notebook_path=str(path))
-            judge = FakeJudge([], fail_at={0})
             out = nb.recall_mistakes("completely unrelated banana pancake recipe",
-                                      notebook_path=str(path), client=FakeClient, judge=judge)
+                                      notebook_path=str(path))
             self.assertEqual(out["detail"]["lines"], [])
-            self.assertEqual(len(judge.calls), 0)
-
-
-
-
-
-
 
 
 class EntrypointTests(unittest.TestCase):
