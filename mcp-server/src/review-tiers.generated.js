@@ -8,10 +8,11 @@
 // this is a checked-in module.
 
 export const REVIEW_TIERS_SOURCE = "ops/config/review-tiers.v1.json";
-export const REVIEW_TIERS_DIGEST = "sha256:49558124dd3086bf178522a23edaa94d24eb33393b7222af5d07ec97083de288";
+export const REVIEW_TIERS_DIGEST = "sha256:252734fd3085c1dfe25c9d873c8477467beb6a3d56bf86e2e0e5b00a1497247a";
 
 export const REVIEW_TIERS = Object.freeze({
   default_tier: 1,
+  tunable_scalars: Object.freeze([{"path": "ops/config/jev-cost-guard.v1.json", "field": "daily_paid_call_cap", "minimum": 0, "maximum": 3000}]),
   rules: Object.freeze([
     Object.freeze({"id": "hooks", "tier": 3, "class": "protected", "match": "prefix", "pattern": "hooks/"}),
     Object.freeze({"id": "ops", "tier": 3, "class": "protected", "match": "prefix", "pattern": "ops/"}),

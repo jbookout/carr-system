@@ -58,6 +58,7 @@ class AdmissionTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k not in ts.SESSION_ID_ENV_KEYS and
                k not in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER", "CARR_JEV_JOB")}
         self.enterContext(patch.dict(os.environ, env, clear=True))
+        self.enterContext(patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=str(self.root / "semantic-cache.json")))
         self.transport = self.enterContext(patch.object(ts.urllib.request, "urlopen",
             side_effect=lambda *a, **kw: VendorResponse(json.dumps(RESPONSE).encode())))
 
@@ -97,6 +98,19 @@ class AdmissionTests(unittest.TestCase):
         shim = review.Shim("fixture-session", "pr:1537:head")
         self.assertEqual(shim.evaluate(PAYLOAD), shim.evaluate(PAYLOAD))
         self.assertEqual(self.transport.call_count, 1)
+
+    def test_separate_shims_reuse_complete_request_without_paid_reservation(self):
+        first = review.Shim("fixture-session", "pr:1531:head")
+        second = review.Shim("fixture-session", "pr:1531:head")
+        self.assertEqual(first.evaluate(PAYLOAD), (200, RESPONSE))
+        status, body = second.evaluate(PAYLOAD)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["answers"], RESPONSE["answers"])
+        self.assertEqual(self.transport.call_count, 1)
+        self.assertEqual(first.paid_attempts, 1)
+        self.assertEqual(second.paid_attempts, 0)
+        self.assertEqual(second.cached, 1)
+        self.assertEqual(body["usage"], {"input_tokens": 0, "output_tokens": 0})
 
     def test_payload_cannot_choose_another_provider(self):
         status, _ = review.Shim("fixture-session", "pr:1537:head").evaluate(
@@ -214,11 +228,13 @@ print(json.dumps({'findings':[]}))
     def test_worker_cache_hit_and_refusal_have_no_paid_reservation(self):
         shim = review.Shim("fixture-session", "pr:fixture:head")
         with patch.object(ts, 'server_ask', return_value=({**RESPONSE, 'cache_hit':True}, None)):
-            self.assertEqual(shim.evaluate(PAYLOAD), (200, {**RESPONSE}))
+            self.assertEqual(shim.evaluate(PAYLOAD), (200, {**RESPONSE,
+                'usage': {'input_tokens': 0, 'output_tokens': 0}}))
         self.assertEqual(shim.paid_attempts, 0)
         with patch.dict(ts.JEV_COST_CONFIG, daily_paid_call_cap=0):
             refused = review.Shim("fixture-session", "pr:fixture:head")
-            self.assertEqual(refused.evaluate(PAYLOAD)[0], 403)
+            changed = {**PAYLOAD, 'state': {**PAYLOAD['state'], 'name': 'uncached'}}
+            self.assertEqual(refused.evaluate(changed)[0], 403)
         self.assertEqual(refused.paid_attempts, 0)
 
     def test_concurrent_same_caller_and_session_reservations_stay_in_their_run(self):

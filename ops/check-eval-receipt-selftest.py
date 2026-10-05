@@ -15,6 +15,7 @@ changing result bytes and reusing a stale summary each fail the check.
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 import hashlib
 import importlib.util
 import json
@@ -215,6 +216,20 @@ def evidence_paths(receipt: dict) -> set[str]:
             | {c["path"] for c in ev["cohorts"].values()})
 
 
+@lru_cache(maxsize=128)
+def historical_dependency(root: Path, rel: str, expected: str) -> bytes:
+    """Find the immutable bytes by digest, including fetched merge parents."""
+    env = fixture_env()
+    revisions = subprocess.check_output(
+        ["git", "log", "--all", "--format=%H", "--", rel], cwd=root, env=env, text=True)
+    for rev in revisions.splitlines():
+        result = subprocess.run(["git", "show", rev + ":" + rel], cwd=root, env=env,
+                                capture_output=True)
+        if result.returncode == 0 and hashlib.sha256(result.stdout).hexdigest() == expected:
+            return result.stdout
+    raise AssertionError("historical receipt source binding unavailable: " + rel)
+
+
 def mirror(receipt: dict, dest: Path) -> None:
     """Copy the receipt's bound bytes, including pending and historical evidence."""
     ev = receipt['evidence']
@@ -226,16 +241,7 @@ def mirror(receipt: dict, dest: Path) -> None:
         data = (ROOT / rel).read_bytes()
         expected = hashes.get(rel)
         if expected is not None and hashlib.sha256(data).hexdigest() != expected:
-            revisions = subprocess.run(['git', 'log', '--all', '--format=%H', '--', rel],
-                cwd=ROOT, env=fixture_env(), check=True, capture_output=True, text=True).stdout.splitlines()
-            for revision in revisions:
-                blob = subprocess.run(['git', 'show', f'{revision}:{rel}'], cwd=ROOT,
-                    env=fixture_env(), capture_output=True)
-                if blob.returncode == 0 and hashlib.sha256(blob.stdout).hexdigest() == expected:
-                    data = blob.stdout
-                    break
-            else:
-                raise ValueError(f'receipt evidence unavailable: {rel} at sha256 {expected}')
+            data = historical_dependency(ROOT, rel, expected)
         (dest / rel).write_bytes(data)
     if not (dest / ".git").exists():
         env = fixture_env()
@@ -970,8 +976,50 @@ class ReceiptMirrorTests(unittest.TestCase):
                 broken = copy.deepcopy(pending)
                 broken['evidence']['source']['input.txt'] = '0' * 64
                 broken['evidence']['expectations']['sha256'] = '0' * 64
-                with self.assertRaisesRegex(ValueError, 'input.txt'):
+                with self.assertRaisesRegex(AssertionError, 'input.txt'):
                     mirror(broken, Path(tmp) / 'missing')
+
+
+class MirrorBindings(unittest.TestCase):
+    def test_receipt_update_does_not_replace_digest_bound_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, dest = Path(tmp, "repo"), Path(tmp, "mirror")
+            root.mkdir()
+            env = fixture_env()
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, env=env,
+                                      check=True, capture_output=True)
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            rel = "ops/source.py"
+            bound = b"value = 1\n"
+            receipt = {"evidence": {"source": {}, "dependencies": {
+                rel: hashlib.sha256(bound).hexdigest()},
+                "expectations": {"path": RD + "/expectations.json",
+                    "sha256": hashlib.sha256(b"{}").hexdigest()}, "cohorts": {}}}
+            for path, body in ((rel, bound), (RD + "/receipt.json", json.dumps(receipt).encode()),
+                               (RD + "/expectations.json", b"{}"), ("evals/surfaces.json", b"{}")):
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(body)
+            message = Path(tmp, "message")
+            message.write_text("Record bound source\n")
+            git("add", rel, RD + "/receipt.json", RD + "/expectations.json", "evals/surfaces.json")
+            git("commit", "-q", "-F", str(message))
+            (root / rel).write_text("value = 2\n")
+            receipt["note"] = "A later receipt amendment keeps the measured dependency."
+            (root / RD / "receipt.json").write_text(json.dumps(receipt))
+            message.write_text("Amend receipt after source changes\n")
+            git("add", rel, RD + "/receipt.json")
+            git("commit", "-q", "-F", str(message))
+            with patch.dict(globals(), ROOT=root):
+                mirror(receipt, dest)
+            self.assertEqual((dest / rel).read_bytes(), bound)
+            receipt["evidence"]["dependencies"][rel] = "0" * 64
+            with patch.dict(globals(), ROOT=root), self.assertRaisesRegex(
+                    AssertionError, "historical receipt source binding unavailable"):
+                mirror(receipt, Path(tmp, "unbound"))
 
 
 class RuleDeliveryEvidenceChain(unittest.TestCase):

@@ -76,6 +76,7 @@ class Harness(unittest.TestCase):
     def setUp(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.root = root
+        self.enterContext(patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=str(root / "semantic-cache")))
         self.log = root / "calls.jsonl"
         self.registry = root / "sites.json"
         self.write_registry([site("hook_site"), site("job_site", attribution="session_or_job"),
@@ -218,7 +219,7 @@ class RecordingAttributionTests(Harness):
         with patch.object(controller.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             controller._execute_deterministic(workflow, {"scheduled_for": "2026-10-04T03:00:00Z"},
                                               timeout=10, mode="live")
-        env = run.call_args.kwargs["env"]
+        env = {**run.call_args.kwargs["env"], "CARR_JEV_SEMANTIC_CACHE": str(self.log)+".semantic"}
         self.assertFalse(any(key in env for key in client.SESSION_ID_ENV_KEYS))
         with patch.dict(os.environ, env, clear=True):
             _, entry = client._admit_paid_call("jev_deal_read", None, {}, [], None, None)
@@ -259,7 +260,9 @@ class RecordingAttributionTests(Harness):
                    "details_supported": {"type": "noul", "noul": 0.99}}
         def opener(request, timeout=None):
             self.requests.append(request)
-            return FakeResponse(json.dumps({**ANSWER, "answers": answers}).encode())
+            asked = json.loads(request.data)["questions"]
+            batched = {key: answers[key.split(":")[-1]] for key in asked}
+            return FakeResponse(json.dumps({**ANSWER, "answers": batched}).encode())
         self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
         self.enterContext(patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "cache.json"),
                                      calls_log=str(self.log)))
