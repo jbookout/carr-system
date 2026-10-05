@@ -119,12 +119,20 @@ jobs:
           echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
 
       - name: Install PostgreSQL 18 server for the migration shadow
-        # The migration class's shadow run (ops/migration-shadow.py) needs
-        # production's major. No main cluster is created.
+        # ops/migration-shadow.py builds its own loopback cluster on production's
+        # major (18) from the base branch's db/schema.sql and applies this
+        # change's migrations to it. No main cluster is created, so nothing
+        # competes with the service container's port.
+        if: contains(matrix.classes, 'migration')
         run: |
           set -euo pipefail
-          sudo install -d /etc/postgresql-common/createcluster.d
+          sudo install -d /usr/share/postgresql-common/pgdg /etc/postgresql-common/createcluster.d
           echo "create_main_cluster = false" | sudo tee /etc/postgresql-common/createcluster.d/no-main-cluster.conf > /dev/null
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-18
           /usr/lib/postgresql/18/bin/initdb --version
 
@@ -146,12 +154,26 @@ jobs:
 
       - name: Run this group's check classes
         env:
+          # ops/ci.sh refuses any DSN that is not loopback. This one is the
+          # service container above.
           CARR_CI_DATABASE_URL: postgres://carr_ci:carr_ci@localhost:5432/carr_ci # ci-secret-scan: allow — throwaway container credential, loopback only, dies with the runner
           # Excludes the checks whose dependency cannot exist on a runner
           # (installed Claude Code settings, macOS launchd). Each one prints its
           # reason in the output; nothing is dropped silently.
           CARR_CI_PORTABLE_ONLY: "1"
+          # The migration shadow drops its regenerated db/schema.sql here; the
+          # next step uploads it when the class fails, so a stale snapshot is
+          # one download and one commit away from fixed.
+          CARR_SHADOW_ARTIFACT_DIR: ${{ runner.temp }}/migration-shadow
         run: ops/ci.sh --strict --only "${{ matrix.classes }}"
+      - name: Upload the migration shadow's regenerated db/schema.sql
+        if: ${{ failure() && contains(matrix.classes, 'migration') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: migration-shadow-schema-${{ github.sha }}
+          path: ${{ runner.temp }}/migration-shadow/schema.sql
+          if-no-files-found: ignore
+          retention-days: 7
 
   canary:
     name: main canary

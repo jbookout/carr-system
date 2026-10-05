@@ -3270,8 +3270,13 @@ class ControllerFreshness(Base):
         sha = self.push_from_elsewhere({"ops/release-pipeline.py": "v2\n", "mcp-server/src/a.js": "1"})
         verbs: list = []
         runner = FakeRunner()
+        remote_ref = git(self.fx.repo, "rev-parse", "origin/main")
+        fetch_head = self.fx.repo / ".git/FETCH_HEAD"
+        fetch_head.write_text("another session's fetch evidence\n")
         self.assertEqual(self.fx.pipeline(runner, verbs=verbs).tick(["worker"]), 3)
         self.assertEqual(runner.calls, [])
+        self.assertEqual(git(self.fx.repo, "rev-parse", "origin/main"), remote_ref)
+        self.assertEqual(fetch_head.read_text(), "another session's fetch evidence\n")
         held = self.fx.records()[-1]
         self.assertEqual((held["status"], held["reason"]), ("blocked", "controller_stale"))
         self.assertIn("ops/release-pipeline.py", held["detail"])

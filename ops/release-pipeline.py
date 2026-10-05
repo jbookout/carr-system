@@ -1653,8 +1653,11 @@ class Pipeline:
         origin/main (git hash-object vs the committed blob), so a lagging or
         locally edited checkout never releases main with other code. Once
         current again, the filed loop is forgotten so the next episode files."""
-        self.git("fetch", "--quiet", "origin", "main")
-        main = self.git("rev-parse", "origin/main")
+        remote = self.git("ls-remote", "--exit-code", "origin", "refs/heads/main").split()
+        if len(remote) != 2 or not SHA_RE.fullmatch(remote[0]) or remote[1] != "refs/heads/main":
+            raise Blocked("github_unreadable", "controller main has no exact SHA acknowledgement")
+        main = remote[0]
+        self.git("fetch", "--quiet", "origin", main)
         stale = []
         for path in CONTROLLER_PATHS:
             try:
@@ -1669,7 +1672,13 @@ class Pipeline:
                           f"{self.repo} differs from origin/main {main[:12]} in {', '.join(stale)}; "
                           "fleet-sync fast-forwards it once its local changes are gone",
                           capability=CONTROLLER_STALE)
-        if state.get("filed_blockers", {}).pop(CONTROLLER_STALE, None):
+        changed = bool(state.get("filed_blockers", {}).pop(CONTROLLER_STALE, None))
+        for lane in ("worker", "app"):
+            lane_state = state.get(lane, {})
+            if (lane_state.get("rejection") or {}).get("reason") == CONTROLLER_STALE:
+                lane_state.pop("rejection")
+                changed = True
+        if changed:
             self.store.save(state)
 
     # -- lanes --------------------------------------------------------------
@@ -1865,6 +1874,7 @@ class Pipeline:
             if sha == base:
                 self.out(f"release-pipeline[{lane}]: main {sha[:12]} is already released")
                 return 0
+            self.controller_current(state)
             if not self.dry_run and self.rejection_waits(lane_state, lane, base, sha):
                 return 0
             if not self.dry_run:
@@ -1874,7 +1884,6 @@ class Pipeline:
                 self.out(f"release-pipeline[{lane}]: {sha[:12]} failed at "
                          f"{lane_state.get('failed_step')}; waiting for a fix-forward merge")
                 return 0
-            self.controller_current(state)
             try:
                 self.git("merge-base", "--is-ancestor", base, sha, cwd=repo_dir)
             except StepFailed:
