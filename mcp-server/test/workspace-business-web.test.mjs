@@ -5,6 +5,20 @@ import { parseBusinessQuery } from "../src/workspace-business-read.js";
 
 const HOST = "dealroom.doctorcre.com";
 
+test('relationship snapshot uses the authenticated read-only business route',async()=>{
+ const env=environment();let reads=0;
+ const handler=createDealroomHandler(overrides(async(_env,actor,request)=>{
+  reads++;assert.equal(actor.slug,'joe');assert.equal(new URL(request.url).pathname,'/api/v1/business/relationships');
+  return {schema:'carr-relationship-network.v1',nodes:[],edges:[],referrals:[],suggestions:[]};
+ }));
+ const path=`https://${HOST}/api/v1/business/relationships?contract=relationship-network.v1`;
+ assert.equal((await handler.fetch(new Request(path),env,{})).status,401);assert.equal(reads,0);
+ const session=await signIn(handler,env);
+ const response=await handler.fetch(new Request(path,{headers:{cookie:session}}),env,{});
+ assert.equal(response.status,200);assert.equal((await response.json()).schema,'carr-relationship-network.v1');assert.equal(reads,1);
+ assert.equal((await handler.fetch(new Request(path,{method:'POST',headers:{cookie:session}}),env,{})).status,405);assert.equal(reads,1);
+});
+
 test('clients refuse vendor-only territory filtering and sorting through the authenticated route', async () => {
  const env=environment();
  const handler=createDealroomHandler(overrides(async (_env,actor,request)=>{

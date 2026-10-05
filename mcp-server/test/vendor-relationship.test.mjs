@@ -65,7 +65,7 @@ test('all sorts and owner/territory are server queries with deterministic ties a
   const client={async query(sql,values){calls.push({sql,values});return {rows:sql.startsWith('with filtered')?[{total_count:0,rows:[],viewer_owner_resolved:true}]:[{}]};}};
   await readBusinessList({client,actor:{slug:'joe',human:true},query,correlationId:'synthetic',now:()=>new Date(now)});
   assert.ok(calls[0].values.includes('dell'));assert.doesNotMatch(calls[0].sql,/Demo North/);assert.match(calls[0].sql,/f\.id/);
-  if(dataset==='vendors'){assert.ok(calls[0].values.includes('Demo North'));assert.match(calls[0].sql,/v\.deal_evidence/);assert.match(calls[0].sql,/d\.outcome='won'/);assert.match(calls[0].sql,/d\.outcome='lost'/);assert.match(calls[0].sql,/dc\.merged_into is null/);}
+  if(dataset==='vendors'){assert.ok(calls[0].values.includes('Demo North'));assert.match(calls[0].sql,/v\.deal_evidence/);assert.match(calls[0].sql,/e\.outcome='won'/);assert.match(calls[0].sql,/e\.outcome='lost'/);assert.match(calls[0].sql,/public\.party_link_deal r/);assert.match(calls[0].sql,/dc\.merged_into is null/);}
  }
 });
 
