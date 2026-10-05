@@ -717,6 +717,34 @@ class AskTests(unittest.TestCase):
         self.assertEqual(captured, [], "an oversized state must never reach the service")
         self.assertIn("Narrow it in code", str(caught.exception))
 
+    def test_worker_failure_codes_separate_local_failures_from_vendor_outages(self):
+        """A local Worker failure keeps its category; only a vendor or account
+        failure at the Worker reads as an outage (no code)."""
+        def failing(stderr):
+            def run(argv, **_options):
+                if json.loads(argv[3]).get("transport_mode") == "cache_only":
+                    return subprocess.CompletedProcess(argv, 1, "", "TOOL ERROR " + json.dumps(
+                        {"error": "jev_cache_miss", "spend_authority": client.SPEND_AUTHORITY}))
+                return subprocess.CompletedProcess(argv, 1, "", stderr)
+            return run
+        cases = (("could not reach the deployed Worker", "worker_unreachable"),
+                 ("no MCP token", "local_token_missing"),
+                 ('TOOL ERROR {"error":"jev_upstream_failed","status":503}', None),
+                 ('TOOL ERROR {"error":"jev_proxy_unconfigured"}', None))
+        for stderr, code in cases:
+            with self.subTest(code=code, stderr=stderr):
+                with self.assertRaises(client.TypeSafeError) as caught:
+                    client.ask("s", {"q": client.noul("?")}, calls_log=os.devnull,
+                               server_runner=failing(stderr))
+                self.assertNotIsInstance(caught.exception, client.JevCallRefused)
+                self.assertEqual(getattr(caught.exception, "code", None), code)
+
+        def no_authority(argv, **_options):
+            return subprocess.CompletedProcess(argv, 1, "", "TOOL ERROR " + json.dumps(
+                {"error": "jev_cache_miss"}))
+        with self.assertRaises(client.TypeSafeError) as caught:
+            client.ask("s", {"q": client.noul("?")}, calls_log=os.devnull, server_runner=no_authority)
+        self.assertEqual(caught.exception.code, "jev_spend_authority_unavailable")
 
 
 class DecideTests(unittest.TestCase):

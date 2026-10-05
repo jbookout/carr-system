@@ -156,7 +156,14 @@ TIMEOUT_SECONDS = 60.0
 
 
 class TypeSafeError(RuntimeError):
-    """Any failure reaching or being understood by the service."""
+    """Any failure reaching or being understood by the service.
+
+    `code` names a local or policy failure; None means a vendor or account
+    outage (or an untyped failure), which callers may collapse as one."""
+
+    def __init__(self, message, *, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 class JevCallRefused(TypeSafeError):
@@ -167,8 +174,7 @@ class JevCallRefused(TypeSafeError):
     """
 
     def __init__(self, message, *, code, site=None, scope=None, resets_at=None):
-        super().__init__(message)
-        self.code = code
+        super().__init__(message, code=code)
         self.site = site
         self.scope = scope
         self.resets_at = resets_at
@@ -189,6 +195,8 @@ POLICY_REFUSALS = ("fixture_offline", "unregistered_caller", "unattributed_call"
 # credit (HTTP 402), or a Worker attempt may already have been billed.
 VENDOR_REFUSALS = ("vendor_credit_exhausted",)
 REFUSAL_CODES = ("daily_paid_call_cap",) + BUDGET_REFUSALS + POLICY_REFUSALS + VENDOR_REFUSALS
+# Worker failures that are the vendor's or the account's, not this machine's.
+VENDOR_SIDE_FAILURES = ("vendor_failed_at_worker", "worker_key_unbound")
 ATTRIBUTIONS = ("session", "session_or_job")
 UNATTENDED_POLICIES = ("off", "allowed")
 _SITE_FIELDS = {"caller", "trigger", "runs_in", "attribution", "unattended",
@@ -1172,7 +1180,8 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             _observe_worker_pause(error, caller, upstream.get('resets_at'))
             raise JevCallRefused(f"Jev unavailable: {error} ({caller})", code=error, site=caller,
                                  resets_at=upstream.get('resets_at'))
-        raise TypeSafeError(f"Jev Worker unavailable: {error}; no direct fallback")
+        raise TypeSafeError(f"Jev Worker unavailable: {error}; no direct fallback",
+                            code=None if error in VENDOR_SIDE_FAILURES else error)
     cache_hit = served.get("cache_hit") is True
     validation = {**served, "usage": {"input_tokens": 0, "output_tokens": 0}} if cache_hit else served
     valid = usable_judgment(validation, questions)
