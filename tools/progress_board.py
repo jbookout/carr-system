@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import fcntl
 import functools
 import hashlib
@@ -59,9 +60,9 @@ STATUS_TO_STAGE = {
     "superseded": "ci",
 }
 # In flight: a card that should keep moving. Stale applies only to these.
-IN_FLIGHT = frozenset({"running", "review", "blocked"})
+IN_FLIGHT = frozenset({"queued", "running", "review"})
 STUCK_AFTER = timedelta(hours=2)
-STALE_AFTER = timedelta(hours=6)
+STALE_AFTER = timedelta(days=14)
 LAUNCHD_BOARD = "carr-v5"
 DEFAULT_PR_REPO = "jbookout/carr-system"
 SNAPSHOT_SCHEMA = "carr-progress-board.v2"
@@ -76,7 +77,7 @@ SNAPSHOT_TASK_FIELDS = frozenset("""
     pr_phase pr_head pr_checks pr_links question review_verdict summary blocked_reason next_action evidence
     release_wait created_at updated_at completed_at merged_at manual_stage
     stage_entered_at stage_history question_ids human_ref kind related
-    work_request work_request_ref
+    work_request work_request_ref milestone milestone_source slice
 """.split())
 BLOCKER_EXCERPT_LIMIT = 192
 
@@ -654,6 +655,7 @@ def rest_pr(raw: Any) -> dict[str, Any]:
         raise RuntimeError("merged PR has no valid merge commit SHA")
     return {
         "number": raw.get("number"), "title": raw.get("title"), "body": raw.get("body"),
+        "labels": raw.get("labels") or [], "milestone": raw.get("milestone"),
         "url": raw.get("html_url"), "createdAt": raw.get("created_at"), "updatedAt": raw.get("updated_at"),
         "state": "MERGED" if merged else raw["state"].upper(), "isDraft": raw["draft"],
         "headRefOid": raw["head"]["sha"], "headRefName": raw["head"].get("ref", ""),
@@ -1408,6 +1410,21 @@ def open_pr_state(repo: str, pr: dict[str, Any]) -> tuple[str, str, str]:
     return derived_pr_state({**pr, "state": "OPEN"}, repo)
 
 
+def v1_metadata(pr: dict[str, Any]) -> dict[str, str]:
+    match = re.match(r"^(W\d+[a-z]?)\s*:", str(pr.get("title") or ""), re.I)
+    if match:
+        return {"milestone": "V1", "milestone_source": "pr_title_prefix", "slice": match[1]}
+    labels = pr.get("labels") or []
+    if isinstance(labels, dict):
+        labels = labels.get("nodes") or []
+    if any(str(label.get("name") if isinstance(label, dict) else label).casefold() == "v1" for label in labels):
+        return {"milestone": "V1", "milestone_source": "pr_label"}
+    milestone = pr.get("milestone")
+    if isinstance(milestone, dict) and str(milestone.get("title") or "").casefold() == "v1":
+        return {"milestone": "V1", "milestone_source": "github_milestone"}
+    return {}
+
+
 def pr_card(repo: str, pr: dict[str, Any], merged: bool) -> dict[str, Any]:
     author = str((pr.get("author") or {}).get("login") or "") if isinstance(pr.get("author"), dict) else ""
     branch = str(pr.get("headRefName") or "")
@@ -1425,6 +1442,7 @@ def pr_card(repo: str, pr: dict[str, Any], merged: bool) -> dict[str, Any]:
         "created_at": pr.get("createdAt"), "updated_at": pr.get("updatedAt") or pr.get("createdAt"),
         "status": status, "stage": stage, "pr_phase": phase,
     }
+    card.update(v1_metadata(pr))
     if not merged and isinstance(pr.get("statusCheckRollup"), list):
         card["pr_checks"] = checks_summary(pr)
         card["review_verdict"] = review_verdict(pr, repo)
@@ -1642,7 +1660,9 @@ def sync_pr_task(task: dict[str, Any], info: dict[str, Any], at: str) -> bool:
             target.update({"blocked_reason": block[0], "next_action": block[1], "blocked_source": "github"})
     if target["blocked_source"] != "manual":
         target["blocked_head"] = None
-    facts: dict[str, Any] = {"pr_checks": checks_summary(info), "pr_head": info.get("headRefOid") or "",
+    metadata = v1_metadata(info)
+    facts: dict[str, Any] = {**{field: metadata.get(field) for field in ("milestone", "milestone_source", "slice")},
+                             "pr_checks": checks_summary(info), "pr_head": info.get("headRefOid") or "",
                              "review_verdict": review_verdict(info, task_repo(task))}
     if info.get("_legacy_terminal"):
         facts = {"pr_head": task.get("pr_head") or info.get("headRefOid") or ""}
@@ -1753,7 +1773,7 @@ def begin_refresh(project: str) -> tuple[int, dict[str, Any]]:
 
 
 @with_github_read_pass
-def render(project: str) -> None:
+def render(project: str, *, discover: bool = False) -> None:
     """Sync every PR card from GitHub, refresh release and health facts, and
     write the JSON. GitHub is read first, without the board lock; the result
     is applied to a fresh read under the lock, so a note or task written
@@ -1766,15 +1786,27 @@ def render(project: str) -> None:
         build_all_repos()
         return
     generation, initial = begin_refresh(project)
-    tasks = initial.get("tasks", {}).values()
+    tasks = list(initial.get("tasks", {}).values())
     assert GITHUB_PASS is not None
     GITHUB_PASS.seed(tasks)
     keys = {pr_key(task) for task in tasks if task.get("pr") is not None}
     fetched = {key: fetch_pr(key[1], key[0]) for key in sorted(keys)}
+    discovered = {}
+    discovery_error = None
+    if discover and project == LAUNCHD_BOARD and not os.environ.get("PROGRESS_BOARD_SKIP_GH"):
+        try:
+            discovered = discover_v1()
+            fetched.update(discovered)
+        except RuntimeError as exc:
+            discovery_error = str(exc)
+            log(f"V1 discovery failed: {exc}")
     # Every network and git read happens here, before the lock: the release
     # readback for cards whose delivery target a release completes, and the
     # pipeline's reason for the rest.
-    targeted = {pr_key(task) for task in tasks if task.get("pr") is not None
+    release_tasks = [*tasks, *[
+        {"repo": key[0], "pr": key[1], "delivery_target": AUTOMATIC_DELIVERY_TARGETS[key[0]]}
+        for key in discovered if key not in keys]]
+    targeted = {pr_key(task) for task in release_tasks if task.get("pr") is not None
                 and task.get("delivery_target") == AUTOMATIC_DELIVERY_TARGETS.get(pr_key(task)[0])}
     releases: dict[str, tuple[Path, str, str] | None] = {}
     evidence: dict[tuple[str, int], str | None] = {}
@@ -1790,7 +1822,14 @@ def render(project: str) -> None:
         state = read_state(project)
         if refresh_generation(project) != generation:
             return
-        if apply_sync(state, fetched, evidence):
+        previous_verified = (state.get("github_sync") or {}).get("last_verified_at")
+        added = add_v1_cards(state, discovered)
+        changed = apply_sync(state, fetched, evidence)
+        if discovery_error:
+            sync = state.setdefault("github_sync", {})
+            sync.setdefault("failed", []).append({"card": "V1 discovery", "error": discovery_error})
+            sync.update({"stale": True, "last_verified_at": previous_verified})
+        if changed or added or discovery_error:
             state["updated_at"] = max((str(task.get("updated_at") or "") for task in state["tasks"].values()),
                                       default=state.get("updated_at"))
             write_json(state)
@@ -1802,7 +1841,10 @@ def apply_sync(state: dict[str, Any],
                fetched: dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]],
                evidence: dict[tuple[str, int], str | None] | None = None) -> bool:
     changed = False
-    failed: list[dict[str, str]] = []
+    known = {pr_key(task) for task in state.get("tasks", {}).values() if task.get("pr") is not None}
+    failed: list[dict[str, str]] = [
+        {"repo": key[0], "pr": f"{key[0]}#{key[1]}", "error": str(error or "No PR facts")[:200]}
+        for key, (info, error) in fetched.items() if key not in known and (info is None or error)]
     synced = 0
     at = now_utc().isoformat(timespec="microseconds")
     for task_id, task in state.get("tasks", {}).items():
@@ -1902,7 +1944,7 @@ def snapshot_size(snapshot: dict[str, Any]) -> int:
 
 def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Trim until the whole payload fits: oldest Live cards first, then oldest
-    Merged cards, then the oldest History rows. Everything in flight, notes,
+    Merged cards, then the oldest History rows. Milestone cards, in-flight work, notes,
     decisions and the ledger are never dropped; if they alone are too large
     the snapshot is refused rather than published short."""
     tasks, history = snapshot["tasks"], snapshot["history"]
@@ -1910,9 +1952,9 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     def age(task: dict[str, Any]) -> str:
         return str(task.get("completed_at") or task.get("merged_at") or task.get("updated_at") or "")
     order = [("live", "tasks", key) for key in sorted(
-                 (k for k, t in tasks.items() if task_stage(t) == "live"), key=lambda k: (age(tasks[k]), k))]
+                 (k for k, t in tasks.items() if task_stage(t) == "live" and not t.get("milestone")), key=lambda k: (age(tasks[k]), k))]
     order += [("merged", "tasks", key) for key in sorted(
-                 (k for k, t in tasks.items() if task_stage(t) == "merged"), key=lambda k: (age(tasks[k]), k))]
+                 (k for k, t in tasks.items() if task_stage(t) == "merged" and not t.get("milestone")), key=lambda k: (age(tasks[k]), k))]
     order += [("history", "history", key) for key in sorted(
                  history, key=lambda k: (str(history[k].get("updated_at") or ""), k))]
     size = snapshot_size(snapshot)
@@ -1933,6 +1975,27 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+def activity_counts(tasks: dict[str, dict[str, Any]], at: datetime | None = None) -> dict[str, int]:
+    counts = {status: 0 for status in (*STATUSES, "stale")}
+    for task in tasks.values():
+        status = "stale" if is_stale(task, at) else task.get("status", "queued")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def milestone_groups(tasks: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, Any] = {}
+    for task_id, task in tasks.items():
+        if not task.get("milestone") or is_retired(task):
+            continue
+        group = groups.setdefault(task["milestone"], {"tasks": [], "counts": {}})
+        group["tasks"].append(task_id)
+        stage = task_stage(task)
+        state = "waiting_on_release" if stage == "merged" and task.get("release_wait") else stage
+        group["counts"][state] = group["counts"].get(state, 0) + 1
+    return groups
+
+
 def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     """The versioned data contract the app page renders. Deterministic for a
     given state. Full diagnostics stay local; the app receives bounded cards."""
@@ -1948,7 +2011,8 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         if isinstance(reason, str) and len(reason) > BLOCKER_EXCERPT_LIMIT:
             head = BLOCKER_EXCERPT_LIMIT // 2
             card["blocked_reason"] = reason[:head] + "…" + reason[-(BLOCKER_EXCERPT_LIMIT - head - 1):]
-        tasks[task_id] = {**card, "provider": provider, "model": model, "effort": effort}
+        tasks[task_id] = {**card, "provider": provider, "model": model, "effort": effort,
+                          "activity_status": "stale" if is_stale(task) else task.get("status", "queued")}
     decisions = [
         {"id": qid, "question": q.get("question"), "answer": q.get("answer"), "default": q.get("default"),
          "answered_at": q.get("answered_at") or q.get("updated_at")}
@@ -1960,6 +2024,9 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "project": state["project"],
         "title": state.get("title") or state["project"],
         "tasks": tasks,
+        "task_counts": activity_counts(tasks),
+        "milestones": milestone_groups(tasks),
+        "stale_policy": {"statuses": sorted(IN_FLIGHT), "after_days": 14, "exclude_from_active": True},
         "history": {
             task_id: {"title": task.get("title", task_id), "status": task.get("status"),
                       "reason": retired_reason(task), "executor": task.get("executor", "unassigned"),
@@ -2171,13 +2238,172 @@ def poll_board_answers(project: str) -> dict[str, int]:
 
 
 @with_github_read_pass
+def discover_v1() -> dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]]:
+    discovered = {}
+    since = (now_utc() - STALE_AFTER).isoformat(timespec="seconds")
+    for repo in CORE_REPOS[:2]:
+        candidates = rest_rows(f"repos/{repo}/pulls?state=open&sort=updated&direction=desc")
+        candidates += [row for row in rest_rows(f"repos/{repo}/issues?state=closed&since={since}")
+                       if row.get("pull_request")]
+        for row in candidates:
+            if v1_metadata(row) and isinstance(row.get("number"), int):
+                key = repo, row["number"]
+                assert GITHUB_PASS is not None
+                discovered[key] = GITHUB_PASS.read(key[1], repo, row)
+    return discovered
+
+
+def add_v1_cards(state: dict[str, Any], discovered: dict) -> bool:
+    changed = False
+    tasks = state.setdefault("tasks", {})
+    known = {pr_key(task) for task in tasks.values() if task.get("pr") is not None}
+    for key, (info, error) in discovered.items():
+        if info is None or error or not v1_metadata(info) or key in known or info.get("state") == "CLOSED":
+            continue
+        task_id = f"pr-{key[1]}" if key[0] == DEFAULT_PR_REPO else f"app-pr-{key[1]}"
+        if task_id in tasks:
+            continue
+        tasks[task_id] = pr_card(key[0], info, info["state"] == "MERGED")
+        tasks[task_id]["delivery_target"] = AUTOMATIC_DELIVERY_TARGETS[key[0]]
+        changed = True
+    return changed
+
+
+def reconcile_state(state: dict[str, Any], fetched: dict, at: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Pure cleanup plan. GitHub read failures preserve cards and fail the check."""
+    result = copy.deepcopy(state)
+    tasks = result.setdefault("tasks", {})
+    removed = {key: tasks.pop(key) for key in list(tasks) if key.startswith("wd-")}
+    folds = {}
+    for task_id in list(tasks):
+        task = tasks[task_id]
+        if task.get("pr") is None or not re.fullmatch(r"pr-[A-Za-z0-9._-]+-\d+", task_id):
+            continue
+        key = pr_key(task)
+        canonical = next((candidate for candidate, other in tasks.items()
+                          if candidate != task_id and other.get("pr") is not None and pr_key(other) == key
+                          and candidate in {f"pr-{key[1]}", f"app-pr-{key[1]}"}), None)
+        if canonical is None:
+            canonical = f"pr-{key[1]}" if key[0] == DEFAULT_PR_REPO else f"app-pr-{key[1]}"
+            if canonical in tasks:
+                continue
+            tasks[canonical] = copy.deepcopy(task)
+        survivor = tasks[canonical]
+        for field, value in task.items():
+            survivor.setdefault(field, copy.deepcopy(value))
+        removed[task_id] = tasks.pop(task_id)
+        folds[task_id] = canonical
+    add_v1_cards(result, fetched)
+    failures = [{"card": f"{repo}#{number}", "error": error or "No PR facts"}
+                for (repo, number), (info, error) in fetched.items() if info is None or error]
+    failed_keys = {key for key, (info, error) in fetched.items() if info is None or error}
+    open_blocked = set()
+    for task_id, task in tasks.items():
+        if task.get("pr") is None:
+            continue
+        key = pr_key(task)
+        info, error = fetched.get(key, (None, "PR not read"))
+        if info is None or error:
+            if key not in failed_keys:
+                failures.append({"card": task_id, "error": error or "No PR facts"})
+            continue
+        status, stage, phase = derived_pr_state(info, key[0])
+        if info["state"] == "OPEN" and status == "blocked":
+            open_blocked.add(key)
+        if task_stage(task) == "live" and info["state"] == "MERGED":
+            stage = "live"
+        before = (task.get("status"), task_stage(task))
+        for field in ("milestone", "milestone_source", "slice"):
+            task.pop(field, None)
+        task.update({"status": status, "stage": stage, "pr_phase": phase, **v1_metadata(info)})
+        if info.get("title"):
+            task["title"] = info["title"]
+        for field in ("health", "blocked_reason", "blocked_source", "blocked_head", "next_action", "manual_stage"):
+            task.pop(field, None)
+        if status == "blocked":
+            block = derived_block(info, phase)
+            if block:
+                task.update({"blocked_reason": block[0], "next_action": block[1], "blocked_source": "github"})
+        if info["state"] == "CLOSED":
+            task["reason"] = "PR closed without merging"
+        if info["state"] == "MERGED":
+            task["merged_at"] = info.get("mergedAt")
+            if merge_sha(info):
+                task["merge_sha"] = merge_sha(info)
+            if stage == "merged":
+                task["release_wait"] = "Waiting for verified release or operational receipt"
+        if before != (status, stage):
+            task["updated_at"] = at
+            record_stage(task, at, before[1])
+        normalize_task(task)
+    watchdog_left = sum(key.startswith("wd-") for key in tasks)
+    terminal_blocked = sum(task.get("status") == "blocked" and task.get("pr") is not None
+                           and (fetched.get(pr_key(task), (None, None))[0] or {}).get("state") in {"MERGED", "CLOSED"}
+                           for task in tasks.values())
+    blocked = sum(task.get("status") == "blocked" for task in tasks.values())
+    report = {"removed_watchdog": sum(key.startswith("wd-") for key in removed), "folded": len(folds),
+              "watchdog_left": watchdog_left, "terminal_blocked": terminal_blocked,
+              "blocked": blocked, "open_blocked_prs": len(open_blocked), "failures": failures}
+    report["check_passed"] = not failures and not watchdog_left and not terminal_blocked and blocked <= len(open_blocked)
+    if removed:
+        result.setdefault("reconcile_archive", []).append({"at": at, "tasks": removed, "folds": folds})
+    return result, report
+
+
+def command_reconcile(args: argparse.Namespace) -> None:
+    if args.live and args.apply:
+        raise SystemExit("--live is read-only; apply to the canonical local board after reviewing its dry-run")
+    if args.live:
+        remote = call_verb("read-progress-board", {"board_id": safe_project(args.project)})
+        snapshot = remote.get("snapshot")
+        if not snapshot:
+            raise SystemExit("No published board snapshot")
+        initial = snapshot["snapshot_json"]
+    else:
+        initial = read_state(args.project)
+    keys = {pr_key(task) for key, task in initial.get("tasks", {}).items()
+            if not key.startswith("wd-") and task.get("pr") is not None}
+    with github_read_pass():
+        fetched = {key: fetch_pr(key[1], key[0]) for key in sorted(keys)}
+        discovery_error = None
+        try:
+            fetched.update(discover_v1())
+        except RuntimeError as exc:
+            discovery_error = str(exc)
+    proposed, report = reconcile_state(initial, fetched, stamp())
+    if discovery_error:
+        report["failures"].append({"card": "V1 discovery", "error": discovery_error})
+        report["check_passed"] = False
+    print("APPLY" if args.apply else "DRY RUN (no board writes or publishes)")
+    print("Status           Before  After")
+    before, after = activity_counts(initial.get("tasks") or {}), activity_counts(proposed["tasks"])
+    for status in (*STATUSES, "stale"):
+        print(f"{status:16} {before[status]:6} {after[status]:6}")
+    print(f"Removed watchdog cards: {report['removed_watchdog']}; folded duplicates: {report['folded']}")
+    print(f"After: wd-*={report['watchdog_left']}; closed/merged PRs in Blocked={report['terminal_blocked']}; "
+          f"Blocked={report['blocked']}; genuinely blocked open PRs={report['open_blocked_prs']}")
+    print(f"GitHub read failures: {len(report['failures'])}")
+    for failure in report["failures"]:
+        print(f"  {failure['card']}: {failure['error']}")
+    print("CHECK " + ("PASS" if report["check_passed"] else "FAIL"))
+    if not report["check_passed"]:
+        raise SystemExit(1)
+    if args.apply:
+        with board_lock(args.project):
+            if read_state(args.project) != initial:
+                raise SystemExit("Board changed during reconcile; rerun dry-run")
+            write_json(proposed)
+        refresh_and_publish(args.project)
+
+
+@with_github_read_pass
 def command_render(args: argparse.Namespace) -> None:
     if args.project == ALL_REPOS_BOARD:
         build_all_repos()
         if args.publish:
             publish_board(ALL_REPOS_BOARD)
         return
-    render(args.project)
+    render(args.project, discover=True)
     if args.publish or args.project == LAUNCHD_BOARD:
         publish_board(args.project)
     if args.project == LAUNCHD_BOARD:
@@ -2442,6 +2668,11 @@ def parser() -> argparse.ArgumentParser:
     render_cmd.add_argument("project")
     render_cmd.add_argument("--publish", action="store_true")
     render_cmd.set_defaults(func=command_render)
+    reconcile = commands.add_parser("reconcile", help="preview watchdog/PR cleanup; no board writes by default")
+    reconcile.add_argument("project")
+    reconcile.add_argument("--live", action="store_true", help="preview the published snapshot (read-only)")
+    reconcile.add_argument("--apply", action="store_true", help="apply a verified plan to local state and publish")
+    reconcile.set_defaults(func=command_reconcile)
     poll = commands.add_parser("poll-answers")
     poll.add_argument("project")
     poll.set_defaults(func=command_poll)
