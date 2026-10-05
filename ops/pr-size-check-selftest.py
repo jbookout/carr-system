@@ -105,6 +105,17 @@ checks.append(("an ordinary source path is not excluded",
                check.is_excluded("ops/pr-size-check.py") is None
                and check.is_excluded("tools/outline.py") is None))
 
+report = check.assess([check.Change("lib/fix.py", 3, "M"),
+                       check.Change("tests/test_fix.py", 400, "A")], LIMIT_LINES, LIMIT_FILES)
+checks.append(("test evidence cannot inflate code size or code file count",
+               report.lines == 3 and report.files == 1 and not report.warn))
+report = check.assess([check.Change("ops/fix-selftest.py", 400, "A")], LIMIT_LINES, LIMIT_FILES)
+checks.append(("test-only evidence is reported separately",
+               report.lines == 0 and report.files == 0 and report.test_lines == 400 and report.test_files == 1))
+report = check.assess([check.Change("tests/moved.py", 400, "R", 95, "lib/code.py")], LIMIT_LINES, LIMIT_FILES)
+checks.append(("moving code into tests cannot hide a code change",
+               report.lines == 400 and report.files == 1))
+
 with tempfile.TemporaryDirectory(prefix="pr-size-check-") as tmp:
     repo = Path(tmp) / "repo"
     repo.mkdir()
