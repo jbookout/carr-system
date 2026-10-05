@@ -1042,6 +1042,36 @@ check_pushfloor() {
     fi
   fi
 
+  if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Eq \
+      '^(migrations/|tools/migration_number_contract\.py$|ops/migration-order-gate\.py$)'; then
+    ran="$ran migration-structure"
+    run_quiet "$LOGDIR/pushfloor-migration-structure.log" \
+      "$PY" ops/migration-order-gate.py \
+      || { tail -15 "$LOGDIR/pushfloor-migration-structure.log" >&2
+           floor_fail migration-structure \
+             "reserve a forward migration number and repair every reference before push"; }
+  fi
+
+  if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Eq \
+      '^(mcp-server/src/|hooks/completion-evidence-gate\.py$)'; then
+    ran="$ran registry-coverage"
+    run_quiet "$LOGDIR/pushfloor-registry-coverage.log" \
+      "$PY" ops/completion-evidence-gate-selftest.py --registry-only \
+      || { tail -12 "$LOGDIR/pushfloor-registry-coverage.log" >&2
+           floor_fail registry-coverage \
+             "classify the registry's new writes in the completion gate and retain read exclusions"; }
+  fi
+
+  if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Eq \
+      '(^ops/ci\.sh$|(^|/)(test[^/]*|[^/]*selftest[^/]*)\.(py|sh|mjs|js)$)'; then
+    ran="$ran test-collection"
+    run_quiet "$LOGDIR/pushfloor-test-collection.log" \
+      "$PY" ops/ci-selftest.py --collection-only \
+      || { tail -12 "$LOGDIR/pushfloor-test-collection.log" >&2
+           floor_fail test-collection \
+             "include the new test in CI's collection or its named decision exception"; }
+  fi
+
   # ── predictor: typed Python ──────────────────────────────────────────────
   # CI's `types` class is `mypy pipelines tools exporters lib generators shared
   # fill-engine bin hooks ops` under the repo's mypy.ini. This is the SAME binary
@@ -1252,6 +1282,11 @@ check_dependency() {
 # requirement means no environment variable, typo or copied DSN can aim it at
 # production. There is no override flag on purpose.
 check_migration() {
+  if ! run_quiet "$LOGDIR/migration-structure.log" "$PY" ops/migration-order-gate.py; then
+    tail -15 "$LOGDIR/migration-structure.log" >&2
+    bad migration "migration ordering or slot collision failed before database work; reserve a forward number"
+    return
+  fi
   local dsn="${CARR_CI_DATABASE_URL:-}"
   if [ -z "$dsn" ]; then
     skip migration "no CARR_CI_DATABASE_URL (CI provides a throwaway Postgres)"
