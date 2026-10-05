@@ -1370,6 +1370,10 @@ def _build_duration_row():
         return ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled checker; "
                 "verify ops/build-duration-check.py --health; auto-clear after fresh complete scan", 1)
     return lines[0], result.returncode
+def _branch_janitor_row():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+    from branch_retirement import health
+    return health(REPO_ROOT)
 
 
 def _canonical_health():
@@ -1988,6 +1992,18 @@ def _canonical_health():
             print(f"  ⚠︎ {'gate precision':<18} {_detail} · on breach: restore "
                   f"tools/gate_verdict.py or the ledger, then rerun health")
             rc = _red("gate_precision_unreadable", _detail, hard_error=True)
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        print("Branch retirement — local scheduled receipts")
+        try:
+            line, failed = _branch_janitor_row()
+            print("  " + line)
+            if failed:
+                rc = _red("branch_janitor", line, subject="three-repo-retirement")
+        except Exception as exc:
+            line = (f"branch janitor unavailable ({type(exc).__name__}) · on breach: owner orchestrator "
+                    "· restore lib/branch_retirement.py · verify health · auto-clear after successful readback")
+            print("  WARN " + line)
+            rc = _red("branch_janitor", line, subject="three-repo-retirement")
 
     if CANONICAL_SECTION in ("all", "tailscale"):
         try:

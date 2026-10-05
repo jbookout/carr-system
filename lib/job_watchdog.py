@@ -216,8 +216,9 @@ def detect(facts, config, now):
         if log["type"] == "release" and now - epoch(log["mtime"]) >= t["pipeline_stale_seconds"]:
             emit(source, "pipeline_stale", log["path"], "release log stopped updating")
     for branch in facts.get("branches", []):
-        if branch["name"].startswith("claude/") and now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
-            emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "claude branch idle for configured limit")
+        if branch["name"] not in {"main", "master", "develop"} and not branch.get("open_pr") and \
+                now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
+            emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "branch idle for configured limit")
     for error in facts.get("errors", []):
         found.append(finding(error["kind"], error["source"], error["reason"], config, blinds=error["blinds"]))
     for f in found:
@@ -649,6 +650,13 @@ def collect(root, config, now=None):
     # head and updated_at, bounded by an age limit for changes that bump neither.
     cache_path = path_at(root, config["paths"]["pr_cache"])
     cache = read_pr_cache(cache_path)
+    dates_path = root / "out/watchdog/branch-dates.json"
+    try:
+        dates = json.loads(dates_path.read_text())
+        if not isinstance(dates, dict):
+            dates = {}
+    except (OSError, ValueError):
+        dates = {}
     t = config["thresholds"]
     for repo in config["repositories"]:
         if limited:
@@ -685,10 +693,31 @@ def collect(root, config, now=None):
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
                 for branch in page:
-                    if branch["name"].startswith("claude/"):
-                        commit = json.loads(command(["gh", "api", f"repos/{repo}/commits/{branch['commit']['sha']}"], config))
+                    if branch["name"] not in {"main", "master", "develop"}:
+                        sha = branch["commit"]["sha"]
+                        key = repo + ":" + sha
+                        date = dates.get(key)
+                        try:
+                            if not isinstance(date, str) or not math.isfinite(epoch(date)):
+                                raise ValueError("invalid cached commit date")
+                        except (AttributeError, TypeError, ValueError):
+                            date = None
+                        if date is None:
+                            # Commit dates are immutable. Prefer already fetched objects;
+                            # still list remote refs every scan so retirement clears facts.
+                            try:
+                                checkout = Path(config["repository_roots"][repo]).expanduser()
+                                date = command(["git", "show", "-s", "--format=%cI", sha], config, checkout).strip()
+                                epoch(date)
+                            except Exception:
+                                commit = json.loads(command(["gh", "api", f"repos/{repo}/commits/{sha}"], config))
+                                date = commit["commit"]["committer"]["date"]
+                                epoch(date)
+                            dates[key] = date
                         facts["branches"].append({"repo": repo, "name": branch["name"],
-                                                  "updated": commit["commit"]["committer"]["date"]})
+                                                  "updated": date,
+                            "open_pr": any(p["repo"] == repo and p.get("headRefName") == branch["name"]
+                                           for p in facts["prs"])})
         except Exception as exc:
             error(repo + " branches", exc, "branches")
     logs = [(p, "queue") for p in config["paths"]["queue_logs"]] + [(config["paths"]["release_log"], "release")]
@@ -706,6 +735,10 @@ def collect(root, config, now=None):
         staged = cache_path.with_suffix(".tmp")
         staged.write_text(json.dumps(cache, separators=(",", ":")))
         staged.replace(cache_path)
+        dates_path.parent.mkdir(parents=True, exist_ok=True)
+        staged = dates_path.with_suffix(".tmp")
+        staged.write_text(json.dumps(dates, separators=(",", ":")))
+        staged.replace(dates_path)
     except OSError:
         pass  # A lost cache only costs the next scan a full collection.
     facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in [*missing.values(), *limited.values()])
@@ -879,6 +912,38 @@ def digest(root, config):
     return "\n".join(lines)
 
 
+def schedule_reaper(root, config, effects, now):
+    policy = config.get("branch_janitor")
+    if not policy:
+        return
+    canonical = config.get("repository_roots", {}).get("jbookout/carr-system")
+    if not canonical or Path(root).resolve() != Path(canonical).expanduser().resolve():
+        return  # A fixture or session checkout must never schedule the live fleet.
+    ledger = root / "out/orch/branch-janitor-schedule.jsonl"
+    previous = read_latest(ledger).get("schedule", {})
+    if now - previous.get("at", 0) < policy["interval_seconds"]:
+        return
+    pid = previous.get("wrapper_pid")
+    identity = process_identity(pid, config) if pid else None
+    if identity and identity == previous.get("process_identity"):
+        return
+    # Read back a possibly interrupted launch before starting another wrapper.
+    jobs = read_latest(path_at(root, config["paths"]["registry"]))
+    active = next((j for j in jobs.values() if j.get("card") == "branch-janitor" and
+                   "exit_code" not in j and j.get("process_identity") and
+                   process_identity(j.get("pid"), config) == j["process_identity"]), None)
+    if active:
+        return
+    job_id = "branch-janitor-" + uuid.uuid4().hex[:12]
+    append(ledger, {"key": "schedule", "at": now, "status": "intent", "job_id": job_id})
+    result = effects.launch({"card": "branch-janitor", "executor": "deterministic reaper",
+                             "limit": policy["limit_seconds"]},
+        [sys.executable, str(SOURCE / "hooks/worktree-self-plumb.py"), "--reap", "--fleet",
+         "--repo", str(root)], root, job_id=job_id)
+    append(ledger, {"key": "schedule", "at": now, "status": "started", **result,
+                    "process_identity": process_identity(result["wrapper_pid"], config)})
+
+
 def scan(root, config, config_path=None):
     try:
         with locked(path_at(root, config["paths"]["scan_lock"]), blocking=False):
@@ -889,6 +954,11 @@ def scan(root, config, config_path=None):
                             "previous_status": prior_runs.get("scan", {}).get("status")})
             effects = Effects(root, config)
             effects.config_path = Path(config_path or SOURCE / "ops/config/job-watchdog.json").resolve()
+            try:
+                schedule_reaper(root, config, effects, now)
+            except Exception as exc:
+                append(root / "out/orch/branch-janitor-schedule.jsonl",
+                       {"key": "schedule_error", "at": now, "error": type(exc).__name__})
             facts = collect(root, config, now)
             found = reconcile(root, config, detect(facts, config, now), effects, now)
             append(ledger, {"key": "scan", "status": "completed", "at": stamp(),

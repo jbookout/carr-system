@@ -693,6 +693,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         snap = {"exports": {}, "jobs": [], "job_definitions": [], "controls": {}}
         ns.update(CANONICAL_SECTION="all", _canonical_snapshot=lambda: snap,
                   _seat_health_rows=lambda: ["PASS seat fixture"],
+                  _branch_janitor_row=lambda: ("OK branch janitor fixture", False),
                   _canonical_now=lambda snap: datetime.now(timezone.utc),
                   _canonical_contradiction_alarm=lambda: 0,
                   _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
