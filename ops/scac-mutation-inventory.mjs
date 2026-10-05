@@ -550,6 +550,8 @@ export const REGISTRY_V107_VERSION = "scac-mutation-registry.v107";
 export const REGISTRY_V108_VERSION = "scac-mutation-registry.v108";
 export const REGISTRY_V109_VERSION = "scac-mutation-registry.v109";
 export const REGISTRY_V110_VERSION = "scac-mutation-registry.v110";
+export const REGISTRY_V111_VERSION = "scac-mutation-registry.v111";
+export const REGISTRY_V112_VERSION = "scac-mutation-registry.v112";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -2057,6 +2059,8 @@ export const RELATIONSHIP_V109_DB_CATALOG_BASELINE = Object.freeze({
 });
 
 export const INVOICE_TRACKER_V110_DB_CATALOG_BASELINE = Object.freeze({"projection_version":"scac-db-catalog-projection.v110","secdef_execute":{"count":1234,"digest":"sha256:20b9172e7c6e0c799907abc8d920f0409c910707bd9beba77ca21d8a23bf1bcc"},"relation_dml":{"count":317,"digest":"sha256:93c871b7b7ce93186098fb47d6c93ba91d74a6db46a8ae4db31c6620ed85b302"},"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"runtime_dml_grants":{"count":329,"digest":"sha256:40bd226aaf01dc401544beceb274301f35aed7e2c93557f938f658d7bdc04b52"}});
+
+export const AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE = Object.freeze({"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"relation_dml":{"count":319,"digest":"sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"secdef_execute":{"count":1238,"digest":"sha256:24ac15c3938e60ab97351f3040c854357b30fc2052ebe5a41f63fdfbbf68660a"},"projection_version":"scac-db-catalog-projection.v111","runtime_dml_grants":{"count":331,"digest":"sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"}});
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -19816,6 +19820,25 @@ export function renderRelationshipRegistrySql(rows, predecessorSql = null) {
 
 
 
+export const LEADS_V112_DB_CATALOG_BASELINE = Object.freeze({"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"relation_dml":{"count":319,"digest":"sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"secdef_execute":{"count":1242,"digest":"sha256:548ab9cb9d567cb08e55498354fcbb45e663d1391a90a4a8b20af0db00d476d6"},"projection_version":"scac-db-catalog-projection.v112","runtime_dml_grants":{"count":331,"digest":"sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"},"job_definitions":{"count":2,"digest":"sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"}});
+
+export function renderLeadsRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0844_automation_undo_scac_successor.sql",
+    predecessorDigest: "abafd5ab1670298eeca04fea717918e03b959d77025abb9c96a9632cb9fbc763",
+    domainPath: "migrations/0845_lead_archived_stage.sql",
+    oldVersion: REGISTRY_V111_VERSION,
+    newVersion: REGISTRY_V112_VERSION,
+    oldCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE,
+    newCatalogBaseline: LEADS_V112_DB_CATALOG_BASELINE,
+    oldTag: "automation_undo",
+    newTag: "leads",
+    oldLabel: "Audited automation",
+    newLabel: "Leads",
+  });
+}
+
 export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
   return renderAppendedRegistrySql(rows, {
     predecessorSql,
@@ -19828,6 +19851,21 @@ export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
     newCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE,
     oldTag: "relationship", newTag: "invoice_tracker",
     oldLabel: "Relationship", newLabel: "Invoice tracker",
+  });
+}
+
+export function renderAutomationUndoRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0842_invoice_tracker_scac_successor.sql",
+    predecessorDigest: "9a6a23ee5041504d59eda63f4320e510d4dd858c04fe6c0657f4ed74944ea7df",
+    domainPath: "migrations/0843_automation_reason_undo_archive_invoice.sql",
+    oldVersion: REGISTRY_V110_VERSION,
+    newVersion: REGISTRY_V111_VERSION,
+    oldCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE,
+    newCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE,
+    oldTag: "invoice_tracker", newTag: "automation_undo",
+    oldLabel: "Invoice tracker", newLabel: "Automation undo",
   });
 }
 
@@ -21355,10 +21393,23 @@ export function renderGeneratedFrontier() {
       dbCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE });
   artifacts["migrations/0842_invoice_tracker_scac_successor.sql"] =
     renderInvoiceTrackerRegistrySql(v110Rows, artifacts["migrations/0840_relationship_scac_successor.sql"]);
+  const v111Rows = frozenInventory(REGISTRY_V111_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v111.generated.js"] =
+    renderRuntimeProjection(v111Rows, { version: REGISTRY_V111_VERSION,
+      dbCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE });
+  artifacts["migrations/0844_automation_undo_scac_successor.sql"] =
+    renderAutomationUndoRegistrySql(v111Rows, artifacts["migrations/0842_invoice_tracker_scac_successor.sql"]);
+
+  const v112Rows = frozenInventory(REGISTRY_V112_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v112.generated.js"] =
+    renderRuntimeProjection(v112Rows, { version: REGISTRY_V112_VERSION,
+      dbCatalogBaseline: LEADS_V112_DB_CATALOG_BASELINE });
+  artifacts["migrations/0846_leads_scac_successor.sql"] =
+    renderLeadsRegistrySql(v112Rows, artifacts["migrations/0844_automation_undo_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 116 || runtimeCount !== 107 || Object.keys(artifacts).length !== 223)
+  if (migrationCount !== 118 || runtimeCount !== 109 || Object.keys(artifacts).length !== 227)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -22434,6 +22485,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         dbCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE }));
     await writeFile(resolve("migrations/0842_invoice_tracker_scac_successor.sql"), renderInvoiceTrackerRegistrySql(rows));
     process.stdout.write("Invoice tracker v110 frontier generated\n");
+  } else if (process.argv[2] === "--write-automation-undo-frontier") {
+    const rows = frozenInventory(REGISTRY_V111_VERSION);
+    await writeFile(resolve("mcp-server/src/scac-mutation-registry.v111.generated.js"),
+      renderRuntimeProjection(rows, { version: REGISTRY_V111_VERSION,
+        dbCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE }));
+    await writeFile(resolve("migrations/0844_automation_undo_scac_successor.sql"), renderAutomationUndoRegistrySql(rows));
+    process.stdout.write("Automation undo v111 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);
     process.stdout.write(`source inventory matches frozen ${CURRENT_REGISTRY_VERSION} frontier fixture\n`);

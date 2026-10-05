@@ -18,6 +18,7 @@ class GeneratedFrontier(unittest.TestCase):
                        env=fixture_env(), check=True, capture_output=True)
         shutil.copyfile(ROOT / 'ops/scac-mutation-inventory.mjs', self.repo / 'ops/scac-mutation-inventory.mjs')
         self.path = self.repo / 'ops/config/scac-registry-source-inventory-fixtures.v1.json'
+        shutil.copyfile(ROOT / 'ops/config/scac-registry-source-inventory-fixtures.v1.json', self.path)
         self.fixture = json.loads(self.path.read_text())
         previous = self.fixture['patches'][-1]
         self.number = int(previous['version'][1:]) + 1
@@ -31,6 +32,17 @@ class GeneratedFrontier(unittest.TestCase):
         self.path.write_text(json.dumps(self.fixture))
         return subprocess.run(['node', '--input-type=module', '-e', code],
                               cwd=self.repo, env=fixture_env(), text=True, capture_output=True)
+
+    def test_repository_frontier_includes_current_generated_history(self):
+        current = json.loads((ROOT / 'ops/config/scac-registry-source-inventory-fixtures.v1.json').read_text())['patches'][-1]
+        result = self.run_node(f"""
+import assert from 'node:assert/strict';
+import {{CURRENT_REGISTRY_VERSION,frozenInventory}} from './ops/scac-mutation-inventory.mjs';
+const current='scac-mutation-registry.{current['version']}';
+assert.equal(CURRENT_REGISTRY_VERSION,'scac-mutation-registry.v{int(current['version'][1:])+1}');
+assert.equal(frozenInventory(current).length,{current['expected_count']});
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_successor_uses_fixture_frontier_and_preserves_historical_rows(self):
         result = self.run_node(f"""
