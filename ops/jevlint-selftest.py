@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 import sys
 import tempfile
+from datetime import datetime, timezone
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -156,6 +157,16 @@ print(json.dumps({'findings':[]}))
         self.assertEqual(report["evaluations"], 1)
         self.assertEqual(report["findings"][0]["ruleId"], "wrapper-without-value")
         self.assertEqual(self.transport.call_count, 1)
+
+    def test_daily_ledger_rollover_cannot_report_a_false_paid_count(self):
+        binary = self.root / "jevlint"
+        binary.write_text('#!/usr/bin/env python3\nprint(\'{"findings":[]}\')\n')
+        binary.chmod(0o700)
+        with patch.object(review, "datetime") as clock:
+            clock.now.side_effect = [datetime(2026, 10, 4, 23, 59, tzinfo=timezone.utc),
+                                     datetime(2026, 10, 5, tzinfo=timezone.utc)]
+            with self.assertRaises(ValueError):
+                review.run_jevlint(binary, self.root, review.Shim("fixture", "pr:fixture:head"), port=0)
 
 
 class DiffTests(unittest.TestCase):

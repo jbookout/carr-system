@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 from contextlib import closing
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -145,6 +146,7 @@ def run_jevlint(binary, workspace, shim, *, evals=None, port=PORT):
     workspace = workspace.resolve()
     env = {k: v for k, v in fixture_env().items() if not k.startswith(
         ("TYPESAFE_", "JEVLINT_", "OPENROUTER_", "CLOUDFLARE_", "CLEF_"))}
+    day = datetime.now(timezone.utc).date()
     before = paid_reservations()
     with serve(shim, port) as endpoint:
         env.update(TYPESAFE_ENDPOINT=endpoint, TYPESAFE_API_KEY=LOCAL_MARKER,
@@ -153,6 +155,8 @@ def run_jevlint(binary, workspace, shim, *, evals=None, port=PORT):
                 "--concurrency", "1", "--config", str(workspace / "jevlint.json")]
         args += ["--evals", str(evals), "--verbose"] if evals else ["--changed"]
         result = subprocess.run(args, cwd=workspace, env=env, capture_output=True, text=True, timeout=1800)
+    if datetime.now(timezone.utc).date() != day:
+        raise ValueError("paid ledger rolled over; repeat the cached check for a bound count")
     shim.paid_attempts = paid_reservations() - before
     if result.returncode not in (0, 1, 2):
         raise ValueError("unexpected jevlint exit status")
