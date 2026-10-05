@@ -1341,6 +1341,13 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
   _mstep migrate
+  if ! CARR_INVOICE_TEST_DATABASE_URL="$dsn" CARR_INVOICE_TEST_REQUIRED=1 \
+       run_quiet "$LOGDIR/invoice-tracker-transaction.log" \
+       node --test mcp-server/test/invoice-tracker-transaction.test.mjs; then
+    tail -30 "$LOGDIR/invoice-tracker-transaction.log" >&2
+    bad migration "the registered invoice receipt replay and atomic rollback proof failed"
+    return
+  fi
   local tour_pg_proof tour_pg_log
   for tour_pg_proof in \
     mcp-server/test/tour-operations-slice2-postgres.sql \
@@ -1350,7 +1357,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-client-share-allowlist-postgres.sql \
     mcp-server/test/assurance-health-store-postgres.sql \
     mcp-server/test/work-portfolio-postgres.sql \
-    mcp-server/test/local-deals-postgres.sql; do
+    mcp-server/test/local-deals-postgres.sql \
+    mcp-server/test/invoice-tracker-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \

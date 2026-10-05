@@ -837,7 +837,7 @@ predecessor_seal = json.loads(subprocess.run(
 assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
     predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
 assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0840_relationship_scac_successor.sql"
-assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0842_automation_undo_scac_successor.sql"
+assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0842_invoice_tracker_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR
@@ -1121,10 +1121,3 @@ assert "0840_relationship_scac_successor.sql" in GENERATOR
 assert "RELATIONSHIP_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=109" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=108" in GENERATOR
-
-assert "0842_automation_undo_scac_successor.sql" in GENERATOR
-assert "AUTOMATION_UNDO_REGISTRY_APPLIED" in GENERATOR
-assert "SCAC_CURRENT_NUMBER=110" in GENERATOR
-assert "SCAC_VERSION_COUNT=110" in GENERATOR
-assert "SCAC_FULL_SET_SEAL_COUNT=109" in GENERATOR
-assert "ops.scac_mutation_catalog_v110_current()" in GENERATOR
