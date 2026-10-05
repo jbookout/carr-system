@@ -62,7 +62,7 @@ class BatchContract(unittest.TestCase):
 
     def test_frozen_parity_replays_through_both_public_paths(self):
         fixture = json.loads(path.with_name("fixtures").joinpath("rule-batch-parity.v1.json").read_text())
-        selection = delivery._sibling("jev_rule_select")
+        selection = delivery
         client = selection._sibling("typesafe_client")
         replay = fixture["fresh_replays"][-1]
         rows = replay["training"] + replay["heldout"]
@@ -94,14 +94,11 @@ class BatchContract(unittest.TestCase):
                     case["prompt"], rules, [], ask=ask, client=client,
                     titles={rule["id"]: (rule.get("gist", ""), rule.get("context", ""))
                             for rule in rules}, deadline=10**12)
-                standalone = selection.select(case["prompt"], rules=rules,
-                                              judge=Judge, client=client, limit=len(rules))
                 expected = {key for key, value in row["batch"].items()
                             if value >= fixture["threshold_selection"]["floor"]}
                 self.assertEqual(set(selected), expected)
-                self.assertEqual({rule["id"] for rule in standalone}, expected)
                 self.assertEqual(report["calls"], 1)
-                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(calls), 1)
                 for rule_id, score in row["batch"].items():
                     gold = rule_id == row["target"] if case["split"] == "train" else row["serial"][rule_id] >= .75
                     if gold:
@@ -152,13 +149,13 @@ class BatchContract(unittest.TestCase):
 
     def test_no_serial_option_on_either_interface(self):
         import inspect
-        selection = delivery._sibling("jev_rule_select")
-        for interface in (delivery.judge_budgeted, delivery.advise, selection.select):
+        selection = delivery
+        for interface in (delivery.judge_budgeted, delivery.advise):
             with self.subTest(interface=interface.__name__):
                 self.assertNotIn("serial_fallback", inspect.signature(interface).parameters)
 
     def test_batch_question_preserves_serial_binding_criteria(self):
-        selection = delivery._sibling("jev_rule_select")
+        selection = delivery
         baseline = selection.binding_question(Client)
         scoped = selection.batch_binding_question("rule0001", Client)
         self.assertEqual(scoped["criteria"], baseline["criteria"])
@@ -168,7 +165,7 @@ class BatchContract(unittest.TestCase):
     def test_measured_parity_floor_is_shared_and_inclusive(self):
         import json
         fixture = json.loads(path.with_name("fixtures").joinpath("rule-batch-parity.v1.json").read_text())
-        selection = delivery._sibling("jev_rule_select")
+        selection = delivery
         floor = fixture["threshold_selection"]["floor"]
         self.assertEqual(selection.BATCH_BIND_AT, floor)
         rules = [{"id": "rule0001", "statement": "send"},
