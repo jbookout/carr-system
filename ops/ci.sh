@@ -334,7 +334,7 @@ fail_tail() {  # fail_tail <logfile>
   local log="$1" lines window
   lines="$(wc -l < "$log" 2>/dev/null | tr -d ' ')"
   [ -n "$lines" ] || lines=0
-  window="$(mktemp "${TMPDIR:-/tmp}/carr-ci-window.XXXXXX")"
+  window="$(mktemp "${TMPDIR:-/tmp}/carr-ci-tail.XXXXXX")"
   if [ "$lines" -lt 200 ]; then cat "$log" >"$window" 2>/dev/null
   else tail -80 "$log" >"$window" 2>/dev/null; fi
   if "$PY" ops/ci-secret-scan.py --redact <"$window" >"$window.redacted" 2>/dev/null; then

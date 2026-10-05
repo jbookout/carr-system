@@ -68,7 +68,8 @@ gate = _load("migration_safety_gate", REPO / "ops" / "migration-safety-gate.py")
 local_pg = _load("local_pg_ci", REPO / "ops" / "local-pg-ci.py")
 # The one operational value ops/schema-snapshot-currentness.py already admits.
 WORK_REQUEST_SEQUENCE_VALUE = re.compile(
-    r"(?m)^select pg_catalog\.setval\('ops\.work_request_ref_seq', [0-9]+, true\);$")
+    _load("schema_snapshot_currentness", REPO / "ops" / "schema-snapshot-currentness.py")
+    .WORK_REQUEST_SEQUENCE_VALUE.pattern.decode(), re.MULTILINE)
 
 
 # ── comparison ─────────────────────────────────────────────────────────────
