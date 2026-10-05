@@ -51,6 +51,9 @@ class PortContractTests(unittest.TestCase):
             self.assertFalse(any(path.is_symlink() for path in installed.rglob("*")))
             self.assertFalse((installed / ".git").exists())
             self.assertEqual(json.loads((installed / ".claude-plugin/marketplace.json").read_text())["name"], "carr-local")
+            runtime_cache = installed / "plugins/pstack/skills/poteto-mode/scripts/node_modules"
+            runtime_cache.mkdir()
+            (runtime_cache / "generated-dependency").write_text("runtime cache")
             again = bundle(root)
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertEqual(again.stdout, result.stdout)
