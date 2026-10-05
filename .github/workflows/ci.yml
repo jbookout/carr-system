@@ -92,7 +92,7 @@ name: CI
 # workdays for either partner, so that is exactly the window with no other cover.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review, closed]
+    types: [opened, synchronize, reopened, edited]
   schedule:
     # 06:20 UTC daily. Sits after the nightly backup (02:35 UTC) and the 05:10
     # edge-liveness slot, and before the automerge pilot (08:30 UTC weekdays), so
@@ -111,7 +111,6 @@ permissions:
 
 jobs:
   classes:
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'closed' }}
     name: ops/ci.sh --strict --only ${{ matrix.classes }}
     runs-on: ubuntu-latest
     strategy:
@@ -269,8 +268,7 @@ jobs:
 
   checks:
     # THE REQUIRED CONTEXT. Its name is what the ruleset requires, so it must
-    # Closed events intentionally skip both this job and the class work. On
-    # every open PR event, keep reporting whatever the class jobs do: `always()` makes it run when
+    # report whatever the class jobs do: `always()` makes it run when
     # a group is red or cancelled, and the step below turns anything but
     # success into a red context. Without `always()` a failed group would
     # leave this job skipped, and a required check that never reports blocks
@@ -278,7 +276,7 @@ jobs:
     name: ops/ci.sh --strict
     runs-on: ubuntu-latest
     needs: classes
-    if: ${{ always() && (github.event_name != 'pull_request' || github.event.action != 'closed') }}
+    if: ${{ always() }}
     timeout-minutes: 5
     steps:
       - name: Fail unless every class group succeeded
