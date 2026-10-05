@@ -33,6 +33,7 @@ import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
+import { invoiceAutomation } from "./invoice-automation.js";
 import { leadAutomationTools } from "./lead-automation.js";
 import { jevCallReceiptTools } from "./jev-call-receipt.js";
 import { workflowCutoverTools } from "./workflow-cutover.v5.js";
@@ -341,7 +342,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move"].includes(verb) || verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move", "undo-lead-move", "record-deal-invoice", "undo-invoice-close"].includes(verb) || verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -3270,10 +3271,19 @@ export const TOOLS = {
                 (select party_id from lead where lead.id=v_lead_board.id) as party_id,
                 stage_label,stage_sort,score,segment,suppressed,est_lease_event,
                 event_confidence,last_touch,next_action_date,owner,owner_label,
-                base_version,created_at,updated_at
+                base_version,created_at,updated_at,
+                (stage <> 'archived') as conversion_eligible,
+                (select client_id is not null from lead where lead.id=v_lead_board.id) as converted,
+                coalesce((select jsonb_agg(jsonb_build_object('move_id',m.id,'from_stage',m.from_stage,
+                  'to_stage',m.to_stage,'reason',m.reason,'evidence_ref',m.evidence_ref,'status',m.status,
+                  'created_at',m.created_at,'undone_at',m.undone_at,'undone_by',a.display_name) order by m.created_at,m.id)
+                  from lead_stage_move m left join actor a on a.id=m.undone_by where m.lead_id=v_lead_board.id),'[]') as stage_moves
            from v_lead_board
           order by stage_sort,suppressed,score desc nulls last,name,registry_ref`)).rows;
-      return { generated_at: new Date().toISOString(), stages, leads };
+      const eligible=leads.filter(l=>l.stage!=="archived");
+      return { generated_at: new Date().toISOString(), stages, leads,
+        metrics:{nurture_count:eligible.filter(l=>l.stage==="nurture_drip" && !l.suppressed).length,
+          conversion_denominator:eligible.length,converted_count:eligible.filter(l=>l.converted).length} };
     },
   },
 
@@ -3878,7 +3888,7 @@ export const TOOLS = {
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] },
-            recorded_at_after_lock: k === "phase", idempotency_key: args.idempotency_key });
+            recorded_at_after_lock: k === "phase" || k === "invoiced_on", idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys,
                ...(guard.rebased ? { rebased: true, rebase_receipt: guard.rebase_receipt } : {}) };
     }),
@@ -4759,6 +4769,8 @@ export const TOOLS = {
       const current = (await c.query("select stage,suppressed from lead where id=$1", [s.id])).rows[0];
       const nextStage = keys.includes("stage") ? args.fields.stage : current.stage;
       const nextSuppressed = keys.includes("suppressed") ? args.fields.suppressed : current.suppressed;
+      if (keys.includes("stage") && (current.stage === "archived" || nextStage === "archived") && !canExercisePartnerAuthority(actor))
+        throw new ToolError({error:"archive_requires_partner"});
       if (nextStage === "do_not_contact" && nextSuppressed !== true) {
         throw new ToolError({ error: "do_not_contact_requires_suppression",
           hint: "do_not_contact is a standing instruction, not only a funnel label; pass stage='do_not_contact' and suppressed=true together" });
@@ -4777,7 +4789,7 @@ export const TOOLS = {
         [actor.id, ...keys.map(k => args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-lead", "lead", s.id,
-          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
+          { recorded_at_after_lock: k === "stage", field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys };
     }),
   },
@@ -8737,6 +8749,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
   "lead-automation": "mcp-server/src/lead-automation.js",
+  "invoice-automation": "mcp-server/src/invoice-automation.js",
   "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
@@ -9874,7 +9887,11 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 // server-timestamped receipt (migration 0587) before returning the answers, so
 // Jev gates credit only rows the gated model could not forge locally. See
 // src/jev-call-receipt.js.
-registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError }), "lead-automation");
+const invoices=invoiceAutomation({withEnvelope,writeEvent,ToolError,lockDealField,
+  updateDeal:(c,actor,args)=>TOOLS["update-deal"].handler(c,actor,args),
+  invoicingMailbox:process.env.CARR_INVOICING_MAILBOX});
+registerTools(invoices.tools,"invoice-automation");
+registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoices }), "lead-automation");
 registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
 // DoctorCRE V5-R02: workflow cutover, caller migration and retirement
 // readiness. Composes accept-workflow / disable-legacy-schedule rather than
