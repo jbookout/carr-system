@@ -1073,9 +1073,12 @@ def native_context_orders():
                 payload = ({"transcriptPath": path, "sessionId": "selftest"} if kind == "codex" else
                            {"transcript_path": path, "session_id": "selftest"})
                 payload.update(cwd=REPO, hook_event_name="Stop", stop_hook_active=False)
+                # The wired command runs through hook-meter-run.py; without the
+                # fixture marker its blocks were metered as LIVE refusals.
                 proc = subprocess.run(argv, input=json.dumps(payload), capture_output=True,
                                       text=True, timeout=30,
-                                      env={**os.environ, "CARR_STOP_LATCH_STATE": state})
+                                      env={**os.environ, "CARR_STOP_LATCH_STATE": state,
+                                           "CARR_HOOK_FIXTURE": "1"})
                 body = json.loads(proc.stdout or "{}")
                 event_ok = proc.returncode == 0 and (body.get("decision") == "block") == expected
                 outcomes.append(event_ok)
