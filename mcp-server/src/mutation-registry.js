@@ -4,7 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v108 admits unfinished system-work after the delivered Doc activity contract.
+// v110 admits invoices after the delivered relationship v109 contract.
 // v103 admits rule lookup and atomic teach supersession.
 // v102 seals confirm-merge as a human identity act; machines are refused.
 // v101 admits partner catch-up and its scoped watermark store.

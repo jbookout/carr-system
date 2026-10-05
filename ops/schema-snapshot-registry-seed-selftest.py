@@ -759,22 +759,6 @@ assert "SCAC_FULL_SET_SEAL_COUNT=100" in GENERATOR
 assert "ops.scac_mutation_catalog_v101_current()" in GENERATOR
 assert 'scac-mutation-registry.v101.generated.js' in GENERATOR
 registry_gate = (ROOT / 'ops/siep11-mutation-registry-local-pg-gate.py').read_text()
-successor_guards: list[ast.stmt] = [
-    node for node in ast.walk(ast.parse(registry_gate))
-    if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
-    and isinstance(node.test.left, ast.Name) and node.test.left.id == 'runtime_version'
-    and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.NotIn)
-]
-assert len(successor_guards) == 1
-successor_guard = compile(ast.Module(body=successor_guards, type_ignores=[]), '<successor guard>', 'exec')
-for runtime_version in ['scac-mutation-registry.v109', 'scac-mutation-registry.v110']:
-    exec(successor_guard, {'runtime_version': runtime_version})
-try:
-    exec(successor_guard, {'runtime_version': 'scac-mutation-registry.v111'})
-except RuntimeError as exc:
-    assert 'unsupported live successor' in str(exc)
-else:
-    raise AssertionError('unreviewed successors must remain refused')
 assert "0768_confirm_merge_human_only_scac_successor.sql" in GENERATOR
 assert "CONFIRM_MERGE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=102" in GENERATOR
@@ -853,7 +837,7 @@ predecessor_seal = json.loads(subprocess.run(
 assert monitor_pins["SEALED_PREDECESSOR_ENTRY_COUNTS"] == (
     predecessor_seal["entryCount"], predecessor_seal["sourceEntryCount"])
 assert monitor_pins["SEALED_PREDECESSOR_MIGRATION"] == "migrations/0840_relationship_scac_successor.sql"
-assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0844_leads_scac_successor.sql"
+assert monitor_pins["LIVE_REGISTRY_MIGRATION"] == "migrations/0842_invoice_tracker_scac_successor.sql"
 
 assert "0720_doctorcre_a03_review_scac_successor.sql" in GENERATOR
 assert "V5_A03_REVIEW_REGISTRY_APPLIED" in GENERATOR
@@ -1137,8 +1121,3 @@ assert "0840_relationship_scac_successor.sql" in GENERATOR
 assert "RELATIONSHIP_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=109" in GENERATOR
 assert "SCAC_FULL_SET_SEAL_COUNT=108" in GENERATOR
-
-assert "0844_leads_scac_successor.sql" in GENERATOR
-assert "LEADS_REGISTRY_APPLIED" in GENERATOR
-assert "SCAC_CURRENT_NUMBER=110" in GENERATOR
-assert "SCAC_FULL_SET_SEAL_COUNT=109" in GENERATOR

@@ -1350,16 +1350,15 @@ if [ "$RELATIONSHIP_REGISTRY_APPLIED" = t ] && [ "$SYSTEM_WORK_REGISTRY_APPLIED"
   exit 1
 fi
 
-LEADS_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0844_leads_scac_successor.sql')" \
+INVOICE_TRACKER_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0842_invoice_tracker_scac_successor.sql')" \
   2>/dev/null)"
-case "$LEADS_REGISTRY_APPLIED" in
+case "$INVOICE_TRACKER_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read Leads v110 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read invoice tracker v110 registry state" >&2; exit 1 ;;
 esac
-if [ "$LEADS_REGISTRY_APPLIED" = t ] && [ "$RELATIONSHIP_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: Leads v110 is applied without v109 predecessor" >&2
-  exit 1
+if [ "$INVOICE_TRACKER_REGISTRY_APPLIED" = t ] && [ "$RELATIONSHIP_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: invoice tracker v110 is applied without v109 predecessor" >&2; exit 1
 fi
 
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
@@ -3256,7 +3255,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v108'"
                                        SCAC_FULL_SET_SEAL_COUNT=108
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v109_current()"
-                                     if [ "$LEADS_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$INVOICE_TRACKER_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=110
                                        SCAC_VERSION_COUNT=110
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v110'")"

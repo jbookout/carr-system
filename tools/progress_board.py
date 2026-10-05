@@ -68,6 +68,17 @@ SNAPSHOT_SCHEMA = "carr-progress-board.v2"
 # publish-board-snapshot refuses JSON.stringify(snapshot).length > 262144
 # (mcp-server/src/board-answers.js): compact JSON, counted in UTF-16 units.
 SNAPSHOT_LIMIT = 262144
+SNAPSHOT_BUDGET = SNAPSHOT_LIMIT * 9 // 10
+# The app card contract, not the local job/PR diagnostic record. In particular,
+# note duplicates watchdog stderr already carried in blocked_reason.
+SNAPSHOT_TASK_FIELDS = frozenset("""
+    title status stage executor provider model effort health repo pr pr_url
+    pr_phase pr_head pr_checks pr_links question review_verdict summary blocked_reason next_action evidence
+    release_wait created_at updated_at completed_at merged_at manual_stage
+    stage_entered_at stage_history question_ids human_ref kind related
+    work_request work_request_ref
+""".split())
+BLOCKER_EXCERPT_LIMIT = 192
 
 ALL_REPOS_BOARD = "all-repos"
 GITHUB_OWNER = "jbookout"
@@ -1906,8 +1917,8 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                  history, key=lambda k: (str(history[k].get("updated_at") or ""), k))]
     size = snapshot_size(snapshot)
     index = 0
-    while size > SNAPSHOT_LIMIT and index < len(order):
-        freed, excess = 0, size - SNAPSHOT_LIMIT
+    while size > SNAPSHOT_BUDGET and index < len(order):
+        freed, excess = 0, size - SNAPSHOT_BUDGET
         while freed < excess and index < len(order):
             kind, section, key = order[index]
             index += 1
@@ -1915,22 +1926,29 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             freed += snapshot_size({key: entry}) - 1
             snapshot["omitted"][kind] += 1
         size = snapshot_size(snapshot)
-    if size > SNAPSHOT_LIMIT:
+    if size > SNAPSHOT_BUDGET:
         raise SnapshotTooLarge(f"board {snapshot.get('project')} snapshot is {size} characters after trimming "
-                               f"every Live, Merged and History entry; the server limit is {SNAPSHOT_LIMIT}")
+                               f"every Live, Merged and History entry; the publication budget is {SNAPSHOT_BUDGET} "
+                               f"and the server limit is {SNAPSHOT_LIMIT}")
     return snapshot
 
 
 def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     """The versioned data contract the app page renders. Deterministic for a
-    given state, and always within the server's size limit."""
+    given state. Full diagnostics stay local; the app receives bounded cards."""
     tasks = {}
     all_tasks = state.get("tasks") or {}
     for task_id, task in all_tasks.items():
         if is_retired(task):
             continue
         provider, model, effort = task_identity(task)
-        tasks[task_id] = {**task, "provider": provider, "model": model, "effort": effort}
+        card = {key: value for key, value in task.items()
+                if key in SNAPSHOT_TASK_FIELDS and value is not None}
+        reason = card.get("blocked_reason")
+        if isinstance(reason, str) and len(reason) > BLOCKER_EXCERPT_LIMIT:
+            head = BLOCKER_EXCERPT_LIMIT // 2
+            card["blocked_reason"] = reason[:head] + "…" + reason[-(BLOCKER_EXCERPT_LIMIT - head - 1):]
+        tasks[task_id] = {**card, "provider": provider, "model": model, "effort": effort}
     decisions = [
         {"id": qid, "question": q.get("question"), "answer": q.get("answer"), "default": q.get("default"),
          "answered_at": q.get("answered_at") or q.get("updated_at")}

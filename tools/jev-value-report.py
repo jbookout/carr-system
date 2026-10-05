@@ -327,7 +327,8 @@ def _denies_defect(message, noun):
         for denial in re.finditer(rf"\b{_denial(re.escape(noun))}\b", sentence, re.I):
             # A historical qualifier must attach to this non-detection.
             if (re.match(r"did\s+not\b", denial.group(0), re.I)
-                    and (re.search(r"\b(?:earlier|previously)\b\s*,?\s*"
+                    and (re.search(r"(?:\b(?:earlier|previously)\b\s+"
+                                   r"|^\s*(?:earlier|previously)\b\s*,\s*)"
                                    r"(?:(?:(?:our|the)\s+)?(?:tests?|checks?|reviews?|investigations?)\s*)?$",
                                    sentence[:denial.start()], re.I)
                          or re.match(r"\s+(?:earlier|previously|before\s+(?:this|the)\s+review)\b",
