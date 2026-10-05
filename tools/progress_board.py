@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import sys
 import tempfile
 import urllib.request
@@ -693,6 +694,14 @@ def rest_checks(repo: str, head: str) -> list[dict[str, Any]]:
             for c in checks] + list(contexts.values())
 
 
+def pr_fresh_seconds() -> float:
+    """Seconds an open-PR observation is reused (PROGRESS_BOARD_PR_FRESH_SECONDS, default 120; 0 disables)."""
+    try:
+        return max(0.0, float(os.environ.get("PROGRESS_BOARD_PR_FRESH_SECONDS", "120")))
+    except ValueError:
+        return 120.0
+
+
 class GitHubReadPass:
     def __init__(self) -> None:
         self.path = board_dir() / ".github-pr-cache.json"
@@ -763,13 +772,33 @@ class GitHubReadPass:
                           "author": {"login": task.get("author") or ""}, "mergeCommit": None,
                           "statusCheckRollup": [], "comments": [], "reviewDecision": "", "mergeable": "UNKNOWN"})
 
+    def result(self, info: dict[str, Any] | None, repo: str,
+               error: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        # Raw observations are reusable; review trust belongs to the current policy.
+        if info and "_reviews" in info:
+            info = {**info, "reviewDecision": rest_review_decision(
+                info["_reviews"], {"mergeable_state": info.get("_mergeable_state")}, review_rules(repo))}
+        return info, error or (info.get("_refresh_error") if info else None)
+
+    @staticmethod
+    def matches_discovery(info: dict[str, Any] | None, raw: dict[str, Any] | None) -> bool:
+        return raw is None or (info is not None
+            and raw.get("state") == ("open" if info["state"] == "OPEN" else "closed")
+            and raw.get("updated_at") == info.get("updatedAt")
+            and (not isinstance(raw.get("head"), dict)
+                 or raw["head"].get("sha") == info.get("headRefOid")))
+
     def read(self, number: int, repo: str, raw: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
         repo = safe_repo(repo)
         identity = f"{repo}#{number}"
         self.reconcile()
         old = self.saved.get(identity)
         if old and old.get("state") == "MERGED" and not old.get("_legacy_terminal"):
-            return old, None
+            return self.result(old, repo)
+        # An open PR read moments ago is reused instead of re-fetched. Every board
+        # mutation renders every open PR, so one job-watchdog scan (100+ mutations)
+        # spent the whole 5,000/hr REST pool in minutes on 2026-10-04. Discovery
+        # rows (raw) still carry their own version evidence and are checked below.
         cached = self.results.get(identity)
         if cached:
             info, error = cached
@@ -777,14 +806,24 @@ class GitHubReadPass:
                 info, error = old, None
             # Discovery rows are evidence: a different state, version or head
             # invalidates even an earlier result from this same render pass.
-            matches = (raw is None or (info is not None
-                       and raw.get("state") == ("open" if info["state"] == "OPEN" else "closed")
-                       and raw.get("updated_at") == info.get("updatedAt")
-                       and (not isinstance(raw.get("head"), dict)
-                            or raw["head"].get("sha") == info.get("headRefOid"))))
-            if matches:
-                return info, error
+            if self.matches_discovery(info, raw):
+                return self.result(info, repo, error)
+        window = pr_fresh_seconds()
+        # Payload and observation time come from the same atomic cache snapshot.
+        # A losing writer never changes the winner's time; failed refreshes miss.
+        if (window and raw is None and old and not old.get("_legacy_terminal")
+                and not old.get("_refresh_error")
+                and isinstance(old.get("_observed_at"), (int, float))
+                and 0 <= time.time() - old["_observed_at"] < window):
+            return self.result(old, repo)
         observation = self.observe()
+        observed_at = time.time()
+        discovery = raw if raw is not None else (old.get("_discovery") if old else None)
+        if old and discovery is not None and not self.matches_discovery(old, discovery):
+            hint = {key: discovery[key] for key in ("state", "updated_at", "head") if key in discovery}
+            old = self.save(identity, {**old, "_observation": observation, "_observed_at": None,
+                                      "_discovery": hint,
+                                      "_refresh_error": "PR discovery invalidated cached observation"})
         result: tuple[dict[str, Any] | None, str | None]
         try:
             # Mergeability changes with the base and CI changes independently
@@ -792,6 +831,10 @@ class GitHubReadPass:
             raw = gh_json(["api", f"repos/{repo}/pulls/{number}"], timeout=30)
             info = rest_pr(raw)
             assert isinstance(raw, dict)  # rest_pr has validated the response
+            if (discovery is not None and not self.matches_discovery(info, discovery)
+                    and str(info.get("updatedAt") or "") <= str(discovery.get("updated_at") or "")):
+                kind = "closed discovery" if discovery.get("state") == "closed" else "discovery"
+                raise RuntimeError(f"PR detail disagrees with {kind}")
             head = info["headRefOid"]
             base = f"repos/{repo}"
             if old and old.get("_legacy_terminal") and old["state"] == "MERGED":
@@ -817,6 +860,7 @@ class GitHubReadPass:
                 if reviews is None:
                     reviews = rest_rows(f"{base}/pulls/{number}/reviews")
                 info["_reviews"] = reviews
+                info["_mergeable_state"] = raw.get("mergeable_state")
                 info["reviewDecision"] = rest_review_decision(reviews, raw, review_rules(repo))
             if info["state"] == "MERGED":
                 files = rest_rows(f"{base}/pulls/{number}/files")
@@ -827,11 +871,17 @@ class GitHubReadPass:
             if validated_pr(info) is None:
                 raise RuntimeError("gh returned a malformed PR payload")
             info["_observation"] = observation
-            result = (self.save(identity, info), None)
+            info["_observed_at"] = observed_at
+            result = self.result(self.save(identity, info), repo)
         except (RuntimeError, TypeError, ValueError, AttributeError, KeyError) as exc:
             self.reconcile()
             old = self.saved.get(identity) or old
-            result = (old, str(exc))
+            if old:
+                old = self.save(identity, {**old, "_observation": observation,
+                                          "_observed_at": None, "_refresh_error": str(exc)})
+                result = self.result(old, repo)
+            else:
+                result = (None, str(exc))
         self.results[identity] = result
         return result
 
@@ -1921,12 +1971,47 @@ def question_revision(question: dict[str, Any], project: str) -> dict[str, Any]:
     }
 
 
+def publish_external_inventory(cache: dict[str, Any]) -> dict[str, Any]:
+    """Publish immutable bounded pages before switching the manifest pointer."""
+    pages: list[dict[str, Any]] = []
+    batch: list[dict[str, Any]] = []
+    def emit(rows):
+        payload = {'items': rows}
+        encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        board_id = 'carr-v5-external-' + digest
+        before = call_verb('read-progress-board', {'board_id': board_id}).get('snapshot')
+        if before is None:
+            args = {'board_id': board_id, 'base_version': 0, 'snapshot': payload}
+            call_verb('publish-board-snapshot', {**args, 'idempotency_key': stable_key('publish-board-snapshot', args)})
+        after = call_verb('read-progress-board', {'board_id': board_id}).get('snapshot')
+        if not after or after.get('snapshot_json') != payload:
+            raise RuntimeError('external inventory page did not read back')
+        pages.append({'board_id': board_id, 'version': int(after['version']), 'count': len(rows), 'digest': digest})
+    for row in cache['items']:
+        candidate = [*batch, row]
+        if len(json.dumps({'items': candidate}, ensure_ascii=False)) > 120000:
+            if not batch: raise RuntimeError('external inventory row exceeds page contract')
+            emit(batch)
+            batch = [row]
+            if len(json.dumps({'items': batch}, ensure_ascii=False)) > 120000:
+                raise RuntimeError('external inventory row exceeds page contract')
+        else: batch = candidate
+    if batch: emit(batch)
+    return {**{key: value for key, value in cache.items() if key not in ('items', 'pr_heads')},
+            'schema': 'system-work-external.v2', 'pages': pages, 'item_count': len(cache['items'])}
+
+
 def publish_board(project: str) -> dict[str, int]:
     state = read_state(project)
     board = safe_project(project)
     before = call_verb("read-progress-board", {"board_id": board})
     remote_snapshot = before.get("snapshot")
     snapshot = board_snapshot(state)
+    if board == "carr-v5":
+        from system_work_cache import cached_github
+        snapshot["external_inventory"] = publish_external_inventory(cached_github(board_dir() / "system-work-github-cache.json",
+            Path.home() / "carr-system/out/orch/dot/job13/report-G.md"))
     if remote_snapshot is None or remote_snapshot.get("snapshot_json") != snapshot:
         args = {"board_id": board, "base_version": int(remote_snapshot["version"]) if remote_snapshot else 0,
                 "snapshot": snapshot}
@@ -2148,6 +2233,7 @@ def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
     derived = executor_metadata(executor)
     new_executor = args.executor is not None
     task.update({
+        "domain": args.domain or prior.get("domain") or "system",
         "title": args.title or prior.get("title"),
         "status": args.status or prior.get("status"),
         "executor": executor,
@@ -2299,6 +2385,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--summary")
     task.add_argument("--pr", type=int)
     task.add_argument("--repo")
+    task.add_argument("--domain", choices=("system", "deals", "unclassified"))
     task.add_argument("--stage", choices=PR_STAGES)
     task.add_argument("--health", choices=("healthy", "question", "blocked"))
     task.add_argument("--reason", help="why the task is blocked (required with blocked), or why it failed or was superseded (required for those)")
