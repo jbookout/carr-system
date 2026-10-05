@@ -14,6 +14,8 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from lib.disposable_pg_fixture import postgres_fixture_group
 
 
 def main():
@@ -30,7 +32,7 @@ def main():
         assert match, f"missing schema definition: {name}"
         return match.group()
 
-    with tempfile.TemporaryDirectory(prefix="carr-catchup-writer-") as temp:
+    with postgres_fixture_group(), tempfile.TemporaryDirectory(prefix="carr-catchup-writer-") as temp:
         root = Path(temp)
         data, socket = root / "data", root / "socket"
         socket.mkdir()

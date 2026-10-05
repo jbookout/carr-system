@@ -16,7 +16,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -191,32 +191,87 @@ class Regressions(unittest.TestCase):
                 result = (0, b'')
         self.assertEqual(result, (413, b''))
 
+    def test_5_overload_reset_during_connect_is_a_closed_connection(self):
+        connect = socket.create_connection
+        calls = 0
+        def reset_on_third(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise ConnectionResetError(errno.ECONNRESET, 'synthetic overload reset')
+            return connect(*args, **kwargs)
+        with patch.object(socket, 'create_connection', reset_on_third):
+            self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+
+    def test_5_all_connect_rejections_cannot_pass_vacuously(self):
+        with patch.object(socket, 'create_connection', side_effect=ConnectionResetError('all rejected')):
+            with self.assertRaises(ConnectionResetError):
+                self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+
+    def test_5_connection_rejected_before_send_is_closed_and_workers_recover(self):
+        connect = socket.create_connection
+        rejected = Mock()
+        rejected.sendall.side_effect = BrokenPipeError('worker limit rejected connection')
+        rejected.recv.return_value = b''
+        calls = 0
+
+        def connect_or_reject(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                return rejected
+            return connect(*args, **kwargs)
+
+        with patch.object(socket, 'create_connection', side_effect=connect_or_reject):
+            self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+        rejected.close.assert_called_once()
+
     def test_5_abandoned_headers_and_bodies_release_bounded_workers(self):
         with serving(self.ledger, read_timeout=0.2, max_workers=2) as server:
             stalled = []
+            occupied = threading.Event()
+            release = threading.Event()
+            lock = threading.Lock()
+            started = 0
+            handle = server.process_request_thread
+            def hold_worker(*args):
+                nonlocal started
+                with lock:
+                    started += 1
+                    if started == 2:
+                        occupied.set()
+                release.wait(10)
+                handle(*args)
+            def assert_closed(sock):
+                try:
+                    while sock.recv(4096):
+                        pass
+                except ConnectionResetError:
+                    pass
             try:
-                for i in range(8):
-                    sock = socket.create_connection(server.server_address, timeout=2)
-                    sock.sendall(b'POST /ingest HTTP/1.0\r\n' if i % 2 == 0 else
-                                 b'POST /ingest HTTP/1.0\r\nAuthorization: Bearer synthetic-token\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{')
-                    stalled.append(sock)
-                time.sleep(0.08)
-                workers = sum('process_request_thread' in t.name
-                              for t in threading.enumerate() if t.is_alive())
-                time.sleep(0.5)
-                closed = []
+                with patch.object(server, 'process_request_thread', hold_worker):
+                    for i in range(2):
+                        sock = socket.create_connection(server.server_address, timeout=2)
+                        stalled.append(sock)
+                        sock.sendall(b'POST /ingest HTTP/1.0\r\n' if i == 0 else
+                                     b'POST /ingest HTTP/1.0\r\nAuthorization: Bearer synthetic-token\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{')
+                    self.assertTrue(occupied.wait(2), 'both workers must be occupied before overload')
+                    # All excess connections must close while the two readers
+                    # remain occupied. TCP may report rejection at connect,
+                    # send, or recv; all three prove the same server boundary.
+                    for _ in range(6):
+                        try:
+                            with contextlib.closing(socket.create_connection(server.server_address, timeout=2)) as sock:
+                                sock.sendall(b'POST /ingest HTTP/1.0\r\n')
+                                assert_closed(sock)
+                        except (ConnectionResetError, BrokenPipeError):
+                            pass
+                    release.set()
                 for sock in stalled:
-                    try:
-                        sock.recv(4096)
-                        closed.append(True)
-                    except ConnectionResetError:
-                        closed.append(True)
-                    except TimeoutError:
-                        closed.append(False)
-                self.assertLessEqual(workers, 2)
-                self.assertTrue(all(closed))
+                    assert_closed(sock)
                 self.assertEqual(post(server, b'{"external_id":"recovered"}')[0], 200)
             finally:
+                release.set()
                 for sock in stalled:
                     sock.close()
 

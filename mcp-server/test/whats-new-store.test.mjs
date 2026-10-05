@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -27,12 +28,20 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
   const dir = mkdtempSync('/tmp/doc-catchup-');
   let running = false;
   const clients = [];
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try {
     execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
     // Hosted Postgres uses UTC; the catchup date contract uses America/Chicago.
     execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h '' -c timezone=UTC`,'-w','start'], { stdio: 'pipe' });
     running = true;
-    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); return c; };
+    const connect = async () => {
+      const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
+      await c.connect(); clients.push(c);
+      // CURRENT_DATE fixtures use the same business day as the feature, even
+      // when the PostgreSQL cluster and CI host default to UTC.
+      await c.query("set time zone 'America/Chicago'");
+      return c;
+    };
     const c = await connect();
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
@@ -249,9 +258,13 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       assert.equal((await section('critical_dates',await context())).state,'empty');
     }
   } finally {
-    for (const c of clients) await c.end();
-    if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio:'pipe' });
-    mkdirSync('/tmp/_to_delete',{ recursive:true });
-    renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
+    try {
+      for (const c of clients) await c.end();
+      if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio:'pipe' });
+      mkdirSync('/tmp/_to_delete',{ recursive:true });
+      renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
+    } finally {
+      await releaseBudget();
+    }
   }
 });
