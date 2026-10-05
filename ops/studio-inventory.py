@@ -151,6 +151,7 @@ def compare(root):
                 raise ValueError('credential-shaped launch arguments cannot be captured')
             p['EnvironmentVariables'] = {k: v for k, v in p.get('EnvironmentVariables', {}).items()
                                          if k in ('PATH', 'PROGRESS_BOARD_ROOT')}
+            if not p['EnvironmentVariables']: p.pop('EnvironmentVariables')
             text = plistlib.dumps(p).decode().replace(str(Path.home() / 'carr-system'), '{{REPO}}')
             if 'StartInterval' in p:
                 from lib.launchd_calendar import rewrite_template
