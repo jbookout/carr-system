@@ -247,8 +247,8 @@ def regenerate_once(repo: Path, base: str, pending: list[str], argv: list[str], 
             return prior
         if prior.get('state') == 'running' or (prior.get('state') == 'refused' and prior.get('source_after') in (None, source)):
             raise MigrationNumberError('failed or interrupted generation requires reconciliation before retry')
-        inputs = {'plan': plan, 'argv': argv, 'source': source,
-                  'pending': {n: hashlib.sha256((repo/'migrations'/n).read_bytes()).hexdigest() for n in pending}}
+        drafts = {n: hashlib.sha256((repo/'migrations'/n).read_bytes()).hexdigest() for n in pending}
+        inputs = {'plan': plan, 'argv': argv, 'source': source, 'pending': drafts}
         fingerprint = hashlib.sha256(json.dumps(inputs,sort_keys=True).encode()).hexdigest()
         if prior.get('fingerprint') == fingerprint:
             raise MigrationNumberError('generation already attempted for these inputs; reconcile its receipt before retry')
@@ -283,8 +283,8 @@ def regenerate_once(repo: Path, base: str, pending: list[str], argv: list[str], 
                 if not (repo/'migrations'/name).is_file():
                     raise MigrationNumberError('generator exited zero without its allocated migration output')
             for old,new in plan['migration_names'].items():
-                stale_input = new in inputs['pending'] and inputs['pending'][new] != inputs['pending'][old] and \
-                    hashlib.sha256((repo/'migrations'/new).read_bytes()).hexdigest() == inputs['pending'][new]
+                stale_input = new in drafts and drafts[new] != drafts[old] and \
+                    hashlib.sha256((repo/'migrations'/new).read_bytes()).hexdigest() == drafts[new]
                 if (old not in outputs and (repo/'migrations'/old).exists()) or stale_input:
                     raise MigrationNumberError('generator left an obsolete pending migration')
             current={p.name:p.read_bytes() for p in (repo/'migrations').glob('*.sql')}
