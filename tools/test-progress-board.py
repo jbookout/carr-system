@@ -1191,7 +1191,7 @@ class AllRepositoriesBoard(BoardCase):
         events = []
         args = type("Args", (), {"project": "all-repos", "publish": True})()
         with patch.object(BOARD, "build_all_repos", lambda: events.append(("build", "all-repos"))), \
-             patch.object(BOARD, "render", lambda project: events.append(("render", project))), \
+             patch.object(BOARD, "render", lambda project, *, discover: events.append(("render", project, discover))), \
              patch.object(BOARD, "publish_board", lambda project: events.append(("publish", project))):
             BOARD.command_render(args)
         self.assertEqual(events, [("build", "all-repos"), ("publish", "all-repos")])
@@ -1354,12 +1354,12 @@ class PublishAndAnswers(BoardCase):
     def test_existing_launchd_render_runs_publish_poll_and_system_board_without_a_model(self):
         events = []
         args = type("Args", (), {"project": "carr-v5", "publish": False})()
-        with patch.object(BOARD, "render", lambda project: events.append(("render", project))), \
+        with patch.object(BOARD, "render", lambda project, *, discover: events.append(("render", project, discover))), \
              patch.object(BOARD, "publish_board", lambda project: events.append(("publish", project))), \
              patch.object(BOARD, "poll_board_answers", lambda project: events.append(("poll", project))), \
              patch.object(BOARD, "build_all_repos", lambda: events.append(("build", "all-repos"))):
             BOARD.command_render(args)
-        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"),
+        self.assertEqual(events, [("render", "carr-v5", True), ("publish", "carr-v5"), ("poll", "carr-v5"),
                                   ("build", "all-repos"), ("publish", "all-repos")])
 
     def test_system_board_failure_is_logged_and_last_known_state_published(self):
@@ -1371,13 +1371,13 @@ class PublishAndAnswers(BoardCase):
         (self.root / "boards").mkdir(parents=True, exist_ok=True)
         (self.root / "boards" / "all-repos.json").write_text(json.dumps({"project": "all-repos", "tasks": {}}))
         with patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(self.root)}), \
-             patch.object(BOARD, "render", lambda project: events.append(("render", project))), \
+             patch.object(BOARD, "render", lambda project, *, discover: events.append(("render", project, discover))), \
              patch.object(BOARD, "publish_board", lambda project: events.append(("publish", project))), \
              patch.object(BOARD, "poll_board_answers", lambda project: events.append(("poll", project))), \
              patch.object(BOARD, "build_all_repos", broken), \
              patch("sys.stderr", new_callable=io.StringIO) as err:
             BOARD.command_render(args)
-        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"),
+        self.assertEqual(events, [("render", "carr-v5", True), ("publish", "carr-v5"), ("poll", "carr-v5"),
                                   ("publish", "all-repos")])
         self.assertIn("gh unavailable", err.getvalue())
 
