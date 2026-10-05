@@ -490,13 +490,15 @@ PR_FIELDS = "number,headRefOid,headRefName,updatedAt,isDraft,mergeable,comments,
 def collect_pr(repo, number, config):
     pr = json.loads(command(["gh", "pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS], config))
     pr["repo"] = repo
-    # gh's exporter omits check providers and workflow IDs. Read those with
-    # queue membership, bound to the same head, so equal names cannot collide.
-    # The PR snapshot cache keeps this second query to changed or stale PRs.
+    # gh's exporter omits check providers and workflow IDs. Read those bound to
+    # the same head, so equal names cannot collide. The PR snapshot cache keeps
+    # this second query to changed or stale PRs. Only a repository that uses
+    # GitHub's merge queue can have a queue entry, so others skip that field.
+    queue_field = "mergeQueueEntry{id}" if repo in config.get("github_merge_queue_repositories", []) else ""
     owner, name = repo.split("/")
     query = """query($owner:String!,$name:String!,$number:Int!){
       repository(owner:$owner,name:$name){pullRequest(number:$number){
-        mergeQueueEntry{id}
+        """ + queue_field + """
         commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){
           pageInfo{hasNextPage}
           nodes{__typename
@@ -520,7 +522,7 @@ def collect_pr(repo, number, config):
     if (contexts.get("pageInfo") or {}).get("hasNextPage"):
         raise RuntimeError("CI evidence exceeds the bounded check collection")
     pr["statusCheckRollup"] = contexts["nodes"]
-    pr["mergeQueueEntry"] = observed["mergeQueueEntry"]
+    pr["mergeQueueEntry"] = observed.get("mergeQueueEntry")
     return pr
 
 

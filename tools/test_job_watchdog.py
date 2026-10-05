@@ -114,6 +114,26 @@ class ReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "head changed"):
                 w.collect_pr("example/repo", 1, w.load_config(ROOT / "ops/config/job-watchdog.json"))
 
+    def test_merge_queue_membership_is_read_only_for_listed_repositories(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        config = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        self.assertEqual(config["github_merge_queue_repositories"], [])
+        head = "a" * 40
+        def response(entry):
+            observed = {"commits": {"nodes": [{"commit": {"oid": head, "statusCheckRollup": None}}]}}
+            return json.dumps({"data": {"repository": {"pullRequest": {**observed, **entry}}}})
+        with patch.object(w, "command", side_effect=[json.dumps({"headRefOid": head}), response({})]) as command:
+            pr = w.collect_pr("example/repo", 1, config)
+        self.assertIsNone(pr["mergeQueueEntry"])
+        self.assertNotIn("mergeQueueEntry", command.call_args.args[0][4])
+        queued = {**config, "github_merge_queue_repositories": ["example/repo"]}
+        with patch.object(w, "command", side_effect=[json.dumps({"headRefOid": head}),
+                                                     response({"mergeQueueEntry": {"id": "q"}})]) as command:
+            pr = w.collect_pr("example/repo", 1, queued)
+        self.assertEqual(pr["mergeQueueEntry"], {"id": "q"})
+        self.assertIn("mergeQueueEntry", command.call_args.args[0][4])
+
     def test_fixtures_have_only_synthetic_name_vocabulary(self):
         # No record-layer access or client-name literals. Unknown name-like
         # words form the denylist relative to this closed synthetic vocabulary.
