@@ -346,7 +346,10 @@ async function withEnvelope(client, actor, verb, args, fn) {
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
     if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
-    return { ...prior.rows[0].response, replayed: true };          // A1: replay, no second write
+    const replay = { replayed: true, ...prior.rows[0].response };
+    // Approval reports the retry while existing verbs retain their stored response contract.
+    if (verb === "approve-rule") replay.replayed = true;
+    return replay;                                              // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction
   await client.query(
