@@ -3015,9 +3015,11 @@ test("source-only migration diagnostics preserve the sealed runtime frontier", (
   assert.equal(confirmMerge.human_only, true);
   assert.equal(confirmMerge.principal_mode, "server_verified_human");
   const fixture = JSON.parse(fs.readFileSync(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
-  const review = fixture.current_source_reviews[SCAC_MUTATION_REGISTRY_VERSION];
+  const reviewVersion = Object.keys(fixture.current_source_reviews)
+    .sort((left, right) => Number(left.split('.v')[1]) - Number(right.split('.v')[1])).at(-1);
+  const review = fixture.current_source_reviews[reviewVersion];
   for (const locator of ["bin/migrate-prod.sh", "tools/migrate-prod-support.py"]) {
-    const row = review.upsert.find(row => row.source_locator === locator);
+    const row = review?.upsert.find(row => row.source_locator === locator) || sealed.find(row => row.source_locator === locator);
     const previous = sealed.find(row => row.source_locator === locator);
     assert.ok(previous, "reviewed administration script already exists in the seal");
     const digest = sha256(fs.readFileSync(new URL(`../../${locator}`, import.meta.url), "utf8"));
@@ -3033,11 +3035,11 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 116);
+  assert.equal(migrations.length, 118);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0786", "0787", "0807", "0812", "0825", "0827", "0840", "0842"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 107);
-  assert.equal(paths.length, 223);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0786", "0787", "0807", "0812", "0825", "0827", "0840", "0842", "0844", "0846"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 109);
+  assert.equal(paths.length, 227);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
   // migration under its own review, not a generated artifact, so nothing here
   // reproduces it byte for byte and it must not appear among the frontier's
@@ -3540,8 +3542,9 @@ test("credential rotation source review cannot widen authority or admit an ingre
     const read = fs.readFileSync;
     const fixturePath = "ops/config/scac-registry-source-inventory-fixtures.v1.json";
     const fixture = JSON.parse(read(fixturePath, "utf8"));
-    const { SCAC_MUTATION_REGISTRY_VERSION } = await import("./mcp-server/src/mutation-registry.js");
-    const review = fixture.current_source_reviews[SCAC_MUTATION_REGISTRY_VERSION];
+    const reviewVersion = Object.keys(fixture.current_source_reviews)
+      .sort((left, right) => Number(left.split('.v')[1]) - Number(right.split('.v')[1])).at(-1);
+    const review = fixture.current_source_reviews[reviewVersion];
     const variant = process.argv[1];
     const errors = {
       authority: /changed an ingress contract/,
@@ -3562,7 +3565,7 @@ test("credential rotation source review cannot widen authority or admit an ingre
     syncBuiltinESMExports();
     const { assertCurrentSourceInventoryMatchesFixture } = await import("./ops/scac-mutation-inventory.mjs");
     const { TOOLS } = await import("./mcp-server/src/tools.js");
-    assert.throws(() => assertCurrentSourceInventoryMatchesFixture(TOOLS), errors[variant]);
+    assert.throws(() => assertCurrentSourceInventoryMatchesFixture(TOOLS, reviewVersion), errors[variant]);
   `;
   for (const variant of ["authority", "locator", "ingress", "digest", "base", "broad"])
     execFileSync(process.execPath, ["--input-type=module", "-e", probe, variant],

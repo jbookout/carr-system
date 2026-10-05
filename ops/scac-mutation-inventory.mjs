@@ -550,12 +550,26 @@ export const REGISTRY_V107_VERSION = "scac-mutation-registry.v107";
 export const REGISTRY_V108_VERSION = "scac-mutation-registry.v108";
 export const REGISTRY_V109_VERSION = "scac-mutation-registry.v109";
 export const REGISTRY_V110_VERSION = "scac-mutation-registry.v110";
-export const CURRENT_REGISTRY_VERSION = REGISTRY_V110_VERSION;
+export const REGISTRY_V111_VERSION = "scac-mutation-registry.v111";
+export const REGISTRY_V112_VERSION = "scac-mutation-registry.v112";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
 const SOURCE_INVENTORY_FIXTURES = JSON.parse(
   readFileSync(SOURCE_INVENTORY_FIXTURE_PATH, "utf8"));
+// Generated fixtures own the frontier; integration never adds a source-code
+// version constant. Missing or duplicate slots cannot silently select a seal.
+const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze(Object.fromEntries(
+  [...SOURCE_INVENTORY_FIXTURES.base.versions,
+    ...SOURCE_INVENTORY_FIXTURES.patches.map(patch => patch.version)]
+    .map((key, index) => {
+      if (key !== `v${index + 2}`)
+        throw new Error(`source-inventory frontier is not contiguous at ${key}`);
+      return [`scac-mutation-registry.${key}`, key];
+    })));
+export const CURRENT_REGISTRY_VERSION = Object.keys(SOURCE_INVENTORY_VERSION_KEYS).at(-1);
+if (!CURRENT_REGISTRY_VERSION)
+  throw new Error("source-inventory frontier is empty");
 function historicalArtifactReplayReview() {
   const review = SOURCE_INVENTORY_FIXTURES.historical_artifact_replay_review;
   if (!review || review.base_version !== "v26" || !Array.isArray(review.upsert))
@@ -2046,6 +2060,8 @@ export const RELATIONSHIP_V109_DB_CATALOG_BASELINE = Object.freeze({
 
 export const INVOICE_TRACKER_V110_DB_CATALOG_BASELINE = Object.freeze({"projection_version":"scac-db-catalog-projection.v110","secdef_execute":{"count":1234,"digest":"sha256:20b9172e7c6e0c799907abc8d920f0409c910707bd9beba77ca21d8a23bf1bcc"},"relation_dml":{"count":317,"digest":"sha256:93c871b7b7ce93186098fb47d6c93ba91d74a6db46a8ae4db31c6620ed85b302"},"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"runtime_dml_grants":{"count":329,"digest":"sha256:40bd226aaf01dc401544beceb274301f35aed7e2c93557f938f658d7bdc04b52"}});
 
+export const AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE = Object.freeze({"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"relation_dml":{"count":319,"digest":"sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"secdef_execute":{"count":1238,"digest":"sha256:24ac15c3938e60ab97351f3040c854357b30fc2052ebe5a41f63fdfbbf68660a"},"projection_version":"scac-db-catalog-projection.v111","runtime_dml_grants":{"count":331,"digest":"sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"}});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -2692,118 +2708,6 @@ export function fullInventory(tools = defaultTools) {
     .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
 }
 
-const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
-  [REGISTRY_V2_VERSION]: "v2",
-  [REGISTRY_V3_VERSION]: "v3",
-  [REGISTRY_V4_VERSION]: "v4",
-  [REGISTRY_V5_VERSION]: "v5",
-  [REGISTRY_V6_VERSION]: "v6",
-  [REGISTRY_V7_VERSION]: "v7",
-  [REGISTRY_V8_VERSION]: "v8",
-  [REGISTRY_V9_VERSION]: "v9",
-  [REGISTRY_V10_VERSION]: "v10",
-  [REGISTRY_V11_VERSION]: "v11",
-  [REGISTRY_V12_VERSION]: "v12",
-  [REGISTRY_V13_VERSION]: "v13",
-  [REGISTRY_V14_VERSION]: "v14",
-  [REGISTRY_V15_VERSION]: "v15",
-  [REGISTRY_V16_VERSION]: "v16",
-  [REGISTRY_V17_VERSION]: "v17",
-  [REGISTRY_V18_VERSION]: "v18",
-  [REGISTRY_V19_VERSION]: "v19",
-  [REGISTRY_V20_VERSION]: "v20",
-  [REGISTRY_V21_VERSION]: "v21",
-  [REGISTRY_V22_VERSION]: "v22",
-  [REGISTRY_V23_VERSION]: "v23",
-  [REGISTRY_V24_VERSION]: "v24",
-  [REGISTRY_V25_VERSION]: "v25",
-  [REGISTRY_V26_VERSION]: "v26",
-  [REGISTRY_V27_VERSION]: "v27",
-  [REGISTRY_V28_VERSION]: "v28",
-  [REGISTRY_V29_VERSION]: "v29",
-  [REGISTRY_V30_VERSION]: "v30",
-  [REGISTRY_V31_VERSION]: "v31",
-  [REGISTRY_V32_VERSION]: "v32",
-  [REGISTRY_V33_VERSION]: "v33",
-  [REGISTRY_V34_VERSION]: "v34",
-  [REGISTRY_V35_VERSION]: "v35",
-  [REGISTRY_V36_VERSION]: "v36",
-  [REGISTRY_V37_VERSION]: "v37",
-  [REGISTRY_V38_VERSION]: "v38",
-  [REGISTRY_V39_VERSION]: "v39",
-  [REGISTRY_V40_VERSION]: "v40",
-  [REGISTRY_V41_VERSION]: "v41",
-  [REGISTRY_V42_VERSION]: "v42",
-  [REGISTRY_V43_VERSION]: "v43",
-  [REGISTRY_V44_VERSION]: "v44",
-  [REGISTRY_V45_VERSION]: "v45",
-  [REGISTRY_V46_VERSION]: "v46",
-  [REGISTRY_V47_VERSION]: "v47",
-  [REGISTRY_V48_VERSION]: "v48",
-  [REGISTRY_V49_VERSION]: "v49",
-  [REGISTRY_V50_VERSION]: "v50",
-  [REGISTRY_V51_VERSION]: "v51",
-  [REGISTRY_V52_VERSION]: "v52",
-  [REGISTRY_V53_VERSION]: "v53",
-  [REGISTRY_V54_VERSION]: "v54",
-  [REGISTRY_V55_VERSION]: "v55",
-  [REGISTRY_V56_VERSION]: "v56",
-  [REGISTRY_V57_VERSION]: "v57",
-  [REGISTRY_V58_VERSION]: "v58",
-  [REGISTRY_V59_VERSION]: "v59",
-  [REGISTRY_V60_VERSION]: "v60",
-  [REGISTRY_V61_VERSION]: "v61",
-  [REGISTRY_V62_VERSION]: "v62",
-  [REGISTRY_V63_VERSION]: "v63",
-  [REGISTRY_V64_VERSION]: "v64",
-  [REGISTRY_V65_VERSION]: "v65",
-  [REGISTRY_V66_VERSION]: "v66",
-  [REGISTRY_V67_VERSION]: "v67",
-  [REGISTRY_V68_VERSION]: "v68",
-  [REGISTRY_V69_VERSION]: "v69",
-  [REGISTRY_V70_VERSION]: "v70",
-  [REGISTRY_V71_VERSION]: "v71",
-  [REGISTRY_V72_VERSION]: "v72",
-  [REGISTRY_V73_VERSION]: "v73",
-  [REGISTRY_V74_VERSION]: "v74",
-  [REGISTRY_V75_VERSION]: "v75",
-  [REGISTRY_V76_VERSION]: "v76",
-  [REGISTRY_V77_VERSION]: "v77",
-  [REGISTRY_V78_VERSION]: "v78",
-  [REGISTRY_V79_VERSION]: "v79",
-  [REGISTRY_V80_VERSION]: "v80",
-  [REGISTRY_V81_VERSION]: "v81",
-  [REGISTRY_V82_VERSION]: "v82",
-  [REGISTRY_V83_VERSION]: "v83",
-  [REGISTRY_V84_VERSION]: "v84",
-  [REGISTRY_V85_VERSION]: "v85",
-  [REGISTRY_V86_VERSION]: "v86",
-  [REGISTRY_V87_VERSION]: "v87",
-  [REGISTRY_V88_VERSION]: "v88",
-  [REGISTRY_V89_VERSION]: "v89",
-  [REGISTRY_V90_VERSION]: "v90",
-  [REGISTRY_V91_VERSION]: "v91",
-  [REGISTRY_V92_VERSION]: "v92",
-  [REGISTRY_V93_VERSION]: "v93",
-  [REGISTRY_V94_VERSION]: "v94",
-  [REGISTRY_V95_VERSION]: "v95",
-  [REGISTRY_V96_VERSION]: "v96",
-  [REGISTRY_V97_VERSION]: "v97",
-  [REGISTRY_V98_VERSION]: "v98",
-  [REGISTRY_V99_VERSION]: "v99",
-  [REGISTRY_V100_VERSION]: "v100",
-  [REGISTRY_V101_VERSION]: "v101",
-  [REGISTRY_V102_VERSION]: "v102",
-  [REGISTRY_V103_VERSION]: "v103",
-  [REGISTRY_V104_VERSION]: "v104",
-  [REGISTRY_V105_VERSION]: "v105",
-  [REGISTRY_V106_VERSION]: "v106",
-  [REGISTRY_V107_VERSION]: "v107",
-  [REGISTRY_V108_VERSION]: "v108",
-  [REGISTRY_V109_VERSION]: "v109",
-  [REGISTRY_V110_VERSION]: "v110",
-});
-
 export function sourceInventoryFixtureDigest(rows) {
   return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
@@ -2977,25 +2881,7 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
 }
 
 export function registryDigestFor(version, rows = fullInventory(), dbCatalogBaseline = DB_CATALOG_BASELINE) {
-  if (![REGISTRY_VERSION, REGISTRY_V2_VERSION, REGISTRY_V3_VERSION, REGISTRY_V4_VERSION,
-    REGISTRY_V5_VERSION, REGISTRY_V6_VERSION, REGISTRY_V7_VERSION, REGISTRY_V8_VERSION,
-    REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
-    REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
-    REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
-    REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION,
-    REGISTRY_V21_VERSION, REGISTRY_V22_VERSION,
-    REGISTRY_V23_VERSION, REGISTRY_V24_VERSION,
-    REGISTRY_V25_VERSION, REGISTRY_V26_VERSION, REGISTRY_V27_VERSION,
-    REGISTRY_V28_VERSION, REGISTRY_V29_VERSION,
-    REGISTRY_V30_VERSION, REGISTRY_V31_VERSION, REGISTRY_V32_VERSION,
-    REGISTRY_V33_VERSION, REGISTRY_V34_VERSION,
-    REGISTRY_V35_VERSION, REGISTRY_V36_VERSION, REGISTRY_V37_VERSION,
-    REGISTRY_V38_VERSION, REGISTRY_V39_VERSION, REGISTRY_V40_VERSION,
-    REGISTRY_V41_VERSION, REGISTRY_V42_VERSION, REGISTRY_V43_VERSION,
-    REGISTRY_V44_VERSION, REGISTRY_V45_VERSION, REGISTRY_V46_VERSION,
-    REGISTRY_V47_VERSION, REGISTRY_V48_VERSION, REGISTRY_V49_VERSION,
-    REGISTRY_V50_VERSION, REGISTRY_V51_VERSION, REGISTRY_V52_VERSION, REGISTRY_V53_VERSION, REGISTRY_V54_VERSION,
-    REGISTRY_V55_VERSION, REGISTRY_V56_VERSION, REGISTRY_V57_VERSION, REGISTRY_V58_VERSION, REGISTRY_V59_VERSION, REGISTRY_V60_VERSION, REGISTRY_V61_VERSION, REGISTRY_V62_VERSION, REGISTRY_V63_VERSION, REGISTRY_V64_VERSION, REGISTRY_V65_VERSION, REGISTRY_V66_VERSION, REGISTRY_V67_VERSION, REGISTRY_V68_VERSION, REGISTRY_V69_VERSION, REGISTRY_V70_VERSION, REGISTRY_V71_VERSION, REGISTRY_V72_VERSION, REGISTRY_V73_VERSION, REGISTRY_V74_VERSION, REGISTRY_V75_VERSION, REGISTRY_V76_VERSION, REGISTRY_V77_VERSION, REGISTRY_V78_VERSION, REGISTRY_V79_VERSION, REGISTRY_V80_VERSION, REGISTRY_V81_VERSION, REGISTRY_V82_VERSION, REGISTRY_V83_VERSION, REGISTRY_V84_VERSION, REGISTRY_V85_VERSION, REGISTRY_V86_VERSION, REGISTRY_V87_VERSION, REGISTRY_V88_VERSION, REGISTRY_V89_VERSION, REGISTRY_V90_VERSION, REGISTRY_V91_VERSION, REGISTRY_V92_VERSION, REGISTRY_V93_VERSION, REGISTRY_V94_VERSION, REGISTRY_V95_VERSION, REGISTRY_V96_VERSION, REGISTRY_V97_VERSION, REGISTRY_V98_VERSION, REGISTRY_V99_VERSION, REGISTRY_V100_VERSION, REGISTRY_V101_VERSION, REGISTRY_V102_VERSION, REGISTRY_V103_VERSION, REGISTRY_V104_VERSION, REGISTRY_V105_VERSION, REGISTRY_V106_VERSION, REGISTRY_V107_VERSION, REGISTRY_V108_VERSION, REGISTRY_V109_VERSION, REGISTRY_V110_VERSION].includes(version))
+  if (version !== REGISTRY_VERSION && !Object.hasOwn(SOURCE_INVENTORY_VERSION_KEYS, version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -19934,6 +19820,25 @@ export function renderRelationshipRegistrySql(rows, predecessorSql = null) {
 
 
 
+export const LEADS_V112_DB_CATALOG_BASELINE = Object.freeze({"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"relation_dml":{"count":319,"digest":"sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"secdef_execute":{"count":1242,"digest":"sha256:548ab9cb9d567cb08e55498354fcbb45e663d1391a90a4a8b20af0db00d476d6"},"projection_version":"scac-db-catalog-projection.v112","runtime_dml_grants":{"count":331,"digest":"sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"},"job_definitions":{"count":2,"digest":"sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"}});
+
+export function renderLeadsRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0844_automation_undo_scac_successor.sql",
+    predecessorDigest: "abafd5ab1670298eeca04fea717918e03b959d77025abb9c96a9632cb9fbc763",
+    domainPath: "migrations/0845_lead_archived_stage.sql",
+    oldVersion: REGISTRY_V111_VERSION,
+    newVersion: REGISTRY_V112_VERSION,
+    oldCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE,
+    newCatalogBaseline: LEADS_V112_DB_CATALOG_BASELINE,
+    oldTag: "automation_undo",
+    newTag: "leads",
+    oldLabel: "Audited automation",
+    newLabel: "Leads",
+  });
+}
+
 export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
   return renderAppendedRegistrySql(rows, {
     predecessorSql,
@@ -19946,6 +19851,21 @@ export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
     newCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE,
     oldTag: "relationship", newTag: "invoice_tracker",
     oldLabel: "Relationship", newLabel: "Invoice tracker",
+  });
+}
+
+export function renderAutomationUndoRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0842_invoice_tracker_scac_successor.sql",
+    predecessorDigest: "9a6a23ee5041504d59eda63f4320e510d4dd858c04fe6c0657f4ed74944ea7df",
+    domainPath: "migrations/0843_automation_reason_undo_archive_invoice.sql",
+    oldVersion: REGISTRY_V110_VERSION,
+    newVersion: REGISTRY_V111_VERSION,
+    oldCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE,
+    newCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE,
+    oldTag: "invoice_tracker", newTag: "automation_undo",
+    oldLabel: "Invoice tracker", newLabel: "Automation undo",
   });
 }
 
@@ -21473,10 +21393,23 @@ export function renderGeneratedFrontier() {
       dbCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE });
   artifacts["migrations/0842_invoice_tracker_scac_successor.sql"] =
     renderInvoiceTrackerRegistrySql(v110Rows, artifacts["migrations/0840_relationship_scac_successor.sql"]);
+  const v111Rows = frozenInventory(REGISTRY_V111_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v111.generated.js"] =
+    renderRuntimeProjection(v111Rows, { version: REGISTRY_V111_VERSION,
+      dbCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE });
+  artifacts["migrations/0844_automation_undo_scac_successor.sql"] =
+    renderAutomationUndoRegistrySql(v111Rows, artifacts["migrations/0842_invoice_tracker_scac_successor.sql"]);
+
+  const v112Rows = frozenInventory(REGISTRY_V112_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v112.generated.js"] =
+    renderRuntimeProjection(v112Rows, { version: REGISTRY_V112_VERSION,
+      dbCatalogBaseline: LEADS_V112_DB_CATALOG_BASELINE });
+  artifacts["migrations/0846_leads_scac_successor.sql"] =
+    renderLeadsRegistrySql(v112Rows, artifacts["migrations/0844_automation_undo_scac_successor.sql"]);
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 116 || runtimeCount !== 107 || Object.keys(artifacts).length !== 223)
+  if (migrationCount !== 118 || runtimeCount !== 109 || Object.keys(artifacts).length !== 227)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -22552,6 +22485,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         dbCatalogBaseline: INVOICE_TRACKER_V110_DB_CATALOG_BASELINE }));
     await writeFile(resolve("migrations/0842_invoice_tracker_scac_successor.sql"), renderInvoiceTrackerRegistrySql(rows));
     process.stdout.write("Invoice tracker v110 frontier generated\n");
+  } else if (process.argv[2] === "--write-automation-undo-frontier") {
+    const rows = frozenInventory(REGISTRY_V111_VERSION);
+    await writeFile(resolve("mcp-server/src/scac-mutation-registry.v111.generated.js"),
+      renderRuntimeProjection(rows, { version: REGISTRY_V111_VERSION,
+        dbCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE }));
+    await writeFile(resolve("migrations/0844_automation_undo_scac_successor.sql"), renderAutomationUndoRegistrySql(rows));
+    process.stdout.write("Automation undo v111 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);
     process.stdout.write(`source inventory matches frozen ${CURRENT_REGISTRY_VERSION} frontier fixture\n`);

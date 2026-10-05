@@ -1183,6 +1183,8 @@ def _stub_git_answering_the_floor(changed_paths, *, main_paths=None, added_paths
     quoted_main = " ".join(shlex.quote(path) for path in main_paths)
     quoted_added = " ".join(shlex.quote(path) for path in added_paths)
     quoted_tree = " ".join(shlex.quote(path) for path in main_tree_paths)
+    quoted_main_added = " ".join(shlex.quote(path) for path in added_paths
+                                  if path in main_paths and path not in main_tree_paths)
     main_exit = "" if main_readable else "exit 7; "
     with tempfile.TemporaryDirectory(prefix="ci-selftest-stub-git-") as td:
         stub = pathlib.Path(td) / "git"
@@ -1190,6 +1192,8 @@ def _stub_git_answering_the_floor(changed_paths, *, main_paths=None, added_paths
             "#!/bin/sh\n"
             'case " $* " in *" diff --name-only origin/main HEAD "*)\n'
             f'  {main_exit}printf "%s\\n" {quoted_main}; exit 0 ;;\n'
+            '  *" diff --diff-filter=A --name-only origin/main -- "*)\n'
+            f'  {main_exit}printf "%s\\n" {quoted_main_added}; exit 0 ;;\n'
             '  *" ls-tree -r --name-only origin/main "*)\n'
             f'  {main_exit}printf "%s\\n" {quoted_tree}; exit 0 ;;\n'
             f'*" {FIXTURE_RANGE} "*)\n'
