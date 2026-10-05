@@ -263,9 +263,8 @@ def process_group_alive(pgid):
         return True
 
 
-def board_task(root, config, card, executor, status, note, project=None, pr=None, repo=None, needs_joe=False, health=None,
-               expected_task=None, reason=None, next_action=None):
-    project = project or config["board"]
+def board_task(root, config, card, executor, status, note):
+    project = config["board"]
     board = root / "out/boards" / (project + ".json")
     env = dict(os.environ, PROGRESS_BOARD_ROOT=str(root / "out"))
     with locked(root / "out/watchdog/board.lock"):
@@ -279,20 +278,14 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
         prior = json.loads(board.read_text()).get("tasks", {}).get(card, {})
         argv = [sys.executable, str(SOURCE / "tools/progress_board.py"), "task", project, card,
                 "--title", prior.get("title", card), "--executor", prior.get("executor", executor) if executor == "orchestrator" else executor, "--status", status,
-                "--health", health or ("blocked" if status == "blocked" else "healthy"), "--note", note]
-        argv.extend(["--lane", config["needs_joe_lane"] if needs_joe else "status"])
-        if expected_task is not None:
-            argv.extend(["--expected-task", json.dumps(expected_task)])
+                "--health", "blocked" if status == "blocked" else "healthy", "--note", note,
+                "--lane", "status"]
         if status == "blocked":
-            argv.extend(["--reason", reason or note,
-                         "--next-action", next_action or config["next_actions"]["job_failed"]])
-        if pr is not None:
-            argv.extend(["--pr", str(pr), "--repo", repo])
+            argv.extend(["--reason", note, "--next-action", config["next_actions"]["job_failed"]])
         result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                 timeout=config["thresholds"]["command_timeout_seconds"])
         if result.returncode:
             raise RuntimeError(result.stderr)
-        return prior
 
 
 def run_job(root, config, card, executor, minutes, argv):
@@ -364,8 +357,6 @@ def reconcile(root, config, found, effects, now, complete=True):
     for key, f in current.items():
         prior = previous.get(key, {})
         row = {**f, "first_seen": prior.get("first_seen", stamp(now)), "cleared_at": None}
-        if prior.get("cleared_at"):
-            row["board_recovery"] = None
         if not prior or prior.get("cleared_at") or prior.get("reason") != f["reason"]:
             append(findings_path, row)
         # Failed reporting is retried with the SAME record-layer idempotency key.
@@ -427,14 +418,6 @@ def reconcile(root, config, found, effects, now, complete=True):
     if complete:
         for key, prior in previous.items():
             if key not in current and not prior.get("cleared_at") and prior.get("kind") not in blinded:
-                if prior.get("board_recovery"):
-                    try:
-                        effects.clear(prior, list(current.values()))
-                    except Exception as exc:
-                        error = finding("board_error", key, str(exc), config)
-                        current[error["key"]] = error
-                        append(findings_path, {**error, "first_seen": stamp(now), "cleared_at": None})
-                        continue  # Keep the original open so board recovery is retried.
                 append(findings_path, {**prior, "cleared_at": stamp(now)})
     return list(current.values())
 
@@ -658,31 +641,8 @@ class Effects:
         self.root, self.config = root, config
         self.children = []
 
-    def card(self, f):
-        return f.get("card") or "wd-" + hashlib.sha256(f["subject"].encode()).hexdigest()[:16]
-
-    def show_finding(self, f, expected_task=None):
-        return board_task(self.root, self.config, self.card(f), "orchestrator", "blocked",
-                          f["reason"] + "\nNext action: " + f["next_action"],
-                          pr=f.get("pr"), repo=f.get("repo"), needs_joe=bool(f.get("needs_joe")),
-                          expected_task=expected_task, reason=f["reason"], next_action=f["next_action"])
-
     def report(self, f):
         c = self.config
-        card = self.card(f)
-        before = self.show_finding(f)
-        # Sibling findings share the original state, not each other's blocked overlay.
-        for prior in read_latest(path_at(self.root, c["paths"]["findings"])).values():
-            recovery = prior.get("board_recovery")
-            if recovery and recovery["card"] == card and not prior.get("cleared_at"):
-                before = recovery["before"]
-                break
-        recovery = {"card": card, "before": before,
-                    "note": f["reason"] + "\nNext action: " + f["next_action"],
-                    "lane": c["needs_joe_lane"] if f.get("needs_joe") else None}
-        # Persist ownership even if the later record-layer write fails.
-        append(path_at(self.root, c["paths"]["findings"]),
-               {"key": f["key"], "board_recovery": recovery})
         if c["actions"]["file_defects"] and f["kind"] != "pr_ready":
             digest_key = hashlib.sha256(f["key"].encode()).hexdigest()
             payload = {"idempotency_key": "job-watchdog:" + digest_key,
@@ -701,24 +661,6 @@ class Effects:
             response = json.loads(result[start:])
             if response.get("ok") is not True or not response.get("loop_id"):
                 raise RuntimeError("record layer refused watchdog defect: " + str(response))
-        return {"board_recovery": recovery}
-
-    def clear(self, f, active):
-        recovery = f["board_recovery"]
-        card = recovery["card"]
-        owned = {"status": "blocked", "health": "blocked", "note": recovery["note"],
-                 "lane": recovery["lane"]}
-        siblings = [row for row in active if self.card(row) == card]
-        if siblings:
-            self.show_finding(siblings[-1], expected_task=owned)
-            return
-        before = recovery["before"]
-        board_task(self.root, self.config, card, before.get("executor", "orchestrator"),
-                   before.get("status", "done"),
-                   before.get("note", "Watchdog finding recovered; evidence source is healthy."),
-                   needs_joe=before.get("lane") == self.config["needs_joe_lane"],
-                   health=before.get("health", "healthy"), expected_task=owned,
-                   reason=before.get("blocked_reason"), next_action=before.get("next_action"))
 
     def launch(self, f, argv, cwd, *, job_id, restart_count=0, root_id=None):
         c = self.config
