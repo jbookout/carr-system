@@ -1,5 +1,4 @@
 -- Source only: manual host failover is not enabled by applying this schema.
-begin;
 create table ops.studio_leader (
     singleton boolean primary key default true check (singleton),
     host text not null check (host in ('studio','macbook')),
@@ -15,4 +14,3 @@ grant select,update on ops.studio_leader to carr_authority_joe;
 comment on table ops.studio_leader is
   'Durable Studio/MacBook owner. Never expires. Manual transfer requires source fencing '
   'and exclusive advisory lock 638148226000001; guarded jobs hold its shared form.';
-commit;
