@@ -13,7 +13,9 @@
       "daily_budget": 0,
       "owner": "orchestrator",
       "value": "judged rules reached the session beyond the compiled match on 9% of human prompts (234 of ~2,560, 2026-09-27..10-04); worker briefs are machine-written and fall back to the deterministic overlap pick",
-      "sources": ["ops/rule_trigger_delivery.py"]
+      "sources": [
+        "ops/rule_trigger_delivery.py"
+      ]
     },
     {
       "caller": "jev_session_watch",
@@ -25,7 +27,9 @@
       "daily_budget": 0,
       "owner": "orchestrator",
       "value": "Bounded uncertain diagnosis retained; caller-level improvement remains unmeasured.",
-      "sources": ["ops/jev_session_watch.py"]
+      "sources": [
+        "ops/jev_session_watch.py"
+      ]
     },
     {
       "caller": "jev_defect_class",
@@ -37,7 +41,9 @@
       "daily_budget": 0,
       "owner": "orchestrator",
       "value": "advisory class at a real filing boundary (rare); its selftest was the largest single fixture burner (a 'pick' prompt repeated 91 times on 2026-10-04)",
-      "sources": ["ops/jev_defect_class.py"]
+      "sources": [
+        "ops/jev_defect_class.py"
+      ]
     },
     {
       "caller": "jev_executor_tier",
@@ -49,7 +55,9 @@
       "daily_budget": 0,
       "owner": "orchestrator",
       "value": "verdict consumed by code (rewrites or denies the subagent model); ~4 calls a day",
-      "sources": ["ops/jev_executor_tier.py"]
+      "sources": [
+        "ops/jev_executor_tier.py"
+      ]
     },
     {
       "caller": "jev_code_review",
@@ -61,7 +69,9 @@
       "daily_budget": 0,
       "owner": "orchestrator",
       "value": "task-fit at >=0.85 becomes must-address; 92% of its 7-day calls were selftest fixtures, now refused",
-      "sources": ["ops/jev_code_review.py"]
+      "sources": [
+        "ops/jev_code_review.py"
+      ]
     },
     {
       "caller": "jev_model_route",
@@ -73,7 +83,9 @@
       "daily_budget": 40,
       "owner": "orchestrator",
       "value": "verdict consumed by code (chooses the desk)",
-      "sources": ["ops/jev_model_route.py"]
+      "sources": [
+        "ops/jev_model_route.py"
+      ]
     },
     {
       "caller": "jev_deal_read",
@@ -85,7 +97,11 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "rendered on the partner-facing deal cards; ~6 calls a day",
-      "sources": ["ops/jev_deal_read.py", "mcp-server/src/dealroom-web.js", "mcp-server/src/jev-deal-reading.js"]
+      "sources": [
+        "ops/jev_deal_read.py",
+        "mcp-server/src/dealroom-web.js",
+        "mcp-server/src/jev-deal-reading.js"
+      ]
     },
     {
       "caller": "post_call_jev",
@@ -97,7 +113,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "annotates the post-call review pack Joe reads",
-      "sources": ["tools/dictation-rig/bin/post_call_jev.py"]
+      "sources": [
+        "tools/dictation-rig/bin/post_call_jev.py"
+      ]
     },
     {
       "caller": "jev_fact_boundary",
@@ -109,7 +127,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "off by default; budget bounds an opt-in",
-      "sources": ["ops/jev_fact_boundary.py"]
+      "sources": [
+        "ops/jev_fact_boundary.py"
+      ]
     },
     {
       "caller": "jev_intake",
@@ -121,7 +141,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only; no hook wires it",
-      "sources": ["ops/jev_intake.py"]
+      "sources": [
+        "ops/jev_intake.py"
+      ]
     },
     {
       "caller": "jev_scorecard",
@@ -133,7 +155,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only; no hook wires it",
-      "sources": ["ops/jev_scorecard.py"]
+      "sources": [
+        "ops/jev_scorecard.py"
+      ]
     },
     {
       "caller": "jev_best_of",
@@ -145,7 +169,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only; no hook wires it",
-      "sources": ["ops/jev_best_of.py"]
+      "sources": [
+        "ops/jev_best_of.py"
+      ]
     },
     {
       "caller": "flash-script",
@@ -157,7 +183,9 @@
       "daily_budget": 20,
       "owner": "orchestrator",
       "value": "flash desk only",
-      "sources": ["tools/flash-script.py"]
+      "sources": [
+        "tools/flash-script.py"
+      ]
     },
     {
       "caller": "rule_gold_label",
@@ -169,7 +197,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "eval labels; on demand only",
-      "sources": ["ops/rule_gold_label.py"]
+      "sources": [
+        "ops/rule_gold_label.py"
+      ]
     },
     {
       "caller": "rule_delivery_eval",
@@ -181,7 +211,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "eval measurement; on demand only",
-      "sources": ["ops/rule_delivery_eval.py"]
+      "sources": [
+        "ops/rule_delivery_eval.py"
+      ]
     },
     {
       "caller": "judge_paired_eval",
@@ -193,7 +225,9 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "eval measurement; on demand only",
-      "sources": ["tools/judge/paired_eval.py"]
+      "sources": [
+        "tools/judge/paired_eval.py"
+      ]
     },
     {
       "caller": "adhoc:*",
@@ -205,7 +239,9 @@
       "daily_budget": 40,
       "owner": "orchestrator",
       "value": "64 explicit review/diagnosis judgments in 7 days under ad-hoc caller names; they now share one prefix and one budget",
-      "sources": ["ops/typesafe_client.py"]
+      "sources": [
+        "ops/typesafe_client.py"
+      ]
     },
     {
       "caller": "jev_rerank_eval",
@@ -217,7 +253,23 @@
       "daily_budget": 60,
       "owner": "orchestrator",
       "value": "Measure retrieval ranking quality",
-      "sources": ["evals/retrieval/jev-rerank-eval.mjs"]
+      "sources": [
+        "evals/retrieval/jev-rerank-eval.mjs"
+      ]
+    },
+    {
+      "caller": "jevlint_review",
+      "trigger": "Explicit advisory PR diff check or bounded rule calibration; never a scheduled full-repo run",
+      "runs_in": "ops/jevlint_review.py loopback SystemOne shim for pinned jevlint",
+      "attribution": "session",
+      "unattended": "allowed",
+      "hourly_budget": 150,
+      "daily_budget": 200,
+      "owner": "orchestrator",
+      "value": "Code taste findings for the reviewer, measured against real deletion fixtures",
+      "sources": [
+        "ops/jevlint_review.py"
+      ]
     }
   ]
 }

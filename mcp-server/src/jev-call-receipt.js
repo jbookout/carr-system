@@ -259,6 +259,7 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
       throw new LeafToolError({ error: "jev_cache_miss", spend_authority: "carr-jev-spend/v1" });
     if (!reserveAttempt || !billingHold)
       refuseJevSpend("jev_spend_authority_unavailable", null);
+    const paidAttempts = [];
     const reserve = async () => {
       let attempt;
       try { attempt = await reserveAttempt(); }
@@ -269,73 +270,81 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
       if (typeof attempt?.key !== "string" || !attempt.key ||
           typeof attempt?.receipt_id !== "string" || !attempt.receipt_id)
         refuseJevSpend("jev_receipt_store_unavailable", null);
+      paidAttempts.push({ receipt_id: attempt.receipt_id, recorded_at: attempt.recorded_at });
       return attempt;
     };
-    let reservedAttempt = await reserve();
-    const deadline = now() + budgetMs;
-    for (let attempt = 0; ; attempt++) {
-      if (attempt > 0) reservedAttempt = await reserve();
-      const remaining = deadline - now();
-      if (remaining <= 0) throw upstreamFailure(null, "timeout", "", key);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), remaining);
-      let response;
-      try {
-        response = await fetchImpl(ENDPOINT, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${key}`,
-            "content-type": "application/json",
-            "user-agent": USER_AGENT,
-          },
-          body,
-          signal: controller.signal,
-        });
-      } catch (error) {
-        clearTimeout(timer);
-        // Never the error's own message: a fetch failure can quote its request.
-        throw upstreamFailure(null, controller.signal.aborted || error?.name === "AbortError"
-          ? "timeout" : "network", "", key);
-      }
-      try {
-        const failedBody = response.ok ? "" : await response.text().catch(() => "");
-        // Billing takes precedence over retry classification, including 429.
-        if (!response.ok && (response.status === 402 ||
-            /billing|insufficient[_ -]*(?:credit|fund)|credit[_ -]*(?:exhaust|balance)|payment required/i.test(failedBody))) {
-          try { await billingHold(); }
-          catch { refuseJevSpend("jev_spend_authority_unavailable", null); }
-          throw upstreamFailure(response.status, "http_status", failedBody, key);
+    try {
+      let reservedAttempt = await reserve();
+      const deadline = now() + budgetMs;
+      for (let attempt = 0; ; attempt++) {
+        if (attempt > 0) reservedAttempt = await reserve();
+        const remaining = deadline - now();
+        if (remaining <= 0) throw upstreamFailure(null, "timeout", "", key);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), remaining);
+        let response;
+        try {
+          response = await fetchImpl(ENDPOINT, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${key}`,
+              "content-type": "application/json",
+              "user-agent": USER_AGENT,
+            },
+            body,
+            signal: controller.signal,
+          });
+        } catch (error) {
+          clearTimeout(timer);
+          // Never the error's own message: a fetch failure can quote its request.
+          throw upstreamFailure(null, controller.signal.aborted || error?.name === "AbortError"
+            ? "timeout" : "network", "", key);
         }
-        if (transport_mode !== "paid_once" && response.status === 429 && attempt < MAX_429_RETRIES) {
-          const wait = retryAfterMs(response);
-          if (deadline - now() - wait >= MIN_ATTEMPT_MS) {
-            clearTimeout(timer);
-            await sleep(wait);
-            continue;
+        try {
+          const failedBody = response.ok ? "" : await response.text().catch(() => "");
+          // Billing takes precedence over retry classification, including 429.
+          if (!response.ok && (response.status === 402 ||
+              /billing|insufficient[_ -]*(?:credit|fund)|credit[_ -]*(?:exhaust|balance)|payment required/i.test(failedBody))) {
+            try { await billingHold(); }
+            catch { refuseJevSpend("jev_spend_authority_unavailable", null); }
+            throw upstreamFailure(response.status, "http_status", failedBody, key);
           }
+          if (transport_mode !== "paid_once" && response.status === 429 && attempt < MAX_429_RETRIES) {
+            const wait = retryAfterMs(response);
+            if (deadline - now() - wait >= MIN_ATTEMPT_MS) {
+              clearTimeout(timer);
+              await sleep(wait);
+              continue;
+            }
+          }
+          if (!response.ok)
+            throw upstreamFailure(response.status, "http_status", failedBody, key);
+          let parsed;
+          try { parsed = await response.json(); }
+          catch { throw upstreamFailure(response.status, controller.signal.aborted ? "timeout" : "invalid_json", "", key); }
+          if (!isPlainObject(parsed) || !isPlainObject(parsed.answers) || typeof parsed.model !== "string" ||
+              parsed.model.trim() === "")
+            throw upstreamFailure(response.status, "invalid_answer_shape", "", key);
+          const answer = {
+            model: parsed.model,
+            answers: parsed.answers,
+            usage: isPlainObject(parsed.usage) ? parsed.usage : null,
+            paid_attempts: paidAttempts,
+            ...(reservedAttempt ? { attempt: reservedAttempt } : {}),
+          };
+          return answer;
+        } catch (error) {
+          if (error instanceof LeafToolError) throw error;
+          throw upstreamFailure(response?.status ?? null,
+            controller.signal.aborted ? "timeout" : "network", "", key);
+        } finally {
+          clearTimeout(timer);
         }
-        if (!response.ok)
-          throw upstreamFailure(response.status, "http_status", failedBody, key);
-        let parsed;
-        try { parsed = await response.json(); }
-        catch { throw upstreamFailure(response.status, controller.signal.aborted ? "timeout" : "invalid_json", "", key); }
-        if (!isPlainObject(parsed) || !isPlainObject(parsed.answers) || typeof parsed.model !== "string" ||
-            parsed.model.trim() === "")
-          throw upstreamFailure(response.status, "invalid_answer_shape", "", key);
-        const answer = {
-          model: parsed.model,
-          answers: parsed.answers,
-          usage: isPlainObject(parsed.usage) ? parsed.usage : null,
-          ...(reservedAttempt ? { attempt: reservedAttempt } : {}),
-        };
-        return answer;
-      } catch (error) {
-        if (error instanceof LeafToolError) throw error;
-        throw upstreamFailure(response?.status ?? null,
-          controller.signal.aborted ? "timeout" : "network", "", key);
-      } finally {
-        clearTimeout(timer);
       }
+    } catch (error) {
+      if (error instanceof LeafToolError && paidAttempts.length)
+        throw new LeafToolError({ ...error.payload, paid_attempts: paidAttempts });
+      throw error;
     }
   };
   // Only the caller that committed the matching receipt may promote an answer.
@@ -360,7 +369,7 @@ export async function reserveJevCallAttempt(client, actor, args) {
   try {
     const site = await checkJevSpend(client, unpackJevState(args.state).attribution);
     const row = (await client.query(
-      `select r.receipt_id from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
+      `select r.receipt_id, to_jsonb(r.recorded_at)#>>'{}' as recorded_at from ops.record_jev_call_receipt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) r`,
       [args.session_id, "call", Object.keys(questions).sort(compareCodePoints), facets,
         model, "jev-attempt-pending", await sha256Hex(stateJson),
         await canonicalSha256(questions), await canonicalSha256({}), null,
@@ -375,7 +384,7 @@ export async function reserveJevCallAttempt(client, actor, args) {
           jev_site: site.caller, jev_caller: unpackJevState(args.state).attribution.caller })],
     );
     await client.query("commit");
-    return { key, receipt_id: row.receipt_id };
+    return { key, receipt_id: row.receipt_id, recorded_at: row.recorded_at };
   } catch (error) {
     await client.query("rollback");
     throw error;
@@ -530,6 +539,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
             model: answered.model,
             answers: answered.answers,
             usage: answered.usage ?? null,
+            paid_attempts: answered.paid_attempts ?? [],
             cache_hit: answered.cache_hit === true,
             state_sha256: stateSha,
             prompt_sha256: promptSha,

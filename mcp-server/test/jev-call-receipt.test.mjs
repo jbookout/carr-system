@@ -14,6 +14,24 @@ function jevAskBinding(env, fetchImpl, options = {}) {
     billingHold: async () => {}, ...options,
   });
 }
+test("Worker reservation evidence survives paid transport failure and retry refusal", async () => {
+  const reservation = { key: "k", receipt_id: "r", recorded_at: "2026-10-04T23:59:59Z" };
+  for (const retry of [false, true]) {
+    let calls = 0;
+    const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fakeFetch([
+      jsonResponse(retry ? 429 : 500, "failed", { "retry-after": "0" })]), {
+      cache: null, sleep: async () => {},
+      reserveAttempt: async () => {
+        if (calls++) throw new ToolError({ error: "site_daily_budget" });
+        return reservation;
+      },
+    });
+    const out = await prefetchJevAnswer(askArgs(), ask);
+    assert.equal(out.ok, false);
+    assert.deepEqual(out.error.paid_attempts, [{ receipt_id: "r", recorded_at: reservation.recorded_at }]);
+  }
+});
+
 const SPEND_STATS = { day_used: 0, hour_used: 0, site_day: 0, site_hour: 0,
   resets_day: "2026-10-05T00:00:00Z", resets_hour: "2026-10-04T23:00:00Z", hold_until: null };
 const AGENT = { id: "10000000-0000-0000-0000-000000000031", slug: "joe", human: true, via: "test" };
@@ -507,7 +525,8 @@ test("jevAskBinding posts {state, model, questions} with bearer auth and a user 
   const fetchImpl = fakeFetch([jsonResponse(200, { model: "jev-1.14.0", answers: ANSWERS, usage: { n: 1 } })]);
   const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { sleep: async () => {} });
   const out = await ask({ state: { a: 1 }, model: "jev-latest", questions: QUESTIONS });
-  assert.deepEqual(out, { model: "jev-1.14.0", answers: ANSWERS, usage: { n: 1 }, attempt: { key: 'offline-k', receipt_id: 'offline-r' } });
+  assert.deepEqual(out, { model: "jev-1.14.0", answers: ANSWERS, usage: { n: 1 }, attempt: { key: 'offline-k', receipt_id: 'offline-r' },
+    paid_attempts: [{ receipt_id: 'offline-r', recorded_at: undefined }] });
   assert.equal(fetchImpl.calls.length, 1);
   const { url, init } = fetchImpl.calls[0];
   assert.equal(url, "https://api.typesafe.ai/v1/systemone");

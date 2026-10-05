@@ -14,13 +14,13 @@ await pool.query(`create table tool_call (
   idempotency_key text primary key, verb text not null, actor_id uuid not null,
   request_hash text not null, response jsonb not null,
   created_at timestamptz not null default now())`);
-await pool.query(readFileSync(new URL('../../migrations/0838_jev_spend_attempt_index.sql', import.meta.url), 'utf8'));
+await pool.query(readFileSync(new URL('../../migrations/0845_jev_spend_attempt_index.sql', import.meta.url), 'utf8'));
 // The receipt sink is a database fixture; admission/insertion uses the
 // production reservation function, and no provider is configured.
 await pool.query(`create schema ops;
   create function ops.record_jev_call_receipt(text,text,text[],text[],text,text,
-    text,text,text,text,jsonb,jsonb,uuid,text,text) returns table(receipt_id uuid)
-    language sql as 'select gen_random_uuid()'`);
+    text,text,text,text,jsonb,jsonb,uuid,text,text) returns table(receipt_id uuid, recorded_at timestamptz)
+    language sql as 'select gen_random_uuid(), clock_timestamp()'`);
 test.after(() => pool.end());
 
 async function reserve(attribution = who, registry = spendPolicy, cost = costPolicy) {
@@ -139,6 +139,7 @@ test('production reservation records the post-wait clock across a delayed lock',
     const threshold = (await blocker.query('select clock_timestamp() stamp')).rows[0].stamp;
     await blocker.query('commit');
     const attempt = await pending;
+    assert.ok(new Date(attempt.recorded_at) >= threshold, 'receipt timestamp predates reservation lock release');
     const row = (await worker.query('select created_at >= $2::timestamptz after_wait, response from tool_call where idempotency_key=$1',
       [attempt.key, threshold])).rows[0];
     assert.equal(row.after_wait, true);

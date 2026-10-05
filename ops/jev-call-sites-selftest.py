@@ -364,6 +364,8 @@ class RegistryCoverageTests(unittest.TestCase):
                              client.JEV_COST_CONFIG["daily_paid_call_cap"] * 24)
         self.assertLessEqual(client.JEV_COST_CONFIG["daily_paid_call_cap"], 1000,
                              "global capacity is shared across site allocations")
+        for entry in registry["sites"].values():
+            self.assertLessEqual(entry["daily_budget"], client.JEV_COST_CONFIG["daily_paid_call_cap"])
 
     def test_every_paid_call_source_is_registered(self):
         registry = client.load_call_sites(REGISTRY_PATH)

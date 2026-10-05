@@ -68,7 +68,8 @@ import shutil
 import uuid
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -641,6 +642,8 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
             start = (proc.stderr or '').find('TOOL ERROR ')
             try:
                 error_payload, _ = json.JSONDecoder().raw_decode(proc.stderr, start + len('TOOL ERROR '))
+                if isinstance(error_payload, dict) and "paid_attempts" in error_payload:
+                    upstream["paid_attempts"] = error_payload["paid_attempts"]
                 reset = error_payload.get('resets_at') if start >= 0 and isinstance(error_payload, dict) else None
                 if isinstance(reset, str):
                     datetime.fromisoformat(reset.replace('Z', '+00:00'))
@@ -663,6 +666,7 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         "answers": out["answers"],
         "usage": out.get("usage") if isinstance(out.get("usage"), dict) else None,
         "cache_hit": out.get("cache_hit") is True,
+        **({"paid_attempts": out["paid_attempts"]} if "paid_attempts" in out else {}),
         "server_receipt": {k: out.get(k) for k in (
             "receipt_id", "recorded_at", "purpose", "session_id",
             "state_sha256", "prompt_sha256")},
@@ -995,6 +999,44 @@ def _refuse_offline(caller):
                              code="fixture_offline", site=caller)
 
 
+_reservation_receipt: ContextVar[dict | None] = ContextVar("jev_reservation_receipt", default=None)
+
+
+@contextmanager
+def capture_paid_reservations(*, caller, session_id, run_id):
+    """Observe Worker-committed attempts for this execution context."""
+    receipt = {"caller": caller, "session_id": session_id, "run_id": run_id, "utc_days": {}, "seen": set(), "complete": True}
+    token = _reservation_receipt.set(receipt)
+    try:
+        yield receipt
+    finally:
+        _reservation_receipt.reset(token)
+
+
+def _observe_paid_reservations(attempts, caller, session, *, complete=True):
+    receipt = _reservation_receipt.get()
+    if receipt is None or receipt["caller"] != caller or receipt["session_id"] != session:
+        return
+    receipt["complete"] = receipt["complete"] and complete
+    if not isinstance(attempts, list):
+        receipt["complete"] = False
+        return
+    for attempt in attempts:
+        try:
+            key = attempt["receipt_id"]
+            recorded = datetime.fromisoformat(attempt["recorded_at"].replace("Z", "+00:00"))
+            if not isinstance(key, str) or not key or recorded.tzinfo is None:
+                receipt["complete"] = False
+                continue
+        except (KeyError, TypeError, ValueError, AttributeError):
+            receipt["complete"] = False
+            continue
+        if key not in receipt["seen"]:
+            receipt["seen"].add(key)
+            day = recorded.astimezone(timezone.utc).date().isoformat()
+            receipt["utc_days"][day] = receipt["utc_days"].get(day, 0) + 1
+
+
 def active_pause(*, sites=None, now=None):
     """The budget pause in force now, as {"scope", "resets_at"}, or None.
 
@@ -1172,6 +1214,10 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         session_id=dispatch_binding[0] or "unbound", timeout=remaining,
         transport_mode="paid_once" if cache_ttl_seconds == 0 else None,
         runner=server_runner, upstream=upstream, caller=caller, job_id=_job_label(), unattended=_unattended())
+    observed = served or upstream
+    complete = ("paid_attempts" in observed or bool(served and served.get("cache_hit"))
+                or (served is None and error in REFUSAL_CODES + ("jev_spend_authority_unavailable",)))
+    _observe_paid_reservations(observed.get("paid_attempts", []), caller, dispatch_binding[0], complete=complete)
     if served is None:
         _append_call_receipt(questions, facets, {"http_status": upstream.get("status")}, calls_log, dispatch_binding=dispatch_binding,
             caller=caller, question_kind=question_kind, prompt_sha256=prompt_sha256,
