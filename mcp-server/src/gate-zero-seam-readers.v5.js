@@ -326,6 +326,7 @@ const DECLARED_CHECK_NAMES = Object.freeze([
   "main canary (gates, migration, types, freshness)",
   "merge",
   "measure",
+  "CI flake proposals",
   "Backup artifact",
 ]);
 
