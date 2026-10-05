@@ -155,6 +155,7 @@ def compare(root):
             if 'StartInterval' in p:
                 from lib.launchd_calendar import rewrite_template
                 text, _ = rewrite_template(text)
+            text = text.replace('\n', '\n<!-- doctrine: studio-macbook-failover -->\n', 1)
             (root / source).write_text(text.replace(str(Path.home()), '{{HOME}}'))
         if (root / source).exists():
             key = label.removeprefix('com.carr.')
