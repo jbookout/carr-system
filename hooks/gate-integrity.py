@@ -110,6 +110,7 @@ INSTALL_REPO = install_repo()
 HOOKS = os.path.join(REPO, "hooks")
 BASELINE = os.path.join(REPO, "ops", "config", "gate-baseline.json")
 REPO_HOOKS_JSON = os.path.join(REPO, "ops", "config", "hooks.json")
+GATE_DECLARATIONS = os.path.join(REPO, "ops", "config", "gate-declarations.json")
 DELEGATION_HOOK_CONFIG = os.path.join(
     REPO, "ops", "config", "delegation-gate-hook.json"
 )
@@ -129,6 +130,8 @@ SESSION_CONTEXT_LIFECYCLE = os.path.join(
 CONTRACTS = {
     "hook_runtime.py": os.path.join(REPO, "lib", "hook_runtime.py"),
     "hook_execution.py": os.path.join(REPO, "lib", "hook_execution.py"),
+    "gate_declarations.py": os.path.join(REPO, "lib", "gate_declarations.py"),
+    "gate-declarations.json": GATE_DECLARATIONS,
     "delegation-gate-hook.json": DELEGATION_HOOK_CONFIG,
     "hooks.json": REPO_HOOKS_JSON,
     "codex-hooks.json": CODEX_HOOKS_REPO,
@@ -366,7 +369,11 @@ def bless(only=None):
 
 def render_config(path):
     """Load one portable hooks config with this machine's concrete paths."""
-    raw = open(path).read()
+    if os.path.abspath(path) == REPO_HOOKS_JSON:
+        from lib.gate_declarations import render_hooks
+        raw = json.dumps({"hooks": render_hooks(GATE_DECLARATIONS)})
+    else:
+        raw = open(path).read()
     # {{REPO}} renders the command the INSTALLED adapter must be invoking, which
     # is always the main worktree — see install_repo(). Identical to REPO in the
     # canonical checkout.

@@ -80,10 +80,11 @@ class CheckArtifacts(unittest.TestCase):
         spec.loader.exec_module(adapter)
         with tempfile.TemporaryDirectory(prefix="review-floor-gates-") as td:
             root = Path(td)
-            for folder in ["ops", "hooks", "bin"]:
+            for folder in ["ops", "hooks", "bin", "lib"]:
                 (root / folder).mkdir()
             shutil.copy(ROOT / "ops/ci.sh", root / "ops/ci.sh")
             shutil.copy(ROOT / "bin/with-timeout.py", root / "bin/with-timeout.py")
+            (root / "lib/gate_declarations.py").write_text("raise SystemExit(0)\n")
             (root / "hooks/gate-integrity.py").write_text("raise SystemExit(0)\n")
             result = root / "result.json"
             for rc, expected in [(0, "passed"), (78, "partial")]:

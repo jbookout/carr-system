@@ -428,6 +428,12 @@ check("host scheduling delays cannot exhaust the replayed Stop inspection budget
 # ---------------------------------------------------------------- manifest coverage
 
 REAL_MANIFEST = GR.load_manifest()
+with tempfile.TemporaryDirectory(prefix="gate-replay-declarations-") as tmp:
+    pointer = Path(tmp) / "manifest.json"
+    pointer.write_text(json.dumps({"declarations": str(REPO / "ops/config/gate-declarations.json")}))
+    declared = GR.load_manifest(pointer)
+    check("replay loads hook scenarios from the single declaration",
+          declared.get("hooks") == REAL_MANIFEST["hooks"])
 REAL_FIXTURES = GR.load_fixtures(REAL_MANIFEST)
 REAL_WIRED = GR.config_wirings()
 check("the committed manifest passes its own coverage check",
