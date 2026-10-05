@@ -51,7 +51,9 @@ _SPEC.loader.exec_module(rp)
 FIXTURE_ENV = fixture_env()
 VERSION = "0f1e2d3c-4b5a-4968-8776-655443322110"
 CF_TOKEN = "cf-selftest-token-must-never-be-echoed-9f8e7d"
-DEPLOY_STEPS = {"wrangler-auth", "upload", "staging", "promote", "app-release"}
+DEPLOY_STEPS = {"wrangler-auth", "upload", "staging", "promote", "app-release", "rollback", "app-rollback"}
+PRIOR = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"        # the Worker version serving before the release
+PRIOR_APP = "5c4b3a29-1807-4f6e-9d5c-4b3a29180716"    # the app version serving before the release
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -68,8 +70,12 @@ class FakeRunner:
                  health_baseline_findings: list | None = None, health_findings: list | None = None,
                  health_baseline_out_extra: str = "", health_out_extra: str = "",
                  health_baseline_write_json: bool = True, health_write_json: bool = True,
-                 outputs: dict | None = None):
+                 outputs: dict | None = None, smoke: dict | None = None):
         self.fail_at, self.pending, self.live = fail_at, pending, live
+        # The release-smoke summaries, by step: {"smoke-post": ["invoices-list"]}
+        # fails that journey in that run; None writes no summary (a crashed run).
+        # Absent steps pass every journey.
+        self.smoke = smoke or {}
         self.outputs = outputs or {}
         self.wrangler_out = wrangler_out
         # Defaults: a clean, COMPLETE health read with no findings, on both
@@ -132,6 +138,8 @@ class FakeRunner:
             assert "CLOUDFLARE_API_TOKEN" not in env, f"the deploy token reached non-deploy step {name}"
         if name in ("health-baseline", "health"):
             return rp.Result(0 if name != self.fail_at else 7, self._health_output(name, argv))
+        if name.startswith("smoke-"):
+            return self._smoke_output(name, argv)
         if name == self.fail_at:
             failed_out = self.outputs.get(name, "boom")
             log.parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +158,27 @@ class FakeRunner:
         if name == "promote" and self.live is not None:
             upload = next(a for n, a in self.calls if n == "upload")
             self.live["sha"] = upload[upload.index("--release-sha") + 1]
+            self.live["version"] = VERSION
+        if name == "rollback" and self.live is not None:
+            self.live["version"] = argv[argv.index("--promote-version") + 1]
         return rp.Result(0, out)
+
+    def _smoke_output(self, name, argv):
+        """Write the summary a real ops/release-smoke.py run would, at --out."""
+        failed = self.smoke.get(name, [])
+        if failed is None:
+            return rp.Result(1, "Traceback: release-smoke crashed")
+        only = argv[argv.index("--only") + 1].split(",") if "--only" in argv else None
+        failed = [f for f in failed if only is None or f in only]
+        out = Path(argv[argv.index("--out") + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        probes = [{"id": f, "status": "fail", "ms": 3, "detail": f"{f} broke",
+                   "evidence": {"tests": [{"title": f, "status": "failed",
+                                           "artifacts": [str(out / "browser/artifacts/a1/screenshots/x.png"),
+                                                         str(out / "browser/artifacts/a1/trace.zip")]}]}}
+                  for f in failed]
+        (out / "summary.json").write_text(json.dumps({"ok": not failed, "failed": failed, "probes": probes}))
+        return rp.Result(1 if failed else 0, "release-smoke: done")
 
     def names(self) -> list[str]:
         return [n for n, _ in self.calls]
@@ -317,7 +345,8 @@ class Fixture:
         env.update({k: FIXTURE_ENV[k] for k in ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL")})
         return rp.Pipeline(cfg or self.config(), repo=self.repo, runner=runner,
                            github=lambda _r: github or FakeGitHub(),
-                           http=lambda _u: {"git_sha": {"value": live["sha"]}},
+                           http=lambda _u: {"git_sha": {"value": live["sha"]},
+                                            "worker_version": {"id": live.get("version", PRIOR)}},
                            call_verb=lambda verb, args: (verbs.append((verb, args)) or (True, {"ok": True})),
                            slice_marker=slice_marker, dry_run=dry_run, env=env, today="2026-09-30", out=lambda _s: None)
 
@@ -589,6 +618,224 @@ class StopOnFailure(Base):
         self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 1)
         self.assertEqual(self.fx.records()[-1]["step"], "verify-live")
 
+
+
+class PostReleaseProof(Base):
+    """After every production release the live system is proven by
+    ops/release-smoke.py: a journey that passed before the release and fails
+    after it (twice: one retry absorbs a flake) marks the release FAILED, rolls
+    the lane back and files one loop naming the journey and its evidence."""
+
+    def worker(self, runner, verbs=None, live=None):
+        live = live if live is not None else {"sha": self.fx.base}
+        runner.live = live
+        verbs = verbs if verbs is not None else []
+        rc = self.fx.pipeline(runner, live=live, verbs=verbs).tick(["worker"])
+        return rc, verbs, live
+
+    def argv(self, runner, name):
+        return next(a for n, a in runner.calls if n == name)
+
+    def test_pass_ships_with_baseline_before_any_apply_and_proof_after_promotion(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        rc, verbs, _ = self.worker(runner)
+        self.assertEqual(rc, 0)
+        names = runner.names()
+        self.assertLess(names.index("smoke-baseline"), names.index("staging-prepare"))
+        self.assertLess(names.index("promote"), names.index("smoke-post"))
+        self.assertNotIn("smoke-retry", names)
+        self.assertNotIn("rollback", names)
+        post = self.argv(runner, "smoke-post")
+        self.assertEqual(post[post.index("--phase") + 1], "post")
+        self.assertEqual(post[post.index("--sha") + 1], sha)
+        self.assertTrue(post[post.index("--worker-dir") + 1].endswith("mcp-server"))
+        evidence = Path(post[post.index("--out") + 1])
+        self.assertEqual(evidence, self.fx.repo / "out" / "release-smoke" / sha / "post")
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["status"], "shipped")
+        self.assertEqual(rec["post_release"]["regressions"], [])
+        self.assertEqual(rec["post_release"]["evidence_dir"], str(evidence.parent))
+        self.assertNotIn("add-loop", [v for v, _ in verbs])
+
+    def test_fail_marks_failed_rolls_the_worker_back_and_files_one_loop(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner(smoke={"smoke-post": ["invoices-list"], "smoke-retry": ["invoices-list"]})
+        rc, verbs, live = self.worker(runner)
+        self.assertEqual(rc, 1)
+        rollback = self.argv(runner, "rollback")
+        self.assertEqual(rollback[:3], ["bin/deploy-worker.sh", "--promote-version", PRIOR])
+        self.assertEqual(rollback[rollback.index("--recovery-strategy") + 1], "rollback")
+        self.assertEqual(rollback[rollback.index("--rollback-plan-ref") + 1], "runbooks/rollback-worker.md")
+        self.assertEqual(live["version"], PRIOR)
+        self.assertLess(runner.names().index("smoke-retry"), runner.names().index("rollback"))
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["step"]), ("failed", "post-release-smoke"))
+        self.assertEqual(rec["post_release"]["regressions"], ["invoices-list"])
+        self.assertEqual(rec["post_release"]["rollback"]["ok"], True)
+        self.assertEqual(rec["post_release"]["rollback"]["served_version"], PRIOR)
+        state = self.fx.state()["worker"]
+        self.assertEqual(state["failed_sha"], sha)
+        self.assertNotEqual(state.get("last_released_sha"), sha)
+        loops = [a for v, a in verbs if v == "add-loop"]
+        self.assertEqual(len(loops), 1)
+        body = loops[0]["body"]
+        self.assertIn("invoices-list", body)
+        self.assertIn("invoices-list broke", body)
+        self.assertIn("screenshots/x.png", body)
+        self.assertIn("trace.zip", body)
+        self.assertIn("rolled back", body)
+        self.assertEqual(loops[0]["kind"], "open_loop")
+        self.assertTrue(loops[0]["idempotency_key"])
+        self.assertIn("add-room-turn", [v for v, _ in verbs])   # the fix-forward diagnosis still goes
+
+    def test_a_journey_that_passes_on_its_one_retry_is_flaky_and_ships(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner(smoke={"smoke-post": ["deal-board"]})
+        rc, verbs, _ = self.worker(runner)
+        self.assertEqual(rc, 0)
+        retry = self.argv(runner, "smoke-retry")
+        self.assertEqual(retry[retry.index("--only") + 1], "deal-board")
+        self.assertEqual(runner.names().count("smoke-retry"), 1)
+        self.assertNotIn("rollback", runner.names())
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["post_release"]["flaky"]), ("shipped", ["deal-board"]))
+        self.assertNotIn("add-loop", [v for v, _ in verbs])
+
+    def test_a_failure_already_present_before_the_release_is_not_this_releases(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner(smoke={"smoke-baseline": ["invoices-list"], "smoke-post": ["invoices-list"],
+                                   "smoke-retry": ["invoices-list"]})
+        rc, _, _ = self.worker(runner)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("rollback", runner.names())
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["post_release"]["preexisting"], ["invoices-list"])
+        self.assertEqual(rec["post_release"]["regressions"], [])
+
+    def test_identity_and_released_verbs_are_never_excused_by_the_baseline(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner(smoke={"smoke-baseline": ["verb-registry"], "smoke-post": ["verb-registry"],
+                                   "smoke-retry": ["verb-registry"]})
+        rc, _, _ = self.worker(runner)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.fx.records()[-1]["post_release"]["regressions"], ["verb-registry"])
+
+    def test_a_release_that_migrated_production_is_never_rolled_back(self):
+        self.fx.commit({"mcp-server/src/a.js": "1", "migrations/0999_x.sql": "select 1;"})
+        runner = FakeRunner(pending=1, smoke={"smoke-post": ["deal-board"], "smoke-retry": ["deal-board"]})
+        rc, verbs, _ = self.worker(runner)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("rollback", runner.names())
+        rb = self.fx.records()[-1]["post_release"]["rollback"]
+        self.assertFalse(rb["attempted"])
+        self.assertIn("forward fix", rb["reason"])
+        body = next(a for v, a in verbs if v == "add-loop")["body"]
+        self.assertIn("NOT rolled back", body)
+
+    def test_a_refused_rollback_is_recorded_and_still_fails_the_release(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner(fail_at="rollback", smoke={"smoke-post": ["deal-board"], "smoke-retry": ["deal-board"]})
+        rc, verbs, _ = self.worker(runner)
+        self.assertEqual(rc, 1)
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["step"], "post-release-smoke")
+        self.assertEqual((rec["post_release"]["rollback"]["attempted"], rec["post_release"]["rollback"]["ok"]),
+                         (True, False))
+        self.assertIn("rollback FAILED", next(a for v, a in verbs if v == "add-loop")["body"])
+
+    def test_a_rollback_production_never_reads_back_is_a_failed_rollback(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner(smoke={"smoke-post": ["deal-board"], "smoke-retry": ["deal-board"]})
+        live = {"sha": self.fx.base}
+        runner.live = live
+        orig = runner.run
+
+        def run(argv, **kw):
+            res = orig(argv, **kw)
+            if "--promote-version" in argv and argv[argv.index("--promote-version") + 1] == PRIOR:
+                live["version"] = VERSION      # exit 0, but production still serves the release
+            return res
+        runner.run = run  # type: ignore[method-assign]
+        verbs: list = []
+        pipe = self.fx.pipeline(runner, live=live, verbs=verbs)
+        pipe.sleep = lambda _s: None
+        self.assertEqual(pipe.tick(["worker"]), 1)
+        rb = self.fx.records()[-1]["post_release"]["rollback"]
+        self.assertEqual((rb["attempted"], rb["ok"], rb["served_version"]), (True, False, VERSION))
+        self.assertIn("rollback FAILED", next(a for v, a in verbs if v == "add-loop")["body"])
+
+    def test_an_unreadable_smoke_fails_the_release_but_never_rolls_back(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner(smoke={"smoke-post": None, "smoke-retry": None})
+        rc, verbs, _ = self.worker(runner)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("rollback", runner.names())
+        rec = self.fx.records()[-1]
+        self.assertEqual(rec["step"], "post-release-smoke")
+        self.assertFalse(rec["post_release"]["rollback"]["attempted"])
+        self.assertEqual(len([v for v, _ in verbs if v == "add-loop"]), 1)
+
+    def test_the_stage_has_its_own_off_switch(self):
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        cfg = self.fx.config()
+        cfg["worker"]["post_release_smoke"] = False
+        runner = FakeRunner(smoke={"smoke-post": ["deal-board"], "smoke-retry": ["deal-board"]})
+        live = {"sha": self.fx.base}
+        runner.live = live
+        self.assertEqual(self.fx.pipeline(runner, cfg=cfg, live=live).tick(["worker"]), 0)
+        self.assertFalse([n for n in runner.names() if n.startswith("smoke-")])
+
+    def app_cfg(self):
+        cfg = self.fx.config()
+        cfg["app"]["enabled"] = True
+        return cfg
+
+    def app(self, runner, sha, verbs):
+        pipe = self.fx.pipeline(runner, cfg=self.app_cfg(), verbs=verbs)
+        live = {"source_commit": self.fx.base, "environment": "production", "provider_version_id": PRIOR_APP}
+        pipe.http = lambda _u: dict(live)
+        orig = runner.run
+
+        def run(argv, **kw):
+            res = orig(argv, **kw)
+            if argv[:2] == ["node", "scripts/release-production.mjs"]:
+                live.update(source_commit=sha, provider_version_id=VERSION)
+            if argv[:2] == ["node", "scripts/rollback-production.mjs"]:
+                live.update(source_commit=self.fx.base, provider_version_id=argv[2])
+            return res
+        runner.run = run  # type: ignore[method-assign]
+        return pipe.tick(["app"]), live
+
+    def test_app_pass_runs_the_browser_journeys_from_the_release_checkout(self):
+        sha = self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner()
+        rc, _ = self.app(runner, sha, [])
+        self.assertEqual(rc, 0)
+        names = runner.names()
+        self.assertLess(names.index("smoke-baseline"), names.index("app-release"))
+        self.assertLess(names.index("app-release"), names.index("smoke-post"))
+        post = self.argv(runner, "smoke-post")
+        self.assertEqual(post[post.index("--lane") + 1], "app")
+        self.assertEqual(post[post.index("--app-dir") + 1], runner.cwds["app-release"])
+        self.assertNotIn("--worker-dir", post)
+        self.assertEqual(self.fx.records()[-1]["status"], "shipped")
+
+    def test_app_fail_rolls_back_to_the_previous_app_version(self):
+        sha = self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner(smoke={"smoke-post": ["browser-journeys"], "smoke-retry": ["browser-journeys"]})
+        verbs: list = []
+        rc, live = self.app(runner, sha, verbs)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.argv(runner, "app-rollback"), ["node", "scripts/rollback-production.mjs", PRIOR_APP])
+        self.assertEqual(runner.cwds["app-rollback"], runner.cwds["app-release"])
+        self.assertIn("CLOUDFLARE_API_TOKEN", runner.envs["app-rollback"])
+        self.assertEqual(live["provider_version_id"], PRIOR_APP)
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["step"]), ("failed", "post-release-smoke"))
+        self.assertTrue(rec["post_release"]["rollback"]["ok"])
+        self.assertEqual(len([v for v, _ in verbs if v == "add-loop"]), 1)
+        self.assertNotEqual(self.fx.state()["app"].get("last_released_sha"), sha)
 
 class StagingGuard(Base):
     def test_failed_staging_never_promotes(self):
@@ -2213,7 +2460,8 @@ class AppLane(Base):
             return res
         runner.run = run  # type: ignore[method-assign]
         self.assertEqual(pipe.tick(["app"]), 0)
-        self.assertEqual(runner.names()[:5], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-build", "app-release"])
+        self.assertEqual(runner.names()[:7], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-build",
+                                              "smoke-baseline", "app-release", "smoke-post"])
         build_index = runner.names().index("app-build")
         self.assertEqual(runner.calls[build_index][1], ["npm", "run", "build"])
         self.assertEqual(runner.envs["app-build"]["DOCTORCRE_SOURCE_COMMIT"], sha)

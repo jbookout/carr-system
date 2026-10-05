@@ -42,6 +42,7 @@ TWO LANES, one tick:
             6 bin/deploy-worker.sh --env staging --recovery-step forward_fix
             7 bin/deploy-worker.sh --promote-version <id from step 5>
             8 live /release reads back S, ./run.sh health
+            8b post-release proof (ops/release-smoke.py): see POST-RELEASE PROOF
             9 a db/schema.sql follow-up PR when step 4 applied anything; once
               it exists, every older open release/schema-snapshot-* PR is
               closed as superseded (close only, best-effort, never merged)
@@ -58,7 +59,28 @@ TWO LANES, one tick:
           credential-free `node scripts/prepare-release.mjs`, then
           `node scripts/release-production.mjs` (the only step holding the
           deploy credential) from a clean detached origin/main checkout, then
-          /app-release reads the SHA back.
+          /app-release reads the SHA back, then the post-release proof.
+
+POST-RELEASE PROOF. A release is not done when production serves its SHA; it is
+done when the live system works. ops/release-smoke.py runs read-only journeys
+against production (sign-in gate, deal board, Leads, invoices, progress board,
+Dr. CRE chat's read path, the verb registry against the released SHA, and in
+the app lane the app's own browser journeys). It runs once BEFORE the lane's
+first production change (the baseline) and once AFTER the live readback. A
+journey that fails after the release is retried once; one that passes on the
+retry is recorded as flaky and the release ships. A journey that still fails
+and passed in the baseline is the release's regression (release-identity and
+verb-registry are never excused by the baseline). A regression marks the
+release FAILED at step `post-release-smoke`, rolls the lane back to the version
+that served before it (Worker: bin/deploy-worker.sh --promote-version <prior>
+--recovery-strategy rollback, per runbooks/rollback-worker.md; app: node
+scripts/rollback-production.mjs <prior>), reads the rollback back from
+production, and files one CARR loop naming the journey and its evidence. A
+release that applied a database or Durable Object migration is never rolled
+back (the runbook's forward-fix-only case); an unreadable smoke fails the
+release but never rolls back, because it proves nothing about production.
+Evidence: out/release-smoke/<sha>/{baseline,post,retry}/. Per-lane
+`post_release_smoke: false` turns the stage off.
 
 BATCHING. Each lane releases the LATEST main SHA, never each merge separately.
 The last released SHA per lane lives in out/release-pipeline/state.json; when it
@@ -274,6 +296,11 @@ def read_env_value(path: Path, name: str) -> str | None:
 # Head-branch prefix of the PRs schema_followup opens; the newest one carries
 # the cumulative snapshot and supersedes every older open one.
 SCHEMA_SNAPSHOT_PREFIX = "release/schema-snapshot-"
+
+# Journeys a baseline failure never excuses: after a release the lane must serve
+# its own SHA and every verb that SHA carries, whatever production did before.
+SMOKE_ALWAYS_ATTRIBUTED = frozenset({"release-identity", "verb-registry"})
+SMOKE_OUT = Path("out") / "release-smoke"
 
 
 class Runner:
@@ -759,6 +786,7 @@ class Pipeline:
         self.do_migration: dict | None = None   # a Durable Object migration the upload step applied
         self.mutated = False   # set when the first worktree is created; nothing before it writes
         self.schema_superseded_closed: list[int] = []   # older snapshot PRs closed this run
+        self.post_release: dict | None = None   # the post-release proof of a failed release
 
     # -- plumbing ---------------------------------------------------------
     def _call_verb(self, verb: str, args: dict) -> tuple[bool, Any]:
@@ -1598,6 +1626,7 @@ class Pipeline:
         self.mutated = False
         self.db_ahead_of_worker = False
         self.do_migration = None
+        self.post_release = None
         lane_cfg = self.cfg[lane]
         why = kill_switch(self.cfg, lane)
         if why:
@@ -1822,7 +1851,8 @@ class Pipeline:
                            "db_ahead_of_worker": self.db_ahead_of_worker,
                            "do_migration": self.do_migration,
                            "run_dir": str(self.run_dir), "executed": list(self.executed),
-                           "dispatched": ok, "run_id": self.run_id, **extra})
+                           "dispatched": ok, "run_id": self.run_id,
+                           **({"post_release": self.post_release} if self.post_release else {}), **extra})
         if not capability and not ok:
             self.out(f"release-pipeline[{lane}]: diagnosis dispatch FAILED: {res}")
         return 1
@@ -1900,6 +1930,14 @@ class Pipeline:
             # yet"; treat it like every other real failure.
             self.mutated = True
 
+        # Post-release proof, part 1: what production serves and how its
+        # journeys fare BEFORE this release changes anything.
+        smoke_on = lane_cfg.get("post_release_smoke", True)
+        prior_version = smoke_baseline = None
+        if smoke_on:
+            prior_version = self.live_value(lane_cfg, lambda live: (live.get("worker_version") or {}).get("id"))
+            smoke_baseline = self.smoke_run("worker", sha, "baseline", worker_dir=mcp)
+
         # 2-3. staging replacement and app writer
         op = str(uuid.uuid4())
         prep = self.step("staging-prepare", [py, "tools/staging-project-replacement.py", "prepare", "--apply",
@@ -1976,6 +2014,11 @@ class Pipeline:
             if (live.get("git_sha") or {}).get("value") != sha:
                 raise StepFailed("verify-live", 1, "", "production /release does not serve the released SHA")
         health_excused = self.health_gate(wt, health_baseline)
+        post_release = self.post_release_proof(
+            "worker", sha, smoke_baseline, worker_dir=mcp,
+            rollback=lambda: self.rollback_worker(lane_cfg, wt, prior_version,
+                                                  migrated=bool(pending) or bool(self.do_migration))
+        ) if smoke_on else None
 
         # 9. the schema snapshot goes back to main through its own PR
         schema_pr = None
@@ -1996,7 +2039,7 @@ class Pipeline:
                 "verifier_evidence": ev["verifier_evidence"], "test_evidence": ev["test_evidence"],
                 "health_time_rolling_not_attributed": health_excused,
                 "schema_pr": schema_pr, "schema_prs_superseded_closed": self.schema_superseded_closed,
-                "run_dir": str(self.run_dir)}
+                "post_release": post_release, "run_dir": str(self.run_dir)}
 
     def _release_exists(self, wt: Path, py: str, key: str) -> bool:
         res = self.runner.run([py, "tools/ops-record.py", "release", "show", "--key", key], cwd=wt,
@@ -2145,19 +2188,203 @@ class Pipeline:
         # publisher directly so npm pre/post-release hooks cannot inherit it.
         self.step("app-build", ["npm", "run", "build"], wt, timeout=3600,
                   env={**self.env, "DOCTORCRE_SOURCE_COMMIT": sha})
+        smoke_on = lane_cfg.get("post_release_smoke", True)
+        prior_app = smoke_baseline = None
+        if smoke_on:
+            prior_app = self.live_value(lane_cfg, lambda live: live.get("provider_version_id"))
+            smoke_baseline = self.smoke_run("app", sha, "baseline", app_dir=wt)
         self.step("app-release", ["node", "scripts/release-production.mjs"], wt, timeout=900,
                   env=self.deploy_env())
         if self.dry_run:
             self.out(f"  [dry-run] GET {lane_cfg['live_release_url']} and require source_commit == {sha}")
         else:
             self.verify_app_live(lane_cfg, sha)
+        post_release = self.post_release_proof(
+            "app", sha, smoke_baseline, app_dir=wt,
+            rollback=lambda: self.rollback_app(lane_cfg, wt, prior_app)) if smoke_on else None
+        if not self.dry_run:
             self.remove_worktrees()
         head = rev.get("head") or {}
         return {"run_dir": str(self.run_dir), "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
                 "reviews": rev.get("reviews", []), "fix_forwards": rev.get("fix_forwards", []),
                 "review_rule": head.get("rule"),
                 "reviewed_sha": head.get("reviewed_sha"), "pr_head_sha": head.get("head_sha"),
-                "review_evidence": rev["verifier_evidence"]}
+                "review_evidence": rev["verifier_evidence"], "post_release": post_release}
+
+    # -- post-release proof ------------------------------------------------
+    def live_value(self, lane_cfg: dict, pick: Callable[[dict], Any]) -> Any:
+        """One field of the lane's live identity endpoint, or None: a value a
+        rollback may need later, never a reason to stop the release now."""
+        if self.dry_run:
+            return None
+        try:
+            live = self.http(lane_cfg["live_release_url"])
+            return pick(live) if isinstance(live, dict) else None
+        except Exception:  # noqa: BLE001 — an unknown prior only means no rollback target
+            return None
+
+    def smoke_run(self, lane: str, sha: str, name: str, *, worker_dir: Path | None = None,
+                  app_dir: Path | None = None, only: list[str] | None = None) -> dict | None:
+        """One ops/release-smoke.py run, logged like a step, never raising: the
+        caller reads its summary.json. None when no summary was written."""
+        out = self.repo / SMOKE_OUT / sha / name
+        venv = self.repo / ".venv" / "bin" / "python"
+        argv = [str(venv) if venv.exists() else sys.executable, "ops/release-smoke.py",
+                "--lane", lane, "--sha", sha, "--phase", "baseline" if name == "baseline" else "post",
+                "--out", str(out), "--credential-dir", str(expand(self.cfg.get("credential_dir", "~/.config/carr")))]
+        if worker_dir is not None:
+            argv += ["--worker-dir", str(worker_dir)]
+        if app_dir is not None:
+            argv += ["--app-dir", str(app_dir)]
+        if only:
+            argv += ["--only", ",".join(only)]
+        step = f"smoke-{name}"
+        if self.dry_run:
+            self.out(f"  [dry-run] (cd {self.repo}) {' '.join(argv)}")
+            return {"failed": [], "probes": []}
+        n = len(self.executed) + 1
+        log = self.run_dir / f"{n:02d}-{step}.log"
+        self.out(f"  -> {step}: {' '.join(argv)}")
+        self.executed.append(step)
+        self.runner.run(argv, cwd=self.repo, log=log, env=self.env, timeout=1800)
+        try:
+            summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(summary, dict) or not isinstance(summary.get("failed"), list):
+            return None
+        summary["path"], summary["log"] = str(out / "summary.json"), str(log)
+        return summary
+
+    def post_release_proof(self, lane: str, sha: str, baseline: dict | None, *,
+                           rollback: Callable[[], dict], worker_dir: Path | None = None,
+                           app_dir: Path | None = None) -> dict:
+        """The live system works after this release, or the release FAILED,
+        the lane is rolled back and one loop names the broken journey."""
+        if self.dry_run:
+            self.smoke_run(lane, sha, "post", worker_dir=worker_dir, app_dir=app_dir)
+            self.out("  [dry-run] failed journeys retry once; a regression rolls the lane back and files a loop")
+            return {}
+        post = self.smoke_run(lane, sha, "post", worker_dir=worker_dir, app_dir=app_dir)
+        failed = None if post is None else set(post["failed"])
+        final = post
+        if failed is None or failed:
+            final = self.smoke_run(lane, sha, "retry", worker_dir=worker_dir, app_dir=app_dir,
+                                   only=sorted(failed) if failed else None)
+        if final is None:
+            still = None
+        elif failed is None:
+            still = set(final["failed"])
+        else:
+            still = set(final["failed"]) & failed
+        before = set(baseline["failed"]) if baseline else set()
+        preexisting = sorted((before - SMOKE_ALWAYS_ATTRIBUTED) & (still or set()))
+        outcome: dict[str, Any] = {
+            "evidence_dir": str(self.repo / SMOKE_OUT / sha),
+            "baseline_failed": sorted(before) if baseline else None,
+            "post_failed": sorted(failed) if failed is not None else None,
+            "flaky": sorted(failed - still) if failed and still is not None else [],
+            "preexisting": preexisting,
+            "regressions": sorted((still or set()) - set(preexisting)),
+        }
+        if still is None:
+            outcome["rollback"] = {"attempted": False, "reason": "the smoke run wrote no summary twice; "
+                                   "production is not proven broken, so it is not rolled back"}
+            detail = "post-release smoke unreadable (no summary.json after one retry)"
+        elif outcome["regressions"]:
+            outcome["rollback"] = rollback()
+            detail = f"post-release journeys failed: {', '.join(outcome['regressions'])}"
+        else:
+            if outcome["flaky"] or preexisting:
+                self.out(f"  -> post-release proof: flaky {outcome['flaky']}, pre-existing {preexisting}")
+            return outcome
+        outcome["loop_filed"] = self.file_smoke_loop(lane, sha, final, outcome)
+        self.post_release = outcome
+        raise StepFailed("post-release-smoke", 1, (final or {}).get("log") or str(self.run_dir), detail)
+
+    def _await_live(self, lane_cfg: dict, pick: Callable[[dict], Any], expected: str,
+                    attempts: int = 12) -> Any:
+        served = None
+        for attempt in range(attempts):
+            served = self.live_value(lane_cfg, pick)
+            if served == expected:
+                break
+            if attempt < attempts - 1:
+                self.sleep(5)
+        return served
+
+    def rollback_worker(self, lane_cfg: dict, wt: Path, prior: str | None, *, migrated: bool) -> dict:
+        """runbooks/rollback-worker.md steps 2 and 3: promote the version that
+        served before this release through the sanctioned wrapper, then read it
+        back from the Worker. Never after a migration (forward fix only)."""
+        if migrated:
+            return {"attempted": False, "reason": "this release applied a database or Durable Object "
+                    "migration; runbooks/rollback-worker.md allows forward fix only"}
+        if not prior:
+            return {"attempted": False, "reason": "the Worker version serving before the release was not read"}
+        try:
+            res = self.step("rollback", ["bin/deploy-worker.sh", "--promote-version", prior,
+                                         "--performance-budget-ref", lane_cfg["performance_budget_ref"],
+                                         "--performance-budget-ms", str(lane_cfg["performance_budget_ms"]),
+                                         "--recovery-strategy", "rollback",
+                                         "--rollback-plan-ref", lane_cfg["rollback_plan_ref"]], wt,
+                            env=self.deploy_env())
+        except StepFailed as failed:
+            return {"attempted": True, "ok": False, "to_version": prior, "rc": failed.rc, "log": failed.log}
+        served = self._await_live(lane_cfg, lambda live: (live.get("worker_version") or {}).get("id"), prior)
+        return {"attempted": True, "ok": served == prior, "to_version": prior, "served_version": served,
+                "log": res.log}
+
+    def rollback_app(self, lane_cfg: dict, wt: Path, prior: str | None) -> dict:
+        """The app's own rollback script, then /app-release must name the prior version."""
+        if not prior:
+            return {"attempted": False, "reason": "the app version serving before the release was not read"}
+        try:
+            res = self.step("app-rollback", ["node", "scripts/rollback-production.mjs", prior], wt,
+                            timeout=900, env=self.deploy_env())
+        except StepFailed as failed:
+            return {"attempted": True, "ok": False, "to_version": prior, "rc": failed.rc, "log": failed.log}
+        served = self._await_live(lane_cfg, lambda live: live.get("provider_version_id"), prior)
+        return {"attempted": True, "ok": served == prior, "to_version": prior, "served_version": served,
+                "log": res.log}
+
+    def file_smoke_loop(self, lane: str, sha: str, summary: dict | None, outcome: dict) -> bool:
+        """One open loop per failed release: each journey, what it said, its
+        screenshot/trace paths, and what happened to production."""
+        lines = []
+        for probe in (summary or {}).get("probes", []):
+            if probe.get("id") not in outcome["regressions"]:
+                continue
+            artifacts = [a for t in (probe.get("evidence") or {}).get("tests", []) for a in t.get("artifacts", [])]
+            lines.append(f"- {probe['id']}: {probe.get('detail', '')}"
+                         + (f" (evidence: {', '.join(artifacts[:6])})" if artifacts else ""))
+        if summary is None:
+            lines.append("- the smoke run itself wrote no summary, twice")
+        rb = outcome["rollback"]
+        if not rb.get("attempted"):
+            production = f"Production was NOT rolled back: {rb.get('reason')}."
+        elif rb.get("ok"):
+            production = f"Production was rolled back to {rb['to_version']} and reads it back."
+        else:
+            production = (f"The rollback FAILED (to {rb.get('to_version')}, served {rb.get('served_version')}, "
+                          f"log {rb.get('log')}): production may still serve {sha[:12]}.")
+        body = (f"Post-release proof failed for the {lane} release of {sha} "
+                "(ops/release-pipeline.py step post-release-smoke). The release is marked FAILED and "
+                "is never retried; a fix-forward merge releases next.\n"
+                + "\n".join(lines) + f"\n{production}\nEvidence: {outcome['evidence_dir']} "
+                "(baseline/, post/, retry/: summary.json, probes.jsonl, browser screenshots and traces).")
+        args = {"kind": "open_loop", "owner": "Claude", "domain": "system", "marker": "none",
+                "blocker": "other_lane",
+                "blocker_detail": f"The release-fix lane fixes {lane} release {sha[:12]} forward through a PR",
+                "body": body, "unblocks": f"the next {lane} release to production",
+                "idempotency_key": str(uuid.uuid5(ROOM_NAMESPACE, f"post-release-smoke:{lane}:{sha}"))}
+        try:
+            ok, res = self.call_verb("add-loop", args)
+        except Exception as exc:  # noqa: BLE001 — a failed filing is reported, never raised
+            ok, res = False, type(exc).__name__
+        if not ok:
+            self.out(f"release-pipeline[{lane}]: could not file the post-release loop: {res}")
+        return bool(ok)
 
 
 # The line tools/health-check.py's _canonical_health() prints last, on every
