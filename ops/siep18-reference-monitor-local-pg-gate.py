@@ -21,18 +21,18 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0832 seals audited automation v107 over the delivered lead automation v106.
+# 0832 installs audited automation v108 and seals the delivered Doc activity v107 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v107"
-LIVE_REGISTRY_ORDINAL = 107
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v106"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v108"
+LIVE_REGISTRY_ORDINAL = 108
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v107"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:4a39603bac5a6cf4650f5d1b9d4cce8f9922dc80d7ac4aca4138ec00440ac4dd"
+    "sha256:f5eb7a7bbbdad295324a4bd4210c74075ab57fefaf8a35e723ed235df9ff8911"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2654, 1108)
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2659, 1109)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0812_lead_automation_scac_successor.sql"
+    "migrations/0825_doc_activity_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
     "migrations/0832_automation_undo_scac_successor.sql"

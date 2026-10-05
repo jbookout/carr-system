@@ -1312,16 +1312,27 @@ if [ "$LEAD_AUTOMATION_REGISTRY_APPLIED" = t ] && [ "$OBSERVATORY_ROOM_READ_REGI
   exit 1
 fi
 
+DOC_ACTIVITY_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0825_doc_activity_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DOC_ACTIVITY_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read Doc activity v107 registry ledger state" >&2; exit 1 ;;
+esac
+if [ "$DOC_ACTIVITY_REGISTRY_APPLIED" = t ] && [ "$LEAD_AUTOMATION_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: Doc activity v107 is applied without v106 predecessor" >&2
+  exit 1
+fi
 
 AUTOMATION_UNDO_REGISTRY_APPLIED="$("$PSQL" -Atqc \
   "select exists (select 1 from schema_migrations where filename='0832_automation_undo_scac_successor.sql')" \
   2>/dev/null)"
 case "$AUTOMATION_UNDO_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read audited automation v107 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read audited automation v108 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ] && [ "$LEAD_AUTOMATION_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: audited automation v107 is applied without v106 predecessor" >&2
+if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ] && [ "$DOC_ACTIVITY_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: audited automation v108 is applied without v107 predecessor" >&2
   exit 1
 fi
 
@@ -3190,8 +3201,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v105'"
                                        SCAC_FULL_SET_SEAL_COUNT=105
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v106_current()"
-                                     fi
-                                     if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$DOC_ACTIVITY_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=107
                                        SCAC_VERSION_COUNT=107
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v107'")"
@@ -3201,6 +3211,18 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v106'"
                                        SCAC_FULL_SET_SEAL_COUNT=106
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v107_current()"
+                                     if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ]; then
+                                       SCAC_CURRENT_NUMBER=108
+                                       SCAC_VERSION_COUNT=108
+                                       SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v108'")"
+                                       SCAC_CURRENT_SOURCE_COUNT="$("$PSQL" -Atqc "select source_entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v108'")"
+                                       SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v108.generated.js"
+                                       SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,'scac-mutation-registry.v108'"
+                                       SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v107'"
+                                       SCAC_FULL_SET_SEAL_COUNT=107
+                                       SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v108_current()"
+                                     fi
+                                     fi
                                      fi
                                      fi
                                      fi

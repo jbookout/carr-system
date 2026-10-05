@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -50,6 +51,7 @@ test("confirm-merge executes against the current activity schema", async t => {
   const run = (command, args) => execFileSync(path.join(bin, command), args, { encoding: "utf8", stdio: "pipe" });
   let db;
   let startAttempted = false;
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try {
     run("initdb", ["-D", data, "-U", "carr_fixture", "--auth=trust", "--encoding=UTF8", "--no-locale"]);
     startAttempted = true;
@@ -232,10 +234,14 @@ test("confirm-merge executes against the current activity schema", async t => {
       assert.equal(Number((await db.query("select count(*) from party where merged_into is not null")).rows[0].count), 0);
     }));
   } finally {
-    if (db) await db.end();
-    if (startAttempted) run("pg_ctl", ["-D", data, "-m", "fast", "-w", "stop"]);
-    const staged = path.join(out, "_to_delete");
-    mkdirSync(staged, { recursive: true });
-    renameSync(cluster, path.join(staged, path.basename(cluster)));
+    try {
+      if (db) await db.end();
+      if (startAttempted) run("pg_ctl", ["-D", data, "-m", "fast", "-w", "stop"]);
+      const staged = path.join(out, "_to_delete");
+      mkdirSync(staged, { recursive: true });
+      renameSync(cluster, path.join(staged, path.basename(cluster)));
+    } finally {
+      await releaseBudget();
+    }
   }
 });

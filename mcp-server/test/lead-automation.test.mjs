@@ -168,11 +168,11 @@ test("malformed contact metadata cannot break the whole job",()=>{
 
 // A merge may advance the registry, but may never replace a sealed predecessor.
 test("lead successor preserves human-only party merges and all v105 MCP contracts", async () => {
-  const { frozenInventory, boundInventoryRows } = await import("../../ops/scac-mutation-inventory.mjs");
+  const { frozenInventory, boundInventoryRows, CURRENT_REGISTRY_VERSION } = await import("../../ops/scac-mutation-inventory.mjs");
   const { SCAC_MUTATION_REGISTRY_VERSION, registeredOperation } = await import("../src/mutation-registry.js");
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, "scac-mutation-registry.v107");
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, CURRENT_REGISTRY_VERSION);
   const before = frozenInventory("scac-mutation-registry.v105");
-  const after = frozenInventory("scac-mutation-registry.v106");
+  const after = frozenInventory(CURRENT_REGISTRY_VERSION);
   const byKey = new Map(boundInventoryRows(after).map(row => [row.ingress_key, row]));
   for (const row of boundInventoryRows(before).filter(row => row.ingress_key.startsWith("mcp-tool:"))) assert.deepEqual(byKey.get(row.ingress_key), row);
   assert.equal(registeredOperation("confirm-merge").human_only, true);
