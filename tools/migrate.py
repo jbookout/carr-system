@@ -499,6 +499,14 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0839_relationship_deal_links.sql",
         "0840_relationship_scac_successor.sql",
     ),
+    (
+        "0841_invoice_tracker.sql",
+        "0842_invoice_tracker_scac_successor.sql",
+    ),
+    (
+        "0843_automation_reason_undo_archive_invoice.sql",
+        "0844_automation_undo_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -641,6 +649,14 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0839_relationship_deal_links.sql",
         "0840_relationship_scac_successor.sql",
+    ),
+    (
+        "0841_invoice_tracker.sql",
+        "0842_invoice_tracker_scac_successor.sql",
+    ),
+    (
+        "0843_automation_reason_undo_archive_invoice.sql",
+        "0844_automation_undo_scac_successor.sql",
     ),
 )
 
