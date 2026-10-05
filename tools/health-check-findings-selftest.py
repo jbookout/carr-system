@@ -118,7 +118,7 @@ FINDING_CALL_NAMES = {"_canonical_finding", "_red"}
 STRUCTURAL_KEYS = {
     "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
-    "credential_health", "unrecorded_failure", "tailscale",
+    "credential_health", "unrecorded_failure", "tailscale", "production_uptime",
 }
 ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity"}
 
@@ -578,6 +578,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         mod = ast.Module(body=[_find_function("_canonical_health"),
                                _find_function("_jev_paid_cap_row")], type_ignores=[])
         ns.update(os=os, re=re, sys=sys, time=time, REPO_ROOT=str(HEALTH_CHECK_PATH.parent.parent),
+                  _uptime=Mock(row=Mock(return_value=("OK production uptime fixture", False))),
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
