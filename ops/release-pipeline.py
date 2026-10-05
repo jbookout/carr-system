@@ -2143,7 +2143,8 @@ class Pipeline:
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
         # Keep package hooks/tests outside the deploy environment. Invoke the
         # publisher directly so npm pre/post-release hooks cannot inherit it.
-        self.step("app-build", ["node", "scripts/prepare-release.mjs"], wt, timeout=3600)
+        self.step("app-build", ["npm", "run", "build"], wt, timeout=3600,
+                  env={**self.env, "DOCTORCRE_SOURCE_COMMIT": sha})
         self.step("app-release", ["node", "scripts/release-production.mjs"], wt, timeout=900,
                   env=self.deploy_env())
         if self.dry_run:
