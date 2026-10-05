@@ -70,6 +70,31 @@ def b(s,q):
         errors = checker.python_errors(source)
         self.assertTrue(any('6: model' in error for error in errors), errors)
 
+    def test_request_receipt_interface_preserves_provenance_and_fanout_checks(self):
+        checker = load('check-jev-conformance')
+        valid = """from jev_semantic import evaluate as run, JudgmentRequest as Request
+def boundary(state, questions):
+ request = Request(state, questions, caller='jev_session_watch', version='v1')
+ return run(request)
+"""
+        self.assertEqual(checker.python_errors(valid), [])
+        invalid = """import jev_semantic as semantic
+def boundary(state, questions):
+ semantic.evaluate(semantic.JudgmentRequest(state, questions))
+ semantic.evaluate(semantic.JudgmentRequest(state, questions))
+"""
+        errors = checker.python_errors(invalid)
+        for kind in ('caller', 'version', 'fanout'):
+            self.assertTrue(any(kind in error for error in errors), errors)
+        keyword_state = """import jev_semantic as semantic
+def boundary(state, questions):
+ one = semantic.JudgmentRequest(state=state, questions=questions, caller='x', version='v1')
+ two = semantic.JudgmentRequest(state=state, questions=questions, caller='x', version='v1')
+ semantic.evaluate(one)
+ semantic.evaluate(two)
+"""
+        self.assertTrue(any('fanout' in error for error in checker.python_errors(keyword_state)))
+
     def test_loop_cannot_repeat_unchanged_state(self):
         checker = load('check-jev-conformance')
         errors = checker.python_errors("""import typesafe_client as tsc

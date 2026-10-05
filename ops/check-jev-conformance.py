@@ -48,20 +48,39 @@ def python_errors(source):
                         imports[alias.asname or alias.name] = (alias.name.split('.')[-1], None)
         aliases = {name for name, (module, method) in imports.items()
                    if module in {'typesafe_client', 'jev_judge', 'jev_semantic'}
-                   and method in {'ask', 'judge', '_ask_jev', 'server_ask'}}
-        semantic_aliases = {name for name, value in imports.items() if value == ('jev_semantic', 'ask')}
+                   and method in {'ask', 'judge', '_ask_jev', 'server_ask', 'evaluate'}}
+        semantic_aliases = {name for name, value in imports.items()
+                            if value in {('jev_semantic', 'ask'), ('jev_semantic', 'evaluate')}}
         semantic_modules = {name for name, value in imports.items() if value == ('jev_semantic', None)}
         seen = set()
         local_nodes = list(scope_nodes(scope))
+        assignments = {target.id: node.value for node in local_nodes if isinstance(node, ast.Assign)
+                       for target in node.targets if isinstance(target, ast.Name)}
         nodes = [n for n in local_nodes if isinstance(n,ast.Call)]
         for n in nodes:
             method = n.func.attr if isinstance(n.func,ast.Attribute) else getattr(n.func,'id','')
-            if not ((isinstance(n.func,ast.Attribute) and method in {'ask','judge','_ask_jev','server_ask'}) or method in aliases):
+            semantic_call = (isinstance(n.func, ast.Name) and method in semantic_aliases) or (
+                isinstance(n.func, ast.Attribute) and (
+                    (isinstance(n.func.value, ast.Name) and n.func.value.id in semantic_modules)
+                    or (isinstance(n.func.value, ast.Name) and n.func.value.id not in imports
+                        and 'semantic' in n.func.value.id)
+                    or (not isinstance(n.func.value, ast.Name) and 'semantic' in ast.unparse(n.func.value))))
+            if method == 'evaluate' and not semantic_call:
                 continue
-            state = ast.dump(n.args[0], include_attributes=False) if n.args else ast.dump(next((k.value for k in n.keywords if k.arg == 'state'),ast.Constant(None)))
+            if not ((isinstance(n.func,ast.Attribute) and method in {'ask','judge','_ask_jev','server_ask','evaluate'}) or method in aliases):
+                continue
+            request_call = method == 'evaluate' or imports.get(method) == ('jev_semantic', 'evaluate')
+            argument = n.args[0] if n.args else next((k.value for k in n.keywords
+                if k.arg == ('request' if request_call else 'state')), ast.Constant(None))
+            request = assignments.get(argument.id, argument) if isinstance(argument, ast.Name) else argument
+            if request_call and isinstance(request, ast.Call):
+                state_node = request.args[0] if request.args else next(
+                    (k.value for k in request.keywords if k.arg == 'state'), argument)
+            else:
+                state_node = argument
+            state = ast.dump(state_node, include_attributes=False)
             # A loop over question subsets is fan-out even with one source
             # call expression. A state derived inside that loop is new evidence.
-            state_node = n.args[0] if n.args else next((k.value for k in n.keywords if k.arg == 'state'), ast.Constant(None))
             state_names = {v.id for v in ast.walk(state_node) if isinstance(v, ast.Name)}
             for loop in (v for v in local_nodes if isinstance(v, (ast.For, ast.AsyncFor, ast.While))):
                 if not any(v is n for child in loop.body for v in scope_nodes(child)):
@@ -75,14 +94,10 @@ def python_errors(source):
             if state in seen:
                 errors.append(f'{n.lineno}: fanout: combine all questions for this state')
             seen.add(state)
-            semantic_call = (isinstance(n.func, ast.Name) and method in semantic_aliases) or (
-                isinstance(n.func, ast.Attribute) and (
-                    (isinstance(n.func.value, ast.Name) and n.func.value.id in semantic_modules)
-                    or (isinstance(n.func.value, ast.Name) and n.func.value.id not in imports
-                        and 'semantic' in n.func.value.id)
-                    or (not isinstance(n.func.value, ast.Name) and 'semantic' in ast.unparse(n.func.value))))
             if semantic_call:
-                kw = {k.arg:k.value for k in n.keywords}
+                keywords = request.keywords if request_call and isinstance(request, ast.Call) else (
+                    [] if request_call else n.keywords)
+                kw = {k.arg:k.value for k in keywords}
                 if not {'caller','version'} <= kw.keys():
                     errors.append(f'{n.lineno}: cache: semantic call needs caller/version')
                 continue
