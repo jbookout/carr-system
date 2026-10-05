@@ -19,6 +19,8 @@
       "id": "jev-judgments",
       "description": "Jev question families, typed-judgment prompts and the TypeSafe client that carries them.",
       "globs": [
+        "jevlint.json",
+        "ops/jevlint_review.py",
         "ops/jev_*.py",
         "ops/typesafe_client.py",
         "tools/judge/interface.py",
@@ -80,6 +82,8 @@
         "hooks/model-floor-gate.py",
         "hooks/rule-shape-gate.py",
         "hooks/stop_latch.py",
+        "hooks/conduct-stop-gate.py",
+        "hooks/escalation-gate.py",
         "hooks/conduct_patterns.py",
         "ops/config/hooks.json",
         "ops/config/codex-hooks.json",

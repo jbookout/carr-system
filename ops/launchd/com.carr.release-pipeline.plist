@@ -11,7 +11,8 @@
   state.json) and, when the batch touches release paths, runs the same
   sanctioned command sequence the manual Worker release ran on 2026-09-23 and
   2026-09-24, from a detached worktree at the exact SHA, with stdin closed.
-  The DoctorCRE app lane runs npm run release:production the same way.
+  The DoctorCRE app lane runs the credential-free scripts/prepare-release.mjs
+  and then scripts/release-production.mjs (deploy credential only) the same way.
 
   A LAUNCH AGENT, NOT A MODEL SESSION (PROP-010's ruling; see
   com.carr.calendar-eventkit.plist). Production credentials are read by the
