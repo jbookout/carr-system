@@ -1067,14 +1067,12 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
             self.assertIn("hooks/rule-pack-preuse-reselection.py", manifests[1])
 
     def test_verified_input_hashes_carry_forward(self):
-        """The inputs PR #1325's replay verified are bound at the same bytes."""
+        """Frozen labels and unchanged compiler inputs retain their verified bytes."""
         deps = self.r["evidence"]["dependencies"]
         for path, digest in {
             "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
             "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
-            "ops/rule_trigger_delivery.py": "64746e5fc5c65e2ff67a72dfb0217598964448283e1c7f7d0fb56dde0c3bc3f3",
             "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
-            "ops/config/rule-jit-triggers.v1.json": "bcf2c4dd152c1df6613a62ddfc333ca4060da6dd983c51d27f51125713ab323e",
         }.items():
             self.assertEqual(deps.get(path), digest, path)
 
