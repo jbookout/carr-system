@@ -174,6 +174,9 @@ def load_cases(path, split=None):
                       "tool_calls": calls, "gold": sorted(set(gold)),
                       "gold_doctrine": sorted(set(doctrine)),
                       "disputed": sorted(set(row.get("disputed") or [])),
+                      **({"judged_rules": row["judged_rules"]} if "judged_rules" in row else {}),
+                      "unjudged_rules": sorted(set(row.get("unjudged_rules") or [])),
+                      **({"doctrine_judged": row["doctrine_judged"]} if "doctrine_judged" in row else {}),
                       "split": row.get("split")})
     if not cases:
         raise ValueError(f"{path}: no cases in split {split!r}")
@@ -241,8 +244,12 @@ class JevProxy:
         self.noul, self.choice, self.score = tsc.noul, tsc.choice, tsc.score
 
     def ask(self, state, questions, **kwargs):
+        kwargs.pop("caller", None)
+        kwargs.pop("version", None)
         kwargs["calls_log"] = self.calls_log
-        return self._tsc.ask(state, questions, **kwargs)
+        semantic = _load(os.path.join(os.path.dirname(os.path.dirname(__file__)), "ops", "jev_semantic.py"), "jev_semantic_eval")
+        return semantic.ask(state, questions, client=self._tsc, caller="rule_delivery_eval",
+                            version="vendor-v1", **kwargs)
 
 
 def _quiet_judge(repo, tag):
@@ -420,10 +427,11 @@ def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull
             client_factory = lambda sink: JevProxy(tsc, sink)  # noqa: E731
         client = client_factory(calls_log)
         rtd_live = _quiet_rule_trigger_delivery(repo, "live")
-        def prompt_full(case):
-            return prompt_delivery(rtd_live, case["prompt"], client=client)
 
-        adapters.append({"name": "prompt_full", "select": prompt_full, "jev": True})
+        def prompt_full(case):
+            return prompt_delivery(rtd_live, case["prompt"], client=client, ask=client.ask)
+
+        adapters += [{"name": "prompt_full", "select": prompt_full, "jev": True}]
     elif jev != "off":
         raise ValueError("jev must be 'off' or 'live'")
     return adapters
@@ -615,9 +623,12 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
             gold = gold_all & universe
             raw = set(out["rules"])
             delivered = raw - disputed
-            if labelled is not None:
-                outside.update(delivered - labelled)
-                delivered &= labelled
+            case_labelled = set(case["judged_rules"]) if "judged_rules" in case else labelled
+            if case_labelled is not None:
+                outside.update(delivered - case_labelled)
+                delivered &= case_labelled
+                gold_all &= case_labelled
+                gold &= case_labelled
             tp, fp, fn = confusion(gold_all, delivered)
             fn = [rid for rid in fn if rid in universe]
             tp_u = [rid for rid in tp if rid in universe]
@@ -633,8 +644,8 @@ def score(cases, deliveries, path_universes, meta, labelled=None, classes=None, 
                 doctrine_scored = True
                 dgold = set(case.get("gold_doctrine") or ())
                 dgot = set(out.get("doctrine") or ())
-                if doctrine_labelled is not None:
-                    judged = set(doctrine_labelled.get(case_id) or ()) | dgold
+                if "doctrine_judged" in case or doctrine_labelled is not None:
+                    judged = set(case.get("doctrine_judged", (doctrine_labelled or {}).get(case_id) or ())) | dgold
                     doctrine_outside += len(dgot - judged)
                     dgot &= judged
                 dtp, dfp, dfn = confusion(dgold, dgot)

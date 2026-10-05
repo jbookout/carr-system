@@ -55,7 +55,8 @@ def _strip(rows):
 def map_digest(doc):
     body = json.dumps({"default_tier": doc["default_tier"], "rules": _strip(doc["rules"]),
                        "noise_exclusions": _strip(doc["noise_exclusions"]),
-                       "never_exclude": _strip(doc["never_exclude"])},
+                       "never_exclude": _strip(doc["never_exclude"]),
+                       "tunable_scalars": doc.get("tunable_scalars", [])},
                       sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
@@ -82,6 +83,7 @@ def render_module(doc):
         "",
         "export const REVIEW_TIERS = Object.freeze({",
         f"  default_tier: {int(doc['default_tier'])},",
+        "  tunable_scalars: Object.freeze(" + json.dumps(doc.get("tunable_scalars", [])) + "),",
         *block("rules", doc["rules"]),
         *block("noise_exclusions", doc["noise_exclusions"]),
         *block("never_exclude", doc["never_exclude"]),

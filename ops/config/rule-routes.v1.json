@@ -1633,9 +1633,7 @@
       "set-lead",
       "update-lead"
      ],
-     "bash_patterns": [
-      "\\bparity-lead-board\\b"
-     ]
+     "bash_patterns": []
     },
     {
      "kind": "path_rule",
