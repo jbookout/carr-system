@@ -1923,24 +1923,12 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     local dsn_read='environ\.get\("(CARR_CI_)?DATABASE_URL"|environ\["(CARR_CI_)?DATABASE_URL"\]|getenv\("(CARR_CI_)?DATABASE_URL"'
     local db_gate_failures="" db_gate_count=0 db_gate_unmarked="" db_gate_declared=""
     _mstep sync
-    local db_gate_timings="" _gt0
+    local db_gates=""
     for g in ops/*-gate.py; do
       [ -f "$g" ] || continue
       if grep -q '^# ci: db-gate' "$g"; then
         db_gate_count=$((db_gate_count+1))
-        _gt0="$(date +%s)"
-        if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/db-gate-$(basename "$g").log" \
-             "$PY" "$g"; then
-          db_gate_failures="$db_gate_failures $(basename "$g")"
-          tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
-        fi
-        # A gate may print a `db-gate-proof:` line saying what it actually
-        # exercised (for example how many race scenarios ran). run_quiet keeps
-        # a passing gate's output in its log file, so surface just that line:
-        # a gate that returned 0 without running anything must not be
-        # indistinguishable from one that passed.
-        grep -h '^db-gate-proof:' "$LOGDIR/db-gate-$(basename "$g").log" 2>/dev/null || true
-        db_gate_timings="$db_gate_timings $(basename "$g" .py)=$(( $(date +%s) - _gt0 ))s"
+        db_gates="$db_gates $g"
       elif grep -qE "$dsn_read" "$g"; then
         # A gate that reads a DSN and carries no marker really is unrun, and
         # this is now a FAILURE rather than a line in the margin. The whole
@@ -1955,6 +1943,9 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
         db_gate_declared="$db_gate_declared\n            $(basename "$g"): $(sed -n 's/^# ci: runs-outside-ci *— *//p' "$g" | head -1)"
       fi
     done
+    if ! DATABASE_URL="$dsn" "$PY" ops/ci-migration-gates.py --logdir "$LOGDIR" $db_gates; then
+      db_gate_failures="isolated/serial DB gate runner (see named failures above)"
+    fi
     _mstep gates
     # Two greppable lines, same contract as ci-timing: which STEP of this class
     # grew, and which GATE PROGRAM grew. Seconds, sorted slowest first. Added
@@ -1962,7 +1953,6 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # while reproducing at 48s on a Mac, and nothing in the hosted log could
     # say which of the ~60 silent children was responsible.
     echo "migration-step-timing:${MIGRATION_STEP_TIMINGS}"
-    echo "db-gate-timing:$(printf '%s\n' $db_gate_timings | sort -t= -k2,2 -rn | tr '\n' ' ' | sed 's/ $//')"
     if [ -n "$db_gate_declared" ]; then
       printf '        \033[33moutside CI\033[0m  gate(s) declared to run elsewhere:%b\n' \
         "$db_gate_declared" >&2

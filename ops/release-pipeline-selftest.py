@@ -243,6 +243,8 @@ class FakeGitHub:
         return [{"id": 7, "name": "main canary", "event": "push", "status": status, "conclusion": conclusion}]
 
     def jobs(self, run_id):
+        if run_id == 7:
+            return [{"name": "main canary (gates, migration, types, freshness)", "conclusion": "success"}]
         return [{"name": "ops/ci.sh --strict", "conclusion": "success"},
                 {"name": "ops/ci.sh --strict --only pushfloor unit secret", "conclusion": "success"}]
 
@@ -676,6 +678,35 @@ class CanaryGlobDrift(unittest.TestCase):
         text = ("on:\n  push:\n    paths-ignore:\n      - \"a/**\"\n"
                 "      # c\n      - '**/*.md'\n  workflow_dispatch:\n")
         self.assertEqual(_workflow_paths_ignore(text), ["a/**", "**/*.md"])
+
+
+class CanaryAggregate(Base):
+    def test_release_poll_wait_is_bounded_to_one_minute(self):
+        import plistlib
+        source = HERE / 'launchd/com.carr.release-pipeline.plist'
+        schedule = plistlib.loads(source.read_bytes())['StartCalendarInterval']
+        self.assertEqual([row['Minute'] for row in schedule], list(range(60)))
+
+    def test_workflow_success_requires_a_green_aggregate(self):
+        pipeline = self.fx.pipeline(FakeRunner())
+        class GH:
+            result = 'success'
+            name = 'main canary'
+            def runs_for(self, sha):
+                return [{'id': 9, 'name': 'main canary', 'status': 'completed', 'conclusion': 'success'}]
+            def jobs(self, run_id):
+                return [{'name': self.name, 'conclusion': self.result}]
+        gh = GH()
+        cfg = self.fx.config()['worker']
+        self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'green')
+        for result in ['skipped', 'neutral', 'failure', 'cancelled', None]:
+            gh.result = result
+            self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'red')
+        gh.result = 'success'
+        gh.name = 'some unrelated job'
+        self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'red')
+        gh.name = 'main canary (gates, migration, types, freshness)'
+        self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'green')
 
 
 class Batching(Base):
