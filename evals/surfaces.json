@@ -75,6 +75,7 @@
         "hooks/drift-claim-gate.py",
         "hooks/executor-tier-gate.py",
         "hooks/gate-edit-gate.py",
+        "hooks/gate_ledger.py",
         "hooks/guard-unattended.py",
         "hooks/hook-meter-run.py",
         "hooks/ledger-sweep.py",

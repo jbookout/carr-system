@@ -1376,9 +1376,18 @@ def _branch_janitor_row():
     return health(REPO_ROOT)
 
 
+def _runtime_error_row():
+    runtime_spec = importlib.util.spec_from_file_location(
+        'runtime_error_health', os.path.join(REPO_ROOT, 'ops', 'runtime_error_health.py'))
+    runtime_health = importlib.util.module_from_spec(runtime_spec)
+    runtime_spec.loader.exec_module(runtime_health)
+    return runtime_health.health_row(REPO_ROOT)
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
+    rc = 0
     build_rc = 0
     if CANONICAL_SECTION in ('all', 'builds'):
         try:
@@ -1389,11 +1398,10 @@ def _canonical_health():
                                    "auto-clear after fresh complete scan", 1)
         print('  ' + build_line)
         if build_rc:
-            _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)
+            rc = _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)
         if CANONICAL_SECTION == 'builds':
             print(_HEALTH_COMPLETION_MARKER)
-            return build_rc
-    rc = build_rc
+            return rc
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)
@@ -1735,10 +1743,7 @@ def _canonical_health():
             print(f"  UNAVAILABLE jev spend — {type(exc).__name__}; "
                   "on breach: open/update one dedup loop · owner orchestrator · "
                   "remediation find caller in jev usage log · auto-clear when below threshold")
-        runtime_spec = importlib.util.spec_from_file_location('runtime_error_health', os.path.join(REPO_ROOT, 'ops', 'runtime_error_health.py'))
-        runtime_health = importlib.util.module_from_spec(runtime_spec)
-        runtime_spec.loader.exec_module(runtime_health)
-        runtime_row = runtime_health.health_row(REPO_ROOT)
+        runtime_row = _runtime_error_row()
         print('  ' + runtime_row)
         if runtime_row.startswith(('WARN', 'UNAVAILABLE')):
             rc = _red('runtime_errors', runtime_row, hard_error=runtime_row.startswith('UNAVAILABLE'))
