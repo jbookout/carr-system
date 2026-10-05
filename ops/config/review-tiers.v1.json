@@ -7,9 +7,13 @@
     "tier": "tier(path) is the highest tier of every matching rule, else default_tier. tier(change set) is the highest tier of its paths. Rule order is presentation only.",
     "match": "path = exact equality; prefix = starts with; suffix = ends with; basename = the last path segment equals; contains = substring. case_insensitive lower-cases both sides first. No glob engine, so Python and JS evaluate identically.",
     "noise": "A path is review noise when a noise_exclusions row matches and no never_exclude row matches. Noise is dropped before a model reads a diff; it never lowers a tier.",
-    "consumers": "Tier 3 never adds a required reviewer or a GitHub rule: the merge controller declines to AUTO-merge and a human presses merge (decision 8daefaba, advisory code-owner review). Thresholds live in the readers: merge refusal and triage high floor at tier 3, security lens at tier 2."
+    "consumers": "Tier 3 never adds a required reviewer or a GitHub rule: the merge controller declines to AUTO-merge and a human presses merge (decision 8daefaba, advisory code-owner review). Thresholds live in the readers: merge refusal and triage high floor at tier 3, security lens at tier 2.",
+    "tunable_scalars": "Dispatch alone may use bounded validation when every changed value is a named integer field within its approved range in both revisions. Added/removed fields, file modes, invalid JSON, changes to the policy, or values above the range keep path-based review. The Jev cap range limits spend without changing caller permissions or actions. Receipts bind base, head, diff digest and policy revision; required hosted CI and the path-based merge/security controls still apply."
   },
   "default_tier": 1,
+  "tunable_scalars": [
+    {"path": "ops/config/jev-cost-guard.v1.json", "field": "daily_paid_call_cap", "minimum": 0, "maximum": 3000}
+  ],
   "rules": [
     {"id": "hooks", "tier": 3, "class": "protected", "match": "prefix", "pattern": "hooks/", "why": "Gate scripts that enforce write policy (doctrine tier 3 protected)."},
     {"id": "ops", "tier": 3, "class": "protected", "match": "prefix", "pattern": "ops/", "why": "Covers ops/config/ and ops/githooks/ (doctrine) and every ops script, which the merge controller already protected."},
