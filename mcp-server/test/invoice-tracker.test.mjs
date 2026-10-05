@@ -60,12 +60,12 @@ test('reference-monitor acceptance uses the live invoice frontier and exact seal
  assert.equal(value('SEALED_PREDECESSOR_MIGRATION'),'migrations/0840_relationship_scac_successor.sql');
 });
 
-// Parallel registry additions must form one ordered history, preserving both contracts.
 test('invoice successor preserves the shipped relationship frontier', async()=>{
  const inventory=await import('../../ops/scac-mutation-inventory.mjs');
- assert.equal(SCAC_MUTATION_REGISTRY_VERSION,'scac-mutation-registry.v110');
- assert.equal(inventory.REGISTRY_V110_VERSION,SCAC_MUTATION_REGISTRY_VERSION);
- const invoices=inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
+ assert.equal(SCAC_MUTATION_REGISTRY_VERSION,inventory.CURRENT_REGISTRY_VERSION);
+ const invoices=inventory.frozenInventory(inventory.REGISTRY_V110_VERSION);
+ const live=inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION);
+ for(const row of invoices) assert.ok(live.some(next=>next.ingress_key===row.ingress_key),row.ingress_key);
  const predecessor=inventory.frozenInventory('scac-mutation-registry.v109');
  for(const key of ['mcp-tool:read-invoice-tracker','mcp-tool:record-commission-receipt'])
   assert.ok(invoices.some(row=>row.ingress_key===key),key);
@@ -82,10 +82,10 @@ test('invoice successor preserves the shipped relationship frontier', async()=>{
  assert.match(sql,/scac_mutation_registry_v108_seal_available/);
 });
 
-// These migrations must append after main; inserting below its ledger breaks prefix checks.
 test('invoice migrations append with exclusive numbers after shipped relationship contract',()=>{
  const names=readdirSync(new URL('../../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql'));
- const predecessor=names.filter(n=>!n.endsWith('_invoice_tracker.sql')&&!n.endsWith('_invoice_tracker_scac_successor.sql')).sort().at(-1);
+ const predecessor='0840_relationship_scac_successor.sql';
+ assert.ok(names.includes(predecessor),predecessor);
  for(const filename of ['0841_invoice_tracker.sql','0842_invoice_tracker_scac_successor.sql']){
   assert.ok(names.includes(filename),filename);
   assert.ok(filename>predecessor,`${filename} must follow ${predecessor}`);

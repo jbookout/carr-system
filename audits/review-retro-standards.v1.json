@@ -1,0 +1,1360 @@
+{
+  "schema": "review-retro-standards.v1",
+  "repository": "jbookout/carr-system",
+  "source_base": "b8e4a42ff",
+  "harvest": {
+    "prs": 1559,
+    "issue_comments": 1332,
+    "inline_comments": 0,
+    "reviews": 2,
+    "errors": [],
+    "retrieved_at": "2026-10-05T14:37:22Z"
+  },
+  "method": [
+    "Fetch pulls?state=all, issues/comments and pulls/comments with gh api --paginate; fetch paginated formal reviews for every listed pull request. No endpoint errors.",
+    "Select substantive blocking/required-change findings from reviewer verdicts, including older BLOCK/REQUEST_CHANGES/CHANGES REQUESTED variants and explicit unnumbered P1 blockers; exclude approval-only descriptions and nonblocking advisory hypotheses.",
+    "Read finding mechanism and later disposition; count one occurrence per distinct PR per root, regardless of findings or review rounds. Roots can overlap, so counts cannot be summed as independent defects.",
+    "Counts are conservative coded evidence in the harvested snapshot, not unresolved defects on current main. All comments were harvested; no numbered blocking verdict was identified in PRs <=800.",
+    "Git cluster includes explicit unnumbered blockers in #1355. RPC multibyte decoding in #1441 is a separate one-PR mechanism, excluded from Git count.",
+    "Raw comment bodies stay ignored locally. This artifact retains software-pattern paraphrases and links only."
+  ],
+  "clusters": [
+    {
+      "id": "single-policy-authority",
+      "pattern": "Independent copies of one policy",
+      "count": 20,
+      "supporting_prs": [
+        1121,
+        1235,
+        1244,
+        1279,
+        1287,
+        1478,
+        1483,
+        1485,
+        1487,
+        1495,
+        1499,
+        1501,
+        1502,
+        1509,
+        1517,
+        1518,
+        1523,
+        1524,
+        1535,
+        1545
+      ],
+      "evidence": [
+        {
+          "pr": 1121,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1121#issuecomment-5954273229",
+          "finding": 5,
+          "pattern": "Main invents a second provider diagnosis from later liveness, ignoring returned errno and launch history.",
+          "later_disposition": {
+            "comment_id": 5955525433,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1121#issuecomment-5955525433",
+            "finding": 5,
+            "summary": "One result owns errno/provider/launch facts; main only presents those facts."
+          }
+        },
+        {
+          "pr": 1235,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1235#issuecomment-5957710081",
+          "finding": 8,
+          "pattern": "Receipt and caller modules duplicate Node discovery, script discovery and Worker error classification.",
+          "later_disposition": {
+            "comment_id": 5959861356,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1235#issuecomment-5959861356",
+            "finding": 8,
+            "summary": "Unused reader deleted; one transport owner remains."
+          }
+        },
+        {
+          "pr": 1244,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1244#issuecomment-5960794916",
+          "finding": 6,
+          "pattern": "Raw launchd installation recipe bypasses canonical installer machine-role checks.",
+          "later_disposition": {
+            "comment_id": 5981284714,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1244#issuecomment-5981284714",
+            "finding": 6,
+            "summary": "Canonical installer route retained; replacement safe final recovery implementation verified."
+          }
+        },
+        {
+          "pr": 1279,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1279#issuecomment-5965004410",
+          "finding": 3,
+          "pattern": "Hardcoded provisioning recipe ignores inventory changes and configured destination.",
+          "later_disposition": {
+            "comment_id": 5965560430,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1279#issuecomment-5965560430",
+            "finding": 3,
+            "summary": "Remedy generated from inventory with actual checked destination."
+          }
+        },
+        {
+          "pr": 1287,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1287#issuecomment-5966069999",
+          "finding": 6,
+          "pattern": "Copied credential repair policy points to default directory while runtime checks custom directory.",
+          "later_disposition": {
+            "comment_id": 5966434543,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1287#issuecomment-5966434543",
+            "finding": 6,
+            "summary": "Configuration-owned remedy substitutes checked path."
+          }
+        },
+        {
+          "pr": 1478,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1478#issuecomment-5944956205",
+          "finding": "5",
+          "pattern": "Feed and Undo independently maintain reversible field/value eligibility.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1478#issuecomment-5986407653"
+        },
+        {
+          "pr": 1483,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1483#issuecomment-5945133873",
+          "finding": "7",
+          "pattern": "Two operations independently encode human-partner authorization.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1483#issuecomment-5985534233"
+        },
+        {
+          "pr": 1485,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1485#issuecomment-5944908069",
+          "finding": "3",
+          "pattern": "Two client entrypoints independently maintain identical required policy.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1485#issuecomment-5952359923"
+        },
+        {
+          "pr": 1487,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1487#issuecomment-5972850518",
+          "finding": "2",
+          "pattern": "Membership and returned coverage metadata separately define business-clock horizon.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1487#issuecomment-5984038951"
+        },
+        {
+          "pr": 1495,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1495#issuecomment-5959006686",
+          "finding": "6",
+          "pattern": "Required versioned cap also exists as handwritten fallback constant.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1495#issuecomment-5969563495"
+        },
+        {
+          "pr": 1499,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1499#issuecomment-5974306361",
+          "finding": "3",
+          "pattern": "New invoice receipt duplicates existing calendar-date predicate.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1499#issuecomment-5996532395"
+        },
+        {
+          "pr": 1501,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1501#issuecomment-5969532859",
+          "finding": "4",
+          "pattern": "Timestamp acceptance predicate gains two more manual copies.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1501#issuecomment-5972056181"
+        },
+        {
+          "pr": 1502,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1502#issuecomment-5969584649",
+          "finding": "4",
+          "pattern": "Supervisor reimplements human provenance classification and disagrees.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1502#issuecomment-5971241539"
+        },
+        {
+          "pr": 1502,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1502#issuecomment-5969584649",
+          "finding": "6",
+          "pattern": "Supervisor reimplements failure detection and disagrees.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1502#issuecomment-5971241539"
+        },
+        {
+          "pr": 1509,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1509#issuecomment-5977436511",
+          "finding": "3",
+          "pattern": "Blind-source sets manually duplicate detector-emitted kind policy.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1509#issuecomment-5978561241"
+        },
+        {
+          "pr": 1517,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1517#issuecomment-5981396325",
+          "finding": "6",
+          "pattern": "Supervisor hardcodes unattended suppression separate from registry policy.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1517#issuecomment-5983007968"
+        },
+        {
+          "pr": 1518,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1518#issuecomment-5982616656",
+          "finding": "4",
+          "pattern": "Python and Worker request validators separately define limits and acceptance and disagree.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1518#issuecomment-5983542160"
+        },
+        {
+          "pr": 1523,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1523#issuecomment-5984063867",
+          "finding": "10",
+          "pattern": "Board cache hardcodes trust rule separately from configured canonical predicate.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1523#issuecomment-5985490448"
+        },
+        {
+          "pr": 1524,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1524#issuecomment-5985400949",
+          "finding": "2",
+          "pattern": "Controller-only fixture duplicates general workflow permission policy and omits new files.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1524#issuecomment-5989446708"
+        },
+        {
+          "pr": 1535,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1535#issuecomment-5988152366",
+          "finding": "2",
+          "pattern": "Required routing instruction copied into both entrypoints despite canonical policy link.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1535#issuecomment-5994541687"
+        },
+        {
+          "pr": 1545,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1545#issuecomment-5989720974",
+          "finding": "4",
+          "pattern": "Second active forwarding lint question expresses same predicate and yields paired reports.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1545#issuecomment-5991409494"
+        }
+      ],
+      "control": "c: standard; domain-specific extractions require separate caller changes",
+      "followup": "Extract duplicated policies within their current owning modules; cover all callers and deliberately divergent inputs, without a generic cross-language policy engine.",
+      "standard_ref": "docs/standards/review-retro.md (single-policy-authority)"
+    },
+    {
+      "id": "behavior-binding-tests",
+      "pattern": "Tests omit or replace their claimed mechanism",
+      "count": 7,
+      "supporting_prs": [
+        855,
+        1235,
+        1273,
+        1483,
+        1499,
+        1526,
+        1541
+      ],
+      "evidence": [
+        {
+          "pr": 1273,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1273#issuecomment-5916617487",
+          "finding": 2,
+          "pattern": "Removing nested browser validators and retaining only top-level keys leaves all 22 panel tests passing.",
+          "later_disposition": {
+            "comment_id": 5964790496,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1273#issuecomment-5964790496",
+            "finding": 2,
+            "summary": "Shared sealed browser/server parity cases make the original validator-removal mutation fail 32 tests."
+          }
+        },
+        {
+          "pr": 1235,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1235#issuecomment-5957710081",
+          "finding": 6,
+          "pattern": "Wrong promptId makes the claimed server-credit positive return unavailable; deleting every server call still passes.",
+          "later_disposition": {
+            "comment_id": 5959861356,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1235#issuecomment-5959861356",
+            "finding": 6,
+            "summary": "Obsolete facet positive removed; replacement asserts actual result, usage, status, receipt identity with unusable negative."
+          }
+        },
+        {
+          "pr": 855,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/855#issuecomment-5958753324",
+          "finding": 1,
+          "pattern": "Any allowlisted cause/class satisfies every failure test; collapsing diagnostic output survives complete suite.",
+          "later_disposition": {
+            "comment_id": 5961486544,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/855#issuecomment-5961486544",
+            "finding": 1,
+            "summary": "Exact rendered expected causes for both handlers kill class-only and collapsed-cause mutants."
+          }
+        },
+        {
+          "pr": 1499,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1499#issuecomment-5974306361",
+          "finding": "2",
+          "pattern": "Envelope is immediate callback and event writer array push; raw SQL proof never composes registered handler/transaction.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1499#issuecomment-5996532395"
+        },
+        {
+          "pr": 1526,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1526#issuecomment-5985559004",
+          "finding": "4",
+          "pattern": "Replay simulator declares success by elapsed ticks and tests events not registered by workflows.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1526#issuecomment-5986361238"
+        },
+        {
+          "pr": 1541,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1541#issuecomment-5989048941",
+          "finding": "3",
+          "pattern": "Failure-return mutation survives the entire admission drift selftest.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1541#issuecomment-5990816179"
+        },
+        {
+          "pr": 1541,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1541#issuecomment-5989048941",
+          "finding": "4",
+          "pattern": "Both max and sum budget formulas pass fixture; presence assertion always true.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1541#issuecomment-5990816179"
+        },
+        {
+          "pr": 1483,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1483#issuecomment-5945133873",
+          "finding": "6",
+          "pattern": "Replacing every new sort comparator with name/ID ordering leaves all five tests passing; fixtures do not assert ordered IDs or excluded owner/territory rows.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1483#issuecomment-5985534233"
+        }
+      ],
+      "control": "c: standard; a: bounded negative-control fixtures in the new pin checker",
+      "followup": "Add real registered invoice replay/rollback proofs with envelope/event failures; add narrowly changed negative controls to remaining claimed gate behavior.",
+      "standard_ref": "docs/standards/review-retro.md (behavior-binding-tests)"
+    },
+    {
+      "id": "sealed-source-cochange",
+      "pattern": "Changed source retains stale admitted bindings",
+      "count": 3,
+      "supporting_prs": [
+        850,
+        865,
+        1384
+      ],
+      "evidence": [
+        {
+          "pr": 865,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/865#issuecomment-5958212936",
+          "finding": 1,
+          "pattern": "Rotation-tool edit leaves external-admin schema/handler digests at previous source.",
+          "later_disposition": {
+            "comment_id": 5961386475,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/865#issuecomment-5961386475",
+            "finding": 1,
+            "summary": "Source frontier and source-review rejection variants pass after explicit bound-row repair."
+          }
+        },
+        {
+          "pr": 850,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/850#issuecomment-5959069953",
+          "finding": 6,
+          "pattern": "Settlement runner changes handler digest without then-required generated source bindings.",
+          "later_disposition": {
+            "comment_id": 5961804802,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/850#issuecomment-5961804802",
+            "finding": 6,
+            "summary": "Resolved by current contract excluding script rows from current frontier while preserving frozen historical projections; no runner reseal is owed now."
+          }
+        },
+        {
+          "pr": 1384,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1384#issuecomment-5967450791",
+          "finding": 1,
+          "pattern": "Administrative migration script newline edit changes whole-file digest without source-frontier reseal.",
+          "later_disposition": {
+            "comment_id": 5968020202,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1384#issuecomment-5968020202",
+            "finding": 1,
+            "summary": "Explicit review row binds corrected source; historical seals unchanged; old fixture mutation reproduces drift."
+          }
+        }
+      ],
+      "control": "a: existing source-frontier checks; c: standard",
+      "followup": null,
+      "standard_ref": "docs/standards/review-retro.md (sealed-source-cochange)"
+    },
+    {
+      "id": "lossless-git-paths",
+      "pattern": "Git filename identity lost before a decision",
+      "count": 5,
+      "supporting_prs": [
+        854,
+        1349,
+        1355,
+        1438,
+        1494
+      ],
+      "evidence": [
+        {
+          "pr": 854,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/854#issuecomment-5962291125",
+          "finding": 4,
+          "pattern": "Universal-newline translation turns CR filenames into LF filenames before exact approval comparison.",
+          "later_disposition": {
+            "comment_id": 5965165799,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/854#issuecomment-5965165799",
+            "finding": 4,
+            "summary": "Raw Git bytes and surrogateescape retain CR/CRLF/LF identity; wrong-name approval refuses."
+          }
+        },
+        {
+          "pr": 1349,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1349#issuecomment-5857497668",
+          "finding": 1,
+          "pattern": "text=True and strip alter a leading-space path depending on which path sorts first, hiding a reverted fix.",
+          "later_disposition": {
+            "comment_id": 5859333394,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1349#issuecomment-5859333394",
+            "finding": null,
+            "summary": "Blocked branch superseded by independently reviewed #1355 repair."
+          }
+        },
+        {
+          "pr": 1438,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1438#issuecomment-5912067358",
+          "finding": "3",
+          "pattern": "Universal-newline decoding turns CR/CRLF Git filenames into absent LF filenames.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1438#issuecomment-5917578649"
+        },
+        {
+          "pr": 1494,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1494#issuecomment-5955270186",
+          "finding": "1",
+          "pattern": "Literal NUL Git paths compared to quoted line-delimited paths.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1494#issuecomment-5957395344"
+        },
+        {
+          "pr": 1494,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1494#issuecomment-5955270186",
+          "finding": "2",
+          "pattern": "Whole-tree strict UTF-8 decode aborts checking for unrelated new paths.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1494#issuecomment-5957395344"
+        },
+        {
+          "pr": 1355,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1355#issuecomment-5858711614",
+          "finding": "P1 (unnumbered; numbered reproduction steps 1\u20134)",
+          "pattern": "Inherited main-merge-only reader trims and line-splits paths, accepting post-review defect restoration.",
+          "later_disposition": {
+            "comment_id": 5859198109,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1355#issuecomment-5859198109",
+            "finding": null,
+            "summary": "All six Git decision readers use shared raw NUL path handling; full release matrices refuse."
+          }
+        },
+        {
+          "pr": 1355,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1355#issuecomment-5858795822",
+          "finding": "P1 (unnumbered)",
+          "pattern": "Quoted non-ASCII/control filenames disappear from release classification and required-CI set.",
+          "later_disposition": {
+            "comment_id": 5859198109,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1355#issuecomment-5859198109",
+            "finding": null,
+            "summary": "ASCII/non-ASCII/control filename failed-CI matrix now holds."
+          }
+        },
+        {
+          "pr": 1355,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1355#issuecomment-5858868458",
+          "finding": "P1 (unnumbered)",
+          "pattern": "Per-path strip and non-full glob matching still omit trailing-space/tab/newline release paths.",
+          "later_disposition": {
+            "comment_id": 5859198109,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1355#issuecomment-5859198109",
+            "finding": null,
+            "summary": "Classification preserves names and glob matching consumes the entire filename."
+          }
+        }
+      ],
+      "control": "b: existing Git path readers; c: standard",
+      "followup": "Extend current path-reader regression coverage to every decision consumer, using real Git trees/indexes and non-UTF-8 filenames.",
+      "standard_ref": "docs/standards/review-retro.md (lossless-git-paths)"
+    },
+    {
+      "id": "ack-after-delivery",
+      "pattern": "Dedup acknowledgement precedes durable delivery",
+      "count": 3,
+      "supporting_prs": [
+        810,
+        1279,
+        1287
+      ],
+      "evidence": [
+        {
+          "pr": 810,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/810#issuecomment-5963170691",
+          "finding": 2,
+          "pattern": "Identifier enters seen before receipt write; failed persistence causes retry to return successful duplicate.",
+          "later_disposition": {
+            "comment_id": 5964033373,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/810#issuecomment-5964033373",
+            "finding": 2,
+            "summary": "Seen state changes only after durable publication; ENOSPC retry accepts as new."
+          }
+        },
+        {
+          "pr": 1279,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1279#issuecomment-5965004410",
+          "finding": 2,
+          "pattern": "A transient loop-write failure burns the SHA and permanently suppresses notification.",
+          "later_disposition": {
+            "comment_id": 5965560430,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1279#issuecomment-5965560430",
+            "finding": 2,
+            "summary": "Complete pending payload saved before delivery and replayed independently of failed-SHA suppression."
+          }
+        },
+        {
+          "pr": 1287,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1287#issuecomment-5966069999",
+          "finding": 1,
+          "pattern": "Loop acknowledgment suppresses the first diagnosis even when diagnosis delivery times out.",
+          "later_disposition": {
+            "comment_id": 5966434543,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1287#issuecomment-5966434543",
+            "finding": 1,
+            "summary": "Diagnosis acknowledgment tracked separately; immutable pending first turn survives recovery."
+          }
+        },
+        {
+          "pr": 1287,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1287#issuecomment-5966069999",
+          "finding": 3,
+          "pattern": "Failed capability notification has no pending request before SHA is burned.",
+          "later_disposition": {
+            "comment_id": 5966434543,
+            "comment_url": "https://github.com/jbookout/carr-system/pull/1287#issuecomment-5966434543",
+            "finding": 3,
+            "summary": "Exact notification persisted and retried before burned-SHA early return."
+          }
+        }
+      ],
+      "control": "c: standard",
+      "followup": "Add failure-injection fixtures at file/transport commit boundaries; verify retries after ENOSPC and independent destination failure.",
+      "standard_ref": "docs/standards/review-retro.md (ack-after-delivery)"
+    },
+    {
+      "id": "runtime-role-proof",
+      "pattern": "Proof omits the deployed database role/path",
+      "count": 4,
+      "supporting_prs": [
+        1442,
+        1479,
+        1480,
+        1481
+      ],
+      "evidence": [
+        {
+          "pr": 1442,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1442#issuecomment-5913437509",
+          "finding": "2",
+          "pattern": "Catalog SELECT checks omit executing helper-dependent views under the new login.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1442#issuecomment-5918261150"
+        },
+        {
+          "pr": 1479,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1479#issuecomment-5945050092",
+          "finding": "1",
+          "pattern": "Handler directly joins an ungranted base table; proof runs a different granted view.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1479#issuecomment-5948712239"
+        },
+        {
+          "pr": 1480,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1480#issuecomment-5944268431",
+          "finding": "1",
+          "pattern": "Human route chooses authority role without INSERT on both required tables; proof uses writer role.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1480#issuecomment-5949876867"
+        },
+        {
+          "pr": 1481,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1481#issuecomment-5945200956",
+          "finding": "1",
+          "pattern": "Workspace fake connection passes but constrained reader cannot select newly joined tables.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1481#issuecomment-5995707863"
+        }
+      ],
+      "control": "c: standard; a follow-up: exact-handler role proofs",
+      "followup": "Extend disposable acceptance fixtures for registered readers/human writers; verify exact SQL and helper-dependent views under their runtime roles, with rollback and no production connection.",
+      "standard_ref": "docs/standards/review-retro.md (runtime-role-proof)"
+    },
+    {
+      "id": "registered-ingress",
+      "pattern": "New operation lacks registered ingress bindings",
+      "count": 3,
+      "supporting_prs": [
+        1463,
+        1467,
+        1478
+      ],
+      "evidence": [
+        {
+          "pr": 1463,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1463#issuecomment-5938340438",
+          "finding": "1",
+          "pattern": "Registered invocation refuses before SQL although raw handler feature tests pass.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1463#issuecomment-5940881944"
+        },
+        {
+          "pr": 1467,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1467#issuecomment-5940834234",
+          "finding": "1",
+          "pattern": "New ingress absent from assembled registry and source frontier.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1467#issuecomment-5987579605"
+        },
+        {
+          "pr": 1478,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1478#issuecomment-5944956205",
+          "finding": "1",
+          "pattern": "New activity read lacks successor/runtime projection/source inventory.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1478#issuecomment-5986407653"
+        }
+      ],
+      "control": "a: existing sealed-registry/ingress checks; c: standard",
+      "followup": null,
+      "standard_ref": "docs/standards/review-retro.md (registered-ingress)"
+    },
+    {
+      "id": "process-tree-ownership",
+      "pattern": "Descendants outlive terminal cleanup",
+      "count": 6,
+      "supporting_prs": [
+        1424,
+        1475,
+        1482,
+        1525,
+        1547,
+        1557
+      ],
+      "evidence": [
+        {
+          "pr": 1424,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1424#issuecomment-5899837027",
+          "finding": "1",
+          "pattern": "Leader exits on SIGTERM but helper ignores it; conditional SIGKILL never runs.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1424#issuecomment-5900922272"
+        },
+        {
+          "pr": 1475,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1475#issuecomment-5943049478",
+          "finding": "3",
+          "pattern": "Timeout kills wrapper while nested transport later writes a marker.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1475#issuecomment-5973023544"
+        },
+        {
+          "pr": 1482,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1482#issuecomment-5944593152",
+          "finding": "1",
+          "pattern": "Terminated wrapper releases lock while separate child group runs past timeout.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1482#issuecomment-5951446538"
+        },
+        {
+          "pr": 1525,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1525#issuecomment-5984658168",
+          "finding": "4",
+          "pattern": "Renderer timeout releases ownership while child can mutate output.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1525#issuecomment-5989231926"
+        },
+        {
+          "pr": 1547,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1547#issuecomment-5990907002",
+          "finding": "3",
+          "pattern": "Normal parent exit bypasses group cleanup while detached-stream child remains.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1547#issuecomment-5994284676"
+        },
+        {
+          "pr": 1557,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1557#issuecomment-5996529223",
+          "finding": "2",
+          "pattern": "Cancellation emits cleanup:true before grandchild finishes work.",
+          "later_disposition": "No approval disposition coded"
+        }
+      ],
+      "control": "b: existing tree-aware timeout owner; c: standard",
+      "followup": "Add shared terminal-path fixtures to the existing timeout/process owner: leader exits while a grandchild ignores TERM; verify no delayed effects before lock release.",
+      "standard_ref": "docs/standards/review-retro.md (process-tree-ownership)"
+    },
+    {
+      "id": "successor-consumers",
+      "pattern": "Successor consumers retain stale identities",
+      "count": 3,
+      "supporting_prs": [
+        1457,
+        1480,
+        1536
+      ],
+      "evidence": [
+        {
+          "pr": 1457,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1457#issuecomment-5933076597",
+          "finding": "1",
+          "pattern": "Changed function catalog lacks matching sealed successor and snapshot epoch bindings.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1457#issuecomment-5975291263"
+        },
+        {
+          "pr": 1457,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1457#issuecomment-5933076597",
+          "finding": "4",
+          "pattern": "Snapshot includes conditional role preamble but expected preamble omits it.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1457#issuecomment-5975291263"
+        },
+        {
+          "pr": 1480,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1480#issuecomment-5944268431",
+          "finding": "2",
+          "pattern": "Exporter still selects predecessor despite new seal.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1480#issuecomment-5949876867"
+        },
+        {
+          "pr": 1480,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1480#issuecomment-5944268431",
+          "finding": "3",
+          "pattern": "Mandatory acceptance supported-version list stops at predecessor.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1480#issuecomment-5949876867"
+        },
+        {
+          "pr": 1536,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1536#issuecomment-5988335997",
+          "finding": "1",
+          "pattern": "Frontier test expects domain migration number rather than generated successor number.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1536#issuecomment-5994898500"
+        }
+      ],
+      "control": "a: new bounded live-selector equality check; a: existing frontier checks; c: standard",
+      "followup": "Derive supported live successor selection through the existing inventory interface for exporter/acceptance consumers; retain immutable predecessor evidence and contract-specific validation.",
+      "standard_ref": "docs/standards/review-retro.md (successor-consumers)"
+    },
+    {
+      "id": "atomic-paid-admission",
+      "pattern": "Paid admission checks race with claims",
+      "count": 3,
+      "supporting_prs": [
+        1502,
+        1517,
+        1518
+      ],
+      "evidence": [
+        {
+          "pr": 1502,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1502#issuecomment-5969584649",
+          "finding": "1",
+          "pattern": "Eight processes reserve against cap one after the same ledger read.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1502#issuecomment-5971241539"
+        },
+        {
+          "pr": 1517,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1517#issuecomment-5981396325",
+          "finding": "5",
+          "pattern": "Same-state concurrent cache misses both pay; no per-key claim.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1517#issuecomment-5983007968"
+        },
+        {
+          "pr": 1518,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1518#issuecomment-5982616656",
+          "finding": "1",
+          "pattern": "Credit hold check outside reservation permits eight recovery probes.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1518#issuecomment-5983542160"
+        }
+      ],
+      "control": "c: standard",
+      "followup": "Add barrier-based regressions to existing admission tests for duplicate keys, distinct keys, expired holds, accounting write failure, and one recovery probe.",
+      "standard_ref": "docs/standards/review-retro.md (atomic-paid-admission)"
+    },
+    {
+      "id": "atomic-file-publication",
+      "pattern": "Shared-file readers/writers observe partial or stale state",
+      "count": 4,
+      "supporting_prs": [
+        1420,
+        1467,
+        1516,
+        1517
+      ],
+      "evidence": [
+        {
+          "pr": 1420,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1420#issuecomment-5909699334",
+          "finding": "1",
+          "pattern": "Two board writers use one .tmp path; rename races lose updates.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1420#issuecomment-5970163416"
+        },
+        {
+          "pr": 1467,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1467#issuecomment-5940834234",
+          "finding": "8",
+          "pattern": "Interleaved truncated cache writes leave invalid trailing JSON.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1467#issuecomment-5987579605"
+        },
+        {
+          "pr": 1516,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1516#issuecomment-5981307510",
+          "finding": "8",
+          "pattern": "Snapshot writer truncates file while readers consume it.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1516#issuecomment-5985528974"
+        },
+        {
+          "pr": 1517,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1517#issuecomment-5981396325",
+          "finding": "5",
+          "pattern": "Toll cache in-place writes lose distinct entries and expose partial JSON.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1517#issuecomment-5983007968"
+        }
+      ],
+      "control": "c: standard",
+      "followup": "Reuse existing locked board/cache persistence within each owner; test competing writers, reader during publication, failed replacement, and stale refresh rejection.",
+      "standard_ref": "docs/standards/review-retro.md (atomic-file-publication)"
+    },
+    {
+      "id": "persisted-effect-readback",
+      "pattern": "Success declared without effect readback",
+      "count": 3,
+      "supporting_prs": [
+        1444,
+        1470,
+        1550
+      ],
+      "evidence": [
+        {
+          "pr": 1444,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1444#issuecomment-5916638432",
+          "finding": "6",
+          "pattern": "HTTP 200 with error/missing acknowledgement still clears submitted comment.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1444#issuecomment-5919310759"
+        },
+        {
+          "pr": 1470,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1470#issuecomment-5942094268",
+          "finding": "4",
+          "pattern": "Zero-row version-guarded UPDATE still writes stage event and reports applied.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1470#issuecomment-5981386264"
+        },
+        {
+          "pr": 1550,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1550#issuecomment-5995623480",
+          "finding": "5",
+          "pattern": "Zero-row deal or invoice lifecycle update still reports apply/undo success.",
+          "later_disposition": "No approval disposition coded"
+        }
+      ],
+      "control": "c: standard",
+      "followup": "Add zero-row update and malformed/missing acknowledgement controls to the owning handlers; assert no success event or UI state change without persisted effect.",
+      "standard_ref": "docs/standards/review-retro.md (persisted-effect-readback)"
+    },
+    {
+      "id": "elapsed-deadlines",
+      "pattern": "Per-call bounds do not bound elapsed work",
+      "count": 4,
+      "supporting_prs": [
+        1432,
+        1446,
+        1488,
+        1545
+      ],
+      "evidence": [
+        {
+          "pr": 1432,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1432#issuecomment-5903218363",
+          "finding": "1",
+          "pattern": "Slow-drip socket body extends scan beyond advertised timeout.",
+          "later_disposition": "No approval disposition coded"
+        },
+        {
+          "pr": 1446,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1446#issuecomment-5920876858",
+          "finding": "5",
+          "pattern": "CLI invocation can hang before retry advances; CLI flag only bounds internal state wait.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1446#issuecomment-5922439067"
+        },
+        {
+          "pr": 1488,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1488#issuecomment-5946660986",
+          "finding": "4",
+          "pattern": "Eight individually bounded process probes can exceed outer hook budget.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1488#issuecomment-5951877800"
+        },
+        {
+          "pr": 1545,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1545#issuecomment-5989720974",
+          "finding": "1",
+          "pattern": "Accepted socket/body has no deadline and blocks shutdown indefinitely.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1545#issuecomment-5991409494"
+        }
+      ],
+      "control": "b: existing timeout owner; c: standard",
+      "followup": "Extend existing timeout/deadline owners with slow-drip, incomplete loopback request, redirect, and sequential-probe tests; keep the whole operation inside its enclosing hook budget.",
+      "standard_ref": "docs/standards/review-retro.md (elapsed-deadlines)"
+    }
+  ],
+  "reviewer_feedback": {
+    "pattern": "Advisory swallowed-failure hypotheses explicitly dismissed by reviewers",
+    "count": 52,
+    "supporting_prs": [
+      1407,
+      1427,
+      1430,
+      1433,
+      1437,
+      1438,
+      1439,
+      1441,
+      1442,
+      1443,
+      1444,
+      1445,
+      1446,
+      1447,
+      1448,
+      1450,
+      1452,
+      1453,
+      1454,
+      1455,
+      1456,
+      1457,
+      1458,
+      1460,
+      1462,
+      1463,
+      1464,
+      1465,
+      1466,
+      1467,
+      1469,
+      1470,
+      1472,
+      1473,
+      1475,
+      1476,
+      1477,
+      1478,
+      1479,
+      1480,
+      1481,
+      1482,
+      1483,
+      1484,
+      1485,
+      1488,
+      1490,
+      1493,
+      1494,
+      1519,
+      1524,
+      1528
+    ],
+    "evidence": [
+      {
+        "pr": 1407,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1407#issuecomment-5956394055",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/executor-tier-gate-selftest.py:166"
+        ]
+      },
+      {
+        "pr": 1427,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1427#issuecomment-5909247004",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/grok-run-selftest.py:271"
+        ]
+      },
+      {
+        "pr": 1430,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1430#issuecomment-5909440775",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/judge-provider-selftest.py:123"
+        ]
+      },
+      {
+        "pr": 1433,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1433#issuecomment-5909384077",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1437,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1437#issuecomment-5916586282",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/tour-stop-assembly.test.mjs:83"
+        ]
+      },
+      {
+        "pr": 1438,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1438#issuecomment-5912067358",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/jev-code-partition-selftest.py:191"
+        ]
+      },
+      {
+        "pr": 1439,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1439#issuecomment-5911186796",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "tools/test-progress-board.py:61"
+        ]
+      },
+      {
+        "pr": 1441,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1441#issuecomment-5915267369",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/guard-selftest.py:267"
+        ]
+      },
+      {
+        "pr": 1442,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1442#issuecomment-5913437509",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "tools/test-dot-reader.py:138"
+        ]
+      },
+      {
+        "pr": 1443,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1443#issuecomment-5916660435",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/tour-map-route-state.test.mjs:70"
+        ]
+      },
+      {
+        "pr": 1444,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1444#issuecomment-5916638432",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/tour-internal-web.test.mjs:182"
+        ]
+      },
+      {
+        "pr": 1445,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1445#issuecomment-5919488799",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/main-canary-selftest.py:121"
+        ]
+      },
+      {
+        "pr": 1446,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1446#issuecomment-5922419919",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/jev-scorecard-selftest.py:130"
+        ]
+      },
+      {
+        "pr": 1447,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1447#issuecomment-5921228719",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/pr-size-check-selftest.py:125"
+        ]
+      },
+      {
+        "pr": 1448,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1448#issuecomment-5932031489",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/property-evidence-successor.test.mjs:23-32"
+        ]
+      },
+      {
+        "pr": 1450,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1450#issuecomment-5921289159",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/review-tiers.test.mjs:1"
+        ]
+      },
+      {
+        "pr": 1452,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1452#issuecomment-5924453110",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/bounded-record-retrieval.test.mjs:69"
+        ]
+      },
+      {
+        "pr": 1453,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1453#issuecomment-5931831991",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/tour-production-wiring.test.mjs:80"
+        ]
+      },
+      {
+        "pr": 1454,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1454#issuecomment-5931876557",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/doc-profile.test.mjs:22"
+        ]
+      },
+      {
+        "pr": 1455,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1455#issuecomment-5932358406",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "practice-plugin/test/worker.test.mjs:46"
+        ]
+      },
+      {
+        "pr": 1456,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1456#issuecomment-5932537632",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/guard-selftest.py:106"
+        ]
+      },
+      {
+        "pr": 1457,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1457#issuecomment-5936565746",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1458,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1458#issuecomment-5934473576",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1460,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1460#issuecomment-5936046862",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/shared-oauth.test.mjs:75"
+        ]
+      },
+      {
+        "pr": 1462,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1462#issuecomment-5936691059",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "tools/test-dot-relay.py:260"
+        ]
+      },
+      {
+        "pr": 1463,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1463#issuecomment-5938340438",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/doc-profile.test.mjs:24-36"
+        ]
+      },
+      {
+        "pr": 1464,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1464#issuecomment-5938761755",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/siep-11-mutation-registry.test.mjs:3016"
+        ]
+      },
+      {
+        "pr": 1465,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1465#issuecomment-5939022612",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "practice-plugin/test/calculators.test.mjs:71"
+        ]
+      },
+      {
+        "pr": 1466,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1466#issuecomment-5939589291",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "tools/test-dot-relay.py:321"
+        ]
+      },
+      {
+        "pr": 1467,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1467#issuecomment-5942107604",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1469,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1469#issuecomment-5942815563",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1470,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1470#issuecomment-5942094268",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1472,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1472#issuecomment-5942136311",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/confirm-merge-schema.test.mjs:1"
+        ]
+      },
+      {
+        "pr": 1473,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1473#issuecomment-5942055608",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/ci-selftest.py:1375"
+        ]
+      },
+      {
+        "pr": 1475,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1475#issuecomment-5943049478",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "tools/test-dot-file-reports.py:172"
+        ]
+      },
+      {
+        "pr": 1476,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1476#issuecomment-5943295458",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": []
+      },
+      {
+        "pr": 1477,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1477#issuecomment-5943753759",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "practice-plugin/test/extensions.test.mjs:52"
+        ]
+      },
+      {
+        "pr": 1478,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1478#issuecomment-5944956205",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/doc-activity.test.mjs:12"
+        ]
+      },
+      {
+        "pr": 1479,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1479#issuecomment-5945050092",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/local-deals-read.test.mjs:27"
+        ]
+      },
+      {
+        "pr": 1480,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1480#issuecomment-5944268431",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/siep-11-mutation-registry.test.mjs:1602"
+        ]
+      },
+      {
+        "pr": 1481,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1481#issuecomment-5945200956",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1482,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1482#issuecomment-5944593152",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/headless-task-selftest.py:73"
+        ]
+      },
+      {
+        "pr": 1483,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1483#issuecomment-5945133873",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/run-node-suites.test.mjs:5"
+        ]
+      },
+      {
+        "pr": 1484,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1484#issuecomment-5945412481",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/siep-11-mutation-registry.test.mjs:3016"
+        ]
+      },
+      {
+        "pr": 1485,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1485#issuecomment-5950643315",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1488,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1488#issuecomment-5951165947",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/schema-snapshot-registry-seed-selftest.py:266"
+        ]
+      },
+      {
+        "pr": 1490,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1490#issuecomment-5985421495",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/tour-operations-foundation.test.mjs:19-26"
+        ]
+      },
+      {
+        "pr": 1493,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1493#issuecomment-5986213485",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/lease-radar-read.test.mjs:30-43"
+        ]
+      },
+      {
+        "pr": 1494,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1494#issuecomment-5955270186",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/path-index-hygiene-selftest.py:96"
+        ]
+      },
+      {
+        "pr": 1519,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1519#issuecomment-5986130995",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "mcp-server/test/tour-operations-foundation.test.mjs:19"
+        ]
+      },
+      {
+        "pr": 1524,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1524#issuecomment-5985400949",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/release-pipeline-selftest.py:62-78"
+        ]
+      },
+      {
+        "pr": 1528,
+        "comment_url": "https://github.com/jbookout/carr-system/pull/1528#issuecomment-5985494947",
+        "disposition": "Dismissed advisory exception-swallowing hypothesis: checked operations/assertions propagate failure or no catching handler exists.",
+        "source_locations": [
+          "ops/jev-boundary-replay-selftest.py:1"
+        ]
+      }
+    ],
+    "qualification": "Advisory leads, not 52 retracted blocking verdicts."
+  },
+  "caveats": [
+    "#850 source-binding finding was resolved by a current contract exclusion for script rows; preserve frozen historical seals and do not demand blanket script resealing.",
+    "Literal TRUNCATE guards appear in approval descriptions; this is not evidence of a 3+ blocking cluster.",
+    "New structural checker covers simple assert.equal/assert.strictEqual live SCAC/current selector comparisons with version strings or REGISTRY_Vn_VERSION, including direct import aliases; it is not a complete JavaScript analyzer or a check of all successor consumers.",
+    "#1344 has a blocked moving release-identity literal test; #1499 describes live registry literal fragility only in approval. Neither is added to the three successor-consumer blocking occurrences."
+  ]
+}
