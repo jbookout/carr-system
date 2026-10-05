@@ -258,7 +258,7 @@ def in_hook_calls_skip_the_server_but_the_advisory_does_not():
           and advisory.get("server_receipt", {}).get("receipt_id") == "srv-h"
           and rows and rows[0]["server_error"] == "in_hook_direct")
     return report(ok, "a hook's own Jev call goes direct and is marked uncredited "
-                      "(in_hook_direct); the build advisory still takes the server path")
+                      "(in_hook_direct); other explicit callers still take the server path")
 
 
 class ReviewRegressions(unittest.TestCase):

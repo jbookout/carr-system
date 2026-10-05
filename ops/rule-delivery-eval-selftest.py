@@ -24,7 +24,7 @@ WHAT IS PROVEN:
      rows, the drift observer, boot layer zero) run on the committed fixture
      against this checkout's real config and return only known rule ids.
   7. The Jev-backed adapters (the UserPromptSubmit judgment in
-     ops/rule_trigger_delivery.py and the legacy ops/jev_rule_select.py) run
+     ops/rule_trigger_delivery.py) run
      end to end against a FAKE client: the rule the fake says binds is
      delivered, every request carries the harness's calls-log sink, and no
      production log, cache or audit file in this checkout's out/ is created or
@@ -319,7 +319,7 @@ class FakeClient:
 def test_jev_adapters(ev, meta):
     tsc = load(REPO / "ops" / "typesafe_client.py", "typesafe_client_for_eval_selftest")
     rtc = load(REPO / "ops" / "rule_trigger_compile.py", "rtc_for_eval_selftest")
-    jrs = load(REPO / "ops" / "jev_rule_select.py", "jrs_for_eval_selftest")
+    jrs = load(REPO / "ops" / "rule_trigger_delivery.py", "rtd_for_eval_selftest")
     pack = rtc.pack_rules()
     statements = {rule["statement"]: rule["id"] for rule in pack}
     for rule in jrs.load_rules():
@@ -333,8 +333,8 @@ def test_jev_adapters(ev, meta):
     adapters = ev.build_adapters(REPO, jev="live",
                                  client_factory=lambda calls_log: ev.JevProxy(fake, calls_log),
                                  calls_log=sink)
-    wanted = [a for a in adapters if a["name"] in ("prompt_full", "jev_rule_select")]
-    check("both Jev-backed adapters are built in live mode", len(wanted) == 2,
+    wanted = [a for a in adapters if a["name"] == "prompt_full"]
+    check("the single Jev-backed adapter is built in live mode", len(wanted) == 1,
           [a["name"] for a in adapters])
     case = {"id": "fake-1", "stratum": "engineering", "tool_calls": [], "gold": [target],
             "prompt": "hello, a quick question before we start"}
@@ -342,9 +342,6 @@ def test_jev_adapters(ev, meta):
     check("Jev-backed adapters did not raise", not any(errors.values()), errors)
     check("UserPromptSubmit judgment delivers the rule the fake binds",
           target in deliveries["prompt_full"]["fake-1"]["rules"], deliveries["prompt_full"])
-    check("legacy selector delivers the rule the fake binds",
-          target in deliveries["jev_rule_select"]["fake-1"]["rules"],
-          deliveries["jev_rule_select"])
     check("the fake was actually asked", fake.requests >= 2, fake.requests)
     check("every Jev request carried the harness calls-log sink",
           fake.sinks and all(s == sink for s in fake.sinks), set(map(str, fake.sinks)))
