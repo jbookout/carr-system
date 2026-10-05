@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECK = ROOT / 'ops/build-duration-check.py'
 FIXTURE = ROOT / 'ops/fixtures/build-duration/five-main-timeouts.json'
 spec = importlib.util.spec_from_file_location('build_duration', CHECK)
+assert spec is not None and spec.loader is not None
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
 
