@@ -116,5 +116,18 @@ class PostgresLeaderTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, 'authority session user'):
                 Leader(conn).claim('studio', 'macbook', self.evidence())
 
+    def test_schema_rebuild_without_runtime_owner_refuses_jobs_and_transfer(self):
+        with self.connect() as conn:
+            try:
+                conn.execute('delete from ops.studio_leader')
+                with self.assertRaisesRegex(RuntimeError, 'leader row missing'):
+                    Leader(conn).acquire('studio', 'nightly')
+                with self.authority() as authority:
+                    with self.assertRaisesRegex(RuntimeError, 'leader row missing'):
+                        Leader(authority).claim('studio', 'macbook', self.evidence())
+            finally:
+                conn.execute("insert into ops.studio_leader(singleton,host) values(true,'studio')")
+            self.assertEqual(Leader(conn).read(), ('studio', 1))
+
 
 if __name__ == '__main__': unittest.main()
