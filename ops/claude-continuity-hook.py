@@ -8,6 +8,8 @@ Stop is always advisory and this process always exits zero.
 """
 from __future__ import annotations
 
+from typing import cast
+
 import hashlib
 import json
 import os
@@ -388,6 +390,7 @@ def _record(event: str, identity: dict, cursor: dict, source_digest: str,
     response, failure = spool.invoke("claude-record-event", args)
     if response is not None:
         return True
+    failure = cast(dict, failure)
     try:
         if failure["kind"] == "refused":
             spool.archive({"verb": "claude-record-event", "args": args}, "refused", failure["error"])

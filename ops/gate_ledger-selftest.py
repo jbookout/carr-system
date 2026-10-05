@@ -41,7 +41,7 @@ if verdict == "reopen":
 sys.exit(0)
 '''
 
-FAILS = []
+FAILS: list[str] = []
 VERBOSE = "-v" in sys.argv[1:]
 
 
@@ -234,6 +234,7 @@ finally:
 
 # ── 11. The verdict CLI and the precision report ────────────────────────────
 spec = importlib.util.spec_from_file_location("gate_verdict", os.path.join(REPO, "tools", "gate_verdict.py"))
+assert spec is not None and spec.loader is not None
 gv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gv)
 
@@ -333,7 +334,7 @@ check("backfilled decisions carry the rule, never the command",
       {r["rule"] for r in got} == {"private key material", "bare_id"}
       and SECRET not in open(lab.ledger, encoding="utf-8").read(), got)
 
-calls = []
+calls: list[tuple[str, dict]] = []
 
 
 def fake_verb(name, payload):

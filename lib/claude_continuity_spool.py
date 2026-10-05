@@ -10,6 +10,8 @@ appended to the archive with its outcome.
 """
 from __future__ import annotations
 
+from typing import cast
+
 import fcntl
 import hashlib
 import hmac
@@ -251,6 +253,7 @@ def drain(call=None) -> dict:
                     _move_to_archive(path, "not_replayable", reason)
                     result["archived"] += 1
                     continue
+                body = cast(dict, body)
                 response, failure = call(body["verb"], body["args"])
                 if response is not None:
                     outcome = "already_recorded" if response.get("replayed") is True else "delivered"
