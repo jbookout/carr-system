@@ -20,7 +20,8 @@ why it can never lock a context out.
 
   · a boot page fetch (CARR MCP standing-context, or a Bash command that runs
     this repo's run.sh `call standing-context '<json>'` by any path, after an
-    absolute `cd ... &&`, and through harmless output filters — the grammar is
+    absolute `cd ... &&`, and through harmless output filters (the emitted
+    repair uses literal `python3 -m json.tool`) — the grammar is
     in lib/rule_boot_gate.py)                 -> allow, and record the attempt;
     a page counts as READ only when PostToolUse finds that page's rule_boot
     (matching page, digest and text) in the result, and the page lengths add

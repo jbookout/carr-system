@@ -34,6 +34,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -657,6 +658,25 @@ def indent2(body):
     return json.dumps(json.loads(body), indent=2)
 
 
+def case_recorded_formatter_repair(c):
+    c.stub_sized("a", pages=7)
+    c.arm()
+    c.fetch(1)
+    rejected = (f"cd {REPO} && ./run.sh call standing-context {boot_arg(2)} | "
+                'python3 -c "import sys,json;print(json.dumps(json.load(sys.stdin)))"')
+    result = c.call("Bash", {"command": rejected})
+    assert denied(result), "arbitrary Python programs remain outside the fetch grammar"
+    repair = f"cd {REPO} && ./run.sh call standing-context {boot_arg(2)} | python3 -m json.tool"
+    reason = result["permissionDecisionReason"]
+    assert repair in reason, f"the recorded command must get a runnable exact repair: {reason}"
+    assert "python3 -c from the repo root" not in reason, "no broad executable allowance"
+    for p in range(2, 8):
+        command = f"cd {REPO} && ./run.sh call standing-context {boot_arg(p)} | python3 -m json.tool"
+        pre, post = c.fetch_cmd(command, p, cwd="/tmp", stdout=indent2)
+        assert not denied(pre) and not notice(post), (pre, post)
+    assert c.call(*READ) is None, "every repaired full-output page counts"
+
+
 def case_absolute_form(c):
     c.stub_sized("a", pages=3)
     c.arm()
@@ -913,6 +933,7 @@ CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage
          case_unreachable_no_deadlock, case_fetch_never_denied, case_deny_before_allow_after,
          case_digest_change_rearms, case_rearm_on_compact, case_subagent_path,
          case_answer_parsing,
+         case_recorded_formatter_repair,
          case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
          case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
          case_confirm_needs_the_real_page,
@@ -980,6 +1001,84 @@ def check_pending_install():
         assert pending == [] and real == errs[:1], "seen installed once: missing is a finding"
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def check_adapter_smoke(installed=False):
+    """Invoke registered adapter commands with captured connector envelope shapes.
+
+    This proves hook invocation and state accounting, not a native client launch.
+    Only temporary fixture state is written; installed configuration is read-only.
+    """
+    from pathlib import Path
+    adapters = [("claude", "ops/config/hooks.json"), ("codex", "ops/config/codex-hooks.json")]
+    evidence = []
+    for client, path in adapters:
+        if installed:
+            path = str(Path.home() / (".claude/settings.json" if client == "claude" else ".codex/hooks.json"))
+        with open(path if installed else os.path.join(REPO, path), encoding="utf-8") as fh:
+            config = json.load(fh)
+        events = config.get("hooks", config)
+
+        def command(event, tool):
+            matches = [h["command"] for group in events[event]
+                       if re.search(group.get("matcher", ".*"), tool)
+                       for h in group["hooks"] if "rule-boot-gate.py" in h["command"]]
+            assert len(matches) == 1, (client, event, tool, matches)
+            argv = shlex.split(matches[0].replace("{{REPO}}", REPO))
+            if not installed and not os.path.exists(argv[0]):
+                argv[0] = sys.executable
+            return argv
+
+        with tempfile.TemporaryDirectory(prefix="rule-boot-adapter-") as work:
+            c = Case(REPO, work)
+            c.env.update(CARR_HOOK_FIXTURE="1", CARR_HOOK_TELEMETRY=os.path.join(work, "telemetry.jsonl"))
+            c.stub_sized("a", pages=7)
+            c.arm()
+
+            def invoke(event, tool, args, response=None):
+                payload = {"hook_event_name": event, "session_id": SESSION, "cwd": REPO,
+                           "tool_name": tool, "tool_input": args, "tool_use_id": f"smoke-{client}-{tool}"}
+                if response is not None:
+                    payload["tool_response"] = response
+                proc = subprocess.run(command(event, tool), input=json.dumps(payload),
+                                      capture_output=True, text=True, env=c.env, timeout=30, cwd=REPO)
+                assert proc.returncode == 0, (client, event, proc.stderr)
+                return json.loads(proc.stdout)["hookSpecificOutput"] if proc.stdout.strip() else None
+
+            for form in ("connector", "bash"):
+                if form == "bash":
+                    c.arm("compact")
+                with open(os.path.join(c.state, SESSION, "arm.json"), encoding="utf-8") as fh:
+                    arm = json.load(fh)
+                assert denied(invoke("PreToolUse", "Read", READ[1]))
+                for p in range(1, 8):
+                    body = {"ok": True, "rule_boot": c.boot(p)}
+                    if form == "connector":
+                        tool = ("mcp__b36e17b6-7e3b-4e65-b890-21f21d538440__standing-context"
+                                if client == "claude" else "mcp__carr__standing_context")
+                        args = {"detail": "boot", "page": p}
+                        content = [{"type": "text", "text": json.dumps(body)}]
+                        # Claude trace lines 14579-14615 carries content blocks;
+                        # MCP CallToolResult also carries structuredContent.
+                        response = content if client == "claude" else {"content": content, "structuredContent": body}
+                    else:
+                        tool, args = bash_fetch(p)
+                        args["command"] += " | python3 -m json.tool"
+                        response = {"stdout": json.dumps(body, indent=2), "stderr": "", "interrupted": False}
+                    assert invoke("PreToolUse", tool, args) is None
+                    assert invoke("PostToolUse", tool, args, response) is None
+                    folder = os.path.join(c.state, SESSION, "fetched", "main",
+                                          f"{arm['digest'][7:31]}-{arm['epoch']}")
+                    with open(os.path.join(folder, f"c{p}"), encoding="utf-8") as fh:
+                        assert int(fh.read()) == len(c.page_text(p))
+                assert invoke("PreToolUse", "Read", READ[1]) is None
+                evidence.append({"adapter": client, "route": form, "mode": "installed" if installed else "source",
+                                 "epoch": arm["epoch"], "digest": arm["digest"], "pages": list(range(1, 8)),
+                                 "post_tool_use": "recorded", "next_ordinary_tool": "allowed"})
+            with open(c.env["CARR_HOOK_TELEMETRY"], encoding="utf-8") as fh:
+                rows = [json.loads(line) for line in fh]
+            assert sum(row["event"] == "PostToolUse" for row in rows) == 14, (client, rows)
+    return evidence
 
 
 # ------------------------------------------------------------------ mutants
@@ -1053,12 +1152,17 @@ def mutant_tree(root, replacements):
 
 
 def main():
+    if "--adapter-smoke" in sys.argv:
+        print(json.dumps({"kind": "adapter-command-invocation-replay", "evidence":
+                          check_adapter_smoke(installed="--installed" in sys.argv)}, indent=2))
+        return 0
     failures = run_all(REPO)
     if failures:
         print("FAIL rule-boot-gate cases:\n  " + "\n  ".join(failures))
         return 1
     check_gate_integrity_rearms()
     check_pending_install()
+    check_adapter_smoke()
     survived = []
     for name, replacements in MUTANTS.items():
         root = tempfile.mkdtemp(prefix=f"rule-boot-mutant-{name}-")
