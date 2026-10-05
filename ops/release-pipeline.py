@@ -60,6 +60,14 @@ TWO LANES, one tick:
           deploy credential) from a clean detached origin/main checkout, then
           /app-release reads the SHA back.
 
+CONTROLLER FRESHNESS. launchd runs this file from the canonical checkout,
+and fleet-sync fast-forwards that checkout only when it has no local changes.
+Before releasing either lane the tick compares its own source
+(CONTROLLER_PATHS) on disk with origin/main; any difference holds every lane
+as `controller_stale` (nothing run, no SHA burned) and files one loop per stale
+episode. 2026-10-05: a checkout 8 commits behind ran app f04c9ab8 without the
+`app-build` step main already carried, and burned that SHA.
+
 BATCHING. Each lane releases the LATEST main SHA, never each merge separately.
 The last released SHA per lane lives in out/release-pipeline/state.json; when it
 is absent it is bootstrapped from what production serves (/release, /app-release).
@@ -206,6 +214,11 @@ CHILD_ENV_NAMES = ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL
 CLOUDFLARE_TOKEN_NAME = "CLOUDFLARE_API_TOKEN"
 CLOUDFLARE_TOKEN_FILE = "tokens.env"   # under credential_dir
 CREDENTIAL_INVENTORY_PATH = REPO / "ops/config/credential-inventory.v1.json"
+# The code and config this tick executes from the canonical checkout; each must
+# equal origin/main before any lane releases (see CONTROLLER FRESHNESS above).
+CONTROLLER_PATHS = ("ops/release-pipeline.py", "ops/config/release-pipeline.v1.json",
+                    "lib/secret_redaction.py")
+CONTROLLER_STALE = "controller_stale"
 
 
 # ── results and the command runner seam ───────────────────────────────────────
@@ -713,11 +726,16 @@ def blocker_loop(capability: str, detail: str, *, remedy: str = "", recovery: st
     continuation = recovery or ("It stops at that step every tick until this "
                                 "exists; nothing is released meanwhile.")
     health_repair = capability in {"health_baseline_hard_error", "health_baseline_stalled"}
-    blocker_detail = (f"The authorized release-repair lane must restore and verify the health baseline: {detail}"
-                      if health_repair else
-                      f"Joe is the provisioning decider for the named unattended credential: {detail}; Joe grants it")
-    args = {"kind": "open_loop", "owner": "Claude" if health_repair else "Joe", "domain": "system", "marker": "none",
-            "blocker": "other_lane" if health_repair else "capability", "blocker_detail": blocker_detail,
+    if health_repair:
+        blocker_detail = f"The authorized release-repair lane must restore and verify the health baseline: {detail}"
+    elif capability == CONTROLLER_STALE:
+        blocker_detail = ("The canonical checkout's owner must commit or move its local changes so fleet-sync "
+                          f"can fast-forward it to origin/main: {detail}")
+    else:
+        blocker_detail = f"Joe is the provisioning decider for the named unattended credential: {detail}; Joe grants it"
+    repair_lane = health_repair or capability == CONTROLLER_STALE
+    args = {"kind": "open_loop", "owner": "Claude" if repair_lane else "Joe", "domain": "system", "marker": "none",
+            "blocker": "other_lane" if repair_lane else "capability", "blocker_detail": blocker_detail,
             "body": (f"The scripted release pipeline (ops/release-pipeline.py) cannot run "
                      f"unattended: {detail}. {continuation} {remedy}".rstrip()),
             "unblocks": "unattended Worker/app release on every merge to main"}
@@ -1546,6 +1564,30 @@ class Pipeline:
                 raise Blocked("credential_missing", f"{name} is absent from ~/.config/carr/mcp-tokens.env",
                               capability=name)
 
+    def controller_current(self, state: dict) -> None:
+        """Blocked unless every CONTROLLER_PATHS file on disk is byte-equal to
+        origin/main (git hash-object vs the committed blob), so a lagging or
+        locally edited checkout never releases main with other code. Once
+        current again, the filed loop is forgotten so the next episode files."""
+        self.git("fetch", "--quiet", "origin", "main")
+        main = self.git("rev-parse", "origin/main")
+        stale = []
+        for path in CONTROLLER_PATHS:
+            try:
+                committed = self.git("rev-parse", f"{main}:{path}")
+            except StepFailed:
+                committed = None
+            disk = self.git("hash-object", "--", path) if (self.repo / path).is_file() else None
+            if disk != committed:
+                stale.append(path)
+        if stale:
+            raise Blocked(CONTROLLER_STALE,
+                          f"{self.repo} differs from origin/main {main[:12]} in {', '.join(stale)}; "
+                          "fleet-sync fast-forwards it once its local changes are gone",
+                          capability=CONTROLLER_STALE)
+        if state.get("filed_blockers", {}).pop(CONTROLLER_STALE, None):
+            self.store.save(state)
+
     # -- lanes --------------------------------------------------------------
     def _at_or_before(self, a: str, b: str, repo_dir: Path) -> bool:
         """True when commit `a` is `b` or an ancestor of it."""
@@ -1618,6 +1660,7 @@ class Pipeline:
                 self.out(f"release-pipeline[{lane}]: {sha[:12]} failed at "
                          f"{lane_state.get('failed_step')}; waiting for a fix-forward merge")
                 return 0
+            self.controller_current(state)
             try:
                 self.git("merge-base", "--is-ancestor", base, sha, cwd=repo_dir)
             except StepFailed:
