@@ -2,10 +2,11 @@
 """Paid-call admission eval for the jev-judgments surface (2026-10-04 audit).
 
 THE FLOW MEASURED: a would-be paid Jev call reaches ops/typesafe_client.py.
-Does the client pay for it? The baseline arm is the client at the merge base
+Does the client pay for it? The baseline arm is the client at the explicit historical baseline
 (daily cap only); the candidate arm is this tree's client (call-site registry,
 attribution, unattended policy, fixture/CI refusal, site budgets). Both arms
-run the REAL ask() with the vendor transport replaced by a recorder, so the
+run the REAL ask(); the candidate fake Worker runs canonical checkJevSpend
+against an empty ledger, and vendor transport is replaced by a recorder, so the
 observation is simply whether a request would have left the machine.
 
 CASES. `--build` samples production traces from out/jev-calls.jsonl
@@ -185,7 +186,8 @@ ARM_FILES = ("ops/typesafe_client.py", "ops/config/jev-cost-guard.v1.json",
              "ops/config/jev-call-sites.v1.json", "tools/judge/interface.py",
              "mcp-server/src/judge-providers.v1.json", "lib/jev_required_actions.py",
              "mcp-server/src/jev-request-contract.v1.json",
-             "lib/transcript_read.py", "lib/__init__.py")
+             "lib/transcript_read.py", "lib/__init__.py",
+             "mcp-server/src/jev-spend-authority.js", "mcp-server/src/errors.js")
 
 
 def _tree(ref, root):
@@ -240,14 +242,35 @@ def observe(client, case, scratch):
         env["CARR_JEV_JOB"] = case["carr_job"]
     log = scratch / "calls.jsonl"
     refusal = None
-    with mock.patch.dict(os.environ, env, clear=True), \
-            mock.patch.object(client, "JEV_DAILY_CAP_LOG", str(log)), \
-            mock.patch.object(client, "_launch_spend_alert_worker", lambda *a: None, create=True), \
-            mock.patch.object(client.urllib.request, "urlopen",
-                              lambda request, timeout=None: sent.append(1) or _Response()):
+    def worker(state, questions, **options):
+        who = {key: options.get(key) for key in ('caller', 'session_id', 'job_id', 'unattended')}
+        if who['session_id'] == 'unbound': who['session_id'] = None
+        registry = json.loads(Path(client.JEV_CALL_SITES_PATH).read_text())
+        script = """import {checkJevSpend,costPolicy} from './mcp-server/src/jev-spend-authority.js';
+            let input='';for await(const chunk of process.stdin)input+=chunk;
+            const {who,registry}=JSON.parse(input);
+            const db={query:async sql=>({rows:sql.includes('day_used')?[{
+                day_used:0,hour_used:0,site_day:0,site_hour:0,
+                resets_day:'2099-01-01T00:00:00Z',resets_hour:'2099-01-01T00:00:00Z',hold_until:null}]:[]})};
+            try {await checkJevSpend(db,who,registry,costPolicy);console.log(JSON.stringify({ok:true}));}
+            catch(e){console.log(JSON.stringify({error:e.payload.error}));}"""
+        run = subprocess.run(['node','--input-type=module','-e',script],cwd=REPO,
+            input=json.dumps({'who':who,'registry':registry}),capture_output=True,text=True,check=True)
+        outcome = json.loads(run.stdout)
+        if outcome.get('error'): return None, outcome['error']
+        sent.append(1)
+        return json.loads(_Response().body), None
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+        stack.enter_context(mock.patch.object(client, "JEV_DAILY_CAP_LOG", str(log)))
+        if hasattr(client, 'SPEND_AUTHORITY'):
+            stack.enter_context(mock.patch.object(client, 'server_ask', worker))
+        else:
+            stack.enter_context(mock.patch.object(client.urllib.request, 'urlopen',
+                lambda request, timeout=None: sent.append(1) or _Response()))
         try:
-            client.ask("eval state", {"q": client.noul("Eval judgment")}, api_key="eval-fixture",
-                       calls_log=str(log), cache_ttl_seconds=0, retries=0, caller=case["site"],
+            client.ask("eval state", {"q": client.noul("Eval judgment")},
+                       calls_log=str(log), cache_ttl_seconds=0, caller=case["site"],
                        session_id="eval-session" if case.get("session") else None)
         except Exception as exc:  # a refusal is the observation, not a crash
             refusal = getattr(exc, "code", None) or type(exc).__name__
@@ -301,6 +324,7 @@ def report(base_ref):
     harness = _sha(HERE / "run_eval.py")
     receipt = {
         "schema_version": 2, "surface": "jev-judgments",
+        "baseline_ref": base_ref,
         "change": "Admit a paid Jev call only from a registered call site with its declared attribution, "
                   "outside fixtures/CI and unattended workers its site excludes, within per-site and "
                   "global hourly budgets.",
@@ -308,7 +332,7 @@ def report(base_ref):
         "adapter": {"surface": "offline_programmatic", "adapter_id": "jev-judgments-admission-replay",
                     "adapter_version": "1", "harness_id": "evals/jev-judgments/run_eval.py",
                     "harness_version": harness, "provider_id": "none", "model_id": "deterministic-no-model",
-                    "native_session_ref": os.environ.get("CLAUDE_CODE_SESSION_ID") or "local",
+                    "native_session_ref": os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "local",
                     "configuration_fingerprint": f"sha256:{fingerprint}"},
         "cases": {"total": len(cases), "train": len(cases) - len(test), "test": len(test),
                   "should_not_fire": sum(1 for e in cases.values() if e["should_not_fire"]),
@@ -334,7 +358,7 @@ def report(base_ref):
             "Fixture provenance is inferred: a prompt hash seen in three or more sessions. Ad-hoc explicit "
             "callers are excluded from the trace sample and covered by hand-written hard cases.",
             "Budgets (site hourly/daily, global hourly) do not bind at this sample size; "
-            "ops/jev-call-sites-selftest.py exercises them.",
+            "Worker unit tests and disposable PostgreSQL exercise them.",
             "Native /claude-api slash commands are unavailable in this runtime; the replay runs the real "
             "client functions with the vendor transport recorded, no model call.",
         ],

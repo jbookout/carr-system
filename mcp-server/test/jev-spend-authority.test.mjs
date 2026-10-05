@@ -50,7 +50,7 @@ test('daily, hourly, site-day and site-hour caps refuse at the boundary', async 
   ]) await assert.rejects(() => check(counts), e => e.payload?.error === code && Boolean(e.payload.resets_at));
   const { queried, site } = await check();
   assert.equal(site.caller, 'jev_deal_read');
-  assert.match(queried[0].sql, /pg_advisory_xact_lock/);
+  assert.match(queried[2].sql, /pg_advisory_xact_lock/);
 });
 
 test('global daily cap cannot exceed hard 1000 or use malformed config', async () => {
@@ -58,4 +58,28 @@ test('global daily cap cannot exceed hard 1000 or use malformed config', async (
     await assert.rejects(() => check({}, attribution, { daily_paid_call_cap: cap }),
       e => e.payload?.error === 'call_site_registry_invalid');
   await check({ day_used: 999 }, attribution, { daily_paid_call_cap: 1000 });
+});
+
+
+test('admission bounds lock and statement waits before taking the global lock', async () => {
+  const { queried } = await check();
+  assert.match(queried[0].sql, /set local lock_timeout = '1s'/);
+  assert.match(queried[1].sql, /set local statement_timeout = '3s'/);
+  assert.match(queried[2].sql, /pg_advisory_xact_lock/);
+});
+
+test('the admission ledger has a partial time index migration', async () => {
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const dir = new URL('../../migrations/', import.meta.url);
+  const sql = readdirSync(dir).filter(name => name.endsWith('.sql'))
+    .map(name => readFileSync(new URL(name, dir), 'utf8')).join('\n');
+  assert.ok(/create index[^;]+on (?:public\.)?tool_call\s*\(created_at\)\s*where verb = 'ask-jev-attempt'/i.test(sql), 'missing admission index');
+});
+
+test('a cache-only capability probe advertises spend authority without vendor fetch', async () => {
+  let fetched = 0;
+  const ask = jevAskBinding({ TYPESAFE_API_KEY: 'fixture' }, async () => { fetched++; }, {cache:null});
+  await assert.rejects(ask({state:'probe',questions:{},transport_mode:'cache_only'}),
+    e => e.payload?.error === 'jev_cache_miss' && e.payload.spend_authority === 'carr-jev-spend/v1');
+  assert.equal(fetched, 0);
 });

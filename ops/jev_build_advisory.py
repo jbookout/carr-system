@@ -249,7 +249,6 @@ def _advise(partner_request: str, *, client: Any | None = None,
             {"partner_request": partner_request},
             questions(tsc),
             timeout=min(timeout, TIMEOUT_SECONDS),
-            retries=0,
         )
     except Exception as exc:
         reason = failure_reason(exc)

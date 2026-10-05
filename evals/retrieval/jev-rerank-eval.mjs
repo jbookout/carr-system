@@ -138,15 +138,15 @@ export function pythonJevBridge({ repo = REPO, spawn = spawnSync, python = "pyth
   };
 }
 
-// Refuse a live run up front when the credential is not readable, rather
+// Refuse a live run up front when Worker spend authority is unavailable, rather
 // than letting every case fall back and print a report that looks measured.
-export function assertLiveCredential({ repo = REPO, spawn = spawnSync, python = "python3" } = {}) {
+export function assertWorkerReady({ repo = REPO, spawn = spawnSync, python = "python3" } = {}) {
   const run = spawn(python, ["-c",
-    "import sys\nsys.path.insert(0, 'ops')\nimport typesafe_client\ntypesafe_client.read_api_key()"],
+    "import sys\nsys.path.insert(0, 'ops')\nimport typesafe_client\nassert typesafe_client.worker_ready(), 'Jev Worker spend authority unavailable'"],
   { cwd: repo, encoding: "utf8", timeout: 30000 });
   if (run.error || run.status !== 0)
-    throw new Error("a live run needs the TypeSafe credential at ~/.config/carr/typesafe.env " +
-      `(TYPESAFE_API_KEY=...); ${String(run.error?.message || run.stderr || "").trim().split("\n").pop()}`);
+    throw new Error("a live run needs authenticated Worker spend authority " +
+      `${String(run.error?.message || run.stderr || "").trim().split("\n").pop()}`);
 }
 
 function metered(askJev, now, meter) {
@@ -275,7 +275,7 @@ export async function main(args = [], {
   const recording = {};
   let askJev = null;
   if (opts.live) {
-    assertLiveCredential({ spawn });
+    assertWorkerReady({ spawn });
     askJev = recordingAsk(pythonJevBridge({ spawn }), recording);
   }
   if (opts.replay) askJev = replayAsk(JSON.parse(readFileSync(resolve(REPO, opts.replay), "utf8")).recording || {});

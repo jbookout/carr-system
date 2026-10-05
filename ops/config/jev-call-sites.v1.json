@@ -1,6 +1,6 @@
 {
   "schema": "carr-jev-call-sites/v1",
-  "about": "Paid Jev caller policy shared by the local preflight and Worker spend authority. The Worker reserves every attempt atomically under site hourly/daily limits, a global hourly cap, and jev-cost-guard daily cap (maximum 1000). No local vendor fallback. Worker queue decoration is retired.",
+  "about": "Paid Jev caller policy enforced by the Worker spend authority; local readers observe policy. The Worker reserves every attempt atomically under site hourly/daily limits, a global hourly cap, and jev-cost-guard daily cap (maximum 1000). No local vendor fallback. Worker queue decoration is retired.",
   "hourly_paid_call_cap": 200,
   "sites": [
     {
@@ -328,16 +328,16 @@
       "sources": ["ops/typesafe_client.py"]
     },
     {
-      "caller": "worker.rerank",
-      "trigger": "Explicit residual semantic retrieval on an ambiguous deterministic shortlist",
-      "runs_in": "Worker retrieval and bounded retrieval eval",
-      "attribution": "session_or_job",
-      "unattended": "allowed",
-      "hourly_budget": 10,
-      "daily_budget": 40,
+      "caller": "jev_rerank_eval",
+      "trigger": "Operator live retrieval rerank evaluation",
+      "runs_in": "evals/retrieval/jev-rerank-eval.mjs",
+      "attribution": "session",
+      "unattended": "off",
+      "hourly_budget": 40,
+      "daily_budget": 60,
       "owner": "orchestrator",
-      "value": "Bounded semantic relevance trial; source/query digest cache, independent relevance labels required",
-      "sources": ["mcp-server/src/jev-rerank.js"]
+      "value": "Measure retrieval ranking quality",
+      "sources": ["evals/retrieval/jev-rerank-eval.mjs"]
     }
   ]
 }

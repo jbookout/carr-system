@@ -1,4 +1,3 @@
-import { attributedJevState } from "./jev-spend-authority.js";
 // Offline Jev reranking trial for doctrine source selection. Default OFF.
 // The production report-problem writer does not import or call this module.
 //
@@ -175,11 +174,7 @@ function fallback(result, reason) {
 }
 
 async function ask(askJev, request, model) {
-  const sessionId = `worker-rerank-${crypto.randomUUID()}`;
-  const result = await askJev({ state: attributedJevState(request.state, {
-    caller: "worker.rerank", session_id: sessionId, job_id: null, unattended: false }),
-    questions: request.questions, model, session_id: sessionId });
-  return result;
+  return askJev({ state: request.state, questions: request.questions, model });
 }
 
 export async function rerankShortlist({ situation, candidates, variant, askJev, model = JEV_RERANK_MODEL }) {

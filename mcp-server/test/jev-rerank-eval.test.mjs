@@ -184,7 +184,7 @@ test("main --live runs every requested variant through the bridge and writes the
   let asked = 0;
   let preflight = 0;
   const spawn = (cmd, args, options) => {
-    if (args[1].includes("read_api_key")) { preflight += 1; return { status: 0, stdout: "", stderr: "" }; }
+    if (args[1].includes("worker_ready")) { preflight += 1; return { status: 0, stdout: "", stderr: "" }; }
     asked += 1;
     const request = JSON.parse(options.input);
     const answers = Object.fromEntries(Object.entries(request.questions).map(([k, q]) =>
@@ -204,16 +204,16 @@ test("main --live runs every requested variant through the bridge and writes the
   assert.equal(Object.keys(written[0][1].recording).length, 11);
 });
 
-test("main --live refuses before any request when the credential is unreadable", async () => {
+test("main --live refuses before any request when the Worker capability is unavailable", async () => {
   let asked = 0;
   const spawn = (cmd, args) => {
-    if (args[1].includes("read_api_key"))
+    if (args[1].includes("worker_ready"))
       return { status: 1, stdout: "", stderr: "Traceback\ntypesafe_client.TypeSafeError: cannot read the TypeSafe credential" };
     asked += 1;
     return { status: 0, stdout: "{}", stderr: "" };
   };
   await assert.rejects(main(["--live"], { stdout: () => {}, spawn, writeReport: () => assert.fail("no report") }),
-    /needs the TypeSafe credential.*cannot read the TypeSafe credential/);
+    /needs authenticated Worker spend authority.*cannot read the TypeSafe credential/);
   assert.equal(asked, 0);
 });
 
@@ -238,4 +238,17 @@ test('the Python bridge strips transport attribution and keeps replay keys stabl
   const recording = {};
   await recordingAsk(async () => result, recording)(req('first'));
   assert.deepEqual(await replayAsk(recording)(req('second')), result);
+});
+
+
+test('the live eval caller passes Worker admission and is the bridge caller', async () => {
+  const { jevCallSite, spendPolicy } = await import('../src/jev-spend-authority.js');
+  const caller = 'jev_rerank_eval';
+  assert.equal(jevCallSite({caller, session_id:'native-eval', unattended:false}).caller, caller);
+  assert.ok(!spendPolicy.sites.some(s => s.caller === 'worker.rerank'));
+  await pythonJevBridge({spawn: (cmd, args, options) => {
+    assert.match(args[1], /caller="jev_rerank_eval"/);
+    assert.doesNotMatch(args[1], /worker_ready/);
+    return {status:0, stdout:JSON.stringify({ok:true,result:{answers:{}},latency_ms:1})};
+  }})({state:'state', questions:{}});
 });

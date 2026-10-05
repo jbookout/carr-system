@@ -73,11 +73,11 @@ def client_routes_through_the_worker():
 
     def runner(argv, **_kw):
         if json.loads(argv[3]).get("transport_mode") == "cache_only":
-            return _Proc(1, "", '{"error":"jev_cache_miss"}')
+            return _Proc(1, "", 'TOOL ERROR {"error":"jev_cache_miss","spend_authority":"carr-jev-spend/v1"}')
         seen["verb"] = argv[2]
         seen["args"] = json.loads(argv[3])
         return _Proc(0, json.dumps({
-            "ok": True, "receipt_id": "srv-1", "recorded_at": ts(0), "purpose": "call",
+            "ok": True, "spend_authority": "carr-jev-spend/v1", "receipt_id": "srv-1", "recorded_at": ts(0), "purpose": "call",
             "session_id": "s", "model": "jev-1.13.0", "state_sha256": "a" * 64,
             "prompt_sha256": None, "usage": {"input_tokens": 3, "output_tokens": 1},
             "answers": {"diagnosis_q": {"type": "noul", "noul": 0.7}}}))
@@ -106,9 +106,9 @@ def malformed_server_answer_is_not_credited():
 
     def runner(argv, **_kw):
         if json.loads(argv[3]).get("transport_mode") == "cache_only":
-            return _Proc(1, "", '{"error":"jev_cache_miss"}')
+            return _Proc(1, "", 'TOOL ERROR {"error":"jev_cache_miss","spend_authority":"carr-jev-spend/v1"}')
         return _Proc(0, json.dumps({
-            "ok": True, "receipt_id": "srv-malformed", "model": "jev-1.13.0",
+            "ok": True, "spend_authority": "carr-jev-spend/v1", "receipt_id": "srv-malformed", "model": "jev-1.13.0",
             "usage": {"input_tokens": 3, "output_tokens": 1},
             "answers": {"q": {"type": "noul", "noul": 1.5}}}))
 
@@ -133,7 +133,7 @@ def server_cache_answer_preserves_no_spend():
 
     def runner(argv, **_kw):
         return _Proc(0, json.dumps({
-            "ok": True, "receipt_id": "srv-cached", "model": "jev-1.13.0",
+            "ok": True, "spend_authority": "carr-jev-spend/v1", "receipt_id": "srv-cached", "model": "jev-1.13.0",
             "cache_hit": True, "usage": None,
             "answers": {"q": {"type": "noul", "noul": 0.7}}}))
 

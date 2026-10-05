@@ -46,11 +46,9 @@ TRUSTS A CALLER TO REMEMBER:
      the decision, and there is a hard ceiling besides. Retrieve and narrow in
      code, then send only the fields the question needs.
 
-CREDENTIAL. Read from ~/.config/carr/typesafe.env, mode 600, outside the repo,
-recorded by name in secrets-inventory.md. The value is never logged, never
-echoed into an exception, and never written to a receipt. On an HTTP error this
-module reports the status and a truncated response body, and deliberately does
-not report the request it sent, because the request carries the bearer token.
+TRANSPORT. The authenticated CARR Worker holds the vendor credential and owns
+cache, retries and spend admission. This client never reads a vendor key and
+refuses paid requests until the Worker advertises its spend authority.
 
 AUTHORITY. Joe ruled on 2026-09-17 that CARR records, client and deal material
 included, may be sent to third-party model APIs and admitted this vendor on that
@@ -72,14 +70,10 @@ import subprocess
 import sys
 from contextlib import closing
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from functools import partial
 
-ENDPOINT = "https://api.typesafe.ai/v1/systemone"
-KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Entry points may import with only ops/ on sys.path.
 if REPO not in sys.path:
@@ -135,7 +129,6 @@ CANONICAL_REPO = _canonical_repo_root(REPO)
 JEV_CALLS_LOG = os.path.join(CANONICAL_REPO, "out", "jev-calls.jsonl")
 # Receipt destinations may vary for evals; the spend budget never does.
 JEV_DAILY_CAP_LOG = JEV_CALLS_LOG
-JUDGE_CACHE_PATH = os.path.join(CANONICAL_REPO, "out", "jev-judge-cache.sqlite3")
 with open(os.path.join(REPO, "ops", "config", "jev-cost-guard.v1.json"), encoding="utf-8") as _config_file:
     JEV_COST_CONFIG = json.load(_config_file)
 JUDGE_CACHE_TTL_SECONDS = JEV_COST_CONFIG["judge_cache_ttl_seconds"]
@@ -143,7 +136,6 @@ JUDGE_CACHE_TTL_SECONDS = JEV_COST_CONFIG["judge_cache_ttl_seconds"]
 # ops/settlement-run-token.py's NATIVE_SESSION_KEYS already uses.
 SESSION_ID_ENV_KEYS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID",
                        "CLAUDE_CODE_HOST_SESSION_ID")
-KEY_NAME = "TYPESAFE_API_KEY"
 
 # jev-latest is an alias and MOVES when a release ships, so answers can change
 # with no change on our side. A caller that has tuned thresholds against a
@@ -161,7 +153,6 @@ DEFAULT_MODEL = "jev-latest"
 STATE_BUDGET_CHARS = 32_000 * 3
 
 TIMEOUT_SECONDS = 60.0
-RATE_LIMIT_RETRIES = 3
 
 
 class TypeSafeError(RuntimeError):
@@ -188,7 +179,7 @@ class JevCallRefused(TypeSafeError):
 # code path could reach the vendor and the only bound was one shared daily
 # counter. Now a paid call needs a registered site, the attribution that site
 # declares, and room in the site's own hourly and daily budget, beneath a
-# global hourly/daily cap. Local checks validate policy; the Worker alone
+# global hourly/daily cap. Local readers observe policy; the Worker alone
 # counts and reserves paid attempts, failing closed before vendor fetch.
 JEV_CALL_SITES_PATH = os.path.join(REPO, "ops", "config", "jev-call-sites.v1.json")
 BUDGET_REFUSALS = ("hourly_paid_call_cap", "site_hourly_budget", "site_daily_budget")
@@ -283,26 +274,6 @@ def _fixture_offline():
     accounted for 20-45% of each day's paid attempts, because a selftest that
     drops TYPESAFE_API_KEY from its environment still reaches the key FILE."""
     return _truthy_env("CARR_JEV_OFFLINE") or _truthy_env("CARR_HOOK_FIXTURE")
-
-
-def read_api_key(path=KEY_PATH):
-    """The bearer token, from the 600-mode env file. Never logged."""
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            lines = handle.readlines()
-    except OSError as err:
-        raise TypeSafeError(
-            f"cannot read the TypeSafe credential at {path}: {err.strerror}. "
-            "Joe creates it by hand; no agent holds the value."
-        ) from None
-    for line in lines:
-        line = line.strip()
-        if line.startswith(f"{KEY_NAME}="):
-            value = line.split("=", 1)[1].strip()
-            if not value:
-                raise TypeSafeError(f"{path}: {KEY_NAME} is present but empty")
-            return value
-    raise TypeSafeError(f"{path}: no {KEY_NAME} line")
 
 
 def noul(instructions, true=None, false=None):
@@ -586,6 +557,36 @@ def _worker_upstream(stderr):
             reason if isinstance(reason, str) and re.fullmatch(r"[a-z_]{1,40}", reason) else None)
 
 
+SPEND_AUTHORITY = "carr-jev-spend/v1"
+
+
+def _worker_capability(run, node, script, timeout):
+    probe = {"idempotency_key": str(uuid.uuid4()), "session_id": "spend-authority-probe",
+             "purpose": "call", "transport_mode": "cache_only", "state": "spend authority probe",
+             "questions": {"probe": noul("Is this a probe?")}}
+    proc = run([node or "node", script or "local-verb.mjs", SERVER_VERB, json.dumps(probe)],
+               capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    if proc.returncode == 0:
+        payload = json.loads(proc.stdout)
+        return payload.get("ok") is True and payload.get("spend_authority") == SPEND_AUTHORITY
+    start = (proc.stderr or "").find("TOOL ERROR ")
+    if start < 0:
+        return False
+    payload, _ = json.JSONDecoder().raw_decode(proc.stderr, start + len("TOOL ERROR "))
+    return payload.get("error") == "jev_cache_miss" and payload.get("spend_authority") == SPEND_AUTHORITY
+
+
+def worker_ready():
+    """No paid call or vendor credential: verify the authenticated Worker contract."""
+    script, node = _local_verb_script(), _node_binary()
+    if not script or not node or _fixture_offline():
+        return False
+    try:
+        return _worker_capability(subprocess.run, node, script, 5)
+    except Exception:
+        return False
+
+
 def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
                transport_mode, runner=None, upstream=None, caller=None, job_id=None, unattended=False):
     """Ask the Worker's ask-jev verb. Returns (result, None) on success, where
@@ -611,10 +612,16 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         args["transport_mode"] = transport_mode
     try:
         run = runner or subprocess.run
+        started = time.monotonic()
+        if not _worker_capability(run, node, script, float(timeout)):
+            return None, "jev_spend_authority_unavailable"
+        remaining = float(timeout) - (time.monotonic() - started)
+        if remaining <= 0:
+            return None, "server_timeout"
         proc = run([node or "node", script or "local-verb.mjs", SERVER_VERB,
                     json.dumps(args, ensure_ascii=False)],
                    capture_output=True, text=True,
-                   timeout=float(timeout),
+                   timeout=remaining,
                    stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, "server_timeout"
@@ -926,9 +933,6 @@ def _windows(now):
 
 
 _BUDGET_TABLES = (
-    # One refusal row per (code, site, session, window) reaches the call log;
-    # the rest are counted here, so a refused burner cannot flood the log.
-    "CREATE TABLE IF NOT EXISTS refusal_log (window TEXT PRIMARY KEY, count INTEGER NOT NULL)",
     # Active budget pauses, read by hooks to say so once instead of per call.
     "CREATE TABLE IF NOT EXISTS budget_pause (scope TEXT, site TEXT, resets_at TEXT, "
     "PRIMARY KEY(scope,site,resets_at))",
@@ -940,25 +944,6 @@ _BUDGET_TABLES = (
 def _budget_tables(db):
     for statement in _BUDGET_TABLES:
         db.execute(statement)
-
-
-def _record_refusal(questions, facets, caller, question_kind, prompt_sha256, code, session, now=None):
-    """Log a refusal once per code/site/session/hour; count every one."""
-    _, hour, _, _ = _windows(now or datetime.now(timezone.utc))
-    window = json.dumps([code, caller, session or "", hour])
-    first = True
-    try:
-        with closing(sqlite3.connect(_cap_db_path(), timeout=1.0)) as db, db:
-            _budget_tables(db)
-            first = db.execute("INSERT OR IGNORE INTO refusal_log VALUES (?,1)", (window,)).rowcount == 1
-            if not first:
-                db.execute("UPDATE refusal_log SET count=count+1 WHERE window=?", (window,))
-    except (OSError, sqlite3.Error):
-        pass  # A refusal still refuses when its bookkeeping cannot be written.
-    if first:
-        _append_call_receipt(questions, facets, None, JEV_DAILY_CAP_LOG, caller=caller,
-                             question_kind=question_kind, prompt_sha256=prompt_sha256,
-                             ok=False, error=code, session=session)
 
 
 def _observe_worker_pause(code, caller, resets_at):
@@ -995,40 +980,11 @@ def call_site_enabled(caller):
         return False
 
 
-def _admit_paid_call(caller, session, questions, facets, question_kind, prompt_sha256):
-    """The registry gate, before any transport: the site entry, or JevCallRefused.
-
-    Ordered questions, each a deterministic predicate:
-      1. is this a fixture or CI run?             -> refuse, unlogged (never real traffic)
-      2. is the registry readable and valid?      -> else refuse everything
-      3. is `caller` a registered site?           -> else unregistered_caller
-      4. does the call carry the site's attribution (a session, or for
-         session_or_job sites a session or a scheduled job's label)?
-                                                  -> else unattributed_call
-      5. is this an unattended worker, and does the site stay off there?
-                                                  -> unattended_worker_off
-    """
+def _refuse_offline(caller):
+    """Fixtures refuse locally; the Worker alone resolves and admits call sites."""
     if _fixture_offline():
         raise JevCallRefused("Jev unavailable: fixture or CI run (CARR_JEV_OFFLINE/CARR_HOOK_FIXTURE)",
                              code="fixture_offline", site=caller)
-    code = None
-    entry = None
-    try:
-        registry = load_call_sites()
-    except TypeSafeError:
-        code = "call_site_registry_invalid"
-    else:
-        entry = call_site(caller, registry)
-        if entry is None:
-            code = "unregistered_caller"
-        elif not session and not (entry["attribution"] == "session_or_job" and _job_label()):
-            code = "unattributed_call"
-        elif not _site_enabled(entry):
-            code = "unattended_worker_off"
-    if code:
-        _record_refusal(questions, facets, caller, question_kind, prompt_sha256, code, session)
-        raise JevCallRefused(f"Jev unavailable: {code} ({caller})", code=code, site=caller)
-    return registry, entry
 
 
 def active_pause(*, sites=None, now=None):
@@ -1129,22 +1085,20 @@ def spend_by_site_health(*, now=None):
 
 
 def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
-        api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
         facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
-        cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
+        cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS,
         work_class="system_work", purpose="call", server_runner=None, session_id=None,
         transcript_path=None):
     """Compatibility entrypoint: all existing callers cross the class switch.
 
-    The original transport retains its wire, retry, cache and receipt contract.
+    The Worker owns the transport, retry, cache and receipt contract.
     Runtime consumers explicitly pass app_runtime, which cannot use Decisions.
     """
     try:
         return JUDGE.ask(state, questions, jev=partial(_ask_jev, work_class=work_class), work_class=work_class,
-                         model=model, timeout=timeout, api_key=api_key, retries=retries,
-                         endpoint=endpoint, opener=opener, facets=facets, calls_log=calls_log,
+                         model=model, timeout=timeout, facets=facets, calls_log=calls_log,
                          deadline=deadline, caller=caller or _caller_name(),
-                         cache_ttl_seconds=cache_ttl_seconds, cache_path=cache_path, account=account,
+                         cache_ttl_seconds=cache_ttl_seconds,
                          purpose=purpose, server_runner=server_runner, session_id=session_id,
                          transcript_path=transcript_path)
     except JUDGE.JudgeUnavailable as exc:
@@ -1152,9 +1106,8 @@ def ask(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
 
 
 def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
-             api_key=None, retries=RATE_LIMIT_RETRIES, endpoint=ENDPOINT, opener=None,
              facets=None, calls_log=JEV_CALLS_LOG, deadline=None, caller=None,
-             cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS, cache_path=JUDGE_CACHE_PATH, account=None,
+             cache_ttl_seconds=JUDGE_CACHE_TTL_SECONDS,
              purpose="call", server_runner=None, session_id=None, work_class="system_work",
              transcript_path=None):
     """Evaluate `state` against a map of questions in ONE request.
@@ -1170,22 +1123,11 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     receipts to the dispatching human; otherwise the native session is discovered.
     Retries and late answers keep that owner. Unknown owners stay unbound.
 
-    Returns the decoded response: {"model": ..., "answers": {...},
-    "usage": {...}}. `opener` is for the offline selftest and is not used in
-    production. On a successful response this also appends one best-effort
-    receipt row to `calls_log` (default out/jev-calls.jsonl) — see
-    JEV_CALLS_LOG's module-level note for what it carries and why.
-
-    Every production call uses the Worker. It owns the shared cache, durable
-    per-attempt reservation, retries, budget counts, and billing hold. Failures
-    never fall back to a local vendor key. `server_runner` and `opener` are
-    explicit offline test seams; injected openers never read credentials.
-
-    `deadline` caps the Worker transport timeout. `caller` identifies a registered
-    site; `session_id` or a scheduled job supplies attribution. Passing
-    cache_ttl_seconds=0 selects one uncached attempt. Cache hits return usage=None
-    and cannot count as fresh vendor-call evidence. Legacy cache_path, account,
-    api_key, retries and endpoint parameters affect only the offline opener seam.
+    Returns a typed judgment and its Worker receipt. server_runner is the
+    offline fake Worker seam. deadline bounds the entire transport, including
+    the zero-spend capability probe. cache_ttl_seconds=0 selects paid_once.
+    The Worker owns cache, retries, admission and billing; failures never fall
+    back to a vendor key. Cache hits cannot count as fresh vendor evidence.
     """
     if not isinstance(questions, dict) or not questions:
         raise TypeSafeError("ask needs a non-empty map of questions")
@@ -1194,7 +1136,6 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         raise TypeSafeError(f"malformed Jev request, nothing sent: {problem}")
 
     payload = {"state": state, "model": model, "questions": questions}
-    body = json.dumps(payload).encode("utf-8")
     caller = caller or _caller_name()
     question_kind = _question_kind(questions)
     prompt_sha256 = _prompt_sha256(payload)
@@ -1211,85 +1152,38 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
     if not isinstance(cache_ttl_seconds, (int, float)) or not math.isfinite(cache_ttl_seconds) or cache_ttl_seconds < 0:
         raise TypeSafeError("cache_ttl_seconds must be a finite nonnegative number")
     dispatch_binding = _dispatch_binding(transcript_path, session_id)
-    if opener is None:
-        _admit_paid_call(caller, dispatch_binding[0], questions, facets, question_kind, prompt_sha256)
-        remaining = float(timeout)
-        if deadline is not None:
-            remaining = min(remaining, deadline - time.monotonic())
-        if remaining <= 0:
-            raise TypeSafeError("deadline passed before the request could be sent")
-        upstream = {}
-        served, error = server_ask(
-            state, questions, model=model, facets=facets, purpose=purpose,
-            session_id=dispatch_binding[0] or "unbound", timeout=remaining,
-            transport_mode="paid_once" if cache_ttl_seconds == 0 else None,
-            runner=server_runner, upstream=upstream, caller=caller, job_id=_job_label(), unattended=_unattended())
-        if served is None:
-            _append_call_receipt(questions, facets, {"http_status": upstream.get("status")}, calls_log, dispatch_binding=dispatch_binding,
-                caller=caller, question_kind=question_kind, prompt_sha256=prompt_sha256,
-                ok=False, error=error, server_error=error, session=session_id)
-            if error in REFUSAL_CODES:
-                _observe_worker_pause(error, caller, upstream.get('resets_at'))
-                raise JevCallRefused(f"Jev unavailable: {error} ({caller})", code=error, site=caller,
-                                     resets_at=upstream.get('resets_at'))
-            raise TypeSafeError(f"Jev Worker unavailable: {error}; no direct fallback")
-        cache_hit = served.get("cache_hit") is True
-        validation = {**served, "usage": {"input_tokens": 0, "output_tokens": 0}} if cache_hit else served
-        valid = usable_judgment(validation, questions)
-        served["calibration"] = _safe_calibration_block(state, questions, served, model) if valid else None
-        _append_call_receipt(questions, facets, {**served, "schema_valid": valid, "usable": valid}, calls_log,
-            dispatch_binding=dispatch_binding, caller=caller, question_kind=question_kind,
-            prompt_sha256=prompt_sha256, ok=valid, cache_hit=cache_hit,
-            calibration=served["calibration"], session=session_id)
-        if not valid:
-            raise TypeSafeError("TypeSafe returned an unusable judgment")
-        return served
-
-    # The only direct transport is an explicitly injected offline opener. It
-    # never reads a credential, reserves budget, caches, or writes live receipts.
-    credential = api_key or "offline-injected-opener"
-    request = urllib.request.Request(
-        endpoint, data=body, method="POST",
-        headers={
-            "Authorization": f"Bearer {credential}",
-            "Content-Type": "application/json",
-            # Cloudflare rejects urllib's default Python-urllib signature with
-            # error 1010. Identify this server-side client explicitly.
-            "User-Agent": "carr-typesafe-client/1.0",
-        },
-    )
-
-    attempt = 0
-    while True:
-        attempt_timeout = timeout
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TypeSafeError("deadline passed before the request could be sent")
-            attempt_timeout = min(timeout, remaining)
-        try:
-            with opener(request, timeout=attempt_timeout) as response:
-                status = getattr(response, "status", None)
-                result = json.load(response)
-            if not (type(status) is int and 200 <= status < 300 and usable_judgment(result, questions)):
-                raise TypeSafeError("TypeSafe returned an unusable judgment")
-            result["calibration"] = _safe_calibration_block(state, questions, result, model)
-            return result
-        except urllib.error.HTTPError as err:
-            if err.code == 429 and attempt < retries:
-                try:
-                    delay = float(err.headers.get("retry-after"))
-                except (TypeError, ValueError, AttributeError):
-                    delay = 2.0 * (attempt + 1)
-                if deadline is not None and delay >= deadline - time.monotonic():
-                    raise TypeSafeError("TypeSafe retry-after runs past the caller's deadline") from None
-                time.sleep(delay)
-                attempt += 1
-                continue
-            detail = err.read().decode("utf-8", "replace")[:400].replace(credential, "[redacted]")
-            raise TypeSafeError(f"TypeSafe returned HTTP {err.code}: {detail}") from None
-        except urllib.error.URLError as err:
-            raise TypeSafeError(f"offline transport failed: {err.reason}") from None
+    _refuse_offline(caller)
+    remaining = float(timeout)
+    if deadline is not None:
+        remaining = min(remaining, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TypeSafeError("deadline passed before the request could be sent")
+    upstream = {}
+    served, error = server_ask(
+        state, questions, model=model, facets=facets, purpose=purpose,
+        session_id=dispatch_binding[0] or "unbound", timeout=remaining,
+        transport_mode="paid_once" if cache_ttl_seconds == 0 else None,
+        runner=server_runner, upstream=upstream, caller=caller, job_id=_job_label(), unattended=_unattended())
+    if served is None:
+        _append_call_receipt(questions, facets, {"http_status": upstream.get("status")}, calls_log, dispatch_binding=dispatch_binding,
+            caller=caller, question_kind=question_kind, prompt_sha256=prompt_sha256,
+            ok=False, error=error, server_error=error, session=session_id)
+        if error in REFUSAL_CODES:
+            _observe_worker_pause(error, caller, upstream.get('resets_at'))
+            raise JevCallRefused(f"Jev unavailable: {error} ({caller})", code=error, site=caller,
+                                 resets_at=upstream.get('resets_at'))
+        raise TypeSafeError(f"Jev Worker unavailable: {error}; no direct fallback")
+    cache_hit = served.get("cache_hit") is True
+    validation = {**served, "usage": {"input_tokens": 0, "output_tokens": 0}} if cache_hit else served
+    valid = usable_judgment(validation, questions)
+    served["calibration"] = _safe_calibration_block(state, questions, served, model) if valid else None
+    _append_call_receipt(questions, facets, {**served, "schema_valid": valid, "usable": valid}, calls_log,
+        dispatch_binding=dispatch_binding, caller=caller, question_kind=question_kind,
+        prompt_sha256=prompt_sha256, ok=valid, cache_hit=cache_hit,
+        calibration=served["calibration"], session=session_id)
+    if not valid:
+        raise TypeSafeError("TypeSafe returned an unusable judgment")
+    return served
 
 
 def decide(answer, *, yes_at=0.8, no_at=0.2, min_confidence=0.6):

@@ -301,7 +301,7 @@ def _review(region, task, client=None, api_key=None):
         for qid, (text, true, false) in TASK_QUESTIONS.items():
             questions[qid] = tsc.noul(text, true=true, false=false)
         state["task"] = {"latest_human_request": task}
-    answer = tsc.ask(state, questions, timeout=TIMEOUT_SECONDS, api_key=api_key)
+    answer = tsc.ask(state, questions, timeout=TIMEOUT_SECONDS)
     scores = {qid: answer_value(body)
               for qid, body in (answer.get("answers") or {}).items()}
     model = answer.get("model")

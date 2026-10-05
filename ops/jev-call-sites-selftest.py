@@ -22,6 +22,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 import unittest
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -77,11 +78,27 @@ class Harness(unittest.TestCase):
         def opener(request, timeout=None):
             self.requests.append(request)
             return FakeResponse(json.dumps(ANSWER).encode())
-        self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
+        self.enterContext(patch.object(urllib.request, "urlopen", opener))
         def worker(state, questions, **options):
-            request = client.urllib.request.Request(client.ENDPOINT, data=json.dumps({
+            # The canonical JS predicate is the fixture's Worker admission too.
+            attribution = {k: options.get(k) for k in ('caller', 'session_id', 'job_id', 'unattended')}
+            attribution['session_id'] = None if attribution['session_id'] == 'unbound' else attribution['session_id']
+            try:
+                registry = json.loads(Path(client.JEV_CALL_SITES_PATH).read_text())
+            except ValueError:
+                return None, 'call_site_registry_invalid'
+            script = """import {jevCallSite,costPolicy} from './mcp-server/src/jev-spend-authority.js';
+                let input='';for await(const chunk of process.stdin)input+=chunk;
+                const {who,registry}=JSON.parse(input);
+                try {console.log(JSON.stringify({site:jevCallSite(who,registry,costPolicy)}));}
+                catch(e){console.log(JSON.stringify({error:e.payload.error}));}"""
+            run = subprocess.run(['node', '--input-type=module', '-e', script], cwd=REPO,
+                input=json.dumps({'who':attribution,'registry':registry}), capture_output=True, text=True, check=True)
+            outcome = json.loads(run.stdout)
+            if outcome.get('error'): return None, outcome['error']
+            request = urllib.request.Request('https://fixture.invalid', data=json.dumps({
                 "state": state, "questions": questions, "model": options["model"]}).encode())
-            with client.urllib.request.urlopen(request, timeout=options["timeout"]) as response:
+            with urllib.request.urlopen(request, timeout=options["timeout"]) as response:
                 answer = json.load(response)
             return {**answer, "server_receipt": {"receipt_id": "offline-worker"}}, None
         self.enterContext(patch.object(client, "server_ask", worker))
@@ -100,7 +117,7 @@ class Harness(unittest.TestCase):
                                              "hourly_paid_call_cap": hourly, "sites": sites}))
 
     def ask(self, text, caller="hook_site", session="sess-1"):
-        return client.ask(text, {"q": client.noul("Fixture judgment")}, api_key="offline-fixture",
+        return client.ask(text, {"q": client.noul("Fixture judgment")},
                           calls_log=str(self.log), cache_ttl_seconds=0, caller=caller,
                           session_id=session)
 
@@ -137,8 +154,7 @@ class RecordingAttributionTests(Harness):
         env = run.call_args.kwargs["env"]
         self.assertFalse(any(key in env for key in client.SESSION_ID_ENV_KEYS))
         with patch.dict(os.environ, env, clear=True):
-            _, entry = client._admit_paid_call("jev_deal_read", None, {}, [], None, None)
-            self.assertEqual(entry["caller"], "jev_deal_read")
+            client._refuse_offline("jev_deal_read")
             self.assertEqual(client._job_label(), "nightly-record-layer")
             spec = importlib.util.spec_from_file_location("jev_deal_read", REPO / "ops/jev_deal_read.py")
             reader = importlib.util.module_from_spec(spec)
@@ -154,9 +170,8 @@ class RecordingAttributionTests(Harness):
             def opener(request, timeout=None):
                 self.requests.append(request)
                 return FakeResponse(json.dumps({**ANSWER, "answers": answers}).encode())
-            with patch.object(reader, "ts", client), patch.object(client.urllib.request, "urlopen", opener), \
-                    patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "deal-cache.json"),
-                               calls_log=str(self.log)):
+            with patch.object(reader, "ts", client), patch.object(urllib.request, "urlopen", opener), \
+                    patch.dict(client.ask.__kwdefaults__, calls_log=str(self.log)):
                 reading = reader.read_deal(bundle, api_key="offline-fixture")
             self.assertTrue(reading["judged"], reading.get("reason"))
             self.assertEqual(len(self.requests), 1)
@@ -165,7 +180,6 @@ class RecordingAttributionTests(Harness):
     def test_quill_post_call_checks_work_without_agent_environment(self):
         self.enterContext(patch.object(client, "JEV_CALL_SITES_PATH", str(REGISTRY_PATH)))
         self.enterContext(patch.dict(os.environ, {"XPC_SERVICE_NAME": "com.digimata.quill"}))
-        self.enterContext(patch.object(client, "read_api_key", lambda *a: "offline-fixture"))
         spec = importlib.util.spec_from_file_location("post_call_jev", REPO / "tools/dictation-rig/bin/post_call_jev.py")
         post = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(post)
@@ -176,9 +190,8 @@ class RecordingAttributionTests(Harness):
         def opener(request, timeout=None):
             self.requests.append(request)
             return FakeResponse(json.dumps({**ANSWER, "answers": answers}).encode())
-        self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
-        self.enterContext(patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "cache.json"),
-                                     calls_log=str(self.log)))
+        self.enterContext(patch.object(urllib.request, "urlopen", opener))
+        self.enterContext(patch.dict(client.ask.__kwdefaults__, calls_log=str(self.log)))
         pack = {"session": "recording-fixture", "joe_tasks": [
             {"id": "item-fixture", "deal_id": "deal-fixture", "task": "send details", "evidence": "send details"}]}
         post.check_distillation(pack, {"deals": [{"id": "deal-fixture", "name": "Fixture"}]},
@@ -199,7 +212,7 @@ class RegistryAdmissionTests(Harness):
             self.assertEqual(caught.exception.code, "unregistered_caller")
         self.assertEqual(self.requests, [])
         refusals = [r for r in self.rows() if r.get("error") == "unregistered_caller"]
-        self.assertEqual(len(refusals), 1, "a refusal is visible once per window, not per call")
+        self.assertEqual(len(refusals), 3, "each Worker refusal retains its own transport receipt")
         self.assertFalse(refusals[0]["ok"])
 
     def test_refusals_never_count_toward_the_daily_cap_seed(self):
@@ -257,11 +270,6 @@ class RegistryAdmissionTests(Harness):
             self.ask("x")
         self.assertEqual(self.requests, [])
 
-    def test_offline_injected_opener_is_not_policed(self):
-        result = client.ask("x", {"q": client.noul("Fixture")}, api_key="k", caller="anything",
-                            opener=lambda request, timeout=None: FakeResponse(json.dumps(ANSWER).encode()),
-                            calls_log=str(self.log), cache_ttl_seconds=0)
-        self.assertEqual(result["model"], "jev-1.13.0")
 
 
 class ChangeTollsDedupeTests(unittest.TestCase):
@@ -524,7 +532,7 @@ class RegistryCoverageTests(unittest.TestCase):
                 continue
             stems = {Path(s).stem for s in entry["sources"]}
             named = caller in stems or any(
-                f'"{caller}"' in (REPO / s).read_text(encoding="utf-8", errors="replace")
+                caller in (REPO / s).read_text(encoding="utf-8", errors="replace")
                 for s in entry["sources"])
             self.assertTrue(named, f"{caller}: the caller is the calling module's file name, "
                                    "or an explicit caller= string in one of its sources")

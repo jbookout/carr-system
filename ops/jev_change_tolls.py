@@ -341,8 +341,7 @@ def _answers(tsc, state, api_key, cached):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Jev toll judgment unavailable: request deadline exhausted")
-        return tsc.ask({"change": state}, questions, timeout=remaining,
-                       api_key=api_key).get("answers") or {}
+        return tsc.ask({"change": state}, questions, timeout=remaining).get("answers") or {}
     if not cached:
         return request()
     key = hashlib.sha256(json.dumps({"change": state, "questions": questions}, sort_keys=True,

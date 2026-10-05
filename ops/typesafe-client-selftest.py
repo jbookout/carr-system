@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline tests for the Jev client.
 
-NOTHING HERE REACHES THE NETWORK. Every request is served by an injected
-opener, so this suite runs on a GitHub runner with no credential, no allowlist
+NOTHING HERE REACHES THE NETWORK. Every request is served by a fake
+Worker, so this suite runs on a GitHub runner with no credential, no allowlist
 entry and no spend. A test that needed the live service would be a test CI
 could not run.
 
@@ -29,6 +29,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -64,19 +65,49 @@ def setUpModule():
     patcher = patch.object(client, "JEV_DAILY_CAP_LOG", os.path.join(_CAP_ROOT.name, "calls.jsonl"))
     patcher.start()
     unittest.addModuleCleanup(patcher.stop)
+    real_run = subprocess.run
+    def guard_run(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and any(str(a).endswith('local-verb.mjs') for a in argv):
+            raise AssertionError('fixture reached real local-verb')
+        return real_run(argv, *args, **kwargs)
+    guard = patch.object(subprocess, 'run', guard_run)
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
 
 
-_REAL_URLOPEN = client.urllib.request.urlopen
+_REAL_URLOPEN = urllib.request.urlopen
 
-def fake_worker(state, questions, **options):
-    send = client.urllib.request.urlopen
+def _urlopen_worker(state, questions, **options):
+    send = urllib.request.urlopen
     if send is _REAL_URLOPEN:
         raise AssertionError("selftest attempted an uninjected transport")
-    request = client.urllib.request.Request("https://fixture.invalid", data=json.dumps({
+    request = urllib.request.Request("https://fixture.invalid", data=json.dumps({
         "state": state, "questions": questions, "model": options["model"]}).encode())
     with send(request, timeout=options["timeout"]) as response:
         answer = json.load(response)
     return {**answer, "server_receipt": {"receipt_id": "offline-worker"}}, None
+
+_REAL_SERVER_ASK = client.server_ask
+
+def offline_worker(opener):
+    def run(argv, **options):
+        args = json.loads(argv[3])
+        if args.get('transport_mode') == 'cache_only':
+            return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR '+json.dumps(
+                {'error':'jev_cache_miss','spend_authority':client.SPEND_AUTHORITY}))
+        request = urllib.request.Request('https://'+'fixture.invalid', method='POST',
+            data=json.dumps({'state':args['state']['input'], 'questions':args['questions'], 'model':args['model']}).encode())
+        with opener(request, timeout=options['timeout']) as response:
+            result = json.load(response)
+        if response.status != 200:
+            return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR {"error":"jev_upstream_failed"}')
+        return subprocess.CompletedProcess(argv, 0, json.dumps({**result,'ok':True,'receipt_id':'offline-worker'}), '')
+    return run
+
+def fake_worker(state, questions, **options):
+    if options.get('runner'):
+        return _REAL_SERVER_ASK(state, questions, **options)
+    return _urlopen_worker(state, questions, **options)
 
 setattr(client, "server_ask", fake_worker)
 
@@ -132,7 +163,7 @@ class UnusableResponseTests(unittest.TestCase):
         self.worker_calls = []
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.log = root / "calls.jsonl"
-        self.options = {"opener": responder(ANSWER, self.requests), "api_key": "fixture"}
+        self.options = {"server_runner": offline_worker(responder(ANSWER, self.requests))}
 
     def ask(self, text):
         return client.ask(text, {"q": client.noul("Fixture")}, **self.options)
@@ -549,9 +580,9 @@ class DispatchOwnershipTests(unittest.TestCase):
                 'message': {'role': 'user', 'content': 'judge this'}}) + '\n')
             log = Path(directory) / 'calls.jsonl'
             with patch.dict(os.environ, {'CODEX_THREAD_ID': session}), patch.object(
-                    client.urllib.request, 'urlopen', responder(ANSWER)):
+                    urllib.request, 'urlopen', responder(ANSWER)):
                 result = client.ask('state', {'q': client.noul('judge')},
-                    api_key='offline', cache_ttl_seconds=0, calls_log=str(log),
+                     cache_ttl_seconds=0, calls_log=str(log),
                     work_class='app_runtime', transcript_path=str(transcript))
             row = json.loads(log.read_text())
             self.assertEqual(result['answers'], ANSWER['answers'])
@@ -568,20 +599,23 @@ class DispatchOwnershipTests(unittest.TestCase):
             transcript.write_text(json.dumps(records[0]) + "\n")
             log = Path(directory) / "calls.jsonl"
             code = r"""
-import importlib.util, io, json, sys
+import importlib.util, io, json, sys, urllib.request
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('standalone_client', sys.argv[1])
 client = importlib.util.module_from_spec(spec); spec.loader.exec_module(client)
 client.JEV_DAILY_CAP_LOG = sys.argv[2]
+def worker(state, questions, **options):
+    return {'model':'jev-test','answers':{'architecture_or_design':{'type':'noul','noul':0.9}},'usage':{'input_tokens':20,'output_tokens':6}}, None
+client.server_ask = worker
 class Response(io.StringIO):
     status = 200
     def __init__(self):
         super().__init__(json.dumps({'model':'jev-test',
             'answers':{'architecture_or_design':{'type':'noul','noul':0.9}},
             'usage':{'input_tokens':20,'output_tokens':6}}))
-with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
+with patch.object(client.subprocess, 'run', side_effect=AssertionError('fixture reached real local-verb')), patch.object(urllib.request, 'urlopen', lambda *a, **k: Response()):
     client.ask('state', {'architecture_or_design':client.noul('judge design')},
-               api_key='offline', cache_ttl_seconds=0, calls_log=sys.argv[2],
+               cache_ttl_seconds=0, calls_log=sys.argv[2],
                caller='adhoc:standalone-owner-fixture')
 """
             result = subprocess.run([__import__('sys').executable, '-c', code,
@@ -622,44 +656,17 @@ with patch.object(client.urllib.request, 'urlopen', lambda *a, **k: Response()):
                 log = home/'calls.jsonl'
                 with patch.dict(os.environ, env, clear=True), patch.object(
                         client.os.path, 'expanduser', lambda path: path.replace('~/', directory+'/', 1)), patch.object(
-                        client.urllib.request, 'urlopen', responder(ANSWER)):
-                    client.ask('state', {'q':client.noul('judge')}, api_key='offline',
+                        urllib.request, 'urlopen', responder(ANSWER)):
+                    client.ask('state', {'q':client.noul('judge')},
                                cache_ttl_seconds=0, calls_log=str(log))
                     transcript.write_text(json.dumps(header)+'\n')
-                    client.ask('state', {'q':client.noul('judge')}, api_key='offline',
+                    client.ask('state', {'q':client.noul('judge')},
                                cache_ttl_seconds=0, calls_log=str(log))
                 rows = [json.loads(line) for line in log.read_text().splitlines()]
                 self.assertEqual(rows[0]['session'], session)
                 self.assertIsInstance(rows[0]['human_turn_id'], str)
                 self.assertIsNone(rows[1]['human_turn_id'])
                 self.assertTrue(all(row['ok'] for row in rows))
-
-
-class CredentialTests(unittest.TestCase):
-    def _write(self, text):
-        path = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
-        target = path / "typesafe.env"
-        target.write_text(text, encoding="utf-8")
-        return str(target)
-
-    def test_reads_the_value(self):
-        path = self._write("# comment\nTYPESAFE_API_KEY=abc123\n")
-        self.assertEqual(client.read_api_key(path), "abc123")
-
-    def test_empty_value_is_refused_rather_than_returned(self):
-        path = self._write("TYPESAFE_API_KEY=\n")
-        with self.assertRaises(client.TypeSafeError):
-            client.read_api_key(path)
-
-    def test_missing_line_is_refused(self):
-        path = self._write("SOMETHING_ELSE=x\n")
-        with self.assertRaises(client.TypeSafeError):
-            client.read_api_key(path)
-
-    def test_missing_file_names_the_path(self):
-        with self.assertRaises(client.TypeSafeError) as caught:
-            client.read_api_key("/nonexistent/typesafe.env")
-        self.assertIn("/nonexistent/typesafe.env", str(caught.exception))
 
 
 class QuestionBuilderTests(unittest.TestCase):
@@ -687,72 +694,29 @@ class AskTests(unittest.TestCase):
             "a": {"type": "noul", "noul": 0.91},
             "b": {"type": "noul", "noul": 0.13},
             "c": {"type": "score", "score": 0.7, "confidence": 0.8}}}
-        client.ask("state", questions, api_key="k",
-                   opener=responder(answer, captured))
+        client.ask("state", questions,
+                   server_runner=offline_worker(responder(answer, captured)))
         self.assertEqual(len(captured), 1, "batching is the whole point; one call per question is 12x the cost")
         sent = json.loads(captured[0].data)
         self.assertEqual(set(sent["questions"]), {"a", "b", "c"})
         self.assertEqual(captured[0].method, "POST")
-        self.assertEqual(captured[0].full_url, client.ENDPOINT)
+        self.assertEqual(captured[0].full_url, 'https://fixture.invalid')
 
     def test_empty_question_map_is_refused_before_any_request(self):
         captured = []
         with self.assertRaises(client.TypeSafeError):
-            client.ask("state", {}, api_key="k", opener=responder(ANSWER, captured))
+            client.ask("state", {},  server_runner=offline_worker(responder(ANSWER, captured)))
         self.assertEqual(captured, [])
 
     def test_oversized_state_fails_locally_and_says_to_narrow_it(self):
         big = "x" * (client.STATE_BUDGET_CHARS + 10)
         captured = []
         with self.assertRaises(client.TypeSafeError) as caught:
-            client.ask(big, {"q": client.noul("?")}, api_key="k",
-                       opener=responder(ANSWER, captured))
+            client.ask(big, {"q": client.noul("?")},
+                       server_runner=offline_worker(responder(ANSWER, captured)))
         self.assertEqual(captured, [], "an oversized state must never reach the service")
         self.assertIn("Narrow it in code", str(caught.exception))
 
-    def test_http_error_reports_status_and_body_but_never_the_key(self):
-        secret = "sk-should-never-appear"
-
-        def failing(request, timeout=None):
-            raise urllib.error.HTTPError(
-                client.ENDPOINT, 422, "Unprocessable", {},
-                io.BytesIO(b"criteria malformed"))
-
-        with self.assertRaises(client.TypeSafeError) as caught:
-            client.ask("s", {"q": client.noul("?")}, api_key=secret, opener=failing)
-        message = str(caught.exception)
-        self.assertIn("422", message)
-        self.assertIn("criteria malformed", message)
-        self.assertNotIn(secret, message)
-
-    def test_rate_limit_is_retried_honouring_retry_after(self):
-        slept = []
-        client.time.sleep = lambda seconds: slept.append(seconds)
-        calls = {"n": 0}
-
-        def flaky(request, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise urllib.error.HTTPError(
-                    client.ENDPOINT, 429, "Too Many Requests",
-                    {"retry-after": "7"}, io.BytesIO(b""))
-            return FakeResponse(json.dumps(ANSWER).encode("utf-8"))
-
-        result = client.ask("s", {"q": client.noul("?")}, api_key="k", opener=flaky)
-        self.assertEqual(calls["n"], 2)
-        self.assertEqual(slept, [7.0], "the service's own retry-after must win over our backoff")
-        self.assertEqual(result["model"], "jev-1.13.0")
-
-    def test_rate_limit_gives_up_rather_than_retrying_forever(self):
-        client.time.sleep = lambda seconds: None
-
-        def always_limited(request, timeout=None):
-            raise urllib.error.HTTPError(
-                client.ENDPOINT, 429, "Too Many Requests", {}, io.BytesIO(b""))
-
-        with self.assertRaises(client.TypeSafeError):
-            client.ask("s", {"q": client.noul("?")}, api_key="k",
-                       opener=always_limited, retries=2)
 
 
 class DecideTests(unittest.TestCase):
@@ -824,9 +788,9 @@ class CallReceiptTests(unittest.TestCase):
             log = Path(d) / "calls.jsonl"
             answer = {**ANSWER, "answers": {
                 name: {"type": "noul", "noul": 0.91}}}
-            with patch.object(client.urllib.request, "urlopen", responder(answer)):
+            with patch.object(urllib.request, "urlopen", responder(answer)):
                 client.ask("state", {name: client.noul("is this relevant?")},
-                           api_key="secret", calls_log=str(log))
+                            calls_log=str(log))
             raw = log.read_text()
             row = json.loads(raw.splitlines()[0])
         self.assertNotIn(name, raw)
@@ -860,10 +824,9 @@ class CallReceiptTests(unittest.TestCase):
     def test_network_receipt_names_caller_kind_hash_and_tokens_without_prompt(self):
         with tempfile.TemporaryDirectory() as d:
             log = str(Path(d) / "calls.jsonl")
-            with patch.object(client.urllib.request, "urlopen", responder(ANSWER)):
+            with patch.object(urllib.request, "urlopen", responder(ANSWER)):
                 client.ask("private prompt", {"q": client.noul("private question")},
-                           api_key="secret", caller="unit-judge", calls_log=log,
-                           cache_path=str(Path(d) / "cache.sqlite3"))
+                            caller="unit-judge", calls_log=log)
             row = json.loads(Path(log).read_text().splitlines()[0])
         self.assertEqual(row["caller"], "unit-judge")
         self.assertEqual(row["question_kind"], "noul")
@@ -874,18 +837,14 @@ class CallReceiptTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(row))
 
 
-    def test_mock_opener_path_writes_no_receipt(self):
-        """A call made through `opener` (the offline selftest/mock path) must
-        NOT leave a receipt — a mock response was never actually seen by the
-        vendor, and a receipt for it would let running THIS selftest suite
-        count as a real turn's Jev evidence in lib/jev_required_actions.py."""
+    def test_injected_worker_writes_bound_receipt(self):
+        """The fake Worker writes only the explicitly isolated test log."""
         with tempfile.TemporaryDirectory() as d:
             log = str(Path(d) / "jev-calls.jsonl")
-            client.ask("s", {"q": client.noul("?")}, api_key="k",
-                       opener=responder(ANSWER), facets=["semantic_creation"],
+            client.ask("s", {"q": client.noul("?")},
+                       server_runner=offline_worker(responder(ANSWER)), facets=["semantic_creation"],
                        calls_log=log)
-            self.assertFalse(Path(log).exists(),
-                            "mock/opener calls must not create a receipt file at all")
+            self.assertEqual(json.loads(Path(log).read_text())["server_receipt_id"], "offline-worker")
 
     def test_receipt_file_is_append_only_across_calls(self):
         with tempfile.TemporaryDirectory() as d:
@@ -954,8 +913,8 @@ class CalibrationRecordTests(unittest.TestCase):
                   "answers": {"q": {"type": "noul", "noul": 0.8},
                               "pick": {"type": "choice", "choice": "b", "confidence": 0.9,
                                        "probabilities": {"a": 0.1, "b": 0.9}}}}
-        result = client.ask({"plan": "ship it"}, questions, api_key="k",
-                            model="jev-1.13.0", opener=responder(answer))
+        result = client.ask({"plan": "ship it"}, questions,
+                            model="jev-1.13.0", server_runner=offline_worker(responder(answer)))
         block = result["calibration"]
         self.assertEqual(block["schema"], "carr.jev-calibration.v1")
         self.assertEqual(block["model_requested"], "jev-1.13.0")
@@ -976,8 +935,8 @@ class CalibrationRecordTests(unittest.TestCase):
                                          "probabilities": {"secret-option": 0.5, "other": 0.5}}}}
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "calls.jsonl"
-            with patch.object(client.urllib.request, "urlopen", responder(answer)):
-                client.ask({"plan": "x"}, questions, api_key="k", calls_log=str(log),
+            with patch.object(urllib.request, "urlopen", responder(answer)):
+                client.ask({"plan": "x"}, questions,  calls_log=str(log),
                            cache_ttl_seconds=0)
             raw = log.read_text()
         row = json.loads(raw.splitlines()[0])
@@ -991,8 +950,8 @@ class CalibrationRecordTests(unittest.TestCase):
 
     def test_a_calibration_bug_never_fails_a_usable_call(self):
         with patch.object(client, "calibration_block", side_effect=RuntimeError("boom")):
-            result = client.ask("s", {"q": client.noul("?")}, api_key="k",
-                                opener=responder(ANSWER))
+            result = client.ask("s", {"q": client.noul("?")},
+                                server_runner=offline_worker(responder(ANSWER)))
         self.assertIsNone(result["calibration"])
         self.assertEqual(result["answers"], ANSWER["answers"])
 

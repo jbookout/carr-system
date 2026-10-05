@@ -79,7 +79,7 @@ test("budgeted cache-only misses never reserve or fetch, including a broken cach
     const ask = jevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, { cache,
       reserveAttempt: async () => { reservations++; return { key: "k", receipt_id: "r" }; } });
     const out = await prefetchJevAnswer(askArgs({ transport_mode: "cache_only" }), ask);
-    assert.deepEqual(out, { ok: false, error: { error: "jev_cache_miss" } });
+    assert.deepEqual(out, { ok: false, error: { error: "jev_cache_miss", spend_authority: "carr-jev-spend/v1" } });
     assert.equal(reservations, 0);
     assert.equal(fetchImpl.calls.length, 0);
   }
@@ -144,7 +144,7 @@ class JevReceiptFake {
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim();
     this.calls.push({ sql, params });
-    if (["begin", "commit", "rollback"].includes(sql)) return { rows: [] };
+    if (sql.startsWith("set local ") || ["begin", "commit", "rollback"].includes(sql)) return { rows: [] };
     if (sql.startsWith("update tool_call set response")) {
       const call = this.toolCalls.get(params[0]);
       if (!call || call.verb !== "ask-jev-attempt" || call.actor_id !== params[1] ||

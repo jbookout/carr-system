@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every production client route uses the Worker; injected openers stay offline."""
+"""Every production client route uses the Worker; injected runners stay offline."""
 import importlib.util
 import io
 import json
@@ -20,16 +20,19 @@ ANSWER = {'model': 'jev-1.13.0', 'answers': {'q': {'type': 'noul', 'noul': .8}},
           'usage': {'input_tokens': 100, 'output_tokens': 1}}
 
 class AuthorityTests(unittest.TestCase):
-    def test_hook_runtime_and_explicit_key_all_use_worker_without_local_key_or_vendor(self):
-        for kwargs in ({}, {'api_key': 'must-not-use'}, {'work_class': 'app_runtime'}):
+    def test_hook_and_runtime_use_worker_without_local_key_or_vendor(self):
+        for kwargs in ({}, {'work_class': 'app_runtime'}):
             with self.subTest(kwargs=kwargs), tempfile.TemporaryDirectory() as tmp:
                 calls = []
                 def worker(argv, **options):
-                    args = json.loads(argv[3]); calls.append(args)
+                    args = json.loads(argv[3])
+                    if args.get('transport_mode') == 'cache_only':
+                        return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR '+json.dumps(
+                            {'error':'jev_cache_miss','spend_authority':client.SPEND_AUTHORITY}))
+                    calls.append(args)
                     return subprocess.CompletedProcess(argv, 0, json.dumps({**ANSWER, 'ok': True, 'receipt_id': 'r'}), '')
                 with patch.dict(os.environ, CARR_JEV_IN_HOOK='1', CARR_JEV_OFFLINE='0', CARR_HOOK_FIXTURE='0'), \
-                     patch.object(client, 'read_api_key', side_effect=AssertionError('local credential read')), \
-                     patch.object(client.urllib.request, 'urlopen', side_effect=AssertionError('vendor bypass')):
+                     patch.object(__import__("urllib.request", fromlist=["request"]), 'urlopen', side_effect=AssertionError('vendor bypass')):
                     answer = client.ask('state', {'q': client.noul('uncertain?')}, caller='jev_deal_read',
                       session_id='native-session-123', server_runner=worker, calls_log=tmp+'/log', **kwargs)
                 self.assertEqual(answer['answers'], ANSWER['answers'])
@@ -41,16 +44,49 @@ class AuthorityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             seen = []
             def fail(argv, **options):
+                if json.loads(argv[3]).get('transport_mode') == 'cache_only':
+                    return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR '+json.dumps(
+                        {'error':'jev_cache_miss','spend_authority':client.SPEND_AUTHORITY}))
                 seen.append(argv)
                 return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR {"error":"vendor_credit_exhausted"}')
             with patch.dict(os.environ, CARR_JEV_OFFLINE='0', CARR_HOOK_FIXTURE='0'), \
-                 patch.object(client.urllib.request, 'urlopen', side_effect=AssertionError('vendor bypass')):
+                 patch.object(__import__("urllib.request", fromlist=["request"]), 'urlopen', side_effect=AssertionError('vendor bypass')):
                 with self.assertRaises(client.TypeSafeError):
                     client.ask('state', {'q': client.noul('uncertain?')}, caller='jev_deal_read',
                       session_id='native-session-123', server_runner=fail, calls_log=tmp+'/log')
             self.assertEqual(len(seen), 1)
             self.assertIn('vendor_credit_exhausted', Path(tmp+'/log').read_text())
 
+
+    def test_old_worker_refuses_before_attribution_or_paid_call(self):
+        seen = []
+        def old_worker(argv, **options):
+            seen.append(json.loads(argv[3]))
+            return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR {"error":"jev_cache_miss"}')
+        with patch.dict(os.environ, CARR_JEV_OFFLINE='0', CARR_HOOK_FIXTURE='0'):
+            result, error = client.server_ask('private state', {'q': client.noul('judge')},
+                model='jev-1.13.0', facets=[], purpose='call', session_id='private-session',
+                timeout=10, transport_mode='paid_once', caller='jev_deal_read', runner=old_worker)
+        self.assertIsNone(result)
+        self.assertEqual(error, 'jev_spend_authority_unavailable')
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]['transport_mode'], 'cache_only')
+        self.assertNotIn('private', json.dumps(seen[0]))
+
+    def test_local_registry_cannot_refuse_worker_admission(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ,
+                CARR_JEV_OFFLINE='0', CARR_HOOK_FIXTURE='0'), patch.object(client,
+                'load_call_sites', side_effect=AssertionError('duplicate local authority')), patch.object(
+                client, 'server_ask', return_value=(dict(ANSWER), None)):
+            answer = client.ask('state', {'q': client.noul('judge')}, caller='new-worker-site',
+                session_id='native-session', calls_log=tmp+'/log')
+        self.assertEqual(answer['answers'], ANSWER['answers'])
+
+    def test_client_has_no_direct_vendor_transport(self):
+        source = Path(client.__file__).read_text()
+        self.assertNotIn('Authorization', source)
+        self.assertNotIn('urllib.request.Request', source)
+        self.assertFalse(hasattr(client, 'read_api_key'))
 
     def test_pause_is_worker_observation_not_retired_local_counter(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(client, 'JEV_DAILY_CAP_LOG', tmp+'/log'):
@@ -61,6 +97,9 @@ class AuthorityTests(unittest.TestCase):
             self.assertIsNone(client.active_pause())
             resets = (datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()
             def refuse(argv, **options):
+                if json.loads(argv[3]).get('transport_mode') == 'cache_only':
+                    return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR '+json.dumps(
+                        {'error':'jev_cache_miss','spend_authority':client.SPEND_AUTHORITY}))
                 return subprocess.CompletedProcess(argv, 1, '', 'TOOL ERROR '+json.dumps(
                     {'error':'vendor_credit_exhausted','resets_at':resets}))
             with patch.dict(os.environ, CARR_JEV_OFFLINE='0', CARR_HOOK_FIXTURE='0'):

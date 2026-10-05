@@ -40,7 +40,7 @@ export function jevCallSite(attribution, registry = spendPolicy, cost = costPoli
       typeof attribution.unattended !== 'boolean') refuseJevSpend('unattributed_call', attribution?.caller);
   const caller = attribution.caller;
   const site = registry.sites.find(s => s.caller === caller) || registry.sites
-    .filter(s => s.caller.endsWith('*') && caller.startsWith(s.caller.slice(0, -1)))
+    .filter(s => s.caller.endsWith('*') && caller.length >= s.caller.length && caller.startsWith(s.caller.slice(0, -1)))
     .sort((a, b) => b.caller.length - a.caller.length)[0];
   if (!site) refuseJevSpend('unregistered_caller', caller);
   const session = typeof attribution.session_id === 'string' && attribution.session_id.trim();
@@ -58,6 +58,8 @@ export async function checkJevSpend(client, attribution, registry = spendPolicy,
   // taken AFTER the prior lock owner commits its reservation, not before wait.
   let row;
   try {
+    await client.query("set local lock_timeout = '1s'");
+    await client.query("set local statement_timeout = '3s'");
     await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))', [SPEND_LOCK]);
     row = (await client.query(`
       with clock as (select clock_timestamp() as now), attempts as (
@@ -88,6 +90,8 @@ export async function checkJevSpend(client, attribution, registry = spendPolicy,
 export async function holdJevBilling(client, actor) {
   await client.query('begin');
   try {
+    await client.query("set local lock_timeout = '1s'");
+    await client.query("set local statement_timeout = '3s'");
     await client.query('select pg_advisory_xact_lock(hashtextextended($1,0))', [SPEND_LOCK]);
     await client.query(`insert into tool_call (idempotency_key, verb, actor_id, request_hash, response)
       values ($1, 'jev-billing-hold', $2, $1,

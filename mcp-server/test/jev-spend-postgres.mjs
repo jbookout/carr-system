@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
+import { readFileSync } from 'node:fs';
 import { checkJevSpend, holdJevBilling, spendPolicy, costPolicy, SPEND_LOCK, attributedJevState } from '../src/jev-spend-authority.js';
 import { jevAskBinding, reserveJevCallAttempt } from '../src/jev-call-receipt.js';
 
@@ -13,6 +14,7 @@ await pool.query(`create table tool_call (
   idempotency_key text primary key, verb text not null, actor_id uuid not null,
   request_hash text not null, response jsonb not null,
   created_at timestamptz not null default now())`);
+await pool.query(readFileSync(new URL('../../migrations/0825_jev_spend_attempt_index.sql', import.meta.url), 'utf8'));
 // The receipt sink is a database fixture; admission/insertion uses the
 // production reservation function, and no provider is configured.
 await pool.query(`create schema ops;
@@ -145,4 +147,37 @@ test('production reservation records the post-wait clock across a delayed lock',
     await blocker.query('rollback');
     blocker.release(); worker.release();
   }
+});
+
+test('an abandoned lock owner causes bounded refusal without a reservation', async () => {
+  await pool.query('truncate tool_call');
+  const blocker = await pool.connect();
+  try {
+    await blocker.query('begin');
+    await blocker.query('select pg_advisory_xact_lock(hashtextextended($1,0))', [SPEND_LOCK]);
+    const started = performance.now();
+    await assert.rejects(() => reserve(), e => e.payload?.error === 'jev_spend_authority_unavailable');
+    assert.ok(performance.now() - started < 2500, 'lock wait escaped its one-second limit');
+    assert.equal((await blocker.query('select count(*)::int n from tool_call')).rows[0].n, 0);
+  } finally { await blocker.query('rollback'); blocker.release(); }
+});
+
+test('admission uses the partial index with a large unrelated idempotency ledger', async () => {
+  await pool.query('truncate tool_call');
+  await pool.query(`insert into tool_call select 'unrelated-'||n, 'other-tool', $1, 'hash', '{}',
+    clock_timestamp() from generate_series(1,20000) n`, [actor.id]);
+  await reserve();
+  await pool.query('analyze tool_call');
+  const c = await pool.connect();
+  try {
+    await c.query('begin');
+    let plan;
+    await checkJevSpend({query: async (sql, params) => {
+      if (sql.includes('with clock as'))
+        plan = (await c.query('explain (format json) '+sql, params)).rows[0]['QUERY PLAN'];
+      return c.query(sql, params);
+    }}, who);
+    assert.ok(JSON.stringify(plan).includes('tool_call_jev_attempt_created_idx'), 'admission ignored partial index');
+    await c.query('rollback');
+  } finally { c.release(); }
 });

@@ -339,16 +339,15 @@ test("jevRerank dispatches by mode and treats off as the deterministic order", a
 });
 
 
-test('all retained rerank variants carry registered Worker attribution', async () => {
+test('rerank variants pass semantic state to their supplied judge', async () => {
   for (const mode of ['score', 'noul', 'beam']) {
     const jev = fakeJev(() => mode === 'score' ? 5 : .5);
     await jevRerank({ mode, situation: 'bounded uncertainty', candidates: [candidate(1), candidate(2)],
       askJev: jev.ask, taxonomy: DOCTRINE_TAXONOMY_SNAPSHOT });
     assert.ok(jev.requests.length > 0);
     for (const req of jev.requests) {
-      assert.equal(req.state.jev_attribution.caller, 'worker.rerank');
-      assert.equal(req.state.jev_attribution.session_id, req.session_id);
-      assert.deepEqual(req.state.input, { situation: 'bounded uncertainty' });
+      assert.deepEqual(req.state, { situation: 'bounded uncertainty' });
+      assert.equal(req.session_id, undefined);
     }
   }
 });

@@ -256,7 +256,7 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
     // paid_once skips cache reads and retries; every paid attempt still
     // reserves from the Worker ledger.
     if (transport_mode === "cache_only")
-      throw new LeafToolError({ error: "jev_cache_miss" });
+      throw new LeafToolError({ error: "jev_cache_miss", spend_authority: "carr-jev-spend/v1" });
     if (!reserveAttempt || !billingHold)
       refuseJevSpend("jev_spend_authority_unavailable", null);
     const reserve = async () => {
@@ -522,6 +522,7 @@ export function jevCallReceiptTools({ withEnvelope, ToolError }) {
           }
           return {
             ok: true,
+            spend_authority: "carr-jev-spend/v1",
             receipt_id: row.receipt_id,
             recorded_at: row.recorded_at,
             purpose: args.purpose,

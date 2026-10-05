@@ -463,10 +463,10 @@ def _advice(boundary, rows):
 
 
 def credential_ready(client=None):
-    """Whether a Jev request could be made at all (no network)."""
+    """Whether the authenticated Worker advertises spend authority (no paid call)."""
     try:
         tsc = client or _sibling("typesafe_client")
-        return bool(tsc.read_api_key())
+        return bool(tsc.worker_ready())
     except Exception:
         return False
 
