@@ -88361,8 +88361,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "e87ed13f745f543b262107a5239ba2733bfe5875216dbdb83c31a69e966665cc",
-          "handler_digest": "e87ed13f745f543b262107a5239ba2733bfe5875216dbdb83c31a69e966665cc",
+          "schema_digest": "a0568ec8abb0650ce5dd5f5c1fccf740cc9bdc638b6fee3b99519c54ba48b7f8",
+          "handler_digest": "a0568ec8abb0650ce5dd5f5c1fccf740cc9bdc638b6fee3b99519c54ba48b7f8",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -88403,7 +88403,7 @@
         }
       ],
       "expected_count": 1110,
-      "expected_sha256": "838b46c4adc5dcf78472eb858b50a8718f662e6e941a9938a07015426ecdbddf",
+      "expected_sha256": "8e2e7cfc1094ecf1b82fcdb8c3f998b3d284eefab5e7eb6e9a651e933e772e87",
       "reason": "Review source-only administration bytes against the one-step approval v109 frontier; authority flags and registered keys remain bound."
     }
   }

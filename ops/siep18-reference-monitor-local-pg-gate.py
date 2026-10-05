@@ -35,7 +35,7 @@ SEALED_PREDECESSOR_MIGRATION = (
     "migrations/0827_system_work_scac_successor.sql"
 )
 LIVE_REGISTRY_MIGRATION = (
-    "migrations/0838_one_step_rule_approval_scac_successor.sql"
+    "migrations/0839_one_step_rule_approval_scac_successor.sql"
 )
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"

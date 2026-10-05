@@ -497,8 +497,8 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     ),
     # Rule delivery and the sealed one-step input contract become visible together.
     (
-        "0836_one_step_rule_approval.sql",
-        "0838_one_step_rule_approval_scac_successor.sql",
+        "0838_one_step_rule_approval.sql",
+        "0839_one_step_rule_approval_scac_successor.sql",
     ),
 )
 
@@ -640,8 +640,8 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0827_system_work_scac_successor.sql",
     ),
     (
-        "0836_one_step_rule_approval.sql",
-        "0838_one_step_rule_approval_scac_successor.sql",
+        "0838_one_step_rule_approval.sql",
+        "0839_one_step_rule_approval_scac_successor.sql",
     ),
 )
 

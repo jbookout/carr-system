@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { frozenInventory, boundInventoryRows, renderRuleApprovalRegistrySql } from '../../ops/scac-mutation-inventory.mjs';
 import { registeredOperation, SCAC_MUTATION_REGISTRY_VERSION } from '../src/mutation-registry.js';
@@ -24,8 +24,8 @@ test('one-step approval changes only teach and approve input contracts after del
 
 test('one-step approval generated successor preserves delivered registry history', () => {
   const sql = renderRuleApprovalRegistrySql(frozenInventory('scac-mutation-registry.v109'));
-  assert.equal(readFileSync(new URL('../../migrations/0838_one_step_rule_approval_scac_successor.sql', import.meta.url), 'utf8'), sql);
-  const domain = readFileSync(new URL('../../migrations/0836_one_step_rule_approval.sql', import.meta.url));
+  assert.equal(readFileSync(new URL('../../migrations/0839_one_step_rule_approval_scac_successor.sql', import.meta.url), 'utf8'), sql);
+  const domain = readFileSync(new URL('../../migrations/0838_one_step_rule_approval.sql', import.meta.url));
   assert.ok(sql.includes(createHash('sha256').update(domain).digest('hex')), 'exact approval implementation is pinned');
   assert.match(sql, /scac_mutation_registry_v108_seal_available\(\)/);
   assert.match(sql, /scac_mutation_registry_v109_seal_available\(\)/);
@@ -33,7 +33,11 @@ test('one-step approval generated successor preserves delivered registry history
 
 test('approval domain and registry changes require one complete atomic migration group', () => {
   const runner = readFileSync(new URL('../../tools/migrate.py', import.meta.url), 'utf8');
-  const pair = /\(\s*"0836_one_step_rule_approval\.sql",\s*"0838_one_step_rule_approval_scac_successor\.sql",\s*\)/;
+  const pair = /\(\s*"0838_one_step_rule_approval\.sql",\s*"0839_one_step_rule_approval_scac_successor\.sql",\s*\)/;
   assert.match(runner.split('STRICT_ATOMIC_MIGRATION_GROUPS:')[0], pair);
   assert.match(runner.split('STRICT_ATOMIC_MIGRATION_GROUPS:')[1], pair);
+  const migrations = readdirSync(new URL('../../migrations/', import.meta.url)).filter(name => name.endsWith('.sql')).sort();
+  const domainIndex = migrations.indexOf('0838_one_step_rule_approval.sql');
+  assert.equal(migrations[domainIndex + 1], '0839_one_step_rule_approval_scac_successor.sql',
+    'the runner must encounter the complete authority group without an intervening migration');
 });
