@@ -205,10 +205,26 @@ for label, patch in (
     with tempfile.TemporaryDirectory(prefix="carr-reinstall-cal-") as tmp:
         templates, agents, log, fake = build(Path(tmp))
         before = snapshot(agents)
+        if label == "definition-only":
+            fake.write_text(
+                "#!/bin/sh\n"
+                f"echo \"$*\" >> '{log}'\n"
+                "if [ \"$1\" = print ]; then\n"
+                "  echo 'Could not find service \"com.carr.fixture-a\"' >&2; exit 113\n"
+                "fi\n"
+                "if [ \"$1\" = print-disabled ]; then echo '\"com.carr.fixture-a\" => disabled'; fi\n"
+                "exit 0\n")
         rc, out = run_inproc(templates, agents, fake, patch=patch)
-        check(f"a {label} agent is skipped: no write, no launchctl",
-              rc == 0 and snapshot(agents) == before and calls(log) == []
-              and f"ok    {A}" in out, (rc, out, calls(log)))
+        if label == "definition-only":
+            check("a definition-only agent stays disabled without a write or bootstrap",
+                  rc == 0 and snapshot(agents) == before
+                  and any(c.startswith("disable ") for c in calls(log))
+                  and not any(c.startswith(("bootstrap ", "kickstart ", "enable ")) for c in calls(log))
+                  and "DEFINITION ONLY com.carr.fixture-a:" in out, (rc, out, calls(log)))
+        else:
+            check(f"a {label} agent is skipped: no write, no launchctl",
+                  rc == 0 and snapshot(agents) == before and calls(log) == []
+                  and f"ok    {A}" in out, (rc, out, calls(log)))
 
 with tempfile.TemporaryDirectory(prefix="carr-reinstall-cal-") as tmp:
     templates, agents, log, fake = build(Path(tmp))

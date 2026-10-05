@@ -486,6 +486,12 @@ def main():
         load_attempts = []
 
         def fail_launchctl(args, *call_args, **call_kwargs):
+            if args[0] == "launchctl" and "synthetic-definition-only" in args[-1]:
+                if args[1] == "print":
+                    return SimpleNamespace(returncode=113, stderr='Could not find service "com.carr.synthetic-definition-only"', stdout="")
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            if args[:2] == ["launchctl", "print-disabled"]:
+                return SimpleNamespace(returncode=0, stderr="", stdout='"com.carr.synthetic-definition-only" => disabled')
             if args[:2] == ["launchctl", "unload"]:
                 return SimpleNamespace(returncode=0, stderr="", stdout="")
             if args[:2] == ["launchctl", "load"]:
@@ -1010,7 +1016,7 @@ def main():
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
         ("definition-only hold skips a held plist without installing it",
          definition_only_absent
-         and "SKIP  com.carr.synthetic-definition-only.plist (definition only:" in launchd_out.getvalue()),
+         and "DEFINITION ONLY com.carr.synthetic-definition-only:" in launchd_out.getvalue()),
         ("control-plane tick released from definition-only hold (cutover 2026-08-26)",
          tick_released),
         ("the Gate Zero scheduler canary is released from the definition-only "

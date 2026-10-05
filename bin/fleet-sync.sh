@@ -208,6 +208,10 @@ fi
 unset CARR_RUN_SCHEDULED_XPC_SERVICE_NAME
 unset CARR_RUN_SCHEDULED_LAUNCHD_PID
 unset CARR_RUN_SCHEDULED_FLEET_SELF_CLAIM
+if ! "$PY" "$REPO/ops/config-as-code.py" launchd-held </dev/null; then
+  print -ru2 -- "fleet-sync: launchd holds unreadable; config installation refused"
+  exit 1
+fi
 if ! "$PY" "$REPO/ops/config-as-code.py" install --apply </dev/null; then
   print -ru2 -- "fleet-sync: config-as-code install --apply failed"
   exit 1

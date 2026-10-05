@@ -2970,6 +2970,20 @@ except Exception as e:
     print(f"  ⚠︎ {'machine config':<18} check failed ({type(e).__name__}: {e})")
     rc = 1
 
+try:
+    sys.path.insert(0, REPO_ROOT)
+    from lib import launchd_hold_health as _launchd_hold_health
+    _hold_line, _hold_rc = _launchd_hold_health.check(
+        os.path.expanduser("~"),
+        lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+    print(f"  {_hold_line}")
+    rc = max(rc, _hold_rc)
+except Exception as e:
+    print(f"  WARN launchd holds response failed ({type(e).__name__}) · "
+          "on breach: owner orchestrator repairs the hold health reader; "
+          "verify rerun health; auto-clear on a successful read")
+    rc = 1
+
 # ── the egress guard: is its LOGIC right, and is its DATA fresh (2026-08-09) ──
 # Two rows, because they fail independently and the 2026-08-08 incident turned on
 # exactly that distinction. `machine config` above answers "is the guard

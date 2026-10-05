@@ -11,6 +11,9 @@ import job_watchdog as watchdog  # noqa: E402
 
 
 def main():
+    if (Path.home() / ".config/carr/job-watchdog.off").exists():
+        print("job-watchdog: disabled by ~/.config/carr/job-watchdog.off")
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=os.environ.get("CARR_WATCHDOG_CONFIG", str(SOURCE / "ops/config/job-watchdog.json")))
     parser.add_argument("--root", default=os.environ.get("CARR_JOB_ROOT"))
