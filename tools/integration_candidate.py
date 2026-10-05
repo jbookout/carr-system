@@ -277,8 +277,6 @@ def regenerate_once(repo: Path, base: str, pending: list[str], argv: list[str], 
         try:
             if returncode is None: raise MigrationNumberError('generator timed out')
             if returncode: raise MigrationNumberError(f'generator refused or failed (exit {returncode})')
-            if git(repo,'rev-parse','HEAD').decode().strip() != source['head']:
-                raise MigrationNumberError('generator moved HEAD; generation attests only its pinned source')
             main=main_snapshot(repo,base)
             outputs = set(plan['migration_names'].values())
             for name in outputs:
@@ -295,12 +293,13 @@ def regenerate_once(repo: Path, base: str, pending: list[str], argv: list[str], 
             if not target.is_file():
                 raise MigrationNumberError('generator exited zero without its allocated registry successor')
             check_generated_write(repo,target,target.read_bytes(),base)
-            if validate_candidate(repo,base,require_clean=False)['head'] != source['head']:
-                raise MigrationNumberError('HEAD moved during generation; generation attests only its pinned source')
-            result['state']='generated'
+            # Success attests only the pinned source: HEAD must not move, whether
+            # the renderer committed or a concurrent writer did.
+            final = validate_candidate(repo,base,require_clean=False)
             result['source_after']=source_binding(repo)
-            if result['source_after']['head'] != source['head']:
-                raise MigrationNumberError('HEAD moved during generation; generation attests only its pinned source')
+            if source['head'] != final['head'] or source['head'] != result['source_after']['head']:
+                raise MigrationNumberError('HEAD moved during generation; regenerate against the pinned source')
+            result['state']='generated'
             result['outputs']={str(p.relative_to(repo)):hashlib.sha256(p.read_bytes()).hexdigest()
                                for p in [target,*[repo/'migrations'/n for n in plan['migration_names'].values()]]}
             publish(result)
