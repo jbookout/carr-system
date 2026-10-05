@@ -1369,10 +1369,8 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
           {"ran": ran, "order": classes})
 
 
-def test_hosted_class_budgets_cover_observed_runtimes():
-    """Each class group's job budget covers its measured runtime.
-
-    PR1121's strict migration job was killed at 20 minutes, while its
+def test_hosted_migration_budget_covers_observed_acceptance_runtime():
+    """PR1121's strict migration job was killed at 20 minutes, while its
     separate exact-head DB acceptance succeeded after 23m51s. Allow at least
     30 minutes including setup, without relaxing the other groups' budgets.
     Both workflows run the canonical migration class; its budget must also
@@ -1383,30 +1381,16 @@ def test_hosted_class_budgets_cover_observed_runtimes():
     On 2026-10-04 it routinely took 22-24 minutes, and six branches
     (PR 1470's run 37182226032 among them) were cancelled at a 25-minute cap
     after every check had passed. It needs the same headroom.
-
-    The gates group grew from 12-13 minutes on 2026-10-01 to 19-20 minutes on
-    2026-10-05 as selftests accumulated; passing runs finished at 1150-1190s
-    of a 1200s cap and PR 1531's run 37292870635 was cancelled at it. Gates
-    gets the same bounded headroom; the combined small-class group (about six
-    minutes) keeps 20.
     """
     job = _hosted_workflow()["jobs"]["classes"]
     groups = job["strategy"]["matrix"]["classes"]
     budgets = re.fullmatch(
-        r"\$\{\{ fromJSON\('(\{[^']*\})'\)\[matrix\.classes\] \|\| (\d+) \}\}",
+        r"\$\{\{ matrix\.classes == 'migration' && (\d+) \|\| (\d+) \}\}",
         str(job["timeout-minutes"]))
-    check("class jobs select their budget from one per-group table", budgets is not None,
-          job["timeout-minutes"])
+    check("class jobs select a bounded migration-specific budget", budgets is not None)
     if budgets is None:
         return
-    table = json.loads(budgets.group(1))
-    other_budget = int(budgets.group(2))
-    check("every budgeted group is a real matrix group", set(table) <= set(groups),
-          {"table": table, "groups": groups})
-    migration_budget = table.get("migration", other_budget)
-    gates_budget = table.get("gates", other_budget)
-    check("gates job has bounded headroom over its observed 20-minute run",
-          gates_budget in range(30, 36), gates_budget)
+    migration_budget, other_budget = map(int, budgets.groups())
     database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
     database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
     check("database acceptance declares a finite job budget",
@@ -1420,10 +1404,50 @@ def test_hosted_class_budgets_cover_observed_runtimes():
     migration = [migration_budget for group in groups if group == "migration"]
     check("migration job has bounded headroom over the observed 24-minute run",
           len(migration) == 1 and migration[0] in bounded_headroom, migration)
-    other = [table.get(group, other_budget) for group in groups
-             if group not in ("migration", "gates")]
-    check("the remaining class group retains its 20-minute budget",
-          len(other) == 1 and all(budget == 20 for budget in other), other)
+    other = [other_budget for group in groups if group != "migration"]
+    check("other class groups retain their 20-minute budgets",
+          bool(other) and all(budget == 20 for budget in other), other)
+
+
+def test_gate_replay_has_an_independent_required_class():
+    """PR1546's gates passed at 1101s, then cleanup hit the 20-minute cap.
+
+    Its 295s replay must run in a separate required job, preserving the cap
+    and every check instead of making the already long job wait for replay.
+    """
+    src = CI.read_text()
+    order = re.search(r'^CLASS_ORDER="([^"]+)"', src, re.M)
+    check("full local CI includes the replay class",
+          order is not None and "replay" in order.group(1).split())
+    gates_body = src.split("check_gates() {", 1)[1].split("\ncheck_", 1)[0]
+    check("gates no longer serializes the real-fixture replay",
+          '"$PY" ops/gate-replay.py' not in gates_body)
+    job = _hosted_workflow()["jobs"]["classes"]
+    groups = job["strategy"]["matrix"]["classes"]
+    check("hosted replay runs once as its own required matrix job",
+          groups.count("replay") == 1)
+    check("gates and replay retain the existing 20-minute cap",
+          job["timeout-minutes"] == "${{ matrix.classes == 'migration' && 35 || 20 }}")
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = pathlib.Path(tmp) / "gate-replay.py"
+        fixture.write_text("import os,sys\n"
+                           "print('gate-replay: OK replay fixture ran')\n"
+                           "sys.exit(int(os.environ['REPLAY_FIXTURE_RC']))\n")
+        # Invoke the class through ci.sh's normal --only interface. Replace
+        # only the replay program with a cheap fixture, keeping its handling.
+        script = pathlib.Path(tmp) / "ci.sh"
+        body = src.replace('"$PY" ops/gate-replay.py', f'"$PY" {shlex.quote(str(fixture))}')
+        # The script resolves the repository from its own path.
+        body = re.sub(r'^REPO=.*$', f'REPO={shlex.quote(str(REPO))}', body, flags=re.M)
+        script.write_text(body)
+        for child_rc, expected_rc in ((0, 0), (1, 1), (78, 1), (124, 1)):
+            out = subprocess.run(["bash", str(script), "--strict", "--only", "replay"],
+                                 cwd=REPO, env=scrubbed_env(dict(os.environ,
+                                     REPLAY_FIXTURE_RC=str(child_rc))),
+                                 capture_output=True, text=True, timeout=10)
+            check(f"strict replay propagates child exit {child_rc}",
+                  out.returncode == expected_rc and "replay fixture ran" in out.stdout + out.stderr,
+                  out.stdout + out.stderr)
 
 
 def test_hosted_zsh_setup_does_not_refresh_working_indexes():
@@ -1514,7 +1538,8 @@ def main():
                test_push_floor_distinguishes_imported_main_paths_from_branch_changes,
                test_strict_still_owns_the_gates_class,
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
-               test_hosted_class_budgets_cover_observed_runtimes,
+               test_hosted_migration_budget_covers_observed_acceptance_runtime,
+               test_gate_replay_has_an_independent_required_class,
                test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()
