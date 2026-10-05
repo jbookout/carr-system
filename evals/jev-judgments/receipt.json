@@ -2,11 +2,11 @@
  "adapter": {
   "adapter_id": "jev-judgments-admission-replay",
   "adapter_version": "1",
-  "configuration_fingerprint": "sha256:84544bb3e2a0a3fd01e3512fd9e6b3f4a92699bf06d8b419813cb49fc2300607",
+  "configuration_fingerprint": "sha256:f1601b41e6cf96ac973f72a1196dfbc5d5144a8110d27e568ad35152b75de697",
   "harness_id": "evals/jev-judgments/run_eval.py",
-  "harness_version": "aec173bb93b97aafd61dd115d720772f448788559c4c92eb535ea2512037c09f",
+  "harness_version": "13057a256d4aaa2a2de7a27b277f5915253d20036fb31c6923ff78745c0fa357",
   "model_id": "deterministic-no-model",
-  "native_session_ref": "01a10b5b-4582-7172-80a9-5b1d40200c4b",
+  "native_session_ref": "89588a51-4f3d-4a0d-8050-9d1e13713958",
   "provider_id": "none",
   "surface": "offline_programmatic"
  },
@@ -89,20 +89,19 @@
    }
   },
   "dependencies": {
-   "evals/jev-judgments/admission-policy.v1.json": "914cfa60d99c043660a69c79688befc485b2755addcaef36e4f4eb65fc3a3cad",
+   "evals/jev-judgments/admission-policy.v1.json": "79a61482eecfca7473cb4293865dac5f60a8f93b5db42824fc54cc23fba1de08",
    "evals/jev-judgments/expectations.v1.json": "fbf78aaede01d2871dd055f2c66e625b5e00f816915ca19a5ce67cc7a9b34211",
    "lib/jev_required_actions.py": "7b5b005de56094eefd18cbef6be5ebfea9e8f33fc419beb3785f73892b0e7171",
    "lib/transcript_read.py": "17f34e6288557340d70e5cff18927a6274f61b5c802afb5848b7d71c3f1210a2",
    "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
    "mcp-server/src/jev-spend-authority.js": "d1e2444d23d8fbce95e7b1a5a430914b00e2a45b08da306cb73464fb5cb018c7",
    "mcp-server/src/judge-providers.v1.json": "48b8ca8b4defec4b82fd36f708498c707eab5f861ae0046f857ae06ae8d981ab",
-   "ops/config/jev-call-sites.v1.json": "76b6a8f43d2058dad5e48bcb71b692d1b74fa90e5854fe3370398c9b6aa6ef29",
+   "ops/config/jev-call-sites.v1.json": "39dd032b8f3e2b562bfaa1c5d8e8fff65a771e6a608581b99f353c55a8e4579b",
    "ops/config/jev-cost-guard.v1.json": "e17dbcf060e2ab9126d99408b4ea2068824066fe90ac5acb8a74d59bb9e0e7e5",
    "ops/typesafe_client.py": "b3a1a502cd1ea3e393da8d1947345ffbb6462b65c4ae92853ad94d85b8137277",
    "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2",
    "tools/room-bridge/design_kernel.py": "7545fd6ec1d18f7df2b14cc67a65eae1190d3369fc00a96a5297fe71d5b34f80",
-   "tools/room-bridge/evaluation_kernel.py": "3b5084bf92946fbbbb6b8190eb8c5a7503080950c380f0b12106d6874155dc34",
-   "tools/room-bridge/evaluation_rubrics.py": "315a8f800989a7eebe6a9c5ceeee087893858593bb1e0460f951919cb7f9279a",
+   "tools/room-bridge/evaluation_kernel.py": "8ffeac75e4db3275206b65df031a48419e04f6ef140dd12ffe34e39a228ea499",
    "tools/room-bridge/execution_contract.py": "d02dd4f4211bd59afe8b6a834f9791bf2bbf04d98d30630c68425c12989334cc",
    "tools/room-bridge/policy_learning.py": "61929dddb0ab1ebac091871f8f0e2f2f692bd047b36d0a35edcb967ea1ab7aac"
   },
@@ -116,7 +115,7 @@
    "path": "evals/jev-judgments/score.py"
   },
   "source": {
-   "evals/jev-judgments/run_eval.py": "aec173bb93b97aafd61dd115d720772f448788559c4c92eb535ea2512037c09f",
+   "evals/jev-judgments/run_eval.py": "13057a256d4aaa2a2de7a27b277f5915253d20036fb31c6923ff78745c0fa357",
    "evals/jev-judgments/score.py": "71511dc3ab33fc63455ada0e3f26f2d1a3cd0b09dfa21fcd121a5835cff4ca65"
   }
  },

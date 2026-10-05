@@ -128,7 +128,7 @@ done
 # pushfloor is FIRST deliberately. It is the cheapest class and the one the
 # local pre-push hook runs, so when a push is going to be refused it is refused
 # in the first seconds rather than after the expensive classes have run.
-CLASS_ORDER="pushfloor unit types contract gates secret dependency migration binding artifact freshness"
+CLASS_ORDER="pushfloor unit types contract gates replay secret dependency migration binding artifact freshness"
 
 class_desc() {
   case "$1" in
@@ -138,6 +138,7 @@ class_desc() {
     types)      echo "seeded shape mistake in a data hand-off" ;;
     contract)   echo "seeded auth/schema contract break" ;;
     gates)      echo "seeded enforcement-layer regression" ;;
+    replay)     echo "real-fixture gate verdict regression" ;;
     secret)     echo "seeded credential in the tree" ;;
     dependency) echo "seeded unpinned or vulnerable dependency" ;;
     migration)  echo "seeded bad migration / trigger permission" ;;
@@ -505,6 +506,15 @@ check_contract() {
   fi
 }
 
+tree_fingerprint() {
+  printf '%s\n' "$(git rev-parse HEAD 2>/dev/null)"
+  # Tracked modifications and the staged index. Untracked files are excluded
+  # deliberately: out/ is gitignored and every class in this file writes logs
+  # there, so counting them would fail the class on its own bookkeeping.
+  git status --porcelain --untracked-files=no 2>/dev/null
+  git diff --cached --name-only 2>/dev/null
+}
+
 # ---------------------------------------------------------------- gates
 # The enforcement layer's own regression suites. These are the checks that caught
 # the ledger-sweep scope gate swallowing its own headline trigger, so they are a
@@ -546,14 +556,6 @@ check_gates() {
   # under pre-push is the session's own worktree — never a hardcoded canonical
   # path — so it makes exactly the assertion the same recommendation demands
   # everywhere else.
-  tree_fingerprint() {
-    printf '%s\n' "$(git rev-parse HEAD 2>/dev/null)"
-    # Tracked modifications and the staged index. Untracked files are excluded
-    # deliberately: out/ is gitignored and every class in this file writes logs
-    # there, so counting them would fail the class on its own bookkeeping.
-    git status --porcelain --untracked-files=no 2>/dev/null
-    git diff --cached --name-only 2>/dev/null
-  }
   local tree_before; tree_before="$(tree_fingerprint)"
 
   # Exceptions come from ops/config/ci-check-scope.json and are ANNOUNCED, never
@@ -789,7 +791,7 @@ PYEOF
   # any rule the two sides classify structurally differently. It does not
   # require full coverage between the files, so it stays cheap and honest on a
   # freshly-seeded, mostly-empty export exactly as it will on a fully synced one.
-  # boot-budget-check and core-rule-ids-check JOINED HERE (WR-000019 slice
+  # boot-budget-check and sync-core-rule-ids --check JOINED HERE (WR-000019 slice
   # S11, boot diet). Same kind again: repository content only, no machine
   # state, no database. boot-budget-check reads CLAUDE.md, the connector's
   # initialize instructions block in mcp-server/src/mcp.js, and a committed
@@ -797,11 +799,11 @@ PYEOF
   # fixture.v1.json, refreshed by hand -- this check has no database to call
   # standing-context with) against ops/config/boot-budget.v1.json's ceiling,
   # and fails the push the same way an overage would go unnoticed otherwise:
-  # silently, at the next session's boot. core-rule-ids-check is the parity
+  # silently, at the next session's boot. sync-core-rule-ids --check is the parity
   # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
   # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
   # reads because a Cloudflare Worker has no filesystem at request time.
-  # rule-boot-classes-check JOINED 2026-09-26 (gated rule boot): the same
+  # sync-rule-boot-classes --check JOINED 2026-09-26 (gated rule boot): the same
   # parity shape for mcp-server/src/rule-boot-classes.js against
   # ops/config/rule-classes.v1.json, plus the rule boot's token budget (fails
   # naming the largest always-on rules; never truncates).
@@ -828,10 +830,13 @@ PYEOF
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
-             boot-budget-check core-rule-ids-check rule-route-coverage \
-             rule-boot-classes-check check-eval-receipt migration-order-gate; do
+             boot-budget-check sync-core-rule-ids rule-route-coverage \
+             sync-rule-boot-classes check-eval-receipt migration-order-gate; do
     [ -f "ops/$inv.py" ] || continue
     local inv_args=()
+    case "$inv" in
+      sync-core-rule-ids|sync-rule-boot-classes) inv_args=(--check) ;;
+    esac
     if [ "$inv" = check-eval-receipt ] && [ -n "${CARR_PR_BODY_FILE:-}" ]; then
       inv_args=(--pr-body-file "$CARR_PR_BODY_FILE")
     fi
@@ -840,35 +845,6 @@ PYEOF
       || { inherited_abort "$inv" "$PY" "ops/$inv.py" ${inv_args[@]+"${inv_args[@]}"}
            failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
-
-  # GATE REPLAY JOINED 2026-09-24 (defect class capability-reported-live-
-  # before-first-human-use: PR #1224's Stop gate never fired on 803 real
-  # receipts, PR #1225's shell regexes were proven only on invented commands).
-  # ops/gate-replay.py RUNS every gate in hooks/ over the committed real
-  # fixtures in ops/fixtures/real-replay/, the way the harness runs it, and
-  # compares every verdict with the committed snapshot there. It computes
-  # nothing from a base ref: it runs everything, every time. It is outside the
-  # loop above for two reasons: it takes about a minute, so it gets its own
-  # timeout, and it may answer 78 (NOT CONFIGURED) on a local interpreter
-  # without requirements.lock, which is announced like any other skip. On a
-  # hosted runner it never answers 78; a missing dependency there is a failure.
-  if [ -f ops/gate-replay.py ]; then
-    "$PY" "$CI_TIMEOUT_HELPER" 900 "$PY" ops/gate-replay.py >"$LOGDIR/gate-gate-replay.log" 2>&1
-    local rrc=$?
-    if [ "$rrc" -eq 78 ]; then
-      skiplist="$skiplist gate-replay.py"
-      printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
-        gate-replay.py "$(tail -1 "$LOGDIR/gate-gate-replay.log" 2>/dev/null)" >&2
-    elif [ "$rrc" -ne 0 ]; then
-      inherited_abort gate-replay "$PY" ops/gate-replay.py
-      failures="$failures gate-replay"; tail -40 "$LOGDIR/gate-gate-replay.log" >&2
-    else
-      # A pass prints its invocation count, runtime and verdict totals, so the
-      # hosted log shows the replay ran and how long it took.
-      grep -E '^gate-replay: [0-9]+ invocations|^  verdicts: |^gate-replay: OK' \
-        "$LOGDIR/gate-gate-replay.log" >&2
-    fi
-  fi
 
   # Did the suite move the tree it was invoked in? See tree_fingerprint() above.
   if [ "$(tree_fingerprint)" != "$tree_before" ]; then
@@ -897,6 +873,39 @@ PYEOF
     ok gates "$count suites + baseline integrity · NOT RUN:$skiplist"
   else
     ok gates "$count selftest suites + baseline integrity"
+  fi
+}
+
+# ---------------------------------------------------------------- replay
+# The real-fixture replay runs in an independent hosted job. PR1546 spent
+# 295s here after the gate suites, then exhausted the job budget in cleanup.
+# Keep the same replay, watchdog and strict failure handling in local CI.
+check_replay() {
+  export CARR_HOOK_FIXTURE=1
+  local tree_before="$(tree_fingerprint)"
+  if [ -f ops/gate-replay.py ]; then
+    "$PY" "$CI_TIMEOUT_HELPER" 900 "$PY" ops/gate-replay.py >"$LOGDIR/gate-gate-replay.log" 2>&1
+    local rrc=$?
+    if [ "$rrc" -eq 78 ]; then
+      skip replay "NOT CONFIGURED (exit 78): gate-replay.py"
+      printf '        \033[33mnot run\033[0m  %s — NOT CONFIGURED (exit 78): %s\n' \
+        gate-replay.py "$(tail -1 "$LOGDIR/gate-gate-replay.log" 2>/dev/null)" >&2
+    elif [ "$rrc" -ne 0 ]; then
+      inherited_abort gate-replay "$PY" ops/gate-replay.py
+      bad replay "gate-replay failed (exit $rrc)"; tail -40 "$LOGDIR/gate-gate-replay.log" >&2
+    else
+      # A pass prints its invocation count, runtime and verdict totals, so the
+      # hosted log shows the replay ran and how long it took.
+      grep -E '^gate-replay: [0-9]+ invocations|^  verdicts: |^gate-replay: OK' \
+        "$LOGDIR/gate-gate-replay.log" >&2
+      ok replay "real-fixture verdicts match the committed snapshot"
+    fi
+  else
+    skip replay "ops/gate-replay.py not present"
+  fi
+
+  if [ "$(tree_fingerprint)" != "$tree_before" ]; then
+    bad replay "tree-mutated-by-replay"
   fi
 }
 

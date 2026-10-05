@@ -244,20 +244,6 @@
       ]
     },
     {
-      "caller": "jev_rerank_eval",
-      "trigger": "Operator live retrieval rerank evaluation",
-      "runs_in": "evals/retrieval/jev-rerank-eval.mjs",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 40,
-      "daily_budget": 60,
-      "owner": "orchestrator",
-      "value": "Measure retrieval ranking quality",
-      "sources": [
-        "evals/retrieval/jev-rerank-eval.mjs"
-      ]
-    },
-    {
       "caller": "jevlint_review",
       "trigger": "Explicit advisory PR diff check or bounded rule calibration; never a scheduled full-repo run",
       "runs_in": "ops/jevlint_review.py loopback SystemOne shim for pinned jevlint",

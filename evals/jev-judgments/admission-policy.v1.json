@@ -326,18 +326,6 @@
       "owner": "orchestrator",
       "value": "64 explicit review/diagnosis judgments in 7 days under ad-hoc caller names; they now share one prefix and one budget",
       "sources": ["ops/typesafe_client.py"]
-    },
-    {
-      "caller": "jev_rerank_eval",
-      "trigger": "Operator live retrieval rerank evaluation",
-      "runs_in": "evals/retrieval/jev-rerank-eval.mjs",
-      "attribution": "session",
-      "unattended": "off",
-      "hourly_budget": 40,
-      "daily_budget": 60,
-      "owner": "orchestrator",
-      "value": "Measure retrieval ranking quality",
-      "sources": ["evals/retrieval/jev-rerank-eval.mjs"]
     }
   ]
 }

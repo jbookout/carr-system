@@ -166,15 +166,16 @@ jobs:
       # NO CHECK LOGIC HERE, rule a8c55a47 — every class is ops/ci.sh's, called
       # one at a time so a red class does not hide the ones after it. The class
       # names are the only thing this file contributes, and
-      # ops/main-canary-selftest.py binds them to the council's measured four.
-      - name: Run the four classes that actually fail on main
+      # Replay was part of gates; the separate class preserves that workload.
+      # ops/main-canary-selftest.py binds this selection to the measured classes.
+      - name: Run the classes that detect regressions on main
         env:
           CARR_CI_DATABASE_URL: postgres://carr_ci:carr_ci@localhost:5432/carr_ci # ci-secret-scan: allow — throwaway container credential, loopback only, dies with the runner
           CARR_CI_PORTABLE_ONLY: "1"
         run: |
           set -uo pipefail
           red=""
-          for class in gates migration types freshness; do
+          for class in gates replay migration types freshness; do
             ops/ci.sh --strict --only "$class" || red="$red $class"
           done
           if [ -n "$red" ]; then
@@ -193,4 +194,4 @@ jobs:
             echo "main-canary-red:$red"
             exit 1
           fi
-          echo "main-canary-green: gates, migration, types and freshness all pass on main"
+          echo "main-canary-green: gates, replay, migration, types and freshness all pass on main"
