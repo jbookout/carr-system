@@ -24,6 +24,7 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
 import jev_outage_health as _jev_outage
+from lib.credential_file import read_env_file
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -2068,12 +2069,10 @@ GATES = {
 
 
 def _keys_in_env_file():
-    """Key names declared in db.env, parsed as text. Never sources, never stores values."""
+    """Key names whose value LOADS from db.env through lib/credential_file, the
+    reader every Python job uses. Never sources, never stores values."""
     try:
-        with open(DB_ENV) as fh:
-            return {ln.split("=", 1)[0].strip()
-                    for ln in fh
-                    if "=" in ln and not ln.lstrip().startswith("#") and ln.split("=", 1)[1].strip()}
+        return {name for name, value in read_env_file(DB_ENV).items() if value}
     except OSError:
         return set()
 

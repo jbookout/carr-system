@@ -61,6 +61,7 @@ from urllib.error import HTTPError, URLError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+from lib.credential_file import read_env_file  # noqa: E402
 from lib.record_call import call_verb  # noqa: E402
 
 INVENTORY_PATH = REPO_ROOT / "ops" / "config" / "credential-inventory.v1.json"
@@ -239,16 +240,11 @@ def _read_token_from_env_file(path, key):
         return None, None, "token_file_missing"
     mode = stat.S_IMODE(st.st_mode)
     try:
-        with open(path) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                name, _, value = line.partition("=")
-                if name.strip() == key:
-                    return value.strip().strip('"').strip("'"), mode, None
+        values = read_env_file(path)
     except OSError:
         return None, mode, "token_file_unreadable"
+    if key in values:
+        return values[key], mode, None
     return None, mode, "token_key_missing"
 
 

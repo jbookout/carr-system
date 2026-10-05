@@ -188,6 +188,7 @@ from typing import Any, Callable, Iterable
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+from lib.credential_file import credential, read_env_file  # noqa: E402
 from lib.github_reader import GitHubReader, GitHubUnreadable  # noqa: E402
 from lib.secret_redaction import redact_text, sensitive_env_values  # noqa: E402
 CONFIG_PATH = REPO / "ops" / "config" / "release-pipeline.v1.json"
@@ -250,26 +251,6 @@ def child_env(environ: dict[str, str] | None = None) -> dict[str, str]:
     env["HOMEBREW_PREFIX"] = "/opt/homebrew"
     env["NO_COLOR"] = "1"
     return env
-
-
-def read_env_value(path: Path, name: str) -> str | None:
-    """The value of NAME in a NAME=value file (optional `export `, optional
-    matching quotes), or None when the file or the key is absent or empty.
-    The value is returned to the caller only; nothing here prints it."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    value = None
-    for line in text.splitlines():
-        m = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
-        if not m or m.group(1) != name:
-            continue
-        v = m.group(2)
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-            v = v[1:-1]
-        value = v or None
-    return value
 
 
 # Head-branch prefix of the PRs schema_followup opens; the newest one carries
@@ -1435,7 +1416,7 @@ class Pipeline:
         wrangler fall back to its interactive OAuth login. Only the NAME and
         the file path ever appear in output."""
         path = expand(self.cfg.get("credential_dir", "~/.config/carr")) / CLOUDFLARE_TOKEN_FILE
-        token = read_env_value(path, CLOUDFLARE_TOKEN_NAME)
+        token = credential(CLOUDFLARE_TOKEN_NAME, path=path, environ={})
         if not token:
             detail = (f"credential missing: {CLOUDFLARE_TOKEN_NAME} is absent from {path}; "
                       "refusing to fall back to wrangler's interactive OAuth login")
@@ -1513,10 +1494,9 @@ class Pipeline:
         capability, which files one loop naming it."""
         def names(path: Path) -> set[str]:
             try:
-                text = path.read_text(encoding="utf-8")
+                return {name for name, value in read_env_file(path).items() if value}
             except OSError:
                 return set()
-            return {m.group(2) for m in re.finditer(r"^(export\s+)?([A-Z0-9_]+)=\S", text, re.M)}
         cred = expand(self.cfg.get("credential_dir", "~/.config/carr"))
         db = names(cred / "db.env")
         for name in lane_cfg.get("required_db_env_names") or []:

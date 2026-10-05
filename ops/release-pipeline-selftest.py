@@ -3192,16 +3192,6 @@ class DeployCredential(unittest.TestCase):
         self.assertTrue(any("would FAIL here: credential missing" in line for line in self.lines))
         self.assertEqual(self.fx.records(), [])
 
-    def test_read_env_value(self):
-        f = self.cred / "t.env"
-        f.write_text("A=1\nexport B=\"two\"\nC='3'\nB=last\nD=\n")
-        self.assertEqual(rp.read_env_value(f, "A"), "1")
-        self.assertEqual(rp.read_env_value(f, "B"), "last")
-        self.assertEqual(rp.read_env_value(f, "C"), "3")
-        self.assertIsNone(rp.read_env_value(f, "D"))
-        self.assertIsNone(rp.read_env_value(f, "E"))
-        self.assertIsNone(rp.read_env_value(self.cred / "absent.env", "A"))
-
 
 class FailClosedVenv(Base):
     """The coordinator's own re-run of health-preflight at a8619391 caught
