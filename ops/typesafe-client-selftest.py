@@ -67,6 +67,10 @@ def setUpModule():
     patcher = patch.object(client, "JEV_DAILY_CAP_LOG", os.path.join(_CAP_ROOT.name, "calls.jsonl"))
     patcher.start()
     unittest.addModuleCleanup(patcher.stop)
+    # Paid Worker attempts sign with a fixture admission secret, never a real one.
+    secret = patch.object(client, "read_admission_secret", lambda: "offline-admission")
+    secret.start()
+    unittest.addModuleCleanup(secret.stop)
 
 
 class FakeResponse(io.BytesIO):
@@ -1572,12 +1576,13 @@ class OfflineBudgetIsolationTests(unittest.TestCase):
                                 "fake transport must use a disposable quota")
             return reserve(*args, **kwargs)
 
-        suite = unittest.TestSuite(DispatchOwnershipTests(name) for name in (
-            "test_runtime_router_preserves_explicit_transcript_owner",
-            "test_ask_discovers_exact_native_session_and_keeps_unknown_owner_unbound"))
         result = unittest.TestResult()
+        # TestCase.run, not a top-level TestSuite.run: the latter runs this
+        # module's cleanups and would undo setUpModule's isolation mid-run.
         with patch.object(client, "_reserve_paid_call", isolated_reservation):
-            suite.run(result)
+            for name in ("test_runtime_router_preserves_explicit_transcript_owner",
+                         "test_ask_discovers_exact_native_session_and_keeps_unknown_owner_unbound"):
+                DispatchOwnershipTests(name).run(result)
         self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
         self.assertEqual(len(destinations), 5)
 

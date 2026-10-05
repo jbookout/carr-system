@@ -1338,15 +1338,15 @@ if [ "$SYSTEM_WORK_REGISTRY_APPLIED" = t ] && [ "$DOC_ACTIVITY_REGISTRY_APPLIED"
   exit 1
 fi
 
-AUTOMATION_UNDO_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0842_automation_undo_scac_successor.sql')" \
+RELATIONSHIP_REGISTRY_APPLIED="$("$PSQL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0840_relationship_scac_successor.sql')" \
   2>/dev/null)"
-case "$AUTOMATION_UNDO_REGISTRY_APPLIED" in
+case "$RELATIONSHIP_REGISTRY_APPLIED" in
   t|f) ;;
-  *) echo "schema-snapshot: could not read audited automation v109 registry ledger state" >&2; exit 1 ;;
+  *) echo "schema-snapshot: could not read relationship v109 registry ledger state" >&2; exit 1 ;;
 esac
-if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ] && [ "$SYSTEM_WORK_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: audited automation v109 is applied without v108 predecessor" >&2
+if [ "$RELATIONSHIP_REGISTRY_APPLIED" = t ] && [ "$SYSTEM_WORK_REGISTRY_APPLIED" != t ]; then
+  echo "schema-snapshot: relationship v109 is applied without v108 predecessor" >&2
   exit 1
 fi
 
@@ -3234,7 +3234,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,'scac-mutation-registry.v107'"
                                        SCAC_FULL_SET_SEAL_COUNT=107
                                        SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v108_current()"
-                                     if [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" = t ]; then
+                                     if [ "$RELATIONSHIP_REGISTRY_APPLIED" = t ]; then
                                        SCAC_CURRENT_NUMBER=109
                                        SCAC_VERSION_COUNT=109
                                        SCAC_CURRENT_ENTRY_COUNT="$("$PSQL" -Atqc "select entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v109'")"

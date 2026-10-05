@@ -169,10 +169,6 @@ def _fields(row, *, judge=False):
             "tokens_in": tokens_in, "tokens_out": tokens_out}
 
 
-def _call_fields(row):
-    return _fields(row)
-
-
 def _judge_fields(row):
     return _fields(row, judge=True)
 
@@ -290,7 +286,8 @@ def positive_attribution(commit):
     the claim's sentence denies it, and so does a denial of the claimed
     defect noun anywhere in subject or body ("found no bug"). Negating a
     different noun ("no regression" after a fixed bug) is validation prose and
-    keeps the claim. Messages denying or deferring a fix remain excluded. This
+    keeps the claim. Earlier non-detection also keeps a later positive claim.
+    Messages denying or deferring a fix remain excluded. This
     is commit-attributed evidence, not an independently verified causal outcome.
     """
     message = "\n".join(str(commit.get(k) or "") for k in ("subject", "body"))
@@ -310,7 +307,7 @@ def positive_attribution(commit):
             noun, quote = fixed.group(1), attribution.strip()
         else:
             continue
-        if not re.search(rf"\b{_denial(re.escape(noun))}\b", message, re.I):
+        if not _denies_defect(message, noun):
             return quote
     return None
 
@@ -321,7 +318,23 @@ def _denial(nouns):
     "No bugs remain" reports the state after a fix, so it is not a denial.
     """
     return (rf"(?:no\s+(?:{nouns})s?\b(?!\s+(?:remain|left|anymore|any\s+more))"
-            rf"|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?)")
+            rf"|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?"
+            rf"|did\s+not\s+(?:find|identify|confirm)\s+(?:(?:a|an|any)\s+)?(?:{nouns})s?)")
+
+
+def _denies_defect(message, noun):
+    for sentence in re.split(r"[.;\n]", message):
+        for denial in re.finditer(rf"\b{_denial(re.escape(noun))}\b", sentence, re.I):
+            # A historical qualifier must attach to this non-detection.
+            if (re.match(r"did\s+not\b", denial.group(0), re.I)
+                    and (re.search(r"\b(?:earlier|previously)\b\s*,?\s*"
+                                   r"(?:(?:(?:our|the)\s+)?(?:tests?|checks?|reviews?|investigations?)\s*)?$",
+                                   sentence[:denial.start()], re.I)
+                         or re.match(r"\s+(?:earlier|previously|before\s+(?:this|the)\s+review)\b",
+                                     sentence[denial.end():], re.I))):
+                continue
+            return True
+    return False
 
 
 def build_report(sources, start, end):
@@ -345,7 +358,7 @@ def build_report(sources, start, end):
         candidates = receipt_judges.get(receipt, []) if isinstance(receipt, str) else []
         linked = (candidates[0] if len(candidates) == 1 and receipt_calls[receipt] == 1
                   and _judge_fields(candidates[0])["billing"] == "measured"
-                  and _call_fields(row)["billing"] == "measured" else None)
+                  and _fields(row)["billing"] == "measured" else None)
         if linked:
             key = site_for(linked["kind"], judge_kind=True)
             traffic = _traffic(linked)
@@ -355,7 +368,7 @@ def build_report(sources, start, end):
             traffic = _traffic(row)
         site = sites[_site_key(key, traffic)]
         site["traffic_class"] = traffic
-        _tally(site, **_call_fields(row))
+        _tally(site, **_fields(row))
     for row in judges:
         traffic = _traffic(row)
         site = sites[_site_key(site_for(row["kind"], judge_kind=True), traffic)]
@@ -421,7 +434,7 @@ def build_report(sources, start, end):
                       "output_source": OUTPUT_PRICE_SOURCE},
             "sites": dict(sites), "totals": totals, "observed_cost_totals": observed_totals,
             "cost_complete": complete_cost, "baseline": base, "source_status": source_status,
-            "judge_hub": {"calls_log_input_tokens": sum(_call_fields(r)["tokens_in"] or 0 for r in calls
+            "judge_hub": {"calls_log_input_tokens": sum(_fields(r)["tokens_in"] or 0 for r in calls
                                                          if r.get("caller") == "jev_judge"),
                           "matched_judge_rows": len(matched), "unlinked_judge_rows": len(judges) - len(matched)},
             "unreadable": sources.get("unreadable") or {}}
