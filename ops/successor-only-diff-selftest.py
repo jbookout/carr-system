@@ -13,6 +13,18 @@ class CheckerCases(SuccessorCommands):
         self.assertEqual(result.returncode == 0, expected, result.stdout + result.stderr)
         return result
 
+    def test_active_registry_import_renumbering_preserves_domain(self):
+        target = 'mcp-server/src/mutation-registry.js'
+        self.write(target, '} from "./scac-mutation-registry.v109.generated.js";\nexport const domain = 1;\n')
+        self.commit(target)
+        approved = self.head()
+        self.write(target, '} from "./scac-mutation-registry.v110.generated.js";\nexport const domain = 1;\n')
+        self.commit(target)
+        self.check(approved, True)
+        self.write(target, '} from "./scac-mutation-registry.v111.generated.js";\nexport const domain = 2;\n')
+        self.commit(target)
+        self.check(approved, False)
+
     def test_main_changes_in_same_file_are_not_branch_patches(self):
         self.write("domain.txt", "before\n" + "context\n" * 12 + "tail\n")
         self.commit("domain.txt")

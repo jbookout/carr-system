@@ -18,7 +18,7 @@ import re
 import importlib.util
 
 from git_env import scrubbed_env
-from successor_ownership import domain_bytes, is_owned_file, REGISTRY_JS, _LEDGER
+from successor_ownership import domain_bytes, is_owned_file, REGISTRY_JS, _LEDGER, ACTIVE_IMPORT
 from successor_generation import regenerate
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -201,6 +201,19 @@ def prepare(repo, base, approved, main, conflict_paths):
         seal_path = staging / 'migrations' / plan['migration_names'][Path(sql[0]).name]
         domains = [staging / 'migrations' / plan['migration_names'][Path(p).name] for p in pending if p != sql[0]]
         receipt = regenerate(staging, plan, domains, seal_path, staging / matches[0])
+        selector = staging / 'mcp-server/src/mutation-registry.js'
+        if selector.exists():
+            content, count = ACTIVE_IMPORT.subn(rf'\g<1>{plan["registry_successor"]}\2', selector.read_text())
+            if count != 1:
+                raise RehomeError('mcp-server/src/mutation-registry.js: active registry import is ambiguous')
+            selector.write_text(content)
+            regenerated.add('mcp-server/src/mutation-registry.js')
+            check_source = subprocess.run(['node', '--input-type=module', '-e',
+                "import {fullInventory} from './ops/scac-mutation-inventory.mjs';import {TOOLS} from './mcp-server/src/tools.js';process.stdout.write(JSON.stringify(fullInventory(TOOLS)));"],
+                cwd=staging, env=scrubbed_env(), capture_output=True, timeout=120)
+            measured = json.loads((staging / '.git/successor-runtime.json').read_text())['rows']
+            if check_source.returncode or json.loads(check_source.stdout) != measured:
+                raise RehomeError('mcp-server/src/mutation-registry.js: selector changed the sealed source inventory')
         snapshot_bookkeeping(staging, seal_path, receipt)
         regenerated.add(f"mcp-server/src/{receipt['version']}.generated.js")
         changed = git(staging, 'diff', '--name-only').decode().splitlines()

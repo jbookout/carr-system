@@ -229,13 +229,8 @@ def regenerate(repo, plan, domain_paths, successor_path, predecessor_path):
         render = """import {renderRuntimeProjection} from './ops/scac-mutation-inventory.mjs';
 import {writeIntegratedArtifact} from './ops/integration-generation.mjs';
 import {readFileSync} from 'node:fs';
-import {createHash} from 'node:crypto';
 const p=JSON.parse(readFileSync(process.argv[1],'utf8'));
-function canonical(v){return JSON.stringify(v, (_,x)=>x&&typeof x==='object'&&!Array.isArray(x)?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);}
-const hash=v=>createHash('sha256').update(canonical(v)).digest('hex');
-let source=renderRuntimeProjection(p.rows,{version:p.predecessor,dbCatalogBaseline:p.baseline});
-source=source.replace(/export const SCAC_MUTATION_REGISTRY_VERSION = .*;/,`export const SCAC_MUTATION_REGISTRY_VERSION = ${JSON.stringify(p.version)};`)
- .replace(/export const SCAC_MUTATION_REGISTRY_DIGEST = .*;/,`export const SCAC_MUTATION_REGISTRY_DIGEST = "${hash({schema_version:p.version,rows:p.rows,db_catalog_baseline:p.baseline})}";`);
+const source=renderRuntimeProjection(p.rows,{version:p.version,dbCatalogBaseline:p.baseline});
 await writeIntegratedArtifact(`mcp-server/src/${p.version}.generated.js`,source);
 """
         result = subprocess.run(["node", "--input-type=module", "-e", render, str(payload_path)], cwd=repo, env=env, capture_output=True, timeout=120)

@@ -21,6 +21,7 @@ JSON_ARTIFACTS = frozenset({
     "ops/config/scac-registry-source-inventory-fixtures.v1.json",
 })
 COUNT_NAMES = r"SCAC_(?:CURRENT_NUMBER|VERSION_COUNT|TOTAL_ENTRY_COUNT|CURRENT_ENTRY_COUNT|CURRENT_SOURCE_COUNT|FULL_SET_SEAL_COUNT)"
+ACTIVE_IMPORT = re.compile(r'(?m)^(} from "\./scac-mutation-registry\.v)[1-9][0-9]*(\.generated\.js";)$')
 
 
 def is_owned_file(path, before, after):
@@ -132,7 +133,9 @@ def domain_bytes(path, content):
         text = content.decode("utf-8")
     except UnicodeError:
         return content
-    if path == "bin/schema-snapshot.sh":
+    if path == "mcp-server/src/mutation-registry.js":
+        text = ACTIVE_IMPORT.sub(r'\g<1><number>\2', text)
+    elif path == "bin/schema-snapshot.sh":
         text = _snapshot_domain(text)
     elif path == "ops/schema-snapshot-registry-seed-selftest.py":
         text = re.sub(rf'(?m)^(assert "{COUNT_NAMES}=)[0-9]+(" in GENERATOR)$', r'\g<1><count>\2', text)
