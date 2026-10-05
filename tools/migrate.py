@@ -492,8 +492,12 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0812_lead_automation_scac_successor.sql",
     ),
     (
-        "0829_relationship_deal_links.sql",
-        "0830_relationship_scac_successor.sql",
+        "0826_system_work_census_read_scope.sql",
+        "0827_system_work_scac_successor.sql",
+    ),
+    (
+        "0839_relationship_deal_links.sql",
+        "0840_relationship_scac_successor.sql",
     ),
 )
 
@@ -631,8 +635,12 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0812_lead_automation_scac_successor.sql",
     ),
     (
-        "0829_relationship_deal_links.sql",
-        "0830_relationship_scac_successor.sql",
+        "0826_system_work_census_read_scope.sql",
+        "0827_system_work_scac_successor.sql",
+    ),
+    (
+        "0839_relationship_deal_links.sql",
+        "0840_relationship_scac_successor.sql",
     ),
 )
 
