@@ -143,11 +143,9 @@ class DeterministicTests(unittest.TestCase):
                 return original(*args)
             setattr(proxy,operation,stalled)
             # Inject the same stalled syscall into the disposable reader too.
-            program=("import importlib.util,sys,time;"
-                     "spec=importlib.util.spec_from_file_location('reader',sys.argv[1]);"
-                     "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);"
-                     f"module.os.{operation}=lambda *a: time.sleep(60);"
-                     "sys.stdout.buffer.write(module._read_regular(sys.argv[2],int(sys.argv[3])))")
+            program=acceptance._READER_PROGRAM.replace(
+                'spec.loader.exec_module(module)\n','spec.loader.exec_module(module)\n'
+                f"module.os.{operation}=lambda *a: __import__('time').sleep(60)\n")
             with patch.object(acceptance,'os',proxy), \
                  patch.object(acceptance,'_READER_PROGRAM',program,create=True), \
                  patch.object(acceptance,'READ_TIMEOUT',0.05,create=True), \
@@ -164,15 +162,56 @@ class DeterministicTests(unittest.TestCase):
                         self.assertEqual(result['status'],'failed',result)
                         self.assertIn('deadline',result['criteria'][0]['reason'])
 
+    def test_stalled_path_resolution_has_enforced_deadline_in_stop_callers(self):
+        import os, time
+        from lib import acceptance_checks as acceptance
+        (self.root/'output').write_text('content')
+        criterion={'id':'output','kind':'contains','path':'output','text':'content'}
+        prompt=json.dumps({'acceptance_contract':{'criteria':[criterion]}})
+        recs=[{'type':'user','message':{'content':prompt}}]
+        req=load('jev_requirements');done=load('jev_done_checks')
+        # Root, artifact and reader-module resolution each lstat a named path.
+        for target in ('output', self.root.name, 'acceptance_checks.py'):
+            original=os.lstat
+            def stalled(path,*args,target=target,**kwargs):
+                if os.path.basename(os.fsdecode(path)) == target:
+                    time.sleep(0.6)
+                return original(path,*args,**kwargs)
+            injection=(f"_lstat=module.os.lstat\n"
+                       f"module.os.lstat=lambda p,*a,**k: (__import__('time').sleep(60) "
+                       f"if module.os.path.basename(module.os.fsdecode(p))=={target!r} else _lstat(p,*a,**k))\n")
+            program=acceptance._READER_PROGRAM.replace(
+                'spec.loader.exec_module(module)\n','spec.loader.exec_module(module)\n'+injection)
+            with patch('os.lstat',stalled), \
+                 patch.object(acceptance,'_READER_PROGRAM',program), \
+                 patch.object(acceptance,'READ_TIMEOUT',0.05), \
+                 patch.object(req,'_acceptance',return_value=acceptance), \
+                 patch.object(done,'_sibling_lib',return_value=acceptance):
+                callers=[lambda:acceptance.evaluate([criterion],root=self.root,deadline=time.monotonic()+0.05),
+                         lambda:acceptance.evaluate([criterion],root=self.root,
+                             receipts=[self.receipt('output')],deadline=time.monotonic()+0.05),
+                         lambda:req.check({'cwd':str(self.root)},recs),
+                         lambda:done.check_done_claim('Done.',{'claim_scope':'current_completion',
+                             'criteria':[criterion],'root':str(self.root)})['detail']]
+                for index,caller in enumerate(callers):
+                    with self.subTest(target=target,caller=index):
+                        start=time.monotonic();result=caller();elapsed=time.monotonic()-start
+                        self.assertLess(elapsed,0.3,result)
+                        if target == 'acceptance_checks.py':
+                            continue  # the reader's own path is never looked up at call time
+                        self.assertEqual(result['status'],'failed',result)
+                        self.assertIn('deadline',result['criteria'][0]['reason'])
+
     def test_replaced_artifact_fifo_is_checked_after_open(self):
         from lib import acceptance_checks as acceptance
         path=self.root/'output';path.write_text('content')
         # Replace after path validation, before opening in the reader.
-        program=("import importlib.util,sys,os;"
-                 "spec=importlib.util.spec_from_file_location('reader',sys.argv[1]);"
-                 "module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);"
-                 "os.unlink(sys.argv[2]);os.mkfifo(sys.argv[2]);"
-                 "sys.stdout.buffer.write(module._read_regular(sys.argv[2],int(sys.argv[3])))")
+        program=acceptance._READER_PROGRAM.replace(
+            'spec.loader.exec_module(module)\n','spec.loader.exec_module(module)\n'
+            "_read=module._read_regular\n"
+            "def _swap(path,limit):\n"
+            "    module.os.unlink(path);module.os.mkfifo(path);return _read(path,limit)\n"
+            "module._read_regular=_swap\n")
         with patch.object(acceptance,'_READER_PROGRAM',program):
             result=acceptance.evaluate([{'id':'x','kind':'contains','path':'output','text':'content'}],root=self.root)
         self.assertEqual(result['status'],'failed')

@@ -6,6 +6,7 @@ check ran is not evidence, so there is no check predicate: a criterion of any
 kind other than the artifact predicates abstains. Missing, unreadable or
 contradictory evidence fails.
 """
+import base64
 import hashlib
 import json
 import os
@@ -43,12 +44,14 @@ Natural language is deliberately not compiled into a permission to complete.
 
 
 READ_TIMEOUT = 1.0
+# Captured at import so no call-time filesystem lookup precedes the deadline.
+_MODULE = os.path.abspath(__file__)
 _READER_PROGRAM = """
-import importlib.util, sys
+import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location('acceptance_reader', sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-sys.stdout.buffer.write(module._read_regular(sys.argv[2], int(sys.argv[3])))
+json.dump(module._observe(json.loads(sys.argv[2])), sys.stdout)
 """
 
 
@@ -70,25 +73,70 @@ def _read_regular(path, limit):
         os.close(fd)
 
 
-def read_regular(path, limit, *, deadline=None):
-    """Bound open/read time as well as bytes, including calls from threads.
+def _error(exc):
+    return {'error': str(exc) or type(exc).__name__, 'os': isinstance(exc, OSError)}
+
+
+def _observe(request):
+    """Runs in the disposable process: every filesystem touch of a verification.
+
+    Resolves root, each path to read and each path only to resolve (contained
+    in root unless root is None), then reads each distinct resolved path.
+    """
+    paths, reads = {}, {}
+    try:
+        base = None if request['root'] is None else Path(request['root']).resolve()
+        base_error = None
+    except (OSError, ValueError) as exc:
+        base, base_error = None, _error(exc)
+    for value, read in [(v, True) for v in request['read']] + [(v, False) for v in request['resolve']]:
+        if value not in paths:
+            try:
+                if base_error:
+                    raise OSError(base_error['error'])
+                paths[value] = {'path': value if request['root'] is None else str(_path(value, base))}
+            except (OSError, ValueError) as exc:
+                paths[value] = _error(exc)
+        resolved = paths[value].get('path')
+        if read and resolved is not None and resolved not in reads:
+            try:
+                reads[resolved] = {'b64': base64.b64encode(_read_regular(resolved, request['limit'])).decode()}
+            except (OSError, ValueError) as exc:
+                reads[resolved] = _error(exc)
+    return {'paths': paths, 'reads': reads}
+
+
+def _observe_bounded(request, deadline):
+    """Bound resolution and open/read time as well as bytes, including from threads.
 
     A stalled filesystem operation cannot hold the verifier: subprocess.run
-    kills and reaps the disposable reader at the deadline. No signal handlers
+    kills and reaps the disposable process at the deadline. No signal handlers
     or lingering I/O threads are installed in the caller.
     """
     remaining = READ_TIMEOUT if deadline is None else min(READ_TIMEOUT, deadline - time.monotonic())
     if remaining <= 0:
         raise ValueError('artifact read deadline expired')
     try:
-        result = subprocess.run([sys.executable, '-c', _READER_PROGRAM,
-                                 str(Path(__file__).resolve()), str(path), str(limit)],
+        result = subprocess.run([sys.executable, '-c', _READER_PROGRAM, _MODULE, json.dumps(request)],
                                 capture_output=True, timeout=remaining)
     except subprocess.TimeoutExpired as exc:
         raise ValueError('artifact read deadline expired') from exc
     if result.returncode:
-        raise ValueError('artifact unreadable or not a regular file')
-    return result.stdout
+        raise ValueError('artifact reader failed')
+    return json.loads(result.stdout)
+
+
+def _raise(row):
+    raise (OSError if row.get('os') else ValueError)(row['error'])
+
+
+def read_regular(path, limit, *, deadline=None):
+    """Read one regular file, path used as given, within the deadline."""
+    path = str(path)
+    row = _observe_bounded({'root': None, 'read': [path], 'resolve': [], 'limit': limit}, deadline)['reads'][path]
+    if 'error' in row:
+        _raise(row)
+    return base64.b64decode(row['b64'])
 
 
 def _path(value, root):
@@ -142,10 +190,31 @@ its artifacts, and each criterion also needs exactly one matching receipt whose
 digest equals the bytes read; with None the caller is the observer.
 """
     deadline = min(deadline, time.monotonic() + READ_TIMEOUT) if deadline is not None else time.monotonic() + READ_TIMEOUT
-    root = Path(root).resolve()
     if not isinstance(criteria, list) or not criteria:
         return {'status':'needs_review','criteria':[], 'reason':'explicit acceptance criteria required'}
-    rows, seen, cache = [], set(), {}
+    # Every filesystem touch happens in one bounded pass before any predicate.
+    wanted = [c['path'] for c in criteria if isinstance(c, dict)
+              and c.get('kind') in {'artifact','contains','json_equals'} and isinstance(c.get('path'), str)]
+    named = [item.get('path') for item in receipts or [] if isinstance(item, dict)]
+    observed, observe_error = {'paths':{}, 'reads':{}}, None
+    if wanted:
+        try:
+            observed = _observe_bounded({'root':str(root), 'read':wanted, 'limit':MAX_BYTES,
+                                         'resolve':[p for p in named if isinstance(p, str)]}, deadline)
+        except ValueError as exc:
+            observe_error = exc
+
+    def resolved(value):
+        if not isinstance(value, str):
+            raise TypeError('artifact path must be a string')
+        if observe_error:
+            raise observe_error
+        row = observed['paths'][value]
+        if 'error' in row:
+            _raise(row)
+        return row['path']
+
+    rows, seen = [], set()
     for index, criterion in enumerate(criteria):
         cid = criterion.get('id', str(index)) if isinstance(criterion, dict) else str(index)
         status, reason = 'needs_review', 'semantic or unknown criterion; needs review'
@@ -158,16 +227,17 @@ digest equals the bytes read; with None the caller is the observer.
                 continue
             kind = criterion.get('kind')
             if kind in {'artifact','contains','json_equals'}:
-                path = _path(criterion['path'], root)
-                if path not in cache:
-                    cache[path] = read_regular(path, MAX_BYTES, deadline=deadline)
-                raw = cache[path]
+                path = resolved(criterion['path'])
+                read = observed['reads'][path]
+                if 'error' in read:
+                    _raise(read)
+                raw = base64.b64decode(read['b64'])
                 if not raw or len(raw) > MAX_BYTES:
                     raise ValueError('artifact empty or over byte budget')
                 digest = hashlib.sha256(raw).hexdigest()
                 if receipts is not None:
                     matches = [item for item in receipts
-                               if isinstance(item, dict) and _path(item.get('path',''),root) == path]
+                               if isinstance(item, dict) and resolved(item.get('path')) == path]
                     if len(matches) != 1 or not SHA.fullmatch(str(matches[0].get('sha256',''))):
                         raise ValueError('one digest-bound artifact receipt required')
                     if digest != matches[0]['sha256']:
