@@ -88,6 +88,8 @@ RECENT_MERGED = timedelta(days=7)
 # from. The launchd wrapper binds it explicitly, so a copy of the tool run from
 # anywhere else still reads the canonical checkout.
 REPO_ROOT = Path(os.environ.get("CARR_REPO_ROOT") or Path(__file__).resolve().parents[1]).expanduser().resolve()
+sys.path.insert(0, str(REPO_ROOT))
+from lib import record_call  # noqa: E402
 RELEASE_CONFIG = REPO_ROOT / "ops" / "config" / "release-pipeline.v1.json"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 
@@ -1866,18 +1868,12 @@ def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> Non
 
 
 def call_verb(verb: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Use the existing noninteractive local-token route; no model is involved."""
-    repo = REPO_ROOT
-    result = subprocess.run(
-        [str(repo / "run.sh"), "call", verb, json.dumps(args, sort_keys=True, separators=(",", ":"))],
-        cwd=repo, capture_output=True, text=True, timeout=30, check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(f"{verb} failed: {(result.stderr or result.stdout).strip()[:500]}")
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{verb} returned invalid JSON") from exc
+    """Use the existing noninteractive local-token route; no model is involved.
+    Anything short of an explicit ok:true reply raises."""
+    result = record_call.call_verb(verb, args, timeout=30)
+    payload = result.reply
+    if not result.ok and result.kind != record_call.REFUSED:
+        raise RuntimeError(result.describe())
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError(f"{verb} refused: {payload.get('error', 'unknown result') if isinstance(payload, dict) else 'invalid result'}")
     return payload

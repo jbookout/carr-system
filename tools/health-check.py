@@ -1774,7 +1774,7 @@ def _canonical_health():
             _action = _jev_outage.action(_joh.get("reason"))
             _outcome = _jev_outage.reconcile(
                 _joh, _loop_state,
-                lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+                _jev_outage.call_verb)
             if _joh["status"] == "warn":
                 _last = (f"last success {_joh['age_hours']}h ago"
                          if _joh["age_hours"] is not None else "no usable call recorded")

@@ -60,6 +60,9 @@ from urllib import request as _urllib_request
 from urllib.error import HTTPError, URLError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from lib.record_call import call_verb  # noqa: E402
+
 INVENTORY_PATH = REPO_ROOT / "ops" / "config" / "credential-inventory.v1.json"
 OUT_JSONL = REPO_ROOT / "out" / "credential-health.jsonl"
 DEDUP_PATH = REPO_ROOT / "out" / "credential-health-loop-dedup.json"
@@ -761,12 +764,7 @@ def file_loop_if_needed(cred, bucket, dedup_state, dry_run=False, timeout_s=30):
         "blocker_detail": f"{name} credential-health probe",
         "body": _loop_body(cred, bucket),
     }
-    try:
-        p = SUBPROCESS_RUN(["./run.sh", "call", "add-loop", json.dumps(payload)],
-                            cwd=str(REPO_ROOT), capture_output=True, timeout=timeout_s)
-        filed_ok = (p.returncode == 0)
-    except Exception:
-        filed_ok = False
+    filed_ok = call_verb("add-loop", payload, timeout=timeout_s, runner=SUBPROCESS_RUN).ok
     dedup_state[name] = {
         "bucket": bucket,
         "filed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
