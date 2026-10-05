@@ -66,7 +66,6 @@ def load(name, path, *, replace=None):
 RTC_PATH = REPO / "ops" / "rule_trigger_compile.py"
 RTD_PATH = REPO / "ops" / "rule_trigger_delivery.py"
 TSC_PATH = REPO / "ops" / "typesafe_client.py"
-BUILD_PATH = REPO / "ops" / "jev_build_advisory.py"
 rtc = load("rule_trigger_compile_t", RTC_PATH)
 rtd = load("rule_trigger_delivery_t", RTD_PATH)
 
@@ -118,7 +117,6 @@ def table_for(doc, tmp, extra=()):
     Path(path).write_text(json.dumps({"schema": "rule-jit-triggers/v1", "triggers": rows}),
                           encoding="utf-8")
     return path
-
 
 
 # Fillers make the roster bigger than the binding capacity, so the ranking
@@ -306,7 +304,7 @@ class ChoiceClient(Client):
 
 
 def prop_default_rank(rtc_m, rtd_m):
-    """The REAL default ranker (jev_rule_select's ranking Choice), driven
+    """The default ranker (rule_trigger_delivery's ranking Choice), driven
     through advise() with only the judge module stubbed: exactly one ranking
     request, its top choices are what gets judged, and the ranking model is
     carried on what it returns. The injected fake ranker elsewhere in this
@@ -334,11 +332,7 @@ def prop_default_rank(rtc_m, rtd_m):
     real_sibling = rtd_m._sibling
 
     def sibling(name):
-        module = real_sibling(name)
-        if name == "jev_rule_select":
-            inner = module._sibling
-            module._sibling = lambda n: StubJudge if n == "jev_judge" else inner(n)
-        return module
+        return StubJudge if name == "jev_judge" else real_sibling(name)
 
     rtd_m._sibling = sibling
     try:
@@ -380,7 +374,7 @@ def prop_ranking_fails_binding_up(rtc_m, rtd_m):
 def prop_none_binds_is_ok(rtc_m, rtd_m):
     """A ranking that answers "no rule binds" is a successful ranking with
     an empty shortlist: logged ok, one request, nothing judged."""
-    jrs = rtd_m._sibling("jev_rule_select")
+    jrs = rtd_m
 
     class NoneJudge:
         @staticmethod
@@ -391,11 +385,7 @@ def prop_none_binds_is_ok(rtc_m, rtd_m):
     real_sibling = rtd_m._sibling
 
     def sibling(name):
-        module = real_sibling(name)
-        if name == "jev_rule_select":
-            inner = module._sibling
-            module._sibling = lambda n: NoneJudge if n == "jev_judge" else inner(n)
-        return module
+        return NoneJudge if name == "jev_judge" else real_sibling(name)
 
     rtd_m._sibling = sibling
     try:
@@ -475,8 +465,7 @@ def prop_deadline_keeps_matches(rtc_m, rtd_m):
 # ------------------------------------------ the Worker transport under a clock
 # Retry ownership moved to the Worker. Exercise the real client and its safe
 # capability probe through the same runner seam used by production.
-EXTRA = {"tsc": load("typesafe_client_t", TSC_PATH),
-         "build": load("jev_build_advisory_t", BUILD_PATH)}
+EXTRA = {"tsc": load("typesafe_client_t", TSC_PATH)}
 
 
 class FakeClock:
@@ -598,33 +587,6 @@ def prop_bind_429_not_retried(rtc_m, rtd_m):
 def prop_rank_429_not_retried(rtc_m, rtd_m):
     return _judged_once(lambda via, deadline: rtd_m._default_rank(
         "anything", ROSTER, rtd_m.BIND_TOP_K, via, timeout=10, deadline=deadline))
-
-
-def prop_build_advisory_bounded(rtc_m, rtd_m):
-    """The build advisory, as the prompt hook calls it (defaults): a hanging
-    transport costs one attempt of at most 6 s; a 429 is not retried."""
-    build_m = EXTRA["build"]
-
-    def hanging(clock, tsc_m):
-        t = Transport(clock, hang=True)
-        start = clock.now
-        try:
-            build_m.advise("please build the deal room panel", client=Via(tsc_m, t))
-            return False
-        except Exception:
-            pass
-        return len(t.attempts) == 1 and t.attempts[0][1] <= 6.0 and clock.now - start <= 6.0
-
-    def limited(clock, tsc_m):
-        t = Transport(clock)
-        try:
-            build_m.advise("please build the deal room panel", client=Via(tsc_m, t))
-            return False
-        except Exception:
-            pass
-        return len(t.attempts) == 1 and clock.slept == []
-
-    return _on_clock(hanging) and _on_clock(limited)
 
 
 def prop_dedupe(rtc_m, rtd_m):
@@ -750,7 +712,6 @@ PROPERTIES = {
     "ask() bounds the capability probe and Worker with one deadline": prop_ask_honours_deadline,
     "a 429 on a binding request is not retried": prop_bind_429_not_retried,
     "a 429 on the ranking request is not retried": prop_rank_429_not_retried,
-    "the build advisory is one attempt of at most 6 s": prop_build_advisory_bounded,
     "a rule already delivered this session is not resent inside the window": prop_dedupe,
     "no session id means no dedupe and no shared key": prop_no_session_no_pooling,
     "coverage flags a triggered rule with no trigger": prop_coverage_flags_empty_trigger,
@@ -994,8 +955,6 @@ MUTANTS = [
     ("ask() bounds the capability probe and Worker with one deadline", TSC_PATH,
      ("remaining = float(timeout) - (time.monotonic() - started)",
       "remaining = float(timeout)")),
-    ("the build advisory is one attempt of at most 6 s", BUILD_PATH,
-     ("TIMEOUT_SECONDS = 6.0", "TIMEOUT_SECONDS = 20.0")),
     ("a rule already delivered this session is not resent inside the window", RTD_PATH,
      ("if not (isinstance(recent.get(rule_id), (int, float))",
       "if True or not (isinstance(recent.get(rule_id), (int, float))")),
@@ -1018,8 +977,6 @@ for number, (prop_name, path, substitution) in enumerate(MUTANTS):
     saved = dict(EXTRA)
     if path == TSC_PATH:
         EXTRA["tsc"] = mutated
-    if path == BUILD_PATH:
-        EXTRA["build"] = mutated
     try:
         survived = PROPERTIES[prop_name](rtc_m, rtd_m)
     except Exception:
