@@ -66,6 +66,11 @@ check("required local environment survives", clean["PATH"] == source["PATH"] and
 check("explicit offline CI mode survives credential scrubbing",
       clean.get("CARR_JEV_OFFLINE_REPLAY") == "1")
 check("unregistered ambient values are scrubbed", "SAFE_LOCAL_FLAG" not in clean)
+# A macOS postmaster with no locale in its environment aborts ("postmaster
+# became multithreaded during startup"), so every disposable cluster needs one.
+check("scrubbed environment pins the C locale when none is set", clean.get("LC_ALL") == "C")
+check("scrubbed environment pins the C locale over an ambient one",
+      mod.scrub_cloud_environment({**source, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}).get("LC_ALL") == "C")
 check("owner DSN is scrubbed", "DATABASE_URL" not in clean)
 check("routine DB DSNs are scrubbed", "CARR_DB_JOBS_URL" not in clean)
 check("provider token is scrubbed", "CARR_AI_ROUTE_PRIMARY_TOKEN" not in clean)

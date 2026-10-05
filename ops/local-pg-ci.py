@@ -107,7 +107,6 @@ def export_snapshot_candidate(
     binaries = find_postgres_binaries()
     command_runner = runner or SubprocessRunner()
     clean_env = scrub_cloud_environment(os.environ)
-    clean_env["LC_ALL"] = "C"
     clean_env["PATH"] = f"{binaries.initdb.parent}{os.pathsep}{clean_env.get('PATH', '')}"
     python = repo / ".venv/bin/python"
     if not python.is_file() or not os.access(python, os.X_OK):
@@ -301,12 +300,12 @@ def refuse_hosted_execution() -> None:
 
 
 def scrub_cloud_environment(source: Mapping[str, str]) -> dict[str, str]:
-    """Build the minimal nonsecret environment needed by local tools."""
+    """Build the minimal nonsecret environment needed by local tools.
+
+    The locale is pinned rather than inherited: a macOS postmaster started with
+    no locale aborts ("postmaster became multithreaded during startup")."""
     allowed = {
         "HOME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
         # CI may explicitly forbid live Jev spend; this is a nonsecret mode.
         "CARR_JEV_OFFLINE_REPLAY",
         "LOGNAME",
@@ -316,7 +315,7 @@ def scrub_cloud_environment(source: Mapping[str, str]) -> dict[str, str]:
         "TMPDIR",
         "USER",
     }
-    return {key: value for key, value in source.items() if key in allowed}
+    return {**{key: value for key, value in source.items() if key in allowed}, "LC_ALL": "C"}
 
 
 def find_postgres_binaries() -> PostgresBinaries:
@@ -424,7 +423,6 @@ def run_local_ci(
     integration_data = root / "integration-data"
     integration_started = False
     clean_env = scrub_cloud_environment(os.environ)
-    clean_env["LC_ALL"] = "C"
     dsn = f"postgres://carr_ci@127.0.0.1:{port}/carr_ci"
     start_attempted = False
     exit_code = 0

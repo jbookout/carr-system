@@ -30,7 +30,6 @@ def main():
     spec.loader.exec_module(module)
     binaries = module.find_postgres_binaries()
     env = module.scrub_cloud_environment(os.environ)
-    env["LC_ALL"] = "C"
     schema = (ROOT / "db/schema.sql").read_text()
     with postgres_fixture_group(), tempfile.TemporaryDirectory(prefix="carr-activation-repin-") as temp:
         root = Path(temp)

@@ -44,6 +44,7 @@ class DotReader(unittest.TestCase):
         spec.loader.exec_module(module)
         try:
             cls.bin = module.find_postgres_binaries()
+            cls.pg_env = module.scrub_cloud_environment(os.environ)
         except module.LocalPGRefusal:
             raise unittest.SkipTest("disposable PostgreSQL binaries unavailable")
         cls.pg_budget = postgres_fixture_group()
@@ -173,7 +174,8 @@ class DotReader(unittest.TestCase):
 
     @classmethod
     def run_pg(cls, args):
-        result = subprocess.run([str(x) for x in args], capture_output=True, text=True, timeout=45)
+        result = subprocess.run([str(x) for x in args], capture_output=True, text=True, timeout=45,
+                                env=cls.pg_env)
         if result.returncode:
             raise RuntimeError("disposable PostgreSQL setup failed")
 
