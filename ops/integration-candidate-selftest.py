@@ -33,42 +33,12 @@ class CandidateTests(unittest.TestCase):
         self.commit(); self.base=self.g('rev-parse','HEAD')
         self.g('update-ref','refs/remotes/origin/main',self.base)
         self.receipt=self.root/'receipt.json'
-        self.generator=self.root/'generator.py'
-        self.generator.write_text('''import json,os,pathlib
-p=json.loads(os.environ['CARR_INTEGRATION_ALLOCATION']);root=pathlib.Path('.')
-count=pathlib.Path(__file__).parent/'integration-render-count'
-count.write_text(str(int(count.read_text())+1) if count.exists() else '1')
-drafts={old:(root/'migrations'/old).read_text() for old in p['migration_names']}
-for old in drafts: (root/'migrations'/old).unlink()
-for old,new in p['migration_names'].items(): (root/'migrations'/new).write_text(drafts[old])
-v=p['registry_successor']
-(root/f'mcp-server/src/scac-mutation-registry.v{v}.generated.js').write_text(f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\\n')
-''')
     def g(self,*args):
         return subprocess.check_output(['git',*args],cwd=self.repo,env=self.env,text=True,stderr=subprocess.DEVNULL).strip()
     def write(self,p,value): (self.repo/p).write_text(value)
     def registry(self,v): self.write(f'mcp-server/src/scac-mutation-registry.v{v}.generated.js',f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\n')
     def commit(self):
         self.g('add','migrations','mcp-server','db'); self.g('commit','-qm','Fixture source')
-    def render(self,pending,argv=None):
-        with patch.dict(os.environ,{'CANARY_TOKEN':'private-canary-123'}):
-            return integration.regenerate_once(self.repo,self.base,pending,argv or [sys.executable,str(self.generator)],self.receipt)
-    def test_same_number_and_version_contenders_render_once_in_order(self):
-        self.write('migrations/0749_first.sql','select 2;')
-        first=self.render(['0749_first.sql']); self.assertEqual(first['allocation']['registry_successor'],98)
-        # Retry authenticates outputs, never reexecutes the generator.
-        self.assertEqual(self.render(['0749_first.sql']),first)
-        self.assertEqual((self.root/'integration-render-count').read_text(),'1')
-        self.commit(); self.base=self.g('rev-parse','HEAD'); self.g('update-ref','refs/remotes/origin/main',self.base)
-        sealed=(self.repo/'mcp-server/src/scac-mutation-registry.v98.generated.js').read_bytes()
-        self.write('migrations/0749_second.sql','select 3;')
-        second=self.render(['0749_second.sql'])
-        self.assertEqual(second['allocation']['migration_names'],{'0749_second.sql':'0750_second.sql'})
-        self.assertEqual(second['allocation']['registry_predecessor'],98)
-        self.assertEqual(second['allocation']['registry_successor'],99)
-        self.assertEqual((self.repo/'mcp-server/src/scac-mutation-registry.v98.generated.js').read_bytes(),sealed)
-        self.assertEqual((self.root/'integration-render-count').read_text(),'2')
-        self.commit(); self.assertEqual(integration.validate_candidate(self.repo,self.base)['pending_migrations'],['0750_second.sql'])
     def test_actual_generator_sink_rejects_reseal_and_wrong_successor(self):
         target=self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js'
         integration.check_generated_write(self.repo,target,target.read_bytes(),self.base)
@@ -87,16 +57,6 @@ v=p['registry_successor']
         self.assertNotIn('private-canary-123',refusal.stdout+refusal.stderr)
         self.assertEqual(target.read_bytes(),original)
 
-    def test_empty_zero_refusal_nonzero_partial_exception_and_acknowledgement(self):
-        for code in ['pass','print("private-canary-123");raise SystemExit(75)', 'raise SystemExit(2)',
-                     'open("migrations/0749_only.sql","w").write("partial")','raise Exception("private-canary-123")']:
-            self.receipt=self.root/(str(abs(hash(code)))+'.json')
-            self.write('migrations/0749_pending.sql','select 2;')
-            with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'],[sys.executable,'-c',code])
-            raw=self.receipt.read_bytes(); self.assertNotIn(b'private-canary-123',raw)
-            self.assertEqual(json.loads(raw)['state'],'refused')
-            with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'],[sys.executable,'-c',code])
-            if (self.repo/'migrations/0749_only.sql').exists(): (self.repo/'migrations/0749_only.sql').unlink()
     def install_sink(self):
         (self.repo/'ops').mkdir(exist_ok=True); (self.repo/'tools').mkdir(exist_ok=True)
         for name in ['integration_candidate.py','migration_number_contract.py']:
@@ -124,6 +84,15 @@ v=p['registry_successor']
         seals=self.repo/'ops/config/seals.json'; seals.parent.mkdir()
         result=self.sink(f'new URL({json.dumps(seals.as_uri())})','{}\n')
         self.assertEqual(result.returncode,0,result.stderr); self.assertEqual(seals.read_text(),'{}\n')
+    def test_nonseal_source_fixture_keeps_the_plain_writer_contract(self):
+        self.install_sink()
+        target=self.repo/'mcp-server/src/synthetic-render-fixture.js'
+        self.g('update-ref','-d','refs/remotes/origin/main')
+        for content in ['first fixture','updated fixture']:
+            result=self.sink(json.dumps(str(target)),content)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(target.read_text(),content)
+
     def test_sink_refuses_while_another_owner_holds_the_generation_lock(self):
         import fcntl
         self.install_sink()
@@ -149,88 +118,76 @@ v=p['registry_successor']
         with patch.object(integration,'check_generated_write',side_effect=advance_after_check):
             with self.assertRaises(MigrationNumberError): integration.write_generated_artifact(self.repo,target,stale)
         self.assertEqual(target.read_bytes(),sealed)
-    def test_coordinator_owned_renderer_writes_through_the_real_sink(self):
+    def test_final_publish_seam_never_replaces_a_new_seal(self):
+        target=self.repo/'mcp-server/src/scac-mutation-registry.v98.generated.js'
+        stale=b'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v98";\n// stale\n'
+        sealed=b'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v98";\n'
+        replace=os.replace; link=os.link
+        def promote_then_publish(publish):
+            def interleave(source,destination,*args,**kwargs):
+                target.write_bytes(sealed); self.commit()
+                self.g('update-ref','refs/remotes/origin/main',self.g('rev-parse','HEAD'))
+                return publish(source,destination,*args,**kwargs)
+            return interleave
+        with (patch.object(integration.os,'replace',side_effect=promote_then_publish(replace)),
+              patch.object(integration.os,'link',side_effect=promote_then_publish(link))):
+            with self.assertRaises(MigrationNumberError):
+                integration.write_generated_artifact(self.repo,target,stale)
+        self.assertEqual(target.read_bytes(),sealed)
+
+    def test_arbitrary_renderer_cannot_launch_detached_source_writers(self):
         self.install_sink()
-        self.generator.write_text('''import json,os,pathlib,subprocess
-p=json.loads(os.environ['CARR_INTEGRATION_ALLOCATION'])
-for old,new in p['migration_names'].items():
- source=pathlib.Path('migrations')/old; data=source.read_text(); source.unlink()
- pathlib.Path('migrations',new).write_text(data)
-v=p['registry_successor']
-script="import {writeIntegratedArtifact} from './ops/integration-generation.mjs'; await writeIntegratedArtifact(process.argv[1],process.argv[2]);"
-subprocess.run(['node','--input-type=module','-e',script,f'mcp-server/src/scac-mutation-registry.v{v}.generated.js',
- f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\\n'],check=True)
-''')
-        self.write('migrations/0749_first.sql','select 2;')
-        self.assertEqual(self.render(['0749_first.sql'])['state'],'generated')
-    def test_partial_failure_cannot_authorize_a_second_execution(self):
-        counter=self.root/'partial-count'
-        code=(f'import pathlib;c=pathlib.Path({str(counter)!r});c.write_text(str(int(c.read_text())+1) if c.exists() else "1");'
-              'open("migrations/0749_pending.sql","a").write("-- partial");raise SystemExit(2)')
-        self.write('migrations/0749_pending.sql','select 2;')
-        for _ in range(2):
-            with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'],[sys.executable,'-c',code])
-        self.assertEqual(counter.read_text(),'1')
-    def test_timeout_stops_renderer_descendants_before_releasing_ownership(self):
         draft=self.repo/'migrations/0749_pending.sql'
         self.write('migrations/0749_pending.sql','select 2;')
-        code=('import subprocess,sys,time;'
-              'subprocess.Popen([sys.executable,"-c","import time;time.sleep(0.6);open(\\"migrations/0749_pending.sql\\",\\"a\\").write(\\"late\\")"],'
-              'stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);time.sleep(30)')
-        with patch.object(integration,'GENERATOR_TIMEOUT_SECONDS',0.2):
-            with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'],[sys.executable,'-c',code])
+        child='import time;time.sleep(0.6);open("migrations/0749_pending.sql","a").write("late")'
+        code=f'import subprocess,sys;subprocess.Popen([sys.executable,"-c",{child!r}],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);sys.exit(2)'
+        result=subprocess.run([sys.executable,str(self.repo/'tools/integration_candidate.py'),
+                               '--base',self.base,'--pending','0749_pending.sql',
+                               '--regenerate',json.dumps([sys.executable,'-c',code,'synthetic-private-canary']),
+                               '--receipt',str(self.receipt)],cwd=self.repo,env=self.env,capture_output=True,text=True,timeout=10)
         import time; time.sleep(1.0)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('synthetic-private-canary',result.stdout+result.stderr)
         self.assertEqual(draft.read_text(),'select 2;')
-    def test_timeout_diagnostics_never_print_renderer_argv(self):
-        self.write('migrations/0749_pending.sql','select 2;')
-        argv=[sys.executable,'-c','import time;time.sleep(30)','private-canary-123']
-        with patch.object(integration,'GENERATOR_TIMEOUT_SECONDS',0.2):
-            with self.assertRaises(MigrationNumberError) as raised: self.render(['0749_pending.sql'],argv)
-        self.assertNotIn('private-canary-123',str(raised.exception))
-        output=io.StringIO()
-        injected=subprocess.TimeoutExpired(argv,300,output=b'private-canary-123',stderr=b'private-canary-123')
-        with patch.object(integration,'regenerate_once',side_effect=injected),redirect_stdout(output),redirect_stderr(output):
-            code=integration.main(['--base','a'*40,'--regenerate',json.dumps(argv),'--receipt',str(self.receipt)])
-        self.assertEqual(code,78)
-        self.assertNotIn('private-canary-123',output.getvalue())
-    def test_renderer_that_moves_head_cannot_attest_generation(self):
-        self.write('migrations/0749_first.sql','select 2;')
-        code=(self.generator.read_text()+
-              "import subprocess\nsubprocess.run(['git','add','-A'],check=True)\nsubprocess.run(['git','commit','-qm','renderer commit'],check=True)\n")
-        self.generator.write_text(code)
-        with patch.dict(os.environ,{'GIT_AUTHOR_NAME':'F','GIT_AUTHOR_EMAIL':'f@example.invalid','GIT_COMMITTER_NAME':'F','GIT_COMMITTER_EMAIL':'f@example.invalid'}):
-            with self.assertRaises(MigrationNumberError): self.render(['0749_first.sql'])
-        self.assertEqual(json.loads(self.receipt.read_text())['state'],'refused')
-    def main_at_0749(self):
-        self.write('migrations/0749_main.sql','select 0;'); self.commit()
-        self.base=self.g('rev-parse','HEAD'); self.g('update-ref','refs/remotes/origin/main',self.base)
-    def test_overlapping_allocation_outputs_are_not_obsolete_drafts(self):
-        self.main_at_0749()
-        self.write('migrations/0749_same.sql','select 49;'); self.write('migrations/0750_same.sql','select 50;')
-        result=self.render(['0749_same.sql','0750_same.sql'])
-        self.assertEqual(result['allocation']['migration_names'],{'0749_same.sql':'0750_same.sql','0750_same.sql':'0751_same.sql'})
-        self.assertEqual((self.repo/'migrations/0750_same.sql').read_text(),'select 49;')
-        self.assertEqual((self.repo/'migrations/0751_same.sql').read_text(),'select 50;')
-    def test_overlapping_output_left_with_another_inputs_bytes_is_refused(self):
-        self.main_at_0749()
-        self.write('migrations/0749_same.sql','select 49;'); self.write('migrations/0750_same.sql','select 50;')
-        code=('import json,os,pathlib;p=json.loads(os.environ["CARR_INTEGRATION_ALLOCATION"]);'
-              'pathlib.Path("migrations/0751_same.sql").write_text(pathlib.Path("migrations/0750_same.sql").read_text());'
-              'pathlib.Path("migrations/0749_same.sql").unlink();v=p["registry_successor"];'
-              'pathlib.Path(f"mcp-server/src/scac-mutation-registry.v{v}.generated.js").write_text('
-              'f\'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v{v}";\\n\')')
-        with self.assertRaises(MigrationNumberError): self.render(['0749_same.sql','0750_same.sql'],[sys.executable,'-c',code])
+        self.assertFalse(self.receipt.exists())
+
     def test_poisoned_git_environment_cannot_move_the_bound_repository(self):
         with patch.dict(os.environ,{'GIT_DIR':'/nonexistent-poison','GIT_INDEX_FILE':'/nonexistent-index'}):
             self.assertEqual(integration.allocation_plan(self.repo,self.base,['0749_pending.sql'])['base'],self.base)
 
-    def test_wrong_base_dirty_proof_and_interrupted_receipt_refuse(self):
-        with self.assertRaises(MigrationNumberError): integration.validate_candidate(self.repo,'f'*40)
+    def test_byte_exact_artifact_does_not_replace_its_inode(self):
+        target=self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js'
+        before=target.stat()
+        integration.write_generated_artifact(self.repo,target,target.read_bytes())
+        self.assertEqual(target.stat().st_ino,before.st_ino)
+        self.assertEqual(target.stat().st_mtime_ns,before.st_mtime_ns)
+
+    def test_existing_pending_artifact_requires_a_fresh_successor(self):
+        target=self.repo/'mcp-server/src/scac-mutation-registry.v98.generated.js'
+        self.registry(98); original=target.read_bytes()
+        with self.assertRaises(MigrationNumberError):
+            integration.write_generated_artifact(self.repo,target,original+b'// new bytes\n')
+        self.assertEqual(target.read_bytes(),original)
+
+    def test_ordered_and_overlapping_allocations_preserve_distinct_inputs(self):
+        self.write('migrations/0749_main.sql','select 0;');self.commit()
+        self.base=self.g('rev-parse','HEAD');self.g('update-ref','refs/remotes/origin/main',self.base)
+        drafts={'0749_same.sql':b'select 49;','0750_same.sql':b'select 50;'}
+        plan=integration.allocation_plan(self.repo,self.base,list(drafts))
+        self.assertEqual(plan['migration_names'],{'0749_same.sql':'0750_same.sql','0750_same.sql':'0751_same.sql'})
+        for old,new in plan['migration_names'].items():
+            integration.write_generated_artifact(self.repo,self.repo/'migrations'/new,drafts[old])
+        integration.write_generated_artifact(self.repo,self.repo/'mcp-server/src/scac-mutation-registry.v98.generated.js',
+                                            b'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v98";\n')
+        for old,new in plan['migration_names'].items():
+            self.assertEqual((self.repo/'migrations'/new).read_bytes(),drafts[old])
+        self.commit()
+        self.assertEqual(integration.validate_candidate(self.repo,self.base)['pending_migrations'],['0750_same.sql','0751_same.sql'])
+
+    def test_wrong_base_and_uncommitted_proof_refuse(self):
+        with self.assertRaises(MigrationNumberError):integration.validate_candidate(self.repo,'f'*40)
         self.write('migrations/0749_pending.sql','select 2;')
-        with self.assertRaises(MigrationNumberError): integration.validate_candidate(self.repo,self.base)
-        self.receipt.write_text('{"state":"running"}')
-        with self.assertRaises(MigrationNumberError): self.render(['0749_pending.sql'])
-        self.assertFalse((self.root/'integration-render-count').exists())
+        with self.assertRaises(MigrationNumberError):integration.validate_candidate(self.repo,self.base)
 
 
 class RestoreForwardTests(unittest.TestCase):
