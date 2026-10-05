@@ -3015,7 +3015,9 @@ test("source-only migration diagnostics preserve the sealed runtime frontier", (
   assert.equal(confirmMerge.human_only, true);
   assert.equal(confirmMerge.principal_mode, "server_verified_human");
   const fixture = JSON.parse(fs.readFileSync(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
-  const review = fixture.current_source_reviews[SCAC_MUTATION_REGISTRY_VERSION];
+  const reviewVersion = Object.keys(fixture.current_source_reviews)
+    .sort((left, right) => Number(left.split('.v')[1]) - Number(right.split('.v')[1])).at(-1);
+  const review = fixture.current_source_reviews[reviewVersion];
   for (const locator of ["bin/migrate-prod.sh", "tools/migrate-prod-support.py"]) {
     const row = review?.upsert.find(row => row.source_locator === locator) || sealed.find(row => row.source_locator === locator);
     const previous = sealed.find(row => row.source_locator === locator);
@@ -3540,8 +3542,8 @@ test("credential rotation source review cannot widen authority or admit an ingre
     const read = fs.readFileSync;
     const fixturePath = "ops/config/scac-registry-source-inventory-fixtures.v1.json";
     const fixture = JSON.parse(read(fixturePath, "utf8"));
-    const { SCAC_MUTATION_REGISTRY_VERSION } = await import("./mcp-server/src/mutation-registry.js");
-    const reviewVersion = Object.keys(fixture.current_source_reviews).sort((a, b) => Number(a.split(".v").at(-1)) - Number(b.split(".v").at(-1))).at(-1);
+    const reviewVersion = Object.keys(fixture.current_source_reviews)
+      .sort((left, right) => Number(left.split('.v')[1]) - Number(right.split('.v')[1])).at(-1);
     const review = fixture.current_source_reviews[reviewVersion];
     const variant = process.argv[1];
     const errors = {
