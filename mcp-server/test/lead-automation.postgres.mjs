@@ -127,4 +127,3 @@ try {
   await c.query('rollback to savepoint invalid_dispatch');
   console.log(`db-gate-proof: lead automation — ${checks} synthetic assertions; stage provenance, draft-only approval, replay, suppression, dry-run and search SQL`);
 } finally {await c.query('rollback');await c.end();}
-
