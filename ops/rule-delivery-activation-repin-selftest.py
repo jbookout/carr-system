@@ -30,12 +30,14 @@ def main():
     spec.loader.exec_module(module)
     binaries = module.find_postgres_binaries()
     env = module.scrub_cloud_environment(os.environ)
+    env['LC_ALL'] = 'C'
     schema = (ROOT / "db/schema.sql").read_text()
     with postgres_fixture_group(), tempfile.TemporaryDirectory(prefix="carr-activation-repin-") as temp:
         root = Path(temp)
         data, socket = root / "data", root / "socket"
         socket.mkdir()
-        subprocess.run([binaries.initdb, "-D", data, "-A", "trust", "-U", "fixture"],
+        subprocess.run([binaries.initdb, "-D", data, "-A", "trust", "-U", "fixture",
+                        "--encoding=UTF8", "--no-locale"],
                        check=True, capture_output=True, env=env, timeout=20)
         try:
             subprocess.run([binaries.pg_ctl, "-D", data, "-l", root / "pg.log", "-o",
