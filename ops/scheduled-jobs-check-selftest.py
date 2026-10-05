@@ -188,10 +188,11 @@ class ReportTests(unittest.TestCase):
                "subject": "canonical", "reason": "behind", "next_action": "repair fleet-sync",
                "owner": "orchestrator", "needs_joe": None}
         class Effects:
+            cleared = []
             def report(self, finding):
-                return {}
+                return {"loop_id": "fixture-loop"}
             def clear(self, finding, active):
-                pass
+                self.cleared.append(finding["loop_id"])
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             effects = Effects()
@@ -204,6 +205,7 @@ class ReportTests(unittest.TestCase):
             watchdog.reconcile(root, config, [], effects, 1002)
             prior = watchdog.read_latest(root / config["paths"]["findings"])[row["key"]]
             self.assertIsNotNone(prior["cleared_at"])
+            self.assertEqual(effects.cleared, ["fixture-loop"])
 
     def test_recovery_closes_versioned_loop_and_recurrence_gets_a_new_episode(self):
         import job_watchdog as watchdog
@@ -217,8 +219,7 @@ class ReportTests(unittest.TestCase):
                      json.dumps({"ok": True, "loop_id": "fixture-loop-two"})]
         with tempfile.TemporaryDirectory() as raw:
             effects = watchdog.Effects(Path(raw), config)
-            with patch.object(effects, "show_finding", return_value={}), \
-                 patch.object(watchdog, "board_task"), \
+            with patch.object(watchdog, "board_task") as board, \
                  patch.object(watchdog, "command", side_effect=responses) as calls:
                 receipt = effects.report(row)
                 self.assertEqual(receipt["loop_id"], "fixture-loop")
@@ -231,6 +232,7 @@ class ReportTests(unittest.TestCase):
                 first = json.loads(calls.call_args_list[0].args[0][-1])
                 second = json.loads(calls.call_args_list[-1].args[0][-1])
                 self.assertNotEqual(first["idempotency_key"], second["idempotency_key"])
+                board.assert_not_called()
 
 
 if __name__ == "__main__":

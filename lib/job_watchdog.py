@@ -472,6 +472,14 @@ def reconcile(root, config, found, effects, now, complete=True):
     if complete:
         for key, prior in previous.items():
             if key not in current and not prior.get("cleared_at") and prior.get("kind") not in blinded:
+                if prior.get("kind") == "scheduled_job_drift" and prior.get("loop_id"):
+                    try:
+                        effects.clear(prior, list(current.values()))
+                    except Exception as exc:
+                        error = finding("record_error", key, str(exc), config)
+                        current[error["key"]] = error
+                        append(findings_path, {**error, "first_seen": stamp(now), "cleared_at": None})
+                        continue
                 append(findings_path, {**prior, "cleared_at": stamp(now)})
     return list(current.values())
 
@@ -796,7 +804,6 @@ class Effects:
                 closed = json.loads(result[result.find("{"):])
                 if closed.get("ok") is not True:
                     raise RuntimeError("scheduled-job loop closure failed")
-
 
     def launch(self, f, argv, cwd, *, job_id, restart_count=0, root_id=None):
         c = self.config
