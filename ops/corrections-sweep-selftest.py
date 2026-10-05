@@ -87,7 +87,7 @@ class CorrectionAuditTests(unittest.TestCase):
             path.write_text(json.dumps({'ts': '2026-10-01T12:00:00Z', 'classes': None}) + '\n')
             result = sweep.scan_conduct(path, '2026-10-01', '2026-10-02')
             self.assertEqual(result['gaps'][0]['reason'], 'invalid conduct classes')
-        self.assertTrue(sweep.review_gaps([{'id': 'one'}], [None]))
+        self.assertTrue(sweep.review_gaps([{'id': 'one'}], [None, {'id': []}]))
 
     def test_private_artifact_refuses_checkout(self):
         with self.assertRaises(ValueError):

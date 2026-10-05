@@ -260,7 +260,7 @@ def review_gaps(turns, review):
             gaps.append({'reason': 'review entry must be an object'})
             continue
         key = row.get('id')
-        if key not in known or key in seen:
+        if not isinstance(key, str) or key not in known or key in seen:
             gaps.append({'id': key, 'reason': 'unknown or duplicate review id'})
             continue
         seen.add(key)
