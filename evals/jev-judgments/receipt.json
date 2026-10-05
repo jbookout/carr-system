@@ -2,11 +2,11 @@
  "adapter": {
   "adapter_id": "jev-judgments-admission-replay",
   "adapter_version": "1",
-  "configuration_fingerprint": "sha256:62ec7babfc93ad307f08dcb9fe3d5718598bbf122145a50b53691591edccdf47",
+  "configuration_fingerprint": "sha256:8615be786f2d60e9436912a7b7a6e783c174475644c9bce676618b30e6fe5944",
   "harness_id": "evals/jev-judgments/run_eval.py",
   "harness_version": "aec173bb93b97aafd61dd115d720772f448788559c4c92eb535ea2512037c09f",
   "model_id": "deterministic-no-model",
-  "native_session_ref": "01a109c5-c2d7-7652-9da4-68955123af7e",
+  "native_session_ref": "7dd3956e-4f89-44d1-a92a-af7b7848ac8f",
   "provider_id": "none",
   "surface": "offline_programmatic"
  },
@@ -91,12 +91,12 @@
   "dependencies": {
    "evals/jev-judgments/admission-policy.v1.json": "914cfa60d99c043660a69c79688befc485b2755addcaef36e4f4eb65fc3a3cad",
    "evals/jev-judgments/expectations.v1.json": "fbf78aaede01d2871dd055f2c66e625b5e00f816915ca19a5ce67cc7a9b34211",
-   "lib/jev_required_actions.py": "23be831932b418a6540bb25da42b9954090a232c85a8697cfa47d2410b82ddcd",
+   "lib/jev_required_actions.py": "7b5b005de56094eefd18cbef6be5ebfea9e8f33fc419beb3785f73892b0e7171",
    "lib/transcript_read.py": "17f34e6288557340d70e5cff18927a6274f61b5c802afb5848b7d71c3f1210a2",
    "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
    "mcp-server/src/jev-spend-authority.js": "d1e2444d23d8fbce95e7b1a5a430914b00e2a45b08da306cb73464fb5cb018c7",
    "mcp-server/src/judge-providers.v1.json": "48b8ca8b4defec4b82fd36f708498c707eab5f861ae0046f857ae06ae8d981ab",
-   "ops/config/jev-call-sites.v1.json": "d085982426f56cf299abcb42a59d94bbac8a4bdc8166c34b73677a073df9bbaa",
+   "ops/config/jev-call-sites.v1.json": "725e5097b6ca5ada9d5e181b324f2d6c4ceee562d80a445a753c071b047739f6",
    "ops/config/jev-cost-guard.v1.json": "e17dbcf060e2ab9126d99408b4ea2068824066fe90ac5acb8a74d59bb9e0e7e5",
    "ops/typesafe_client.py": "2c762db2a1559ab30de3a13b4f153d4dde304ccffe21aa29f180bf04270a577e",
    "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2",
@@ -130,7 +130,7 @@
    "result": "pass"
   }
  },
- "measured_on": "2026-10-04",
+ "measured_on": "2026-10-05",
  "min_useful_gain": 0.5,
  "noise_floor": 0.099,
  "notes": [
