@@ -2214,6 +2214,11 @@ class AppLane(Base):
         runner.run = run  # type: ignore[method-assign]
         self.assertEqual(pipe.tick(["app"]), 0)
         self.assertEqual(runner.names()[:5], ["wrangler-auth", "app-worktree", "app-npm-ci", "app-build", "app-release"])
+        build_index = runner.names().index("app-build")
+        self.assertEqual(runner.calls[build_index][1], ["npm", "run", "build"])
+        self.assertEqual(runner.envs["app-build"]["DOCTORCRE_SOURCE_COMMIT"], sha)
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-build"])
+        self.assertEqual(runner.calls[build_index][2], runner.calls[build_index + 1][2])
         self.assertEqual(self.fx.records()[-1]["status"], "shipped")
         # The slice marker follows Worker releases only: the app lane records
         # no ops.release row for membership to attach to.
@@ -3045,7 +3050,7 @@ class DeployCredential(unittest.TestCase):
         self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-npm-ci"])
         self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-build"])
         self.assertEqual(runner.calls[runner.names().index("app-build")][1],
-                         ["node", "scripts/prepare-release.mjs"])
+                         ["npm", "run", "build"])
         self.assertEqual(runner.calls[runner.names().index("app-release")][1],
                          ["node", "scripts/release-production.mjs"])
         self.assert_never_echoed()
