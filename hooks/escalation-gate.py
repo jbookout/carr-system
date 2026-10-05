@@ -156,7 +156,7 @@ APPROVAL_REQUEST = re.compile(
 NAME_START = (
     r"(?!(?:the|a|an|proposed|new|this|that|it|them|these|those|"
     r"use|using|choose|choosing|pick|picking|select|selecting|"
-    r"run|running|schedule|scheduling|build|building|add|adding|"
+    r"run|running|schedule|scheduling|build|building|add|adding|insert|inserting|"
     r"create|creating|configure|configuring|edit|editing|change|changing|"
     r"remove|removing|replace|replacing|modify|modifying|refactor|refactoring|"
     r"migrate|migrating|install|installing|rename|renaming|delete|deleting|"
