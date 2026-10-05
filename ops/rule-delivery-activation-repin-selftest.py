@@ -35,7 +35,8 @@ def main():
         root = Path(temp)
         data, socket = root / "data", root / "socket"
         socket.mkdir()
-        subprocess.run([binaries.initdb, "-D", data, "-A", "trust", "-U", "fixture"],
+        subprocess.run([binaries.initdb, "-D", data, "-A", "trust", "-U", "fixture",
+                        "--encoding=UTF8"],
                        check=True, capture_output=True, env=env, timeout=20)
         try:
             subprocess.run([binaries.pg_ctl, "-D", data, "-l", root / "pg.log", "-o",
@@ -57,6 +58,8 @@ def main():
                     return conn.execute("select * from ops.rule_delivery_activation_target order by short_id").fetchall()
 
                 baseline = rows()
+                assert all(isinstance(value, str) for row in baseline for value in row), \
+                    "activation targets must round-trip as text"
                 conn.execute(repin, prepare=False)
                 assert rows() == [(*row[:-1], new_digest) for row in baseline], "repin must change only the digest"
                 assert conn.execute("select mode from ops.rule_delivery_policy").fetchone() == ('enforced',)
