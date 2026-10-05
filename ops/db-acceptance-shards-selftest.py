@@ -194,7 +194,9 @@ with (patch.object(pg, 'port_is_available', return_value=True),
                          runner=RealAcceptance(), shard=1, report_path=Path({str(report)!r}))
 sys.exit(rc)
 """
-                lane = subprocess.Popen([sys.executable, "-c", fixture],
+                fixture_env = {key: value for key, value in os.environ.items()
+                               if not key.startswith(("GITHUB_", "CARR_"))}
+                lane = subprocess.Popen([sys.executable, "-c", fixture], env=fixture_env,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         text=True, start_new_session=True)
                 descendant = None
@@ -231,7 +233,7 @@ sys.exit(rc)
                 finally:
                     if lane.poll() is None:
                         os.killpg(lane.pid, signal.SIGKILL)
-                        lane.communicate(timeout=5)
+                    lane.communicate(timeout=5)
                     if descendant is not None:
                         try:
                             os.kill(descendant, signal.SIGKILL)

@@ -91,7 +91,7 @@ class SubprocessRunner:
                 alive = owned & processes.keys()
                 if not alive:
                     proc.wait(timeout=5)
-                    return True
+                    return
                 if proc.pid == os.getpgrp():
                     raise LocalPGRefusal("refusing cancellation of the caller's process group")
                 if any(group == proc.pid for _, group in processes.values()):
@@ -108,7 +108,6 @@ class SubprocessRunner:
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.02)
-        return False
 
     def run(
         self,
@@ -130,10 +129,12 @@ class SubprocessRunner:
         try:
             stdout, stderr = proc.communicate()
         except BaseException:
-            previously_confirmed = self.cleanup_confirmed
+            # A current ps tree cannot prove lifetime ownership. A descendant
+            # may have reparented and escaped its group before cancellation.
+            # Stop discoverable processes, but retain resources for recovery.
             self.cleanup_confirmed = False
             try:
-                self.cleanup_confirmed = self._cancel(proc) and previously_confirmed
+                self._cancel(proc)
             except Exception:
                 pass  # An unreadable process tree cannot acknowledge cleanup.
             raise
