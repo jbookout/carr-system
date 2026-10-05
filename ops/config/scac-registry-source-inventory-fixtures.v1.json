@@ -84923,58 +84923,16 @@
     },
     {
       "version": "v109",
-      "reason": "Append invoices after delivered system-work without changing predecessor contracts.",
+      "reason": "Append exact relationship referral attribution after delivered system-work v108, preserving all predecessor contracts.",
       "remove": [],
-      "upsert": [
-        {
-          "ingress_key": "mcp-tool:read-invoice-tracker",
-          "ingress_kind": "mcp_tool",
-          "operation": "read-invoice-tracker",
-          "effect_class": "audit_side_effect",
-          "source_locator": "mcp-server/src/invoice-tracker.js",
-          "schema_digest": "efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-          "source_digest": "2c44be7b1d1d2e998d655de18df2b53bf18cfff1e11c0568931844a1ffbe7212",
-          "write": false,
-          "human_only": false,
-          "authority_only": false,
-          "principal_mode": "authenticated_registered_principal",
-          "mutation_kind": null,
-          "target_surface": "scac.surface.database",
-          "delegates_to": [],
-          "request_shape": "closed_top_level_schema",
-          "idempotency_mode": "not_applicable",
-          "rollback_class": "append_only_audit",
-          "admission_class": "application_default_deny",
-          "owner_package": "11",
-          "implementation_state": "source_guarded_not_deployed",
-          "classification_authorizing": false
-        },
-        {
-          "ingress_key": "mcp-tool:record-commission-receipt",
-          "ingress_kind": "mcp_tool",
-          "operation": "record-commission-receipt",
-          "effect_class": "administrative_mutation",
-          "source_locator": "mcp-server/src/invoice-tracker.js",
-          "schema_digest": "51745ae15bc5d1ff8741889b5518a243ec1fd5faf9638ce26d9219ae5337244f",
-          "source_digest": "2c44be7b1d1d2e998d655de18df2b53bf18cfff1e11c0568931844a1ffbe7212",
-          "write": true,
-          "human_only": true,
-          "authority_only": false,
-          "principal_mode": "server_verified_human_or_native_agent",
-          "mutation_kind": "scac.mutation.admin",
-          "target_surface": "scac.surface.database",
-          "delegates_to": [],
-          "request_shape": "closed_top_level_schema",
-          "idempotency_mode": "operation_principal_manifest_bound",
-          "rollback_class": "forward_fix_only",
-          "admission_class": "application_default_deny",
-          "owner_package": "11",
-          "implementation_state": "source_guarded_not_deployed",
-          "classification_authorizing": false
+      "upsert": [],
+      "row_replacements": {
+        "mcp-tool:link-parties": {
+          "schema_digest": "0ffb8c8c7ab89cbb729eba73afa67c6b9ac0cba84bdbe5e17a15b99e5e827c5a"
         }
-      ],
-      "expected_count": 1112,
-      "expected_sha256": "23eb229c17a9b462d69feb57d96bf7f9f791889dcfa0b0e373f39c3fee2dd68b"
+      },
+      "expected_count": 1110,
+      "expected_sha256": "e150e54eaaab0edbaaeb0b65636a9ede135ac262d245b6e5d1efe3949dfac501"
     }
   ],
   "current_source_review": {
@@ -88361,8 +88319,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "86405db3986f7b268f407fe00ed7f3c5dfc9a8f1e4432cf0f9fc85bbd7e2fea7",
-          "handler_digest": "86405db3986f7b268f407fe00ed7f3c5dfc9a8f1e4432cf0f9fc85bbd7e2fea7",
+          "schema_digest": "765a0cd3de66705007e15610d797ae13396bec46c4ffdb676e3edbd6d135840a",
+          "handler_digest": "765a0cd3de66705007e15610d797ae13396bec46c4ffdb676e3edbd6d135840a",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -88402,9 +88360,9 @@
           "classification_authorizing": false
         }
       ],
-      "expected_count": 1112,
-      "expected_sha256": "51bfa48cc85e9c794ad1d6857657d95e4e73ab352c75a01afccdcea3b767ace0",
-      "reason": "Carry reviewed administrative source bindings to the invoice successor, including main's system-work atomic migration group, without changing authority contracts."
+      "expected_count": 1110,
+      "expected_sha256": "f0b1ab7979b2094b2deec8082b5e072e288f835feb079e5880bda2efa8074edb",
+      "reason": "Carry reviewed source-only administrative rows forward to relationship v109 and bind both migration atomic groups."
     }
   }
 }

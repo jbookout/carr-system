@@ -88,7 +88,7 @@ class FakeClient:
         out = {}
         for qid in questions:
             out[qid] = self.answers.get(qid, {"type": "noul", "noul": 0.05})
-        return {"model": "jev-fake", "usage": {}, "answers": out}
+        return {"model": "jev-1.13.0", "usage": {}, "answers": out}
 
 
 def patched(fake_judge=None):
@@ -151,7 +151,16 @@ FAILURE_TEXT = ('Traceback (most recent call last):\n  File "a.py", line 3, in f
 # #16 locate_bug
 # --------------------------------------------------------------------------
 
-class LocateBugTests(unittest.TestCase):
+class SemanticTestCase(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cache_env = mock.patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=os.path.join(tmp.name, "cache"))
+        cache_env.start()
+        self.addCleanup(cache_env.stop)
+
+
+class LocateBugTests(SemanticTestCase):
     def test_non_failure_output_never_asks_jev(self):
         with patched() as jj:
             out = watch.locate_bug("a = 1\nb = 2\n", "a.py", "no problems here")
@@ -205,6 +214,21 @@ class LocateBugTests(unittest.TestCase):
             out = watch.locate_bug(source, "a.py", failure, client=client)
         self.assertLess(out["detail"]["window_lines"], 500)
         self.assertLessEqual(out["detail"]["window_lines"], 2 * watch.LINE_WINDOW + 1)
+
+    def test_bug_location_reuses_complete_pinned_evidence(self):
+        client = FakeClient({"culprit_line": {"type": "choice", "choice": "1", "confidence": .9}})
+        class PinnedJudge(FakeJudge):
+            def judge(self, subject, questions, **kwargs):
+                self.options = kwargs
+                return super().judge(subject, questions, **kwargs)
+        judge = PinnedJudge()
+        with patched(judge):
+            for _ in range(2):
+                watch.locate_bug("raise ValueError()", "a.py", FAILURE_TEXT, client=client)
+            self.assertEqual(len(client.calls), 1)
+            self.assertEqual(judge.options["model"], "jev-1.13.0")
+            watch.locate_bug("raise TypeError()", "a.py", FAILURE_TEXT, client=client)
+        self.assertEqual(len(client.calls), 2)
 
     def test_unavailable(self):
         source = "a = 1\n"
@@ -308,7 +332,7 @@ class TranscriptHelperTests(unittest.TestCase):
                          watch.normalize_input({"b": 2, "a": 1}))
 
 
-class BoundaryBatchTests(unittest.TestCase):
+class BoundaryBatchTests(SemanticTestCase):
     def test_main_desk_test_mapping_is_local_in_real_replay(self):
         repo = OPS.parent
         case = next(json.loads(line) for line in
@@ -368,7 +392,7 @@ class BoundaryBatchTests(unittest.TestCase):
             class Incomplete(FakeClient):
                 def ask(self, state, questions, **kwargs):
                     self.calls.append((state, questions))
-                    return {"model": "jev-fake", "answers": {}}
+                    return {"model": "jev-1.13.0", "answers": {}}
             client = Incomplete()
             receipt = os.path.join(tmp, "receipt.jsonl")
             Path(tmp, "a.py").write_text("def f():\n    raise ValueError()\n")
@@ -381,6 +405,28 @@ class BoundaryBatchTests(unittest.TestCase):
             self.assertEqual(len(client.calls), 1)
             self.assertIn("unavailable", [r["verdict"] for r in out])
             self.assertEqual(json.loads(Path(receipt).read_text())["status"], "unavailable")
+
+    def test_traceback_boundary_reuses_one_pinned_request(self):
+        client = FakeClient({"bug_frame": {"type": "choice", "choice": "frame_0", "confidence": .9}})
+        class PinnedJudge(FakeJudge):
+            def judge(self, subject, questions, **kwargs):
+                self.options = kwargs
+                return super().judge(subject, questions, **kwargs)
+        judge = PinnedJudge()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp, "a.py")
+            source.write_text("raise ValueError()\n")
+            receipt = os.path.join(tmp, "receipt.jsonl")
+            args = ("Bash", {"command": "python a.py"},
+                    'Traceback (most recent call last):\n  File "a.py", line 1, in f\nValueError',
+                    1, "inspect failure", tmp)
+            for _ in range(2):
+                watch.inspect_tool_event(*args, client=client, judge_module=judge, receipt_path=receipt)
+            self.assertEqual(len(client.calls), 1)
+            self.assertEqual(judge.options["model"], "jev-1.13.0")
+            source.write_text("raise TypeError()\n")
+            watch.inspect_tool_event(*args, client=client, judge_module=judge, receipt_path=receipt)
+            self.assertEqual(len(client.calls), 2)
 
     def test_failure_classification_needs_review_without_model(self):
         with tempfile.TemporaryDirectory() as tmp:

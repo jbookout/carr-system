@@ -4,7 +4,7 @@
 The installed hook (~/.claude-local/settings.json) runs this entry point by path and
 exits 0 silently when the file is missing, so a deleted or broken entry point looks
 exactly like "no rule binds". These drive the real entry point and the real selector;
-only the two paid requests are injected.
+only the semantic binding transport is injected.
 """
 
 from __future__ import annotations
@@ -47,17 +47,17 @@ class FakeClient:
         return {"instructions": instructions, "criteria": {"true": true, "false": false}}
 
 
-def judge(ranked=("a9ecd5b4",), bind_raises=None):
+def judge(bind_raises=None):
     seen = []
 
-    def rank(text, pool, limit, client):
-        seen.append(text)
-        return [r for r in ranked if r in {rule["id"] for rule in pool}][:limit], 1, "jev"
+    def rank(*args, **kwargs):
+        raise AssertionError("shortlisting must be deterministic")
 
     def ask(state, questions):
+        seen.append(state["situation"])
         if bind_raises:
             raise bind_raises
-        return {"model": "jev", "answers": {key: {"noul": 0.9} for key in questions}}
+        return {"model": "jev-1.13.0", "answers": {key: {"noul": 0.9} for key in questions}}
 
     return {"rank": rank, "ask": ask, "client": FakeClient(), "titles": {}}, seen
 
@@ -74,15 +74,13 @@ def last_log():
         return json.loads(fh.read().splitlines()[-1])
 
 
-def delivers_rules_as_hook_context():
+def records_advice_without_authoritative_context():
     kwargs, seen = judge()
-    out = json.loads(run("add a CI check that the nightly export is non-empty", **kwargs))
-    ctx = out["hookSpecificOutput"]
-    assert ctx["hookEventName"] == "UserPromptSubmit", ctx
-    assert "[a9ecd5b4]" in ctx["additionalContext"], ctx
-    # The interactive situation, not flash-run's disposable-copy one: git is allowed here.
+    assert run("compare the artifact against what it should be before and after", **kwargs) == ""
     assert "may read, edit, run tests and use git" in seen[0], seen
-    assert last_log()["rules"] == ["a9ecd5b4"]
+    row = last_log()
+    assert row["rules"] == [] and "review required" in row.get("error", ""), row
+    assert "rule suggestions:" in row["error"], row
 
 
 def skips_slash_commands_and_short_messages():
@@ -106,7 +104,7 @@ def bad_input_exits_zero():
     assert buf.getvalue() == ""
 
 
-check("delivers picked rules as UserPromptSubmit context", delivers_rules_as_hook_context)
+check("records advice without authoritative context", records_advice_without_authoritative_context)
 check("skips slash commands and short messages", skips_slash_commands_and_short_messages)
 check("a judgment outage is logged, not silent", outage_is_logged_not_silent)
 check("bad input exits 0 with no output", bad_input_exits_zero)
