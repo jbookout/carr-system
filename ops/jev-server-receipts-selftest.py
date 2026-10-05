@@ -56,6 +56,12 @@ def _client():
             "value": "selftest", "sources": ["ops/typesafe_client.py"]}
     mod.load_call_sites = lambda path=None: {"hourly_paid_call_cap": 10**9, "sites": {"*": site}}
     mod.call_site = lambda caller, registry: site
+    # Hermetic credentials, as on a hosted runner: the Worker route signs with
+    # a fixture admission secret and no local vendor key exists to fall back on.
+    mod.read_admission_secret = lambda: "fixture-admission-secret"
+    def no_local_vendor_key(*_args):
+        raise mod.TypeSafeError("fixture holds no local vendor key")
+    mod.read_api_key = no_local_vendor_key
     return mod
 
 
@@ -81,7 +87,7 @@ def client_routes_through_the_worker():
             "session_id": "s", "model": "jev-1.13.0", "state_sha256": "a" * 64,
             "prompt_sha256": None, "usage": {"input_tokens": 3, "output_tokens": 1},
             "answers": {"diagnosis_q": {"type": "noul", "noul": 0.7}}}))
-    tsc.read_api_key = lambda *a: "offline-reservation-key"
+    tsc.read_api_key = lambda *a: (_ for _ in ()).throw(AssertionError("server path read a local credential"))
     log = _write([], ".jsonl")
     try:
         result = tsc.ask({"x": 1}, {"diagnosis_q": tsc.noul("is it?")}, facets=["diagnosis"],
@@ -93,7 +99,7 @@ def client_routes_through_the_worker():
     ok = (seen.get("verb") == "ask-jev" and seen["args"]["purpose"] == "call"
           and seen["args"]["facets"] == ["diagnosis"]
           and seen["args"]["idempotency_key"].startswith("jev1.")
-          and "offline-reservation-key" not in json.dumps(seen)
+          and "fixture-admission-secret" not in json.dumps(seen)
           and result["server_receipt"]["receipt_id"] == "srv-1"
           and result["answers"]["diagnosis_q"]["noul"] == 0.7
           and result["usage"] == {"input_tokens": 3, "output_tokens": 1}

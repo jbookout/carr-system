@@ -11,8 +11,11 @@ import { answerDistribution, canonicalJson, canonicalSha256, jevAskBinding as ra
 const AGENT = { id: "10000000-0000-0000-0000-000000000031", slug: "joe", human: true, via: "test" };
 const OTHER = { id: "10000000-0000-0000-0000-000000000032", slug: "dell", human: true, via: "test" };
 const KEY = "ts_test_key_do_not_leak_4f1c9e";
+const ADMISSION = "admission_secret_fixture_7d2a";
+const WORKER_ENV = { TYPESAFE_API_KEY: KEY, JEV_ADMISSION_SECRET: ADMISSION };
 
-function admission(session = "fixture", now = Date.now(), key = KEY) {
+// `now` is the signer's clock, which may run ahead of or behind the Worker's.
+function admission(session = "fixture", now = Date.now(), key = ADMISSION) {
   const payload = Buffer.from(JSON.stringify([1, Math.floor(now / 1000) + 30,
     crypto.randomUUID(), "adhoc:fixture", session])).toString("base64url");
   return `jev1.${payload}.${createHmac("sha256", key).update(payload).digest("hex")}`;
@@ -21,14 +24,14 @@ function admission(session = "fixture", now = Date.now(), key = KEY) {
 // Transport fixtures receive the same signed, single-attempt admission as
 // production. Admission refusal tests use the raw binding below.
 function jevAskBinding(env, fetchImpl, options = {}) {
-  const binding = rawJevAskBinding(env, fetchImpl, { ...options,
+  const binding = rawJevAskBinding({ JEV_ADMISSION_SECRET: ADMISSION, ...env }, fetchImpl, { ...options,
     reserveAttempt: options.reserveAttempt ?? (async () => ({ key: "fixture", receipt_id: "fixture" })),
   });
   if (!binding) return binding;
   const ask = async request => {
     const session_id = request.session_id ?? "fixture";
     const result = await binding({ ...request, session_id,
-      idempotency_key: admission(session_id, options.now?.() ?? Date.now(), env.TYPESAFE_API_KEY) });
+      idempotency_key: admission(session_id, options.now?.() ?? Date.now()) });
     if (!options.reserveAttempt) delete result.attempt;
     return result;
   };
@@ -74,7 +77,7 @@ const ACTORS = new Map([[AGENT.slug, AGENT.id], [OTHER.slug, OTHER.id]]);
 test("Worker paid entries without shared admission refuse before transport", async () => {
   for (const transport_mode of [undefined, "paid_once"]) {
     const fetchImpl = fakeFetch([jsonResponse(200, { model: "m", answers: ANSWERS })]);
-    const ask = rawJevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, {
+    const ask = rawJevAskBinding(WORKER_ENV, fetchImpl, {
       cache: null, reserveAttempt: async () => ({ key: "k", receipt_id: "r" }),
     });
     const out = await prefetchJevAnswer(askArgs({ transport_mode }), ask);
@@ -84,13 +87,13 @@ test("Worker paid entries without shared admission refuse before transport", asy
   }
 });
 
-test("expired, forged and wrong-session admission proofs never reserve or fetch", async () => {
+test("expired, forged, vendor-key-signed and wrong-session admissions never reserve or fetch", async () => {
   const now = Date.now();
   for (const token of [admission("fixture", now - 31000), admission("other", now),
-    admission("fixture", now, "wrong-key"), "jev1.invalid.invalid"]) {
+    admission("fixture", now, "wrong-key"), admission("fixture", now, KEY), "jev1.invalid.invalid"]) {
     const fetchImpl = fakeFetch([]);
     let reservations = 0;
-    const ask = rawJevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, {
+    const ask = rawJevAskBinding(WORKER_ENV, fetchImpl, {
       cache: null, now: () => now, reserveAttempt: async () => { reservations++; },
     });
     const payload = await rejected(() => ask({ state: "s", model: "m", questions: QUESTIONS,
@@ -101,11 +104,49 @@ test("expired, forged and wrong-session admission proofs never reserve or fetch"
   }
 });
 
+test("a signer clock ahead of the Worker is admitted", async () => {
+  const now = Date.now();
+  for (const skew of [0, 700, 1000, 5000]) {
+    const fetchImpl = fakeFetch([jsonResponse(200, { model: "m", answers: ANSWERS })]);
+    const ask = rawJevAskBinding(WORKER_ENV, fetchImpl, { cache: null, now: () => now,
+      reserveAttempt: async () => ({ key: "k", receipt_id: "r" }) });
+    const out = await ask({ state: "s", model: "m", questions: QUESTIONS,
+      idempotency_key: admission("fixture", now + skew), session_id: "fixture" });
+    assert.equal(out.model, "m", `skew ${skew}ms`);
+    assert.equal(fetchImpl.calls.length, 1);
+  }
+});
+
+test("a Worker without the admission secret refuses paid calls before transport", async () => {
+  const fetchImpl = fakeFetch([jsonResponse(200, { model: "m", answers: ANSWERS })]);
+  const ask = rawJevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, {
+    cache: null, reserveAttempt: async () => ({ key: "k", receipt_id: "r" }) });
+  const out = await prefetchJevAnswer(askArgs({ idempotency_key: admission("session-abc") }), ask);
+  assert.equal(out.ok, false);
+  assert.equal(out.error.error, "jev_admission_required");
+  assert.equal(fetchImpl.calls.length, 0);
+});
+
+test("the in-Worker runtime class is admitted by the Worker; ingress classes need a proof", async () => {
+  for (const [workClass, admitted] of [["app_runtime", true], ["system_work", false]]) {
+    const fetchImpl = fakeFetch([jsonResponse(200, { model: "m", answers: ANSWERS })]);
+    let reservations = 0;
+    const ask = rawJevAskBinding(WORKER_ENV, fetchImpl, { cache: null,
+      reserveAttempt: async () => { reservations++; return { key: "k", receipt_id: "r" }; } });
+    // Deal Room's caller: an ordinary UUID, no client reservation to prove.
+    const out = await prefetchJevAnswer(askArgs({ idempotency_key: crypto.randomUUID() }), ask, workClass);
+    assert.equal(out.ok, admitted, workClass);
+    assert.equal(fetchImpl.calls.length, admitted ? 1 : 0, workClass);
+    assert.equal(reservations, admitted ? 1 : 0, "the durable attempt ledger still precedes the fetch");
+    if (!admitted) assert.equal(out.error.error, "jev_admission_required");
+  }
+});
+
 test("the existing attempt ledger consumes a reservation proof once", async () => {
   const client = new JevReceiptFake();
   const args = askArgs({ idempotency_key: admission("session-abc"), transport_mode: "paid_once" });
   const fetchImpl = fakeFetch([jsonResponse(200, {model:"m", answers:ANSWERS})]);
-  const ask = rawJevAskBinding({ TYPESAFE_API_KEY: KEY }, fetchImpl, {
+  const ask = rawJevAskBinding(WORKER_ENV, fetchImpl, {
     cache:null, reserveAttempt:() => reserveJevCallAttempt(client, AGENT, args),
   });
   assert.equal((await prefetchJevAnswer(args, ask)).ok, true);
@@ -285,9 +326,12 @@ class JevReceiptFake {
 }
 
 function fakeJevAsk(result = { model: "jev-1.14.0", answers: ANSWERS, usage: { input_tokens: 10 } }) {
-  const calls = [];
-  const fn = async request => { calls.push(request); return structuredClone(result); };
+  const calls = [], contexts = [];
+  const fn = async (request, context) => {
+    calls.push(request); contexts.push(context); return structuredClone(result);
+  };
   fn.calls = calls;
+  fn.contexts = contexts;
   return fn;
 }
 
@@ -344,6 +388,7 @@ test("ask-jev purpose call: records the prefetched answer with the server-derive
   assert.equal(jevAsk.calls.length, 1);
   assert.deepEqual(jevAsk.calls[0], { state: { plan: "ship it" }, model: "jev-latest", questions: QUESTIONS,
     idempotency_key: args.idempotency_key, session_id: args.session_id });
+  assert.deepEqual(jevAsk.contexts[0], { workClass: "system_work" });
   assert.equal(result.ok, true);
   assert.equal(result.purpose, "call");
   assert.equal(result.session_id, "session-abc");

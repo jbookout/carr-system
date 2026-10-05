@@ -5,9 +5,12 @@
 // evidence the gated model could write: the session transcript and
 // out/jev-calls.jsonl. The model shares one OS user with the hooks, so any
 // local log or local credential is forgeable. The Worker appends the receipt
-// in its writer transaction, and recorded_at is the database clock. Paid
-// callers also hold the account key to sign their shared admission reservation;
-// the pending attempt ledger consumes each signed reservation once.
+// in its writer transaction, and recorded_at is the database clock. A paid
+// call from outside the Worker carries a shared admission reservation signed
+// with JEV_ADMISSION_SECRET, which only the Worker and the local reservation
+// owner hold (never the vendor key); the pending attempt ledger consumes each
+// signed reservation once. An in-Worker app_runtime caller (Deal Room) is
+// admitted here instead: ingress cannot select that class.
 //
 // DETECTABLE, NOT PREVENTED. This store raises the cost of forging a Jev call;
 // it does not make forgery impossible. The model's OS user can read the
@@ -107,19 +110,23 @@ export async function canonicalSha256(value) {
   return sha256Hex(canonicalJson(value));
 }
 
-async function verifyAdmission(key, token, session, now) {
+// Expiry only bounds an unused proof; single use is the attempt ledger's job.
+// No upper bound: the signer holds the secret and a clock ahead of the
+// Worker's is not a forgery.
+async function verifyAdmission(secret, token, session, now) {
   const parts = typeof token === "string" ? token.split(".") : [];
-  if (parts.length !== 3 || parts[0] !== "jev1" || !/^[a-f0-9]{64}$/.test(parts[2]))
+  if (typeof secret !== "string" || secret.trim() === "" ||
+      parts.length !== 3 || parts[0] !== "jev1" || !/^[a-f0-9]{64}$/.test(parts[2]))
     throw new LeafToolError({ error: "jev_admission_required" });
   try {
-    const signer = await crypto.subtle.importKey("raw", new TextEncoder().encode(key),
+    const signer = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret),
       { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
     const signature = Uint8Array.from(parts[2].match(/../g), byte => parseInt(byte, 16));
     const valid = await crypto.subtle.verify("HMAC", signer, signature, new TextEncoder().encode(parts[1]));
     const payload = JSON.parse(new TextDecoder().decode(Uint8Array.from(
       atob(parts[1].replaceAll("-", "+").replaceAll("_", "/")), c => c.charCodeAt(0))));
     if (!valid || !Array.isArray(payload) || payload.length !== 5 || payload[0] !== 1 ||
-        !Number.isInteger(payload[1]) || payload[1] * 1000 <= now || payload[1] * 1000 > now + 30000 ||
+        !Number.isInteger(payload[1]) || payload[1] * 1000 <= now ||
         typeof payload[2] !== "string" || !payload[2] || typeof payload[3] !== "string" || !payload[3] ||
         payload[4] !== session)
       throw new Error("invalid admission");
@@ -227,6 +234,8 @@ function upstreamFailure(status, reason, body, key) {
 // Returns the Worker's Jev caller, or null when the Worker holds no key.
 // mcp.js calls it before the writer transaction opens (prefetchJevAnswer).
 // Production supplies reserveAttempt; tests also inject time and transport.
+// The second argument is the in-process call context ({ workClass }), never
+// request data, so a caller cannot claim the Worker-admitted runtime class.
 export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   const key = env?.TYPESAFE_API_KEY;
   if (typeof key !== "string" || key.trim() === "") return null;
@@ -236,7 +245,8 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
   const reserveAttempt = options.reserveAttempt;
   const cacheKeyFor = async body =>
     new Request(`https://jev-cache-v2.invalid/${await sha256Hex(`${key}\n${body}`)}`);
-  const jevAsk = async function ({ state, model, questions, transport_mode, idempotency_key, session_id }) {
+  const jevAsk = async function ({ state, model, questions, transport_mode, idempotency_key, session_id },
+    { workClass } = {}) {
     const body = JSON.stringify({ state, model, questions });
     // The Cache API is shared across Worker isolates in a colo. Only the
     // answer is cached; the key contains digests of the request and account.
@@ -259,7 +269,8 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
     // skips cache reads and permits exactly one vendor attempt.
     if (transport_mode === "cache_only")
       throw new LeafToolError({ error: "jev_cache_miss" });
-    await verifyAdmission(key, idempotency_key, session_id, now());
+    if (workClass !== "app_runtime")
+      await verifyAdmission(env.JEV_ADMISSION_SECRET, idempotency_key, session_id, now());
     if (!reserveAttempt) throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
     let reservedAttempt;
     try { reservedAttempt = await reserveAttempt(); }
@@ -267,10 +278,9 @@ export function jevAskBinding(env, fetchImpl = fetch, options = {}) {
     if (typeof reservedAttempt?.key !== "string" || !reservedAttempt.key ||
         typeof reservedAttempt?.receipt_id !== "string" || !reservedAttempt.receipt_id)
       throw new LeafToolError({ error: "jev_receipt_store_unavailable" });
-    const remaining = budgetMs;
-    if (remaining <= 0) throw upstreamFailure(null, "timeout", "", key);
+    if (budgetMs <= 0) throw upstreamFailure(null, "timeout", "", key);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), remaining);
+    const timer = setTimeout(() => controller.abort(), budgetMs);
     let response;
     try {
       response = await fetchImpl(ENDPOINT, {
@@ -425,7 +435,8 @@ export async function prefetchJevAnswer(args, ask, workClass = "system_work") {
   try {
     return { ok: true, result: await judgeBinding(ask, workClass)({ state, model, questions,
       idempotency_key: args.idempotency_key, session_id: args.session_id,
-      ...(args.transport_mode !== undefined ? { transport_mode: args.transport_mode } : {}) }) };
+      ...(args.transport_mode !== undefined ? { transport_mode: args.transport_mode } : {}) },
+      { workClass }) };
   } catch (error) {
     if (error instanceof LeafToolError) return { ok: false, error: error.payload };
     return { ok: false, error: { error: "jev_upstream_failed", status: null, reason: "network" } };

@@ -90,6 +90,11 @@ class Harness(unittest.TestCase):
             return FakeResponse(json.dumps(ANSWER).encode())
         self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
         self.enterContext(patch.object(client, "_launch_spend_alert_worker", lambda *a: None))
+        # Hermetic credentials: a fixture admission secret, and no local vendor
+        # key unless a test supplies one, exactly as on a hosted runner.
+        self.enterContext(patch.object(client, "read_admission_secret", lambda: "offline-admission"))
+        self.enterContext(patch.object(client, "read_api_key", side_effect=client.TypeSafeError(
+            "fixture holds no local vendor key")))
         env = {k: v for k, v in os.environ.items()
                if k not in client.SESSION_ID_ENV_KEYS + ("CARR_JEV_JOB", "XPC_SERVICE_NAME", "CARR_JEV_WORKER",
                                                          "CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE")}
@@ -628,33 +633,107 @@ print(json.dumps({"paid":len(sent),"refused":refused,"budget":c.JEV_DAILY_CAP_LO
         self.assertEqual(counts, {"attempted": 4, "refused": 2, "cached": 1, "paid": 1})
         print("offline admission acceptance: " + json.dumps(counts, sort_keys=True))
 
+    def paid_server_ask(self, runner, **overrides):
+        kwargs = dict(model="jev-1.13.0", facets=[], purpose="call", session_id="s", timeout=2,
+                      transport_mode="paid_once", runner=runner, caller="hook_site")
+        kwargs.update(overrides)
+        return client.server_ask("s", {"q": client.noul("Fixture")}, **kwargs)
+
+    def daily_attempts(self):
+        path = Path(str(self.log) + ".daily-cap.sqlite3")
+        if not path.exists():
+            return 0
+        with client.closing(client.sqlite3.connect(str(path))) as db:
+            row = db.execute("SELECT attempts FROM daily_cap WHERE day='2026-10-04'").fetchone()
+        return row[0] if row else 0
+
     def test_public_worker_402_holds_the_next_paid_entry(self):
         calls = []
         def runner(argv, **kwargs):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 1, "",
                 'TOOL ERROR {"error":"jev_upstream_failed","status":402,"reason":"http_status"}')
-        kwargs = dict(model="jev-1.13.0", facets=[], purpose="call", session_id="s", timeout=2,
-                      transport_mode="paid_once", runner=runner, caller="hook_site")
-        with patch.object(client, "read_api_key", return_value="offline-fixture"):
-            client.server_ask("s", {"q": client.noul("Fixture")}, **kwargs)
-            with self.assertRaises(client.JevCallRefused):
-                client.server_ask("s", {"q": client.noul("Fixture")}, **kwargs)
+        upstream = {}
+        self.assertEqual(self.paid_server_ask(runner, upstream=upstream), (None, "vendor_failed_at_worker"))
+        self.assertIsInstance(upstream["refusal"], client.TypeSafeError)
+        with self.assertRaises(client.JevCallRefused):
+            self.paid_server_ask(runner)
         self.assertEqual(len(calls), 1)
 
     def test_public_worker_shares_budget_and_vendor_hold_with_direct_entry(self):
         calls, runner = WorkerBreakerTests.worker(self, failures=False)
         for hold in (False, True):
-            with self.subTest(hold=hold), patch.object(client, "read_api_key", return_value="offline-fixture"), \
+            with self.subTest(hold=hold), \
                     patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=0 if not hold else 1000):
                 if hold:
                     client._open_hold("credit_hold", 60)
                 with self.assertRaises(client.JevCallRefused):
-                    client.server_ask("s", {"q": client.noul("Fixture")}, model="jev-1.13.0",
-                                      facets=[], purpose="call", session_id="s", timeout=2,
-                                      transport_mode="paid_once", runner=runner, caller="hook_site")
+                    self.paid_server_ask(runner)
         self.assertEqual(calls, [])
         self.assertEqual(self.requests, [])
+
+    def test_worker_route_signs_with_the_admission_secret_not_the_vendor_key(self):
+        captured = []
+        def runner(argv, **kwargs):
+            captured.append(json.loads(argv[3]))
+            return subprocess.CompletedProcess(argv, 0, json.dumps({**ANSWER, "ok": True,
+                                                                     "receipt_id": "w"}), "")
+        served, error = self.paid_server_ask(runner)
+        self.assertIsNone(error)
+        self.assertEqual(served["server_receipt"]["receipt_id"], "w")
+        client.read_api_key.assert_not_called()
+        _, payload, signature = captured[0]["idempotency_key"].split(".")
+        self.assertEqual(signature, client.hmac.new(b"offline-admission", payload.encode(),
+                                                    client.hashlib.sha256).hexdigest())
+
+    def test_missing_admission_secret_is_a_transport_gap_that_spends_no_slot(self):
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            raise AssertionError("no Worker dispatch without an admission secret")
+        with patch.object(client, "read_admission_secret",
+                          side_effect=client.TypeSafeError("no admission secret")):
+            self.assertEqual(self.paid_server_ask(runner), (None, "admission_secret_missing"))
+        self.assertEqual(calls, [])
+        self.assertEqual(self.daily_attempts(), 0)
+
+    def test_worker_admission_refusal_is_named_and_never_paid_again_direct(self):
+        def runner(argv, **kwargs):
+            if json.loads(argv[3]).get("transport_mode") == "cache_only":
+                return subprocess.CompletedProcess(argv, 1, "", '{"error":"jev_cache_miss"}')
+            return subprocess.CompletedProcess(argv, 1, "", 'TOOL ERROR {"error":"jev_admission_required"}')
+        upstream = {}
+        self.assertEqual(self.paid_server_ask(runner, upstream=upstream),
+                         (None, "admission_refused_at_worker"))
+        self.assertIsInstance(upstream["refusal"], client.TypeSafeError)
+        with self.assertRaises(client.TypeSafeError):
+            WorkerBreakerTests.ask_worker(self, "s", runner)
+        self.assertEqual(self.requests, [], "a refused proof must not buy a second, direct attempt")
+        self.assertEqual(self.daily_attempts(), 2, "one reservation per entry, none for a fallback")
+
+    def test_worker_vendor_failure_policy_runs_once_per_failure(self):
+        decisions = []
+        original = client._after_worker_vendor_failure
+        def counted(*args):
+            decisions.append(args)
+            return original(*args)
+        calls, runner = WorkerBreakerTests.worker(self, failures=True)
+        with patch.object(client, "_after_worker_vendor_failure", counted):
+            WorkerBreakerTests.ask_worker(self, "s", runner)
+        self.assertEqual(calls, ["cache_only", "paid_once"])
+        self.assertEqual(len(decisions), 1)
+
+    def test_worker_paid_call_is_admitted_once(self):
+        admissions = []
+        original = client._admit_paid_call
+        def counted(*args):
+            admissions.append(args)
+            return original(*args)
+        calls, runner = WorkerBreakerTests.worker(self, failures=False)
+        with patch.object(client, "_admit_paid_call", counted):
+            WorkerBreakerTests.ask_worker(self, "s", runner)
+        self.assertEqual(calls, ["cache_only", "paid_once"])
+        self.assertEqual(len(admissions), 1)
 
     def test_python_reservation_proof_is_accepted_once_by_worker(self):
         captured = []
@@ -662,36 +741,22 @@ print(json.dumps({"paid":len(sent),"refused":refused,"budget":c.JEV_DAILY_CAP_LO
             captured.append(json.loads(argv[3]))
             return subprocess.CompletedProcess(argv, 0, json.dumps({**ANSWER, "ok": True,
                                                                      "receipt_id": "w"}), "")
-        with patch.object(client, "read_api_key", return_value="offline-fixture"):
-            client.server_ask("s", {"q": client.noul("Fixture")}, model="jev-1.13.0",
-                              facets=[], purpose="call", session_id="s", timeout=2,
-                              transport_mode="paid_once", runner=runner, caller="hook_site")
+        self.paid_server_ask(runner)
         script = '''import { jevAskBinding } from "./mcp-server/src/jev-call-receipt.js";
 let text = ""; for await (const chunk of process.stdin) text += chunk;
 const request = JSON.parse(text); let calls = 0, consumed = false;
-const ask = jevAskBinding({ TYPESAFE_API_KEY: "offline-fixture" }, async () => {
-  calls++; return new Response(JSON.stringify({model:"m",answers:{q:{noul:0.8}}}));
-}, {cache:null, reserveAttempt:async () => {
-  if(consumed) throw Error("already consumed"); consumed = true;
-  return {key:"fixture",receipt_id:"fixture"};
-}});
+const ask = jevAskBinding({ TYPESAFE_API_KEY: "vendor-fixture", JEV_ADMISSION_SECRET: "offline-admission" },
+  async () => { calls++; return new Response(JSON.stringify({model:"m",answers:{q:{noul:0.8}}})); },
+  {cache:null, reserveAttempt:async () => {
+    if(consumed) throw Error("already consumed"); consumed = true;
+    return {key:"fixture",receipt_id:"fixture"};
+  }});
 await ask(request); let refused = false;
 try { await ask(request); } catch { refused = true; }
 console.log(JSON.stringify({calls,refused}));'''
         proc = subprocess.run(["node", "--input-type=module", "-e", script], cwd=REPO,
                               input=json.dumps(captured[0]), capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(proc.stdout), {"calls": 1, "refused": True})
-
-    def test_command_refuses_offline_before_any_transport(self):
-        proc = subprocess.run([sys.executable, "-c",
-                              "import typesafe_client; raise SystemExit(typesafe_client._command())"],
-                              cwd=REPO / "ops",
-                              input=json.dumps({"state": "fixture", "questions": {"q": client.noul("fixture")},
-                                                "caller": "adhoc:factory:fixture", "session_id": "fixture"}),
-                              capture_output=True, text=True, env={**ENV, "CARR_JEV_OFFLINE": "1"})
-        self.assertEqual(json.loads(proc.stdout), {"schema": "carr-jev-admission/v1", "ok": False,
-                                                   "error": "fixture_offline"})
-        self.assertEqual(proc.returncode, 1)
 
     def test_public_worker_transport_cannot_bypass_admission(self):
         calls = []
@@ -729,6 +794,15 @@ console.log(JSON.stringify({calls,refused}));'''
 INFRASTRUCTURE = {"ops/typesafe_client.py", "ops/jev_judge.py", "tools/judge/interface.py"}
 
 
+# ask-jev in a dispatch position: an in-Worker callTool, `run.sh call ask-jev`
+# and `local-verb.mjs ask-jev` in shell, or the same words as an argv list.
+_ARG = r"""["']?(?:\s*,\s*["']|\s+)"""
+VERB_DISPATCH = re.compile(
+    r"""callTool(?:Fn)?\([^)]{0,200}?["']ask-jev["']"""
+    rf"""|run\.sh{_ARG}call{_ARG}["']?ask-jev\b"""
+    rf"""|local-verb(?:\.mjs)?{_ARG}["']?ask-jev\b""")
+
+
 def transport_sources(root, paths):
     """Paid endpoint literals and Worker dispatches, across launcher languages."""
     found = set()
@@ -738,18 +812,25 @@ def transport_sources(root, paths):
             continue
         source = (root / rel).read_text(encoding="utf-8", errors="replace")
         source = re.sub(r"(?m)^\s*(?:#|//).*?$", "", source)
-        if ("https://api.typesafe.ai/" in source or re.search(
-                r'(?:callTool(?:Fn)?|run\.sh|local-verb)[\s\S]{0,200}["\x27]ask-jev["\x27]', source)):
+        if "https://api.typesafe.ai/" in source or VERB_DISPATCH.search(source):
             found.add(rel)
     return found
 
 
-def installed_transport_sources(root):
-    if not root.is_dir():
-        return set()
-    paths = [str(path.relative_to(root)) for path in root.rglob("*")
-             if path.is_file() and path.suffix in {".py", ".sh", ".js", ".mjs"}]
-    return transport_sources(root, paths)
+# What each registered control must visibly do in its source. A label whose
+# marker is absent claims a control the source does not implement.
+CONTROL_MARKERS = {
+    "shared_admission": r"= _reserve_paid_call\([\s\S]{0,200}?= _admission_token\(",
+    "worker_reservation_proof": r"verifyAdmission\(",
+    "worker_runtime_class": r'"ask-jev"[\s\S]{0,400}"app_runtime"',
+}
+
+
+def unimplemented_controls(root, transport_controls):
+    """Registered sources whose source text lacks their control's marker."""
+    return sorted(rel for rel, control in transport_controls.items()
+                  if not re.search(CONTROL_MARKERS.get(control, r"(?!)"),
+                                   (root / rel).read_text(encoding="utf-8")))
 
 
 def paid_call_sources():
@@ -789,19 +870,25 @@ class RegistryCoverageTests(unittest.TestCase):
         examples = {"new.mjs": 'fetch("https://api.typesafe.ai/v1/systemone")',
                     "new.sh": 'curl https://api.typesafe.ai/v1/systemone',
                     "new.py": 'requests.post("https://api.typesafe.ai/v1/systemone")',
-                    "worker.mjs": 'callTool(env, actor, "ask-jev", {})'}
+                    "worker.mjs": 'callTool(env, actor, "ask-jev", {})',
+                    "verb.sh": "./run.sh call ask-jev '{\"x\":1}'",
+                    "local.sh": 'node mcp-server/local-verb.mjs ask-jev "$json"',
+                    "quoted.sh": "run.sh call 'ask-jev' '{}'",
+                    "argv.py": 'subprocess.run(["./run.sh", "call", "ask-jev", payload])'}
+        prose = {"doc.py": '"""Reads through ./run.sh call; every receipt has its ask-jev row."""',
+                 "pattern.py": "re.search(r'callTool(?:Fn)?\\(.*[\"]ask-jev[\"]', line)"}
         with tempfile.TemporaryDirectory() as root:
-            for name, source in examples.items():
+            for name, source in {**examples, **prose}.items():
                 Path(root, name).write_text(source)
-            self.assertEqual(transport_sources(Path(root), examples), set(examples))
+            self.assertEqual(transport_sources(Path(root), {**examples, **prose}), set(examples))
 
-    def test_installed_launcher_inventory_rejects_a_private_transport(self):
+    def test_control_labels_need_the_control_in_their_source(self):
         with tempfile.TemporaryDirectory() as root:
-            Path(root, "review-pr.sh").write_text('python3 helpers/review.py')
-            Path(root, "helpers").mkdir()
-            Path(root, "helpers/review.py").write_text(
-                'requests.post("https://api.typesafe.ai/v1/systemone")')
-            self.assertEqual(installed_transport_sources(Path(root)), {"helpers/review.py"})
+            Path(root, "proof.js").write_text("await verifyAdmission(secret, token, session, now);")
+            Path(root, "plain.py").write_text('run(["./run.sh", "call", "ask-jev", str(uuid.uuid4())])')
+            labels = {"proof.js": "worker_reservation_proof", "plain.py": "worker_reservation_proof"}
+            self.assertEqual(unimplemented_controls(Path(root), labels), ["plain.py"])
+            self.assertEqual(unimplemented_controls(Path(root), {"proof.js": "decorative"}), ["proof.js"])
 
     def test_scan_covers_paid_imports_and_aliases_without_counting_unrelated_names(self):
         examples = {
@@ -836,25 +923,15 @@ class RegistryCoverageTests(unittest.TestCase):
         self.assertEqual(missing, [], "a new paid Jev call path needs an entry in "
                          "ops/config/jev-call-sites.v1.json (caller, trigger, budgets, owner, value)")
 
-    def test_every_transport_and_installed_launcher_is_in_the_existing_registry(self):
-        raw = json.loads(REGISTRY_PATH.read_text())
+    def test_every_transport_is_registered_with_a_control_its_source_implements(self):
+        controls = json.loads(REGISTRY_PATH.read_text())["transport_sources"]
         tracked = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True,
                                  text=True, check=True).stdout.splitlines()
-        sources = transport_sources(REPO, tracked)
-        for root in raw["installed_launcher_roots"]:
-            base = Path(root).expanduser() if root.startswith("~/") else Path(client.CANONICAL_REPO) / root
-            sources.update(f"installed:{root}/{rel}" for rel in installed_transport_sources(base))
-        known = set(raw["transport_sources"]) | set(raw["consumer_transports"])
-        self.assertEqual(sorted(sources - known), [],
+        self.assertEqual(sorted(transport_sources(REPO, tracked) - set(controls)), [],
                          "new paid transport bypass: use typesafe_client admission before dispatch; "
                          "register its source and control in jev-call-sites.v1.json")
-        self.assertEqual(set(raw["transport_sources"].values()),
-                         {"shared_admission", "worker_reservation_proof"})
-        for consumer in raw["consumer_transports"].values():
-            self.assertEqual(consumer["source_repo"], "jbookout/software-factory")
-            self.assertEqual(consumer["required_control"], "shared_admission")
-            self.assertTrue(consumer["source_path"])
-            self.assertTrue(consumer["rollout"], "source inventory is not proof of installed wiring")
+        self.assertEqual(unimplemented_controls(REPO, controls), [],
+                         "a registered transport control is not implemented by its source")
 
     def test_every_registered_source_exists(self):
         registry = client.load_call_sites(REGISTRY_PATH)

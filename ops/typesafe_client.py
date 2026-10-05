@@ -47,7 +47,9 @@ TRUSTS A CALLER TO REMEMBER:
      code, then send only the fields the question needs.
 
 CREDENTIAL. Read from ~/.config/carr/typesafe.env, mode 600, outside the repo,
-recorded by name in secrets-inventory.md. The value is never logged, never
+recorded by name in secrets-inventory.md; only the direct transport reads it.
+The Worker route signs its admission with JEV_ADMISSION_SECRET from
+~/.config/carr/jev-admission.env instead. The value is never logged, never
 echoed into an exception, and never written to a receipt. On an HTTP error this
 module reports the status and a truncated response body, and deliberately does
 not report the request it sent, because the request carries the bearer token.
@@ -58,10 +60,10 @@ basis. Network reachability is separate and already granted: both hosts sit in
 KNOWN_HOSTS in hooks/guard-unattended.py.
 """
 
-import hashlib
-import hmac
 import base64
 import glob
+import hashlib
+import hmac
 import importlib.util
 import json
 import math
@@ -83,6 +85,10 @@ from functools import partial
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 KEY_PATH = os.path.expanduser("~/.config/carr/typesafe.env")
+# The Worker route's admission secret: shared by the Worker and the local
+# reservation owner only, so a Worker caller never needs the vendor key.
+ADMISSION_KEY_PATH = os.path.expanduser("~/.config/carr/jev-admission.env")
+ADMISSION_KEY_NAME = "JEV_ADMISSION_SECRET"
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Entry points may import with only ops/ on sys.path.
 if REPO not in sys.path:
@@ -291,24 +297,34 @@ def _fixture_offline():
     return _truthy_env("CARR_JEV_OFFLINE") or _truthy_env("CARR_HOOK_FIXTURE")
 
 
-def read_api_key(path=KEY_PATH):
-    """The bearer token, from the 600-mode env file. Never logged."""
+def _read_secret(path, name):
+    """One named value from a 600-mode env file. Never logged."""
     try:
         with open(path, "r", encoding="utf-8") as handle:
             lines = handle.readlines()
     except OSError as err:
         raise TypeSafeError(
-            f"cannot read the TypeSafe credential at {path}: {err.strerror}. "
+            f"cannot read the {name} credential at {path}: {err.strerror}. "
             "Joe creates it by hand; no agent holds the value."
         ) from None
     for line in lines:
         line = line.strip()
-        if line.startswith(f"{KEY_NAME}="):
+        if line.startswith(f"{name}="):
             value = line.split("=", 1)[1].strip()
             if not value:
-                raise TypeSafeError(f"{path}: {KEY_NAME} is present but empty")
+                raise TypeSafeError(f"{path}: {name} is present but empty")
             return value
-    raise TypeSafeError(f"{path}: no {KEY_NAME} line")
+    raise TypeSafeError(f"{path}: no {name} line")
+
+
+def read_api_key(path=KEY_PATH):
+    """The vendor bearer token, used only by the direct transport."""
+    return _read_secret(path, KEY_NAME)
+
+
+def read_admission_secret():
+    """The secret that signs a Worker admission; never the vendor key."""
+    return _read_secret(ADMISSION_KEY_PATH, ADMISSION_KEY_NAME)
 
 
 def noul(instructions, true=None, false=None):
@@ -534,6 +550,9 @@ def _dispatch_binding(transcript_path=None, session=None):
 # On Worker failure the direct fallback uses the remaining caller budget and
 # records a fixed error category with no server receipt or raw error text.
 SERVER_VERB = "ask-jev"
+# A signed admission is single-use (the Worker's attempt ledger); this only
+# bounds how long an unused one stays valid.
+ADMISSION_TTL_SECONDS = 30
 # Hooks retain the direct route to stay within their timeout. An explicitly
 # requested build advisory can still use the server log; prompt intake defers it.
 IN_HOOK_ENV = "CARR_JEV_IN_HOOK"
@@ -572,6 +591,7 @@ def _server_error_category(stderr):
             ('"unknown_tool"', "verb_not_deployed"),
             ('"jev_proxy_unconfigured"', "worker_key_unbound"),
             ('"jev_upstream_failed"', "vendor_failed_at_worker"),
+            ('"jev_admission_required"', "admission_refused_at_worker"),
             ("could not reach the deployed Worker", "worker_unreachable"),
             ("no MCP token", "local_token_missing"),
             ("refusing MCP token file", "local_token_insecure")):
@@ -599,13 +619,25 @@ def _worker_upstream(stderr):
             reason if isinstance(reason, str) and re.fullmatch(r"[a-z_]{1,40}", reason) else None)
 
 
+def _admission_token(secret, idempotency_key, caller, session_id):
+    """The existing idempotency key, carrying one shared reservation. The
+    Worker verifies it and its attempt ledger consumes it once."""
+    payload = base64.urlsafe_b64encode(json.dumps(
+        [1, int(time.time()) + ADMISSION_TTL_SECONDS, idempotency_key, caller, session_id],
+        ensure_ascii=False, separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"jev1.{payload}.{signature}"
+
+
 def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
-               transport_mode, runner=None, upstream=None, caller=None):
+               transport_mode, runner=None, upstream=None, caller=None, admission=None):
     """Ask the Worker's ask-jev verb. Returns (result, None) on success, where
     result is {"model", "answers", "usage", "server_receipt": {...}}, or
-    (None, <category>) on transport failure. Admission failures raise before
-    transport. When the Worker's own
-    vendor call failed, a passed `upstream` dict gets its status and reason."""
+    (None, <category>) on transport failure. A paid call is admitted (or uses
+    the caller's `admission`, the (registry, site) pair from _admit_paid_call)
+    and reserves its shared slot before transport; admission failures raise.
+    A passed `upstream` dict gets the Worker's vendor status and reason, and
+    `refusal` when no direct attempt may follow this one."""
     script = _local_verb_script()
     node = _node_binary()
     if runner is None and (script is None or node is None):
@@ -616,16 +648,15 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         caller = caller or _caller_name()
         kind = _question_kind(questions)
         prompt = _prompt_sha256({"state": state, "model": model, "questions": questions})
-        registry, site = _admit_paid_call(caller, session_id, questions, facets, kind, prompt)
-        credential = read_api_key()
+        registry, site = admission or _admit_paid_call(caller, session_id, questions, facets, kind, prompt)
+        try:
+            secret = read_admission_secret()
+        except TypeSafeError:
+            # Before the reservation: a machine without the secret takes the
+            # direct route's own reservation instead.
+            return None, "admission_secret_missing"
         probe = _reserve_paid_call(questions, facets, caller, kind, prompt, registry, site)
-        # The existing idempotency key carries one shared reservation, not a
-        # second counter. The Worker consumes it before its single fetch.
-        payload = base64.urlsafe_b64encode(json.dumps(
-            [1, int(time.time()) + 30, idempotency_key, caller, session_id],
-            ensure_ascii=False, separators=(",", ":")).encode()).decode().rstrip("=")
-        signature = hmac.new(credential.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        idempotency_key = f"jev1.{payload}.{signature}"
+        idempotency_key = _admission_token(secret, idempotency_key, caller, session_id)
     args = {
         "idempotency_key": idempotency_key,
         "session_id": session_id,
@@ -649,16 +680,21 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
         return None, "server_call_failed"
     if proc.returncode != 0:
         category = _server_error_category(proc.stderr)
+        refusal = None
         if category == "vendor_failed_at_worker":
             status, reason = _worker_upstream(proc.stderr)
             if upstream is not None:
                 upstream["status"], upstream["reason"] = status, reason
             try:
                 _after_worker_vendor_failure(status, reason, caller)
-            except TypeSafeError:
-                # Preserve the transport diagnostic; admission on the next
-                # entry now sees the same hold as the direct fallback.
-                pass
+            except TypeSafeError as error:
+                refusal = error
+        elif category == "admission_refused_at_worker":
+            # The reservation is spent; a direct retry would pay a second slot.
+            refusal = TypeSafeError("Jev unavailable: the Worker refused the admission "
+                                    "(jev_admission_required); not retried direct")
+        if upstream is not None and refusal is not None:
+            upstream["refusal"] = refusal
         return None, category
     try:
         out = json.loads(proc.stdout)
@@ -680,24 +716,6 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
     if transport_mode != "cache_only" and not result["cache_hit"] and usable_judgment(result, questions):
         _finish_credit_probe(probe)
     return result, None
-
-
-def _command():
-    """Versioned stdin adapter for installed launchers and factory callers."""
-    try:
-        payload = json.load(sys.stdin)
-        if not isinstance(payload, dict) or set(payload) - {
-                "state", "questions", "model", "caller", "session_id", "api_key"}:
-            raise TypeSafeError("request_invalid")
-        result = ask(**payload)
-        response = {"schema": "carr-jev-admission/v1", "ok": True, "result": result}
-    except TypeSafeError as error:
-        response = {"schema": "carr-jev-admission/v1", "ok": False,
-                    "error": getattr(error, "code", "jev_unavailable")}
-    except (ValueError, TypeError):
-        response = {"schema": "carr-jev-admission/v1", "ok": False, "error": "request_invalid"}
-    print(json.dumps(response))
-    return 0 if response["ok"] else 1
 
 
 # Both transports consume the same maintained request policy. Adapter code
@@ -1921,13 +1939,13 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
             try:
                 remaining = server_deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TypeSafeError("deadline passed during daily cap accounting")
+                    raise TypeSafeError("deadline passed before the paid Worker attempt")
                 upstream = {}
                 served, server_error = server_ask(
                     state, questions, model=model, facets=facets, purpose=purpose,
                     session_id=dispatch_binding[0] or "unbound", caller=caller,
                     timeout=remaining, transport_mode="paid_once", runner=server_runner,
-                    upstream=upstream)
+                    upstream=upstream, admission=(registry, site))
             except TypeSafeError as error:
                 # A free direct-cache answer may still exist after a Worker
                 # cache miss. No transport may run if this reservation failed.
@@ -1940,11 +1958,7 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
                         dispatch_binding=dispatch_binding, caller=caller,
                         question_kind=question_kind, prompt_sha256=prompt_sha256,
                         ok=False, error=server_error, server_error=server_error, session=session_id)
-                    if server_error == "vendor_failed_at_worker":
-                        try:
-                            _after_worker_vendor_failure(status, reason, caller)
-                        except TypeSafeError as error:
-                            reservation_error = error
+                    reservation_error = upstream.get("refusal")
                 elif served.get("cache_hit") is True:
                     raise TypeSafeError("Jev unavailable: Worker paid-once contract violated")
         if served is not None:
@@ -2164,3 +2178,4 @@ def decide(answer, *, yes_at=0.8, no_at=0.2, min_confidence=0.6):
             "confidence": None if confidence is None else float(confidence),
         }
     raise TypeSafeError(f"unknown answer type: {kind!r}")
+
