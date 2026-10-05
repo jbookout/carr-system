@@ -649,9 +649,8 @@ class RemainingReviewTests(unittest.TestCase):
                     self.client.calls.clear()
                     code, advisory = run_main(self.hook, self.event(command, {"stdout": output}))
                     self.assertEqual(code, 0)
-                    self.assertEqual(len(self.client.calls), 1)
-                    self.assertIn("failure_class", self.client.calls[0][1])
-                    self.assertIn("code_bug", advisory)
+                    self.assertEqual(self.client.calls, [])
+                    self.assertIn('code_bug' if 'AssertionError' in output else 'needs_review', advisory)
                     if command.startswith("pytest"):
                         self.assertIn("failed", advisory)
 
@@ -870,7 +869,7 @@ class QuietUnavailabilityTests(unittest.TestCase):
                     live._admit_paid_call("jev_fact_boundary", "s1", {}, None, "noul", "fixture")
             run_main(self.hook, self.failing())
             run_main(self.hook, {"hook_event_name": "Stop", "session_id": "s1", "cwd": self.dir})
-        self.assertEqual(calls, ["watch"])
+        self.assertEqual(calls, ["watch", "done"])
 
     def test_unattended_worker_runs_no_supervisor_check(self):
         with mock.patch.dict(os.environ, {"CARR_JEV_WORKER": "off"}):

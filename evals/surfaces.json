@@ -82,6 +82,8 @@
         "hooks/model-floor-gate.py",
         "hooks/rule-shape-gate.py",
         "hooks/stop_latch.py",
+        "hooks/conduct-stop-gate.py",
+        "hooks/escalation-gate.py",
         "hooks/conduct_patterns.py",
         "ops/config/hooks.json",
         "ops/config/codex-hooks.json",
