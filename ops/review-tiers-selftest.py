@@ -96,27 +96,9 @@ def old_excluded(path):
 # ---------------------------------------------------------------- the consumers
 # Each is driven through its real entry point, with only git stubbed out.
 
-class _FakeClient:
-    @staticmethod
-    def score(instructions, levels):
-        return {"type": "score", "instructions": instructions, "criteria": list(levels)}
-
-
-class _FakeJudge:
-    """Answers every triage question 'low', so only the floor can say high."""
-
-    @staticmethod
-    def judge(state, questions, client=None, timeout=None):
-        return {"answers": {qid: {"score": 0, "confidence": 1.0} for qid in questions}}
-
-    @staticmethod
-    def record(*args, **kwargs):
-        return None
-
-
 def triage_floor(path):
     diff = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-a\n+b\n"
-    result = jdc.triage_review(diff, "", client=_FakeClient(), judge_module=_FakeJudge())
+    result = jdc.triage_review(diff, "")
     files = result["detail"]["files"]
     assert list(files) == [path], (path, result)
     return files[path]["source"] == "deterministic_floor"
