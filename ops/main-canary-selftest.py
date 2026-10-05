@@ -41,7 +41,9 @@ CI_YML = REPO / ".github" / "workflows" / "ci.yml"
 # classes were gates 24, migration 8, types 5, freshness 4. Six classes never
 # failed at all. This tuple is the thing the canary is not allowed to drift from
 # quietly — widening it is a cost decision and belongs in a change that says so.
+# Replay was part of gates; its independent class preserves that same workload.
 COUNCIL_CLASSES = ("gates", "migration", "types", "freshness")
+CANARY_CLASSES = ("gates", "replay", "migration", "types", "freshness")
 NEVER_FAILED = ("unit", "contract", "secret", "dependency", "binding", "artifact")
 
 failures: list[str] = []
@@ -107,8 +109,8 @@ def test_it_runs_the_measured_four_and_not_the_ten():
     if marker not in y:
         return
     listed = tuple(y.split(marker, 1)[1].split(";", 1)[0].split())
-    check("the class loop is EXACTLY the council's measured four",
-          listed == COUNCIL_CLASSES,
+    check("the class loop preserves the council's workload, including gate replay",
+          listed == CANARY_CLASSES and tuple(c for c in listed if c != "replay") == COUNCIL_CLASSES,
           f"found {listed}; widening this is a cost decision and must be "
           f"argued in the change that widens it")
     for c in NEVER_FAILED:
