@@ -116,7 +116,7 @@ FINDING_CALL_NAMES = {"_canonical_finding", "_red"}
 # somewhere and must be excluded from the business-count-never-hard_error
 # check below.
 STRUCTURAL_KEYS = {
-    "canonical_health_refused", "source_unreadable", "export_unreadable",
+    "feature_switch_unreadable", "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
 }

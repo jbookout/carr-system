@@ -552,6 +552,7 @@ export const REGISTRY_V109_VERSION = "scac-mutation-registry.v109";
 export const REGISTRY_V110_VERSION = "scac-mutation-registry.v110";
 export const REGISTRY_V111_VERSION = "scac-mutation-registry.v111";
 export const REGISTRY_V112_VERSION = "scac-mutation-registry.v112";
+export const REGISTRY_V113_VERSION = "scac-mutation-registry.v113";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -19822,6 +19823,22 @@ export function renderRelationshipRegistrySql(rows, predecessorSql = null) {
 
 export const LEADS_V112_DB_CATALOG_BASELINE = Object.freeze({"column_dml":{"count":12,"digest":"sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"},"relation_dml":{"count":319,"digest":"sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"},"role_authority":{"count":13,"digest":"sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"},"secdef_execute":{"count":1242,"digest":"sha256:548ab9cb9d567cb08e55498354fcbb45e663d1391a90a4a8b20af0db00d476d6"},"projection_version":"scac-db-catalog-projection.v112","runtime_dml_grants":{"count":331,"digest":"sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"},"job_definitions":{"count":2,"digest":"sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"}});
 
+export const FEATURE_SWITCHES_V113_DB_CATALOG_BASELINE = Object.freeze({"column_dml": {"count": 12, "digest": "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"}, "relation_dml": {"count": 321, "digest": "sha256:5a7adf6f85a0a98a5126c837b60f566844ee4cadb1b906c78faf69e394c02c12"}, "role_authority": {"count": 13, "digest": "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"}, "secdef_execute": {"count": 1246, "digest": "sha256:6e7ec210c949fbd87f47d04260ae03d9b4ccac569beb7b5439f69f754ed429ae"}, "job_definitions": {"count": 2, "digest": "sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"}, "projection_version": "scac-db-catalog-projection.v113", "runtime_dml_grants": {"count": 333, "digest": "sha256:242594378a78962bbeb10404a97e0374ca45a64e6ef157c8d7a58211e3559ea1"}});
+
+export function renderFeatureSwitchesRegistrySql(rows, predecessorSql = null) {
+  return renderAppendedRegistrySql(rows, {
+    predecessorSql,
+    predecessorPath: "migrations/0846_leads_scac_successor.sql",
+    predecessorDigest: "39c22acce1c8d94d693f0b6f858f8a6d68c20f3f9edb8314832a0a0e35aa5a78",
+    domainPath: "migrations/0847_feature_switches.sql",
+    oldVersion: REGISTRY_V112_VERSION, newVersion: REGISTRY_V113_VERSION,
+    oldCatalogBaseline: LEADS_V112_DB_CATALOG_BASELINE,
+    newCatalogBaseline: FEATURE_SWITCHES_V113_DB_CATALOG_BASELINE,
+    oldTag: "leads", newTag: "feature_switches",
+    oldLabel: "Leads", newLabel: "Feature switches",
+  });
+}
+
 export function renderLeadsRegistrySql(rows, predecessorSql = null) {
   return renderAppendedRegistrySql(rows, {
     predecessorSql,
@@ -21407,9 +21424,16 @@ export function renderGeneratedFrontier() {
   artifacts["migrations/0846_leads_scac_successor.sql"] =
     renderLeadsRegistrySql(v112Rows, artifacts["migrations/0844_automation_undo_scac_successor.sql"]);
 
+  const v113Rows = frozenInventory(REGISTRY_V113_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v113.generated.js"] =
+    renderRuntimeProjection(v113Rows, { version: REGISTRY_V113_VERSION,
+      dbCatalogBaseline: FEATURE_SWITCHES_V113_DB_CATALOG_BASELINE });
+  artifacts["migrations/0848_feature_switches_scac_successor.sql"] =
+    renderFeatureSwitchesRegistrySql(v113Rows, artifacts["migrations/0846_leads_scac_successor.sql"]);
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 118 || runtimeCount !== 109 || Object.keys(artifacts).length !== 227)
+  if (migrationCount !== 119 || runtimeCount !== 110 || Object.keys(artifacts).length !== 229)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -22492,6 +22516,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         dbCatalogBaseline: AUTOMATION_UNDO_V111_DB_CATALOG_BASELINE }));
     await writeFile(resolve("migrations/0844_automation_undo_scac_successor.sql"), renderAutomationUndoRegistrySql(rows));
     process.stdout.write("Automation undo v111 frontier generated\n");
+  } else if (process.argv[2] === "--write-feature-switches-frontier") {
+    const rows = frozenInventory(REGISTRY_V113_VERSION);
+    await writeFile(resolve("mcp-server/src/scac-mutation-registry.v113.generated.js"),
+      renderRuntimeProjection(rows, {version: REGISTRY_V113_VERSION, dbCatalogBaseline: FEATURE_SWITCHES_V113_DB_CATALOG_BASELINE}));
+    await writeFile(resolve("migrations/0848_feature_switches_scac_successor.sql"), renderFeatureSwitchesRegistrySql(rows));
+    process.stdout.write("Feature switches v113 frontier generated\n");
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools(), CURRENT_REGISTRY_VERSION);
     process.stdout.write(`source inventory matches frozen ${CURRENT_REGISTRY_VERSION} frontier fixture\n`);
