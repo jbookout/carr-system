@@ -73,6 +73,9 @@ from lib import launchd_calendar
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
 REPO_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LAUNCHD_DEPENDENCY_CHECKOUTS = (
+    "/opt/homebrew", "/usr/local/Homebrew", "/home/linuxbrew/.linuxbrew/Homebrew",
+)
 
 
 def _canonical_repo(here):
@@ -1543,14 +1546,11 @@ def refused_launchd_templates(repo=None):
             continue
         for problem in launchd_calendar.audit_template(text):
             out.append((os.path.relpath(path, root), problem))
-        problem = launchd_path_refusal(concrete(text))
-        if problem:
-            out.append((os.path.relpath(path, root), problem))
     return out
 
 
 def launchd_path_refusal(body):
-    """Check Git identity for every absolute runtime path in a LaunchAgent."""
+    """Verify runtime checkouts for installation and installed-path audits."""
     try:
         definition = plistlib.loads(body.encode("utf-8"))
     except (ValueError, plistlib.InvalidFileException) as exc:
@@ -1560,11 +1560,14 @@ def launchd_path_refusal(body):
     arguments = definition.get("ProgramArguments") or []
     if not isinstance(arguments, list):
         return "invalid LaunchAgent: ProgramArguments must be an array"
-    paths = [definition.get("WorkingDirectory"), definition.get("Program"), *arguments]
+    working_directory = definition.get("WorkingDirectory") or "/"
+    if not isinstance(working_directory, str) or not os.path.isabs(working_directory):
+        return "invalid LaunchAgent: WorkingDirectory must be absolute"
+    paths = [working_directory, definition.get("Program"), *arguments]
     for path in paths:
-        if not isinstance(path, str) or not os.path.isabs(path):
+        if not isinstance(path, str) or not path or path.startswith("-"):
             continue
-        resolved = os.path.realpath(path)
+        resolved = os.path.realpath(os.path.join(working_directory, path))
         directory = resolved if os.path.isdir(resolved) else os.path.dirname(resolved)
         # A declared script may not exist yet; inspect its closest existing
         # ancestor so a missing file cannot hide a feature checkout.
@@ -1574,7 +1577,9 @@ def launchd_path_refusal(body):
             top = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"],
                                  capture_output=True, text=True, env=_git_env(), timeout=15)
             if top.returncode:
-                continue  # system executables and non-repository directories
+                if top.returncode == 128 and top.stderr.strip() == "fatal: not a git repository (or any of the parent directories): .git":
+                    continue
+                return f"cannot verify repository identity for {path}: {top.stderr.strip()}"
             checkout = top.stdout.strip()
             dirs = subprocess.run(["git", "-C", checkout, "rev-parse", "--path-format=absolute",
                                    "--git-dir", "--git-common-dir"],
@@ -1582,16 +1587,16 @@ def launchd_path_refusal(body):
             identities = dirs.stdout.strip().splitlines()
             if dirs.returncode or len(identities) != 2:
                 return f"cannot verify main/worktree identity for {path}"
-            # Homebrew and other installed dependencies have their own release
-            # branches. This contract governs session worktrees and CARR's
-            # canonical checkout, not a package manager's repository.
-            if identities[0] == identities[1] and os.path.realpath(checkout) != os.path.realpath(REPO):
+            # Only named package-manager checkouts may use release branches.
+            # Standalone session clones have the same Git directory shape.
+            if identities[0] == identities[1] and os.path.realpath(checkout) in {
+                    os.path.realpath(root) for root in LAUNCHD_DEPENDENCY_CHECKOUTS}:
                 continue
             branch = subprocess.run(["git", "-C", checkout, "symbolic-ref", "--short", "HEAD"],
                                     capture_output=True, text=True, env=_git_env(), timeout=15)
         except (OSError, subprocess.SubprocessError) as exc:
             return f"cannot verify main checkout for {path}: {exc}"
-        if branch.returncode or branch.stdout.strip() != "main":
+        if identities[0] != identities[1] or branch.returncode or branch.stdout.strip() != "main":
             return (f"runtime path {path} selects {branch.stdout.strip() or 'detached HEAD'}; "
                     "point the LaunchAgent at the canonical main checkout and reinstall")
     return None

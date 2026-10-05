@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """LaunchAgent runtime paths must never select a feature branch checkout."""
 import importlib.util
+import contextlib
+import io
 import os
 import plistlib
 import subprocess
@@ -26,6 +28,9 @@ class LaunchdMainPathTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "canonical"
         self.feature = self.root / "feature"
+        repo_patch = patch.object(installer, "REPO", str(self.repo))
+        repo_patch.start()
+        self.addCleanup(repo_patch.stop)
         self.env = fixture_env()
         self.git("init", "-b", "main", str(self.repo))
         self.git("-C", str(self.repo), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "seed")
@@ -63,7 +68,68 @@ class LaunchdMainPathTests(unittest.TestCase):
         dependency = self.root / "dependency"
         self.git("init", "-b", "stable", str(dependency))
         body = plistlib.dumps({"Label": "local.test", "ProgramArguments": [str(dependency / "python")]}).decode()
-        self.assertIsNone(installer.launchd_template_refusal(body))
+        with patch.object(installer, "LAUNCHD_DEPENDENCY_CHECKOUTS", (str(dependency),), create=True):
+            self.assertIsNone(installer.launchd_template_refusal(body))
+
+    def assert_runtime_refused(self, data):
+        body = plistlib.dumps(data).decode()
+        self.assertIsNotNone(installer.launchd_path_refusal(body))
+        self.assertIsNotNone(installer.launchd_template_refusal(body))
+        agents = self.root / "Library/LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        name = "com.carr.fixture.plist"
+        target = agents / name
+        target.write_text(body)
+        with patch.object(installer, "LAUNCHD_SRC", str(agents)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(installer.cmd_check_launchd_main_paths(), 1)
+        self.assertEqual(target.read_text(), body, "audit must be read-only")
+
+    def test_source_validation_is_independent_of_checkout_branch(self):
+        source = self.repo / "ops/launchd/com.carr.fixture.plist"
+        source.parent.mkdir()
+        body = plistlib.dumps({"Label": "com.carr.fixture", "WorkingDirectory": str(self.repo),
+                              "ProgramArguments": ["/bin/bash", str(self.repo / "ops/progress-board-render.sh")]}).decode()
+        source.write_text(body)
+        for checkout in ("repair-source", "--detach"):
+            args = ["checkout", "-b", checkout] if checkout != "--detach" else ["checkout", checkout]
+            self.git("-C", str(self.repo), *args)
+            with self.subTest(checkout=checkout):
+                self.assertEqual(installer.refused_launchd_templates(str(self.repo)), [])
+                self.assertIsNotNone(installer.launchd_template_refusal(body))
+
+    def test_relative_runtime_paths_cannot_hide_feature_checkout(self):
+        for field in ("Program", "ProgramArguments"):
+            with self.subTest(field=field):
+                data = {"Label": "com.carr.fixture", "WorkingDirectory": str(self.repo),
+                        "ProgramArguments": ["/bin/bash"]}
+                relative = "../feature/ops/progress-board-render.sh"
+                data[field] = ["/bin/bash", relative] if field == "ProgramArguments" else relative
+                self.assert_runtime_refused(data)
+        safe = {"WorkingDirectory": str(self.repo), "ProgramArguments": ["/bin/bash", "ops/progress-board-render.sh", "--apply", "tick"]}
+        self.assertIsNone(installer.launchd_template_refusal(plistlib.dumps(safe).decode()))
+
+    def test_standalone_feature_clone_is_refused(self):
+        clone = self.root / "clone"
+        self.git("clone", str(self.repo), str(clone))
+        self.git("-C", str(clone), "checkout", "-b", "feature")
+        script = clone / "runner.sh"
+        script.write_text("#!/bin/sh\n")
+        self.assert_runtime_refused({"ProgramArguments": [str(script)]})
+
+    def test_broken_git_metadata_is_refused(self):
+        broken = self.root / "broken"
+        broken.mkdir()
+        (broken / ".git").write_text(f"gitdir: {self.root / 'unavailable'}\n")
+        self.assert_runtime_refused({"ProgramArguments": [str(broken / "runner.sh")]})
+
+    def test_git_ownership_error_is_refused(self):
+        denied = subprocess.CompletedProcess([], 128, "", "fatal: detected dubious ownership in repository")
+        with patch.object(installer.subprocess, "run", return_value=denied):
+            self.assert_runtime_refused({"ProgramArguments": [str(self.repo / "runner.sh")]})
+
+    def test_non_repository_system_path_is_allowed(self):
+        body = plistlib.dumps({"ProgramArguments": ["/bin/bash", "--version"]}).decode()
+        self.assertIsNone(installer.launchd_path_refusal(body))
 
     def test_board_installer_refuses_feature_checkout_without_writing(self):
         agents = self.root / "Library/LaunchAgents"

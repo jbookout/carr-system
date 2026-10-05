@@ -13,6 +13,16 @@ spec.loader.exec_module(board)
 
 
 class SnapshotSizeTests(unittest.TestCase):
+    def test_app_evidence_and_inline_question_survive_projection(self):
+        task = {"title": "Review", "status": "review", "stage": "review", "pr": 1553,
+                "repo": "jbookout/carr-system", "pr_head": "a" * 40, "pr_checks": "failure",
+                "pr_links": [{"repo": "jbookout/doctorcre-app", "number": 42, "head_sha": "b" * 40}],
+                "question": "Which delivery target applies?"}
+        projected = board.board_snapshot({"project": "fixture", "tasks": {"review": task}})["tasks"]["review"]
+        for field in ("pr_head", "pr_checks", "pr_links", "question"):
+            with self.subTest(field=field):
+                self.assertEqual(projected.get(field), task[field])
+
     def test_watchdog_diagnostics_fit_with_every_open_card_and_headroom(self):
         # Live census: 867 tasks, 337 in flight, 29 diagnostic cards around 28 KB
         # per duplicated field. No business text is copied into this fixture.
@@ -28,7 +38,7 @@ class SnapshotSizeTests(unittest.TestCase):
                 "stage_history": [{"stage": stage, "entered_at": "2026-09-29T00:00:00Z"}],
                 "blocked_reason": reason if n < 297 else None, "note": reason,
                 "next_action": "Read the job log, restore the source, then retry.",
-                "pr_head": "f" * 40, "pr_checks": [{"raw_diagnostic": "x" * 1000}],
+                "pr_head": "f" * 40, "pr_checks": "1 pass · 0 pending · 1 fail",
             }
         state = {"project": "carr-v5", "tasks": tasks}
         before = copy.deepcopy(state)
@@ -40,6 +50,8 @@ class SnapshotSizeTests(unittest.TestCase):
             self.assertEqual(card["title"], tasks[f"task-{n}"]["title"])
             self.assertEqual(card["next_action"], tasks[f"task-{n}"]["next_action"])
             self.assertEqual(card["stage_history"], tasks[f"task-{n}"]["stage_history"])
+            self.assertEqual(card["pr_head"], tasks[f"task-{n}"]["pr_head"])
+            self.assertEqual(card["pr_checks"], tasks[f"task-{n}"]["pr_checks"])
         self.assertTrue(snapshot["tasks"]["task-0"]["blocked_reason"].startswith("GitHub read failed:"))
         self.assertTrue(snapshot["tasks"]["task-0"]["blocked_reason"].endswith("diagnostic line\n"))
         self.assertNotIn("note", snapshot["tasks"]["task-0"])
