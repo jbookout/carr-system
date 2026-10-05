@@ -307,7 +307,7 @@ def reconcile(report, path, run_verb=_run_verb):
                                  'loop_id': current['loop_id'], 'base_version': _loop_version(run_verb, current['loop_id']),
                                  'resolution': 'done', 'outcome': f"Auto-clear: {provider} complete UTC day {report['through']} within daily and projection thresholds."},
                   provider, {})
-    return len(grouped)
+    return len(state['open'])
 
 
 def health_row(report, loop_result='not reconciled'):

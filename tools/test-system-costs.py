@@ -145,6 +145,10 @@ class MonthlyCosts(unittest.TestCase):
             self.assertEqual([w[0] for w in writes], ['add-loop'])
             report['alerts'] = []
             report['through'] = '2026-10-06'
+            report['providers'][0]['state'] = 'partial'
+            self.assertEqual(costs.reconcile(report, state, verb), 1)
+            self.assertEqual([w[0] for w in writes], ['add-loop'])
+            report['providers'][0]['state'] = 'ready'
             costs.reconcile(report, state, verb)
             self.assertEqual([w[0] for w in writes], ['add-loop', 'close-loop'])
             report['alerts'] = [{'provider': 'jev', 'driver': 'review', 'kind': 'daily_spike', 'amount_usd': 9, 'threshold_usd': 2}]
