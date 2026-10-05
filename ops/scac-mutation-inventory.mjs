@@ -21501,7 +21501,7 @@ export function renderGeneratedFrontier() {
 
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 116 || runtimeCount !== 107 || Object.keys(artifacts).length !== 223)
+  if (migrationCount !== 117 || runtimeCount !== 108 || Object.keys(artifacts).length !== 225)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
