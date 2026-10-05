@@ -2674,7 +2674,7 @@ else:
             # A WATCHER NAMING A FILE IS NOT A CONSUMER OF IT. Added 2026-08-09,
             # same council pass. Five of the six deprecation rows warned solely
             # because THIS file's own WATCH list holds those filenames, and
-            # parity-lead-board.py is the test harness that dies with them. The
+            # The retired parity harness no longer participates in the scan. The
             # check was its own dependency, so the register could never go green
             # and had printed the identical six warnings since 2026-08-02. That
             # is not a harmless cosmetic: a row that is chronically red detects
@@ -2682,7 +2682,7 @@ else:
             # 2026-08-08 a plugin install deleted the entire hooks block and the
             # catastrophic wipe printed the same headline as a benign stale row,
             # so all five gates were off for a day and it was found by accident.
-            if os.path.basename(_f) in ("health-check.py", "parity-lead-board.py"):
+            if os.path.basename(_f) == "health-check.py":
                 continue
             try:
                 _lines = open(_f, errors="replace").read().splitlines()

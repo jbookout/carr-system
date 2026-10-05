@@ -114,7 +114,7 @@
         "bin/precheck.sh",
         "mcp-server/src/bot-brief.js",
         "tools/room-bridge/engineering_dispatch_adapter.py",
-        "tools/room-bridge/evaluation_rubrics.py",
+        "tools/room-bridge/evaluation_kernel.py",
         "tools/doc-convo/prompt",
         "tools/doc-convo/prompt/**",
         "ops/config/job-watchdog.json",

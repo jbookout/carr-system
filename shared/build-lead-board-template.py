@@ -19,9 +19,7 @@ TWO SOURCE MODES (ORDER 26(b), the ORDER 29a pattern).
 
 The two modes share every transform. What changes is only where the RAW row came
 from — an xlsx cell, a JSON object, or the `source_row` jsonb that stored that
-same object verbatim. That is what makes byte-identical output provable rather
-than hoped for: tools/parity-lead-board.py runs both and diffs the payload the
-template consumes. Records mode falls back to files, loudly, when the record path
+same object verbatim. Both modes feed the same template transforms. Records mode falls back to files, loudly, when the record path
 is unreachable; a board that quietly dropped its radar rows would be worse than
 one that admits it read the files.
 

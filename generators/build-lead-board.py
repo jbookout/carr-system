@@ -18,9 +18,7 @@ TWO SOURCE MODES (ORDER 26(b), the ORDER 29a pattern).
 
 The two modes share every transform. What changes is only where the RAW row came
 from — an xlsx cell, a JSON object, or the `source_row` jsonb that stored that
-same object verbatim. That is what makes byte-identical output provable rather
-than hoped for: tools/parity-lead-board.py runs both and diffs the payload the
-template consumes. Normal mode fails closed when canonical record ingress is
+same object verbatim. Both modes feed the same template transforms. Normal mode fails closed when canonical record ingress is
 unavailable; legacy file reads require explicit recovery and are labeled
 noncanonical.
 
