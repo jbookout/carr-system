@@ -209,6 +209,20 @@
     },
     {"caller": "rule_trigger_compile", "trigger": "manual: bounded semantic evaluation", "runs_in": "explicit evaluation session", "attribution": "session", "unattended": "off", "hourly_budget": 5, "daily_budget": 10, "owner": "orchestrator", "value": "bounded advisory/eval only; no automatic promotion", "sources": ["ops/rule_trigger_compile.py"]},
     {"caller": "timebomb-audit", "trigger": "manual: bounded semantic evaluation", "runs_in": "explicit evaluation session", "attribution": "session", "unattended": "off", "hourly_budget": 5, "daily_budget": 10, "owner": "orchestrator", "value": "bounded advisory/eval only; no automatic promotion", "sources": ["ops/timebomb-audit.py"]},
-    {"caller": "jev_rerank_eval", "trigger": "manual: bounded semantic evaluation", "runs_in": "explicit evaluation session", "attribution": "session", "unattended": "off", "hourly_budget": 5, "daily_budget": 10, "owner": "orchestrator", "value": "bounded advisory/eval only; no automatic promotion", "sources": ["evals/retrieval/jev-rerank-eval.mjs"]}
+    {"caller": "jev_rerank_eval", "trigger": "manual: bounded semantic evaluation", "runs_in": "explicit evaluation session", "attribution": "session", "unattended": "off", "hourly_budget": 5, "daily_budget": 10, "owner": "orchestrator", "value": "bounded advisory/eval only; no automatic promotion", "sources": ["evals/retrieval/jev-rerank-eval.mjs"]},
+    {
+      "caller": "jevlint_review",
+      "trigger": "Explicit advisory PR diff check or bounded rule calibration; never a scheduled full-repo run",
+      "runs_in": "ops/jevlint_review.py loopback SystemOne shim for pinned jevlint",
+      "attribution": "session",
+      "unattended": "allowed",
+      "hourly_budget": 150,
+      "daily_budget": 200,
+      "owner": "orchestrator",
+      "value": "Code taste findings for the reviewer, measured against real deletion fixtures",
+      "sources": [
+        "ops/jevlint_review.py"
+      ]
+    }
   ]
 }
