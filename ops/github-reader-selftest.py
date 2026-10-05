@@ -112,7 +112,8 @@ check("the error names the read, exit status and attempts",
       "gh api repos/o/r/issues/1504/comments exited 1 after 3 attempts" in msg, msg)
 check("the error carries gh's last stderr line", "HTTP 502: Bad Gateway" in msg, msg)
 check("the error is one bounded line", "\n" not in msg and len(msg) < 400, len(msg))
-check("an exhausted transient failure says it was transient", exc.transient is True, exc.transient)
+check("an exhausted transient failure says it was transient",
+      exc is not None and exc.transient is True, exc and exc.transient)
 check("a RuntimeError, so existing `except RuntimeError` callers still catch it",
       isinstance(exc, RuntimeError))
 

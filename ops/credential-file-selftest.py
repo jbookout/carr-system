@@ -105,7 +105,8 @@ with tempfile.TemporaryDirectory() as raw:
     env = {"PLAIN": "from-environment", "EMPTY_ENV": ""}
     check("credential() prefers the job's environment",
           credential("PLAIN", path=path, environ=env) == "from-environment")
-    check("credential() falls back to the file", credential("SINGLE", path=path, environ={}).endswith("require"))
+    check("credential() falls back to the file",
+          (credential("SINGLE", path=path, environ={}) or "").endswith("require"))
     check("an empty environment value falls through to the file",
           credential("PLAIN", path=path, environ={"PLAIN": ""}) == "plain-value")
     check("an empty value is no credential", credential("EMPTY", path=path, environ={}) is None)
