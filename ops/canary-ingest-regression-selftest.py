@@ -226,6 +226,18 @@ class Regressions(unittest.TestCase):
             self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
         rejected.close.assert_called_once()
 
+    def test_5_socket_close_before_worker_release_still_recovers(self):
+        shutdown = sink.BoundedHTTPServer.shutdown_request
+
+        def delayed_worker_exit(server, request):
+            shutdown(server, request)
+            # EOF reaches the client before process_request_thread releases
+            # its worker slot. Force that ordering from the failed CI run.
+            time.sleep(0.1)
+
+        with patch.object(sink.BoundedHTTPServer, 'shutdown_request', delayed_worker_exit):
+            self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+
     def test_5_abandoned_headers_and_bodies_release_bounded_workers(self):
         with serving(self.ledger, read_timeout=0.2, max_workers=2) as server:
             stalled = []
@@ -233,10 +245,12 @@ class Regressions(unittest.TestCase):
             release = threading.Event()
             lock = threading.Lock()
             started = 0
+            worker_threads = []
             handle = server.process_request_thread
             def hold_worker(*args):
                 nonlocal started
                 with lock:
+                    worker_threads.append(threading.current_thread())
                     started += 1
                     if started == 2:
                         occupied.set()
@@ -269,6 +283,9 @@ class Regressions(unittest.TestCase):
                     release.set()
                 for sock in stalled:
                     assert_closed(sock)
+                for worker in worker_threads:
+                    worker.join(2)
+                    self.assertFalse(worker.is_alive(), 'abandoned worker must release its slot')
                 self.assertEqual(post(server, b'{"external_id":"recovered"}')[0], 200)
             finally:
                 release.set()

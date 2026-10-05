@@ -111,6 +111,12 @@ def main():
             expected_preamble + "\n\n\n" + conditional.group("body").strip()
             if conditional and conditional_gate else None
         )
+    # Once 0756 is absorbed, the generated bootstrap also carries Dot's
+    # passwordless role before role-bound policies from pg_dump.
+    dot = re.search(r"cat >> \"\$TMP\" <<'DOT_READER_ROLES'\n(?P<body>.*?)\nDOT_READER_ROLES", generator, re.S)
+    dot_applied = re.search(r"^0756_dot_reader\.sql\t[0-9a-f]{64}\t", sql, re.M) is not None
+    if expected_preamble is not None and dot_applied:
+        expected_preamble = expected_preamble + "\n" + dot.group("body").strip() if dot else None
     preamble_end = sql.find("--\n-- PostgreSQL database dump")
     check("the snapshot generator carries the exact checked-in role preamble",
           expected_preamble is not None and preamble_end > 0
