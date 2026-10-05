@@ -1,3 +1,5 @@
+import { withEnvelope, writeEvent, auditIdentity, versionGuard, versionedWrite } from "./versioned-write.js";
+export { auditIdentity, compareVersion, disjointFromIntervening } from "./versioned-write.js";
 import { invoiceTrackerTools } from "./invoice-tracker.js";
 import { isCalendarDate } from "./calendar-date.js";
 import { bindReferralDeal } from "./relationship-network.js";
@@ -263,169 +265,6 @@ export function pgConstraintError(e) {
 // string — sorted top-level keys — is byte-identical to the old form, so
 // stored hashes stay valid. A historical NESTED-args row would key_reuse
 // loudly on replay rather than lie quietly; that trade is deliberate.
-function canon(v) {
-  if (Array.isArray(v)) return v.map(canon);
-  if (v && typeof v === "object")
-    return Object.keys(v).sort().reduce((o, k) => {
-      if (v[k] !== undefined) o[k] = canon(v[k]);
-      return o;
-    }, {});
-  return v;
-}
-
-async function requestHash(args) {
-  const data = new TextEncoder().encode(JSON.stringify(canon(args)));
-  const d = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-const TOUR_DOMAIN_SERIALIZED_WRITES = new Set([
-  "create-tour-domain",
-  "append-tour-route-version",
-  "prepare-tour-route-version",
-  "append-tour-route-stop",
-  "append-tour-route-stop-transition",
-  "accept-tour-route-version",
-  "append-tour-cheat-sheet-revision",
-  "restore-tour-cheat-sheet-revision",
-  "append-tour-selection-cart-version",
-  "record-tour-map-promotion-receipt",
-  "issue-tour-share-grant",
-  "rotate-tour-share-grant",
-  "revoke-tour-share-grant",
-  "request-tour-pdf-render",
-  "record-tour-pdf-render-result",
-  "record-tour-pdf-human-review",
-]);
-
-export function auditIdentity(actor) {
-  const scope = personalScopeForActor(actor);
-  return {
-    organization_tenant_id: organizationTenantForActor(actor),
-    sponsoring_human_slug: scope.status === "personal" ? scope.sponsor : null,
-    personal_scope: scope.status === "personal" ? `${scope.sponsor}-personal` : "none",
-    authorization_class: actor.authorization_class || authorizationClassForActor(actor),
-    // Program 4 Gap A2 (2026-08-14, defect cae5be2e): the x-correlation-id of the
-    // Worker request that produced this write, set on the actor object by
-    // mcp.js's dispatch() from env.CORRELATION_ID (correlation.js). null for any
-    // caller that reaches a write handler without going through dispatch() —
-    // tests, and anything constructing an actor object by hand.
-    correlation_id: actor.correlation_id || null,
-  };
-}
-
-async function withEnvelope(client, actor, verb, args, fn) {
-  const key = args.idempotency_key;
-  if (!key) throw new ToolError({ error: "missing_idempotency_key",
-    hint: "generate a UUID per intended action; retries reuse the SAME key" });
-  const identity = auditIdentity(actor);
-  // SIEP-11: replay authority is the exact operation manifest, never the bare
-  // caller key. Binding the canonical operation and server-derived principal
-  // makes cross-verb, cross-actor, cross-client, cross-sponsor, and cross-tenant
-  // reuse fail as key_reuse before a stored response can be returned. The
-  // session/token/epoch fields are added by SIEP-12/17/21; their absence here
-  // cannot widen authority because this manifest is monotonic and deny-only.
-  const hash = await requestHash({
-    manifest_version: "scac-application-mutation.v1",
-    ...mutationManifestIdentity(),
-    operation: verb,
-    principal: {
-      actor_id: actor.id,
-      actor_slug: actor.slug,
-      human: actor.human === true,
-      via: actor.via || null,
-      client_id: actor.client_id || null,
-      sponsoring_human_slug: identity.sponsoring_human_slug,
-      authorization_class: identity.authorization_class,
-      organization_tenant_id: identity.organization_tenant_id,
-    },
-    args: { ...args, idempotency_key: undefined },
-  });
-  // Versioned writes need same-key serialization before their replay read:
-  // otherwise two first calls can both see no tool_call row, and the loser
-  // reports a version conflict instead of the promised replay.
-  // Keep this scoped until the shared envelope's existing fake-client suites
-  // are migrated to model the extra query for every historical write verb.
-  if (verb === "record-commission-receipt" || ["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move", "undo-lead-move", "record-deal-invoice", "undo-invoice-close"].includes(verb) || verb === "teach" || verb === "claim-lead" || verb === "link-lead-client" || (verb === "update-lead" && args.stage_review) || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
-    await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
-  const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
-  if (prior.rows.length) {
-    if (prior.rows[0].request_hash !== hash) throw new ToolError({ error: "key_reuse" });
-    return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
-  }
-  const result = await fn();                                        // inside the open transaction
-  await client.query(
-    `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [key, verb, actor.id, hash, JSON.stringify(result), actor.via || null, actor.client_id || null,
-     identity.organization_tenant_id, identity.sponsoring_human_slug, identity.personal_scope,
-     identity.authorization_class, identity.correlation_id]);
-  return result;
-}
-
-async function writeEvent(client, actor, verb, subjectType, subjectId, fields = {}) {
-  const identity = auditIdentity(actor);
-  const allowedCauses = new Set(["human_stated", "human_correction", "ingest_email",
-    "ingest_calendar", "ingest_webhook", "import_migration", "import_salesforce",
-    "automation_job", "learning_job", "system"]);
-  // THE DEFAULT USED TO BE 'human_stated' UNCONDITIONALLY, and it made the column
-  // a lie. Measured 2026-08-13: 2,822 of 3,946 events read human_stated, including
-  // every row written by an automated sweep — 173 research findings, 109 org
-  // consolidations, 38 measurement pulls, and this run's own defect records, none
-  // of which a human stated. A provenance column that says "a human said this"
-  // about a nightly job is worse than an absent one, because a reader trusts it.
-  //
-  // DERIVED FROM WHO IS WRITING, not from an optimistic default. An explicit cause
-  // from the caller still wins, because a verb that knows it is replaying an email
-  // or a Salesforce import knows better than this rule does. Otherwise: a write
-  // carrying the partner's verbatim words is human-stated by definition — that is
-  // the intent signal the write-provenance ruling settled on — and a write from a
-  // non-human actor with no quote is an automation job, which is what it is.
-  //
-  // HISTORY IS NOT REWRITTEN. The 2,822 wrong rows stay wrong. Backfilling an
-  // audit trail so a metric reads better is the one repair that would be worse
-  // than the defect: the log's value is that it records what happened, including
-  // that this column was unreliable before today.
-  // THE ACTOR'S human FLAG IS NOT THE DISCRIMINATOR, and trying it first is how
-  // this fix was nearly shipped wrong. A scheduled unattended run authenticates as
-  // Joe — his OAuth grant, his slug, human:true — so keying on the actor recorded
-  // a 2am cron as "a human said this", which is the same lie in a new place. There
-  // IS no transport signal separating "Joe decided this" from "the agent decided
-  // this"; the write-provenance ruling settled that, and this rule obeys it.
-  //
-  // So the only honest signal is the one that ruling named: the partner's verbatim
-  // words. A write carrying them is human-stated because a session cannot invent a
-  // quote without writing a false sentence a human would recognise. A write without
-  // them is an automation job, whichever account authenticated — and that is the
-  // stricter, more truthful reading, because Joe never types into this database.
-  // He tells Claude and Claude writes.
-  //
-  // An explicit cause from the caller still wins: a verb replaying an email or a
-  // Salesforce import knows better than this rule does.
-  let cause;
-  if (allowedCauses.has(fields.cause)) {
-    cause = fields.cause;
-  } else if (fields.human_quote && String(fields.human_quote).trim()) {
-    cause = "human_stated";
-  } else {
-    cause = "automation_job";
-  }
-  await client.query(
-    `insert into event (occurred_at, recorded_at, actor_id, verb, subject_type, subject_id, field,
-       old_value, new_value, cause, human_quote, agent_rationale, idempotency_key, via, client_id,
-       organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
-     values (coalesce($1::timestamptz, now()),
-       case when $19::boolean then clock_timestamp() else now() end,
-       $2, $3, $4, $5, $6, $7, $8, '${cause}', $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
-    [fields.occurred_at || null, actor.id, verb, subjectType, subjectId, fields.field || null,
-     fields.old ? JSON.stringify(fields.old) : null, fields.new ? JSON.stringify(fields.new) : null,
-     fields.human_quote || null, fields.agent_rationale || null, fields.idempotency_key || null,
-     actor.via || null, actor.client_id || null, identity.organization_tenant_id,
-     identity.sponsoring_human_slug, identity.personal_scope, identity.authorization_class,
-     identity.correlation_id, fields.recorded_at_after_lock === true]);
-}
-
 const INDUSTRY_EVENT_KINDS = ["conference", "association_meeting", "trade_show", "networking"];
 const INDUSTRY_EVENT_ATTENDANCE_INTENTS = ["considering", "plan_to_attend", "not_attending"];
 const INDUSTRY_EVENT_STATUSES = ["planned", "attended", "skipped", "cancelled"];
@@ -687,17 +526,6 @@ async function mirrorDecision(client, actor, d) {
 // (loop #350, base_version 1, current_version 1). Coercing both sides to
 // Number before comparing fixes this without weakening the check: a REAL
 // mismatch (e.g. 1 vs 3) still differs after coercion.
-export function compareVersion(current, baseVersion) {
-  if (baseVersion === undefined || baseVersion === null)
-    return { ok: false, kind: "missing_base_version" };
-  const cv = Number(current);
-  const bv = Number(baseVersion);
-  if (!Number.isFinite(bv))
-    return { ok: false, kind: "invalid_base_version" };
-  if (cv !== bv) return { ok: false, kind: "conflict" };
-  return { ok: true };
-}
-
 // THE OTHER HALF OF THE SAME DEFECT (found 2026-08-13, loop 353). compareVersion
 // above fixed ONE field, base_version, against mistyped arrival. The cause it
 // names — "MCP tool-call arguments are never validated against inputSchema
@@ -945,68 +773,6 @@ export function coerceArgsToSchema(schema, args, path = "") {
 // blanket default. update-deal is the first (and, for now, only) caller wired
 // this way: its `fields{}` PATCH already computes the exact touched-column set
 // before it needs a version at all.
-export function disjointFromIntervening(touchedFields, interveningEvents) {
-  if (!Array.isArray(touchedFields) || !touchedFields.length) return false;
-  if (!interveningEvents.length) return false; // nothing intervened at all — not a race, just a stale read of nothing
-  const touched = new Set(touchedFields);
-  return interveningEvents.every(row => !row.field || !touched.has(row.field));
-}
-
-async function versionGuard(client, table, id, baseVersion, touchedFields = null) {
-  // Every write handler runs inside mcp.js's writer transaction.  Locking the
-  // row makes the optimistic check real: a concurrent writer waits, then sees
-  // the incremented version instead of letting two same-version writes through.
-  // Query text UNCHANGED from before this fix (still exactly
-  // "select version from <table> where id=$1 for update") — existing fakes in
-  // this suite (loop-owner-repair.test.mjs) match on it verbatim, and the new
-  // logic below only needs a second read on the rare conflict path.
-  const r = await client.query(`select version from ${table} where id=$1 for update`, [id]);
-  if (!r.rows.length) throw new ToolError({ error: "not_found", table, id });
-  const current = r.rows[0].version;
-  const cmp = compareVersion(current, baseVersion);
-  if (cmp.kind === "missing_base_version")
-    throw new ToolError({ error: "missing_base_version", current_version: current,
-      hint: "read the record first; pass its version back as base_version" });
-  if (cmp.kind === "invalid_base_version")
-    throw new ToolError({ error: "invalid_base_version", got: baseVersion, current_version: current,
-      hint: "base_version must be the integer version from a fresh read, not a non-numeric value" });
-  if (!cmp.ok) {
-    // Exclude the record's OWN creation event from the "intervening" list.
-    // A caller holding any base_version >= 1 has, by construction, already
-    // read the record after it existed — its birth is not news to them, so
-    // citing it as an intervening event is misleading regardless of the fix
-    // above. created_at and the creation event's recorded_at are written in
-    // the same transaction (both default to now()), so they are exactly
-    // equal; `recorded_at > created_at` keeps every REAL subsequent edit and
-    // drops only that one founding row. Fetched here, lazily, only on the
-    // conflict path, rather than folded into the query above.
-    const created = await client.query(`select created_at from ${table} where id=$1`, [id]);
-    const ev = await client.query(
-      `select a.slug as actor, e.verb, e.field, e.old_value, e.new_value, e.recorded_at
-       from event e join actor a on a.id=e.actor_id
-       where e.subject_id=$1 and e.recorded_at > $2 order by e.recorded_at desc limit 5`,
-      [id, created.rows[0]?.created_at ?? null]);
-    // TRIVIAL RACE: every intervening event's field lies outside this call's
-    // own touched set. Rebase transparently onto the row this transaction
-    // already holds locked (current is fresh and safe to act on — the `for
-    // update` above means nobody else can move it again until this
-    // transaction commits) and hand the caller a receipt instead of a refusal.
-    // SAME-FIELD OR UNDECLARED: unchanged, still asks the human.
-    if (disjointFromIntervening(touchedFields, ev.rows)) {
-      return { version: current, rebased: true, rebase_receipt: {
-        from_base_version: Number(baseVersion), rebased_to_version: current,
-        disjoint_intervening_events: ev.rows.map(row => ({
-          actor: row.actor, verb: row.verb, field: row.field, recorded_at: row.recorded_at })),
-        hint: "version advanced from a write to a different field; re-applied against the current row with no human confirmation needed",
-      } };
-    }
-    throw new ToolError({ error: "version_conflict", current_version: current,
-      intervening_events: ev.rows,
-      hint: "surface this to the human and re-read; NEVER auto-retry" });
-  }
-  return { version: current, rebased: false, rebase_receipt: null };
-}
-
 async function config(client, key, fallback) {
   const r = await client.query("select value from system_config where key=$1", [key]);
   return r.rows.length ? r.rows[0].value : fallback;
@@ -4794,21 +4560,22 @@ export const TOOLS = {
       stage_review: { type: "object", additionalProperties: false, properties: { reason: { type: "string", minLength: 1, maxLength: 1000 }, evidence_ids: { type: "array", items: { type: "string" }, maxItems: 20 }, undo_event_id: { type: "string" }, human_quote: { type: "string", maxLength: 1000 } }, required: ["reason", "evidence_ids"] },
       fields: { type: "object", description: "subset of: stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
       required: ["idempotency_key","lead","base_version","fields"] },
-    handler: async (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
+    handler: versionedWrite("update-lead", {
+      table: "lead",
+      resolve: (c, args) => resolveSubject(c, args.lead),
+      fields: ["stage","lane","segment","source_type","source_detail","suppressed",
+                       "est_lease_event","next_action_date","notes_path","notes","event_source",
+                       "event_confidence","report_back_due","drip_campaign","drip_added","sf_deal"],
+      before: async ({ c, actor, args }) => {
       const reviewed = Object.hasOwn(args, "stage_review") ? validateStageReview(args.stage_review, args.fields, ToolError) : null;
       if (reviewed?.undo_event_id) {
         if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_confirmation_required" });
         if (!reviewed.human_quote?.trim()) throw new ToolError({ error: "undo_human_quote_required" });
       }
       if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
-      const s = await resolveSubject(c, args.lead);
-      if (s.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: s });
-      await versionGuard(c, "lead", s.id, args.base_version);
-      const allowed = ["stage","lane","segment","source_type","source_detail","suppressed",
-                       "est_lease_event","next_action_date","notes_path","notes","event_source",
-                       "event_confidence","report_back_due","drip_campaign","drip_added","sf_deal"];
-      const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
-      if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      return reviewed;
+      },
+      guards: async ({ c, actor, args, subject, keys, prepared }) => {
       // Pre-validate rather than letting the FK abort the transaction, same reason
       // new-lead checks stage/lane up front: once the violation fires the
       // transaction is poisoned and cannot even run the query that would list the
@@ -4823,7 +4590,7 @@ export const TOOLS = {
             hint: `${field} is a foreign key into ${table}; pass one of the listed slugs, never the label.` });
         }
       }
-      const current = (await c.query("select stage,suppressed from lead where id=$1", [s.id])).rows[0];
+      const current = (await c.query("select stage,suppressed from lead where id=$1", [subject.id])).rows[0];
       const nextStage = keys.includes("stage") ? args.fields.stage : current.stage;
       const nextSuppressed = keys.includes("suppressed") ? args.fields.suppressed : current.suppressed;
       if (keys.includes("stage") && (current.stage === "archived" || nextStage === "archived") && !canExercisePartnerAuthority(actor))
@@ -4840,33 +4607,29 @@ export const TOOLS = {
         throw new ToolError({ error: "suppression_clear_requires_human",
           hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
+      const reviewed = prepared;
       let stageReview = null;
       if (reviewed) {
         const ids = reviewed.evidence_ids;
         const evidence = ids.length ? (await c.query(
-          "select id,occurred_at,kind,connected from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [s.id, ids])).rows : [];
+          "select id,occurred_at,kind,connected from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [subject.id, ids])).rows : [];
         if (evidence.length !== ids.length) throw new ToolError({ error: "stage_evidence_mismatch" });
         if (args.fields.stage === "engaged" && evidence.some(row => ["call","text"].includes(row.kind) && row.connected !== true))
           throw new ToolError({ error: "stage_evidence_not_contact" });
         if (reviewed.undo_event_id) {
           const last = (await c.query(`select * from v_lead_stage_transition
-            where lead_id=$1 order by mutation_order desc limit 1`, [s.id])).rows[0];
+            where lead_id=$1 order by mutation_order desc limit 1`, [subject.id])).rows[0];
           if (!last || !last.automatic || last.event_id !== reviewed.undo_event_id.toLowerCase() || last.prior_stage !== args.fields.stage || last.stage !== current.stage)
             throw new ToolError({ error: "undo_changed" });
         }
         stageReview = { ...reviewed, evidence_ids: ids,
           evidence_date: evidence.map(row => new Date(row.occurred_at).toISOString()).sort().at(-1) || null };
       }
-      const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [s.id])).rows[0];
-      const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
-      await c.query(`update lead set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
-        [actor.id, ...keys.map(k => args.fields[k]), s.id]);
-      for (const k of keys)
-        await writeEvent(c, actor, "update-lead", "lead", s.id,
-          { recorded_at_after_lock: k === "stage", field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k], ...(k === "stage" && stageReview ? { stage_review: stageReview } : {}) },
-            ...(k === "stage" && stageReview ? { cause: stageReview.undo_event_id ? "human_correction" : undefined,
-              human_quote: stageReview.human_quote, agent_rationale: stageReview.reason } : {}), idempotency_key: args.idempotency_key });
-      return { ok: true, updated: keys };
+      return stageReview;
+      },
+      eventFields: ({ args, field, old, guarded }) => ({ recorded_at_after_lock: field === "stage", field, old: { [field]: old[field] }, new: { [field]: args.fields[field], ...(field === "stage" && guarded ? { stage_review: guarded } : {}) },
+            ...(field === "stage" && guarded ? { cause: guarded.undo_event_id ? "human_correction" : undefined,
+              human_quote: guarded.human_quote, agent_rationale: guarded.reason } : {}), idempotency_key: args.idempotency_key }),
     }),
   },
 

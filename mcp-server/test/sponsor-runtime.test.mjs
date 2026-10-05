@@ -295,7 +295,7 @@ test("tenant is server fixed and cannot be selected by an actor or tool payload"
 test("audit migration and both write paths preserve actor, sponsor, scope, and authority without rule bodies", async () => {
   const [migration, tools] = await Promise.all([
     readFile(new URL("../../migrations/0095_sponsor_runtime_audit.sql", import.meta.url), "utf8"),
-    readFile(new URL("../src/tools.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/versioned-write.js", import.meta.url), "utf8"),
   ]);
   for (const text of [migration, tools]) {
     assert.match(text, /sponsoring_human_slug/);
@@ -304,7 +304,7 @@ test("audit migration and both write paths preserve actor, sponsor, scope, and a
     assert.match(text, /organization_tenant_id/);
   }
   assert.match(tools, /insert into tool_call \(idempotency_key, verb, actor_id/);
-  assert.match(tools, /insert into event \(occurred_at, actor_id, verb/);
+  assert.match(tools, /insert into event \(occurred_at, recorded_at, actor_id, verb/);
   const auditHelper = tools.slice(tools.indexOf("export function auditIdentity"), tools.indexOf("async function withEnvelope"));
   assert.doesNotMatch(auditHelper, /statement|personal_rules|human_quote/);
   assert.ok(migration.lastIndexOf("do $$") < migration.lastIndexOf("commit;"),
