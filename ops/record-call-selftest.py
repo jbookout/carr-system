@@ -4,7 +4,8 @@ one way an unattended script calls a record-layer verb.
 
 Every case drives call_verb() through an injected runner that stands where
 `./run.sh call` would, replaying what tools/call-verb.py and local-verb.mjs
-actually print and exit with. No subprocess, no network, no credential.
+actually print and exit with. Node renders the CLI's guidance suffix; no
+network or credential is used.
 """
 from __future__ import annotations
 
@@ -68,6 +69,22 @@ r = call_verb("read-x", {}, runner=Runner(1, "", tool_error))
 check("a Worker ToolError is a refusal with its payload as the reply",
       r.kind == REFUSED and r.reply == {"error": "unknown_tool", "name": "read-x"}, r)
 check("the refusal names its error code", r.error == "unknown_tool", r.error)
+
+guidance = subprocess.run(
+    ["node", "--input-type=module", "-e",
+     'import {humanOnlyGuidance} from "./mcp-server/human-only-hint.mjs"; '
+     'process.stdout.write(humanOnlyGuidance("synthetic-verb"));'],
+    cwd=REPO, capture_output=True, text=True, check=True).stdout
+human_only = {"error": "human_only", "name": "synthetic-verb"}
+r = call_verb("synthetic-verb", {}, runner=Runner(1, "", "TOOL ERROR " + reply(human_only) + guidance))
+check("the complete CLI refusal preserves the payload before its guidance",
+      r.kind == REFUSED and r.reply == human_only and r.error == "human_only", r)
+check("the complete CLI refusal describes its structured error",
+      "human_only" in r.describe() and "synthetic-verb" in r.detail, r.describe())
+
+r = call_verb("synthetic-verb", {}, runner=Runner(1, "", "TOOL ERROR {broken\n" + guidance))
+check("a malformed CLI ToolError stays refused without an invented payload",
+      r.kind == REFUSED and r.reply is None and r.error is None, r)
 
 unreachable = ("could not reach the deployed Worker at https://api.doctorcre.com/mcp: fetch failed\n"
                "The default path fails here rather than silently opening a direct database connection.\n")

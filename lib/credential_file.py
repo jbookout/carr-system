@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -32,9 +31,46 @@ def carr_config(name: str = "") -> Path:
     return Path.home() / ".config" / "carr" / name
 
 
+def _literal_value(raw: str) -> str:
+    """Decode the assignment word's quotes and escapes without shell expansion."""
+    value: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if quote == "'":
+            if char == quote:
+                quote = ""
+            else:
+                value.append(char)
+        elif char == "\\":
+            index += 1
+            if index == len(raw):
+                raise ValueError("unterminated escape")
+            escaped = raw[index]
+            if quote == '"' and escaped not in '$`"\\':
+                value.append("\\")
+            value.append(escaped)
+        elif quote:
+            if char == quote:
+                quote = ""
+            else:
+                value.append(char)
+        elif char in "'\"":
+            quote = char
+        elif char.isspace():
+            break
+        else:
+            value.append(char)
+        index += 1
+    if quote:
+        raise ValueError("unterminated quote")
+    return "".join(value)
+
+
 def read_env_file(path: str | os.PathLike[str]) -> dict[str, str]:
-    """Every NAME the shell's `set -a; . path` would set, with the value it
-    would hold. Raises OSError when the file cannot be read."""
+    """Read literal NAME=value assignments, without executing or expanding shell
+    expressions. Raises OSError when the file cannot be read."""
     values: dict[str, str] = {}
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         match = _ASSIGNMENT.match(line)
@@ -42,10 +78,10 @@ def read_env_file(path: str | os.PathLike[str]) -> dict[str, str]:
             continue
         name, raw = match.groups()
         try:
-            words = shlex.split(raw, comments=True, posix=True)
+            value = _literal_value(raw)
         except ValueError:
             continue
-        values[name] = words[0] if words else ""
+        values[name] = value
     return values
 
 

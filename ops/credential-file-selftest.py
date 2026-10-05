@@ -79,6 +79,33 @@ with tempfile.TemporaryDirectory() as raw:
           set(values) == {"PLAIN", "SINGLE", "DOUBLE", "EXPORTED", "ESCAPED", "COMMENTED", "EMPTY",
                           "QUOTED_EMPTY", "INDENTED", "REPEATED", "lower_case"}, sorted(values))
 
+    literal_cases = {
+        "HASH": ("left#right", "left#right"),
+        "LEADING_HASH": ("#right", "#right"),
+        "ADJACENT_HASH": ("'left'#right", "left#right"),
+        "TRAILING_COMMENT": ("left#right # dropped", "left#right"),
+        "EMPTY_COMMENT": (" # dropped", ""),
+        "DOLLAR": (r'"left\$right"', "left$right"),
+        "BACKTICK": (r'"left\`right"', "left`right"),
+        "BACKSLASH": (r'"left\\right"', "left\\right"),
+        "OTHER_ESCAPE": (r'"left\qright"', "left\\qright"),
+        "ESCAPED_SPACE": (r"left\ right", "left right"),
+    }
+    literal_path = Path(raw) / "literal.env"
+    literal_path.write_text("".join(f"{name}={source}\n" for name, (source, _) in literal_cases.items()))
+    literal_values = read_env_file(literal_path)
+    for name, (_, expected) in literal_cases.items():
+        check(f"literal assignment {name}", literal_values.get(name) == expected, literal_values.get(name))
+        for shell_name in ("bash", "zsh"):
+            shell_path = shutil.which(shell_name)
+            if shell_path:
+                shell = subprocess.run(
+                    [shell_path, "-c", f'. "$1"; printf %s "${{{name}}}"', "_", str(literal_path)],
+                    capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+                check(f"{shell_name} agrees on literal {name}",
+                      shell.returncode == 0 and shell.stdout == literal_values.get(name),
+                      (shell.stdout, literal_values.get(name)))
+
     broken = Path(raw) / "broken.env"
     broken.write_text("GOOD=good\nBAD='never closed\nAFTER=after\n", encoding="utf-8")
     got = read_env_file(broken)

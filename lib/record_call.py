@@ -109,7 +109,10 @@ def call_verb(verb: str, args: Mapping[str, Any], *, timeout: float | None = 120
 
     if proc.returncode != 0:
         if _TOOL_ERROR in stderr:
-            payload = _json(stderr.split(_TOOL_ERROR, 1)[1])
+            try:
+                payload, _ = json.JSONDecoder().raw_decode(stderr.split(_TOOL_ERROR, 1)[1].lstrip())
+            except ValueError:
+                payload = _UNPARSED
             if payload is _UNPARSED:
                 return VerbResult(verb, REFUSED, detail=line(stderr))
             return VerbResult(verb, REFUSED, reply=payload, detail=line(json.dumps(payload)))
