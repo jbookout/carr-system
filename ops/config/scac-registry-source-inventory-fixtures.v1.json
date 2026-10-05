@@ -84891,7 +84891,39 @@
     },
     {
       "version": "v108",
-      "reason": "Leads follows the delivered Doc activity v107; preserves every predecessor and adds Claim, Link, workspace and reviewed stage contracts.",
+      "reason": "Append unfinished-work after delivered Doc activity without changing predecessor contracts.",
+      "remove": [],
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:unfinished-work",
+          "ingress_kind": "mcp_tool",
+          "operation": "unfinished-work",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/system-work-census.v5.js",
+          "schema_digest": "126ebd4723150468d305a554501dcf6d3f15023849350468d33e1bb0d9154fb6",
+          "source_digest": "de94f861371294d68e475d9798779619358dabc3822a35ded4df3b4d84fc9b2a",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1110,
+      "expected_sha256": "4487dbdd0cf4725e05beb31b1b0d4dde77317fb41d310bec5cb91f4994cd2cc0"
+    },
+    {
+      "version": "v109",
+      "reason": "Leads extends delivered system-work v108 with Claim, Link, workspace and reviewed stage contracts.",
       "remove": [],
       "upsert": [
         {
@@ -84987,8 +85019,8 @@
           "classification_authorizing": false
         }
       ],
-      "expected_count": 1111,
-      "expected_sha256": "e06ac58b9f5d47eaf4babcc549db967ff804aa1a9bb2a1c4d6ab025bcd4e54bb"
+      "expected_count": 1112,
+      "expected_sha256": "e5f1474f2bcde7911bb1253ec9f5702ee0923af923dd338b021df9fd378b66af"
     }
   ],
   "current_source_review": {
@@ -88201,6 +88233,129 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "external-admin:bin/migrate-prod.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/migrate-prod.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/migrate-prod.sh",
+          "schema_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88",
+          "handler_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate-prod-support.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate-prod-support.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate-prod-support.py",
+          "schema_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e",
+          "handler_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/migrate.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/migrate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/migrate.py",
+          "schema_digest": "86405db3986f7b268f407fe00ed7f3c5dfc9a8f1e4432cf0f9fc85bbd7e2fea7",
+          "handler_digest": "86405db3986f7b268f407fe00ed7f3c5dfc9a8f1e4432cf0f9fc85bbd7e2fea7",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "external-admin:tools/rotate-credential.py",
+          "ingress_kind": "external_admin",
+          "operation": "tools/rotate-credential.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/rotate-credential.py",
+          "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "handler_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1110,
+      "expected_sha256": "46459bb081380cca8a125edd15d8d69e85ec9fd410d6194116c01d291ad7c463",
+      "reason": "Carry reviewed current source bindings forward to unfinished-work without changing predecessor seals."
+    },
+    "scac-mutation-registry.v109": {
+      "base_version": "v109",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:bin/migrate-dell.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/migrate-dell.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/migrate-dell.sh",
+          "schema_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "handler_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "external-admin:tools/rotate-credential.py",
           "ingress_kind": "external_admin",
           "operation": "tools/rotate-credential.py",
@@ -88229,8 +88384,8 @@
           "operation": "tools/migrate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "tools/migrate.py",
-          "schema_digest": "ce1828e19a56917c418b023be937971aee4bd9fce026299f11e84221cc570303",
-          "handler_digest": "ce1828e19a56917c418b023be937971aee4bd9fce026299f11e84221cc570303",
+          "schema_digest": "86405db3986f7b268f407fe00ed7f3c5dfc9a8f1e4432cf0f9fc85bbd7e2fea7",
+          "handler_digest": "86405db3986f7b268f407fe00ed7f3c5dfc9a8f1e4432cf0f9fc85bbd7e2fea7",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -88293,9 +88448,9 @@
           "classification_authorizing": false
         }
       ],
-      "expected_count": 1111,
-      "expected_sha256": "176243911aeeb20c16cc976eefd7deb7f8af4b86e3528bcf4f03f9afc4211e1f",
-      "reason": "Carry the reviewed source-only administrative rows forward to Leads v108 unchanged. No ingress or authority contract changes in this review."
+      "expected_count": 1112,
+      "expected_sha256": "9df4518a7e9d29bc545f6e6e2ad5f6f64b5748c75210292390d1538b64043d84",
+      "reason": "Bind current administrative source after system-work and Leads integration."
     }
   }
 }

@@ -4,7 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-// v107 admits authenticated Doc activity after the delivered lead automation contract.
+// v109 admits Leads after delivered system-work v108.
 // v103 admits rule lookup and atomic teach supersession.
 // v102 seals confirm-merge as a human identity act; machines are refused.
 // v101 admits partner catch-up and its scoped watermark store.
@@ -200,7 +200,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v108.generated.js";
+} from "./scac-mutation-registry.v109.generated.js";
 
 // v108 admits the Leads workspace, Claim, Link and reviewed stage moves.
 // v106 admits evidence-driven lead stages and approval-only drafts.

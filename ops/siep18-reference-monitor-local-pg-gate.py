@@ -21,22 +21,18 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0834 admits Leads v108 and seals the delivered Doc activity v107 as history.
+# 0834 installs Leads v109 and seals delivered system-work v108 as history.
 # Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v108"
-LIVE_REGISTRY_ORDINAL = 108
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v107"
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v109"
+LIVE_REGISTRY_ORDINAL = 109
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v108"
 SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
-SEALED_PREDECESSOR_DIGEST = (
-    "sha256:f5eb7a7bbbdad295324a4bd4210c74075ab57fefaf8a35e723ed235df9ff8911"
-)
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2659, 1109)
+SEALED_PREDECESSOR_DIGEST = "sha256:df4cac1a057a7ea8231a0ceeaeb8c7ebaf5a78f24cf52f3ad16177077de07a38"
+SEALED_PREDECESSOR_ENTRY_COUNTS = (2664, 1110)
 SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0825_doc_activity_scac_successor.sql"
+    "migrations/0827_system_work_scac_successor.sql"
 )
-LIVE_REGISTRY_MIGRATION = (
-    "migrations/0834_leads_scac_successor.sql"
-)
+LIVE_REGISTRY_MIGRATION = "migrations/0834_leads_scac_successor.sql"
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
 LIVE_REGISTRATION_FN = f"ops.scac_mutation_registration_v{LIVE_REGISTRY_ORDINAL}"
