@@ -96,6 +96,7 @@ def flags(rows):
             out.add("failure")
         if check == "path_repair" and verdict == "path_found": out.add("path_repair")
         if check == "done_claim" and verdict == "unsupported": out.add("done_unsupported")
+        if check == "done_claim" and verdict == "needs_review": out.add("done_review")
         if check == "review_triage" and verdict == "needs_review": out.add("review_high")
     return out
 
@@ -123,21 +124,15 @@ def evaluate_case(case, *, old, temp_dir):
                 receipt_path=os.path.join(temp_dir, "tool-receipts.jsonl"))
     elif family in {"stop", "stop_repeat"}:
         if old:
-            results.append(done.check_done_claim(case["final"], case["evidence"],
-                        client=client, judge_module=judge))
-            results.append(done.triage_review(case["diff"], "task", client=client,
-                           judge_module=judge, cache_path=""))
+            results.append(done.check_done_claim(case["final"], case["evidence"]))
+            results.append(done.triage_review(case["diff"], "task"))
         else:
             # stop_repeat deliberately uses the same session and state marker.
             results = done.inspect_stop_boundary(case["final"], case["evidence"],
-                case["diff"], "task", "repeated-stop" if family == "stop_repeat" else "stop",
-                client=client, judge_module=judge, state_dir=temp_dir,
-                receipt_path=os.path.join(temp_dir, "stop-receipts.jsonl"))
+                case["diff"], "task", "repeated-stop" if family == "stop_repeat" else "stop")
             if family == "stop_repeat":
                 results = done.inspect_stop_boundary(case["final"], case["evidence"],
-                    case["diff"], "task", "repeated-stop", client=client,
-                    judge_module=judge, state_dir=temp_dir,
-                    receipt_path=os.path.join(temp_dir, "stop-receipts.jsonl"))
+                    case["diff"], "task", "repeated-stop")
                 client.calls.clear()
     found = flags(results)
     if any(r.get("verdict") == "obligation" for r in results):

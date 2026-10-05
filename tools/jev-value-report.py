@@ -169,10 +169,6 @@ def _fields(row, *, judge=False):
             "tokens_in": tokens_in, "tokens_out": tokens_out}
 
 
-def _call_fields(row):
-    return _fields(row)
-
-
 def _judge_fields(row):
     return _fields(row, judge=True)
 
@@ -345,7 +341,7 @@ def build_report(sources, start, end):
         candidates = receipt_judges.get(receipt, []) if isinstance(receipt, str) else []
         linked = (candidates[0] if len(candidates) == 1 and receipt_calls[receipt] == 1
                   and _judge_fields(candidates[0])["billing"] == "measured"
-                  and _call_fields(row)["billing"] == "measured" else None)
+                  and _fields(row)["billing"] == "measured" else None)
         if linked:
             key = site_for(linked["kind"], judge_kind=True)
             traffic = _traffic(linked)
@@ -355,7 +351,7 @@ def build_report(sources, start, end):
             traffic = _traffic(row)
         site = sites[_site_key(key, traffic)]
         site["traffic_class"] = traffic
-        _tally(site, **_call_fields(row))
+        _tally(site, **_fields(row))
     for row in judges:
         traffic = _traffic(row)
         site = sites[_site_key(site_for(row["kind"], judge_kind=True), traffic)]
@@ -421,7 +417,7 @@ def build_report(sources, start, end):
                       "output_source": OUTPUT_PRICE_SOURCE},
             "sites": dict(sites), "totals": totals, "observed_cost_totals": observed_totals,
             "cost_complete": complete_cost, "baseline": base, "source_status": source_status,
-            "judge_hub": {"calls_log_input_tokens": sum(_call_fields(r)["tokens_in"] or 0 for r in calls
+            "judge_hub": {"calls_log_input_tokens": sum(_fields(r)["tokens_in"] or 0 for r in calls
                                                          if r.get("caller") == "jev_judge"),
                           "matched_judge_rows": len(matched), "unlinked_judge_rows": len(judges) - len(matched)},
             "unreadable": sources.get("unreadable") or {}}
