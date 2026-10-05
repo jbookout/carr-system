@@ -84,6 +84,9 @@ def validate(doc) -> list[str]:
                 problems.append(f"{where}: pattern missing")
             if "case_insensitive" in row and not isinstance(row["case_insensitive"], bool):
                 problems.append(f"{where}: case_insensitive must be a boolean")
+            if "basename_prefix" in row and (not isinstance(row["basename_prefix"], str)
+                                             or not row["basename_prefix"]):
+                problems.append(f"{where}: basename_prefix must be a non-empty string")
             if not isinstance(row.get("why"), str) or not row["why"].strip():
                 problems.append(f"{where}: why missing")
             if tiered:
@@ -149,8 +152,12 @@ def normalize(path) -> str | None:
 def matches(row: dict, path: str) -> bool:
     pattern = row["pattern"]
     subject = path
+    basename_prefix = row.get("basename_prefix", "")
     if row.get("case_insensitive"):
         subject, pattern = subject.lower(), pattern.lower()
+        basename_prefix = basename_prefix.lower()
+    if not subject.rsplit("/", 1)[-1].startswith(basename_prefix):
+        return False
     kind = row["match"]
     if kind == "path":
         return subject == pattern
@@ -198,7 +205,7 @@ def change_summary(changes, doc=None):
     for change in changes:
         group = "test" if is_test_file(change["path"], doc) else "code"
         groups[group].append(change["path"])
-        counts = [change.get(key, 0) for key in ("additions", "deletions")]
+        counts = [change.get(key) for key in ("additions", "deletions")]
         if any(type(v) is not int or v < 0 for v in counts):
             lines[group] = None
         elif lines[group] is not None:

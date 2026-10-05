@@ -2,7 +2,7 @@
  "schema_version": "review-tier-vectors.v1",
  "generated_by": "ops/sync-review-tiers.py",
  "source": "ops/config/review-tiers.v1.json",
- "map_digest": "sha256:56f7a66c332b4649f8162fac1c261ac27d919bec1b66b7460c81069d569b1756",
+ "map_digest": "sha256:731c9b99162294ba83c76c03cf9cfc095e6f3d3b45f39595ccfd5a96ad57fb6a",
  "vectors": [
   {
    "path": ".github/CODEOWNERS",
@@ -1571,6 +1571,30 @@
    "test": false
   },
   {
+   "path": "probe/test-probe.py",
+   "tier": 1,
+   "noise": false,
+   "test": true
+  },
+  {
+   "path": "probe/test-probe.py.txt",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "probe/xtest-probe.py",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "probe/test-probe/x.py",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
    "path": "probe/x-selftest.py",
    "tier": 1,
    "noise": false,
@@ -1689,7 +1713,8 @@
     },
     {
      "path": "tests/test_example.py",
-     "additions": 400
+     "additions": 400,
+     "deletions": 0
     }
    ],
    "summary": {
@@ -1710,7 +1735,7 @@
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "policy_revision": "cccccccccccccccccccccccccccccccccccccccc",
     "diff_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "policy_digest": "sha256:aba1ad25ea933c6d843344bcea47f19b7752bb0ef0c938dc9031350962d6c96a",
+    "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852",
     "changed_paths": [
      "lib/example.py",
      "tests/test_example.py"
@@ -1734,7 +1759,8 @@
    "changes": [
     {
      "path": "tests/test_example.py",
-     "additions": 400
+     "additions": 400,
+     "deletions": 0
     }
    ],
    "summary": {
@@ -1753,7 +1779,7 @@
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "policy_revision": "cccccccccccccccccccccccccccccccccccccccc",
     "diff_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "policy_digest": "sha256:aba1ad25ea933c6d843344bcea47f19b7752bb0ef0c938dc9031350962d6c96a",
+    "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852",
     "changed_paths": [
      "tests/test_example.py"
     ],
@@ -1774,7 +1800,8 @@
    "changes": [
     {
      "path": "ops/example-selftest.py",
-     "additions": 400
+     "additions": 400,
+     "deletions": 0
     }
    ],
    "summary": {
@@ -1793,7 +1820,7 @@
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "policy_revision": "cccccccccccccccccccccccccccccccccccccccc",
     "diff_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "policy_digest": "sha256:aba1ad25ea933c6d843344bcea47f19b7752bb0ef0c938dc9031350962d6c96a",
+    "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852",
     "changed_paths": [
      "ops/example-selftest.py"
     ],
@@ -1811,5 +1838,5 @@
    }
   }
  ],
- "policy_digest": "sha256:aba1ad25ea933c6d843344bcea47f19b7752bb0ef0c938dc9031350962d6c96a"
+ "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852"
 }

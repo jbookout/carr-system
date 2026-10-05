@@ -8,7 +8,7 @@
 // this is a checked-in module.
 
 export const REVIEW_TIERS_SOURCE = "ops/config/review-tiers.v1.json";
-export const REVIEW_TIERS_DIGEST = "sha256:56f7a66c332b4649f8162fac1c261ac27d919bec1b66b7460c81069d569b1756";
+export const REVIEW_TIERS_DIGEST = "sha256:731c9b99162294ba83c76c03cf9cfc095e6f3d3b45f39595ccfd5a96ad57fb6a";
 
 export const REVIEW_TIERS = Object.freeze({
   default_tier: 1,
@@ -101,6 +101,7 @@ export const REVIEW_TIERS = Object.freeze({
     Object.freeze({"id": "fixtures-nested", "match": "contains", "pattern": "/fixtures/"}),
     Object.freeze({"id": "python-test-root", "match": "prefix", "pattern": "test_"}),
     Object.freeze({"id": "python-test-nested", "match": "contains", "pattern": "/test_"}),
+    Object.freeze({"id": "python-test-hyphenated", "match": "suffix", "pattern": ".py", "basename_prefix": "test-"}),
     Object.freeze({"id": "python-selftest", "match": "suffix", "pattern": "-selftest.py"}),
     Object.freeze({"id": "python-test-suffix", "match": "suffix", "pattern": "_test.py"}),
     Object.freeze({"id": "test-js", "match": "suffix", "pattern": ".test.js"}),

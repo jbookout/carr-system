@@ -139,6 +139,16 @@ with tempfile.TemporaryDirectory(prefix="pr-size-check-") as tmp:
     rc, text = case(repo, "small", small)
     checks.append(("under both thresholds: silent, exit 0", rc == 0 and text == ""))
 
+    def hyphenated_evidence(r: Path) -> None:
+        write(r, "tools/progress_board.py", 3)
+        write(r, "tools/test-progress-board.py", 400)
+    rc, text = case(repo, "hyphenated-evidence", hyphenated_evidence)
+    checks.append(("hyphenated Python test evidence does not produce a size warning", rc == 0 and text == ""))
+    for name, path in (("suffix-near-miss", "tools/test-progress-board.py.bak"),
+                       ("directory-near-miss", "tools/test-progress-board/source.py")):
+        rc, text = case(repo, name, lambda r, path=path: write(r, path, LIMIT_LINES + 50))
+        checks.append((f"{name} counts as code and warns", rc == 0 and "hard to review in one piece" in text))
+
     def at_threshold(r: Path) -> None:
         per, extra = divmod(LIMIT_LINES, LIMIT_FILES)
         for i in range(LIMIT_FILES):

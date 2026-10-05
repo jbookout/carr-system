@@ -303,6 +303,34 @@ class TestEvidenceTests(unittest.TestCase):
         return rt.review_decision(changes, base="a" * 40, head="b" * 40,
             policy_revision="c" * 40, diff_digest="sha256:" + "d" * 64)
 
+    def test_hyphenated_python_tests_are_evidence(self):
+        for path in ("test-example.py", "tools/test-progress-board.py", "./tools\\test-example.py"):
+            self.assertTrue(rt.is_test_file(path), path)
+        for path in ("tools/contest-example.py", "tools/test-example.py.bak", "tools/test-example.js",
+                     "tools/test-example.py/source.py", "tools/test-example/source.py"):
+            self.assertFalse(rt.is_test_file(path), path)
+        paths = [p for p in tracked_paths() if p.startswith("tools/test-") and p.endswith(".py")]
+        self.assertTrue(paths)
+        self.assertEqual([p for p in paths if not rt.is_test_file(p)], [])
+        change = {"path": "tools/test-progress-board.py", "additions": 400, "deletions": 0}
+        result = self.decision([{"path": "tools/progress_board.py", "additions": 3, "deletions": 0}, change])
+        self.assertEqual((result["code_lines"], result["test_lines"], result["change_size"]), (3, 400, "small"))
+        self.assertEqual(self.decision([change])["tier"], 2)
+        self.assertEqual(self.decision([dict(change, path="ops/test-example.py")])["tier"], 3)
+
+    def test_missing_and_partial_counts_are_unknown(self):
+        for metadata in ({}, {"additions": 0}, {"deletions": 0}, {"additions": 3}, {"deletions": 3}):
+            with self.subTest(metadata=metadata):
+                change = dict(metadata, path="lib/a.py")
+                result = self.decision([{"path": "lib/known.py", "additions": 2, "deletions": 1}, change])
+                self.assertEqual((result["code_lines"], result["change_size"]), (None, "unknown"))
+                evidence = self.decision([dict(metadata, path="tests/a.py")])
+                self.assertEqual((evidence["code_lines"], evidence["test_lines"], evidence["change_size"]),
+                                 (0, None, "small"))
+        for changes in ([], [{"path": "lib/a.py", "additions": 0, "deletions": 0}]):
+            result = self.decision(changes)
+            self.assertEqual((result["code_lines"], result["test_lines"], result["change_size"]), (0, 0, "small"))
+
     def test_small_fix_with_large_test_sizes_by_code(self):
         result = self.decision([{"path": "lib/example.py", "additions": 2, "deletions": 1},
             {"path": "tests/test_example.py", "additions": 400, "deletions": 0}])
@@ -311,12 +339,12 @@ class TestEvidenceTests(unittest.TestCase):
         self.assertEqual(result["test_paths"], ["tests/test_example.py"])
 
     def test_test_only_change_still_requires_review(self):
-        result = self.decision([{"path": "tests/test_example.py", "additions": 400}])
+        result = self.decision([{"path": "tests/test_example.py", "additions": 400, "deletions": 0}])
         self.assertEqual((result["code_lines"], result["test_lines"], result["tier"], result["lane"]), (0, 400, 2, "review"))
         self.assertFalse(rt.is_review_noise("tests/package-lock.json"))
 
     def test_ops_test_retains_ops_tier(self):
-        result = self.decision([{"path": "ops/example-selftest.py", "additions": 400}])
+        result = self.decision([{"path": "ops/example-selftest.py", "additions": 400, "deletions": 0}])
         self.assertEqual((result["code_lines"], result["test_lines"], result["tier"]), (0, 400, 3))
 
     def test_test_matchers_use_normalized_paths_and_segment_boundaries(self):
@@ -372,7 +400,7 @@ class TestEvidenceTests(unittest.TestCase):
 
     def test_size_boundaries(self):
         for lines, size in ((50, "small"), (51, "medium"), (200, "medium"), (201, "large")):
-            self.assertEqual(self.decision([{"path": "lib/a.py", "additions": lines}])["change_size"], size)
+            self.assertEqual(self.decision([{"path": "lib/a.py", "additions": lines, "deletions": 0}])["change_size"], size)
 
 
 class MapContentTests(unittest.TestCase):
@@ -426,6 +454,7 @@ class MapContentTests(unittest.TestCase):
         self.assertEqual(decision["head"], "b" * 40)
         self.assertEqual(decision["policy_revision"], "c" * 40)
         self.assertEqual(decision["diff_digest"], "sha256:" + "d" * 64)
+        self.assertEqual((decision["code_lines"], decision["change_size"]), (None, "unknown"))
         for changed in [dict(after, daily_paid_call_cap=True), dict(after, daily_paid_call_cap=-1),
                         dict(after, daily_paid_call_cap=3001), dict(after, daily_paid_call_cap="3000"),
                         dict(after, allowed_paths=["*"]), dict(after, command="new authority")]:

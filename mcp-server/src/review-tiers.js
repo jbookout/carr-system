@@ -29,10 +29,13 @@ function normalize(path) {
 function matches(row, path) {
   let subject = path;
   let pattern = row.pattern;
+  let basenamePrefix = row.basename_prefix || "";
   if (row.case_insensitive === true) {
     subject = subject.toLowerCase();
     pattern = pattern.toLowerCase();
+    basenamePrefix = basenamePrefix.toLowerCase();
   }
+  if (!subject.slice(subject.lastIndexOf("/") + 1).startsWith(basenamePrefix)) return false;
   switch (row.match) {
     case "path": return subject === pattern;
     case "prefix": return subject.startsWith(pattern);
@@ -82,7 +85,7 @@ export function reviewChangeSize(changes) {
   for (const change of changes) {
     const test = isTestFile(change.path);
     (test ? test_paths : code_paths).push(change.path);
-    const counts = [change.additions === undefined ? 0 : change.additions, change.deletions === undefined ? 0 : change.deletions];
+    const counts = [change.additions, change.deletions];
     const known = counts.every(v => Number.isSafeInteger(v) && v >= 0);
     if (test) test_lines = known && test_lines !== null ? test_lines + counts[0] + counts[1] : null;
     else code_lines = known && code_lines !== null ? code_lines + counts[0] + counts[1] : null;

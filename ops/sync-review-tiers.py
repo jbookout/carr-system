@@ -37,7 +37,7 @@ SOURCE_REL = "ops/config/review-tiers.v1.json"
 MODULE_PATH = os.path.join(REPO, "mcp-server", "src", "review-tiers.generated.js")
 VECTORS_PATH = os.path.join(REPO, "ops", "fixtures", "review-tiers", "tier-vectors.v1.json")
 BASELINE_PATH = os.path.join(REPO, "ops", "fixtures", "review-tiers", "pre-change-baseline.v1.json")
-ROW_KEYS = ("id", "tier", "class", "match", "pattern", "case_insensitive")
+ROW_KEYS = ("id", "tier", "class", "match", "pattern", "case_insensitive", "basename_prefix")
 
 
 def _reader():
@@ -109,7 +109,10 @@ def probe_paths(doc):
         elif kind == "prefix":
             probes += [pattern + "probe.py", "x/" + pattern + "probe.py"]
         elif kind == "suffix":
-            probes += ["probe/x" + pattern, "probe/x" + pattern + ".txt"]
+            basename = row["basename_prefix"] + "probe" if "basename_prefix" in row else "x"
+            probes += ["probe/" + basename + pattern, "probe/" + basename + pattern + ".txt"]
+            if "basename_prefix" in row:
+                probes += ["probe/x" + basename + pattern, "probe/" + basename + "/x" + pattern]
         elif kind == "basename":
             probes += ["probe/" + pattern, "probe/x" + pattern]
         elif kind == "contains":
@@ -134,13 +137,13 @@ def render_vectors(doc):
         "vectors": vectors,
         "change_vectors": [
             {"changes": [{"path": "lib/example.py", "additions": 2, "deletions": 1},
-                         {"path": "tests/test_example.py", "additions": 400}],
+                         {"path": "tests/test_example.py", "additions": 400, "deletions": 0}],
              "summary": {"code_lines": 3, "test_lines": 400, "change_size": "small",
                          "code_paths": ["lib/example.py"], "test_paths": ["tests/test_example.py"]}, "path_tier": 1},
-            {"changes": [{"path": "tests/test_example.py", "additions": 400}],
+            {"changes": [{"path": "tests/test_example.py", "additions": 400, "deletions": 0}],
              "summary": {"code_lines": 0, "test_lines": 400, "change_size": "small",
                          "code_paths": [], "test_paths": ["tests/test_example.py"]}, "path_tier": 1},
-            {"changes": [{"path": "ops/example-selftest.py", "additions": 400}],
+            {"changes": [{"path": "ops/example-selftest.py", "additions": 400, "deletions": 0}],
              "summary": {"code_lines": 0, "test_lines": 400, "change_size": "small",
                          "code_paths": [], "test_paths": ["ops/example-selftest.py"]}, "path_tier": 3},
         ],
