@@ -42,6 +42,8 @@ from pathlib import Path
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from lib.disposable_pg_fixture import postgres_fixture_group
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 from lib import recovery_evidence  # noqa: E402
@@ -535,6 +537,9 @@ class Migration0597OnADisposableCluster(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.pg_budget = postgres_fixture_group()
+        cls.pg_budget.__enter__()
+        cls.addClassCleanup(cls.pg_budget.__exit__, None, None, None)
         cls.bins = _pg_bins()
         cls.tmp = Path(tempfile.mkdtemp(prefix="carr-f08-0597-"))
         with socket.socket() as s:

@@ -257,6 +257,10 @@ def process_group_alive(pgid):
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # EPERM does not prove absence. Keep polling through group teardown;
+        # an actual TERM/KILL denial still refuses recovery before relaunch.
+        return True
 
 
 def board_task(root, config, card, executor, status, note, project=None, pr=None, repo=None, needs_joe=False, health=None,

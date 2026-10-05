@@ -1006,6 +1006,53 @@ class StateTests(unittest.TestCase):
             self.assertIn("stdin", digest)
             self.assertNotIn("gone", digest)
 
+    def test_permission_denied_group_probe_still_reports_presence(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        with patch.object(w.os, "killpg", side_effect=PermissionError("synthetic group probe")):
+            self.assertTrue(w.process_group_alive(42))
+
+    def test_restart_waits_through_permission_probe_race(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        import signal
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["thresholds"]["recovery_poll_seconds"] = 0.001
+        with tempfile.TemporaryDirectory() as directory:
+            effects = w.Effects(Path(directory), c)
+            job = {"id": "old", "pid": 42, "pgid": 42, "process_identity": "old", "command": ["true"],
+                   "card": "test", "cwd": directory}
+            probes = 0
+            def probe(pgid, signum):
+                nonlocal probes
+                if signum == 0:
+                    probes += 1
+                    if probes == 1:
+                        raise PermissionError("group exiting before reaping")
+                    raise ProcessLookupError("group reaped")
+            with patch.object(w, "process_identity", return_value="old"), patch.object(w.os, "getpgid", return_value=42), patch.object(w.os, "killpg", side_effect=probe) as kill, patch.object(effects, "launch", return_value={"restarted": True}) as launch:
+                self.assertEqual(effects.restart({"job": job}), {"restarted": True})
+                launch.assert_called_once()
+            self.assertEqual([call.args[1] for call in kill.call_args_list if call.args[1]], [signal.SIGTERM])
+
+    def test_denied_group_signal_refuses_relaunch(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        import signal
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        with tempfile.TemporaryDirectory() as directory:
+            effects = w.Effects(Path(directory), c)
+            job = {"id": "old", "pid": 42, "pgid": 42, "process_identity": "old", "command": ["true"],
+                   "card": "test", "cwd": directory}
+            def denied(pgid, signum):
+                if signum != signal.SIGTERM:
+                    raise PermissionError("synthetic denied group")
+            with patch.object(w, "process_identity", return_value="old"), patch.object(w.os, "getpgid", return_value=42), patch.object(w.os, "killpg", side_effect=denied) as kill, patch.object(w.time, "monotonic", side_effect=[0, 100]), patch.object(effects, "launch") as launch:
+                with self.assertRaises(PermissionError):
+                    effects.restart({"job": job})
+                launch.assert_not_called()
+            self.assertIn(signal.SIGKILL, [call.args[1] for call in kill.call_args_list])
+
     def test_reused_pid_is_never_killed(self):
         import job_watchdog as w
         from unittest.mock import patch
