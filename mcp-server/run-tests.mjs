@@ -10,8 +10,10 @@ const LAUNCH_REGRESSIONS = "chrome-launch.test.mjs";
 export function suiteBatches(files) {
   const suites = files.filter((file) => /\.test\.(?:js|mjs)$/.test(file)).sort();
   if (!suites.includes(BROWSER_SHIM)) throw new Error("Chrome browser shim is missing from the Node suites");
+  const browsers = suites.filter((file) => file !== BROWSER_SHIM && /-browser\.test\.(?:js|mjs)$/.test(file));
   return [[BROWSER_SHIM], suites.filter((file) => file === LAUNCH_REGRESSIONS),
-    suites.filter((file) => ![BROWSER_SHIM, LAUNCH_REGRESSIONS].includes(file))];
+    ...browsers.map((file) => [file]),
+    suites.filter((file) => ![BROWSER_SHIM, LAUNCH_REGRESSIONS, ...browsers].includes(file))];
 }
 
 async function main() {

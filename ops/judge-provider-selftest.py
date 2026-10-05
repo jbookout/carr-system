@@ -53,6 +53,8 @@ class RoutingTests(unittest.TestCase):
             "system_work": "decisions", "app_runtime": "jev"}}
         class Response(io.BytesIO):
             status = 200
+        # The client refuses a question with no instructions before sending it.
+        QUESTION = {"type": "noul", "instructions": "Is this the fixture?"}
         seen = []
         def transport(request, **kwargs):
             seen.append(json.loads(request.data))
@@ -60,9 +62,9 @@ class RoutingTests(unittest.TestCase):
         options = dict(api_key="offline-test-value", opener=transport, caller="review")
         with patch.object(client.JUDGE, "provider_for", side_effect=lambda cls, config=None: "decisions" if cls == "system_work" else "jev"):
             with self.assertRaisesRegex(client.TypeSafeError, "decisions contract not yet verified / no key"):
-                client.ask("code", {"q": {"type": "noul"}}, **options)
-            result = client.ask("deal", {"q": {"type": "noul"}}, work_class="app_runtime", **options)
-        self.assertEqual(seen, [{"state": "deal", "model": "jev-latest", "questions": {"q": {"type": "noul"}}}])
+                client.ask("code", {"q": QUESTION}, **options)
+            result = client.ask("deal", {"q": QUESTION}, work_class="app_runtime", **options)
+        self.assertEqual(seen, [{"state": "deal", "model": "jev-latest", "questions": {"q": QUESTION}}])
         self.assertEqual(result["answers"]["q"]["noul"], 0.75)
         self.assertEqual(result["usage"], {"input_tokens": 10, "output_tokens": 2})
 

@@ -520,6 +520,30 @@ async function roomTurns(request, env, session, dependencies) {
     csrf_token: session.csrfToken });
 }
 
+/** GET /api/room/latest — the read-room-latest verb through the same wire. */
+async function roomLatest(request, env, session, dependencies) {
+  if (typeof dependencies.roomLatestFn !== "function") return json({ error: "not_found" }, 404);
+  const url = new URL(request.url);
+  const rawBefore = url.searchParams.get("before_seq");
+  const rawLimit = url.searchParams.get("limit");
+  const rawMode = url.searchParams.get("mode") || "all";
+  if (rawBefore !== null && !/^\d{1,15}$/.test(rawBefore)) return json({ error: "before_seq_invalid" }, 400);
+  if (rawLimit !== null && !/^\d{1,15}$/.test(rawLimit)) return json({ error: "limit_invalid" }, 400);
+  if (!["all", "conversation"].includes(rawMode)) return json({ error: "mode_invalid" }, 400);
+  const { limit } = normalizeRoomPaging({ limit: rawLimit === null ? undefined : Number(rawLimit) });
+  let read;
+  try {
+    read = await dependencies.roomLatestFn(env, {
+      before_seq: rawBefore === null ? undefined : Number(rawBefore), limit, mode: rawMode,
+    });
+  } catch (error) {
+    return json({ error: "wire_unavailable", detail: String(error?.message || error).slice(0, 200) }, 503);
+  }
+  if (!read || read.ok !== true) return json({ error: read?.error || "wire_unavailable" }, 503);
+  return json({ ...read, actor: { slug: session.actor.slug, display: session.actor.display },
+    csrf_token: session.csrfToken });
+}
+
 /** GET /api/room/queue — the read-room-queue verb's exact projection. */
 async function roomQueue(_request, env, _session, dependencies) {
   if (typeof dependencies.queueReadFn !== "function") return json({ error: "not_found" }, 404);
@@ -611,6 +635,10 @@ async function roomTurnPost(request, env, session, dependencies) {
 
 async function roomRequest(request, env, session, dependencies) {
   const pathname = new URL(request.url).pathname;
+  if (pathname === `${ROOM_PREFIX}/latest`) {
+    if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
+    return roomLatest(request, env, session, dependencies);
+  }
   if (pathname === `${ROOM_PREFIX}/turns`) {
     if (request.method !== "GET") return json({ error: "method_not_allowed" }, 405);
     return roomTurns(request, env, session, dependencies);
