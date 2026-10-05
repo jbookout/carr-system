@@ -1203,5 +1203,16 @@
       "reason": "The statement prescribes behavior at after deciding or building, checking other index/context files; it supplies no independently standing organization or partner factual premise.",
       "existing_trigger": "after deciding or building, checking other index/context files"
     }
-  ]
+  ],
+  "boot_readback": {
+    "source": "live standing-context full text fetched 2026-10-05; candidate renderer, no deploy",
+    "rules": 199,
+    "always_on": 87,
+    "unclassified": 4,
+    "baseline_chars": 125442,
+    "candidate_chars": 143933,
+    "candidate_tokens_rounded_up": 39982,
+    "budget_tokens": 40000,
+    "full_statements_preserved": true
+  }
 }

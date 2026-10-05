@@ -18,7 +18,7 @@
    "class": "a",
    "moment": "any turn: classifying, defining terms, or planning multi-step work",
    "summary": "When classifying or defining terms, state the ordered decision procedure, not just the conclusion.",
-   "when": "any turn: classifying, defining terms, or planning multi-step work"
+   "when": "classifying, defining or planning"
   },
   "0156e9fa": {
    "always_on": true,
@@ -54,7 +54,7 @@
    "class": "b",
    "moment": "creating or naming files/folders (pre-commit path check)",
    "summary": "When creating folders or filenames, keep 3-4 levels deep, descriptive names, no final_v2.",
-   "when": "creating or naming files/folders (pre-commit path check)"
+   "when": "naming files or folders"
   },
   "0f38532e": {
    "always_on": false,
@@ -62,7 +62,7 @@
    "class": "e",
    "moment": "duplicate of 14181e60 (single source of truth / DB-first)",
    "summary": "Near-duplicate of 14181e60: single-source-of-truth doctrine already covered by the DB-first gate.",
-   "when": "duplicate of 14181e60 (single source of truth / DB-first)"
+   "when": "duplicate DB-first rule"
   },
   "1021fa84": {
    "always_on": true,
@@ -98,7 +98,7 @@
    "class": "d",
    "moment": "record_home gate (record-home-gate.py), before vault record write",
    "summary": "Before writing a .md file, route content to the database via a verb; markdown-first is blocked.",
-   "when": "record_home gate (record-home-gate.py), before vault record write"
+   "when": "before vault record writes"
   },
   "152ceb65": {
    "always_on": true,
@@ -141,7 +141,7 @@
    "class": "b",
    "moment": "spawning a subagent/workflow or sizing 30+min work (model selection)",
    "summary": "When spawning a subagent or sizing 30+ min work, pick the cheapest fit-map executor and state it.",
-   "when": "spawning a subagent/workflow or sizing 30+min work (model selection)"
+   "when": "delegating or sizing 30+ minute work"
   },
   "19304882": {
    "always_on": false,
@@ -167,7 +167,7 @@
    "class": "a",
    "moment": "same-shape fix recurring about four times in one session",
    "summary": "When the same problem shape needs fixing four times, stop and fix the instruction, not the instance.",
-   "when": "same-shape fix recurring about four times in one session"
+   "when": "four same-shape fixes in one session"
   },
   "1c42d80c": {
    "always_on": true,
@@ -176,7 +176,7 @@
    "class": "a",
    "moment": "hitting unexpected friction (refusal, error, workaround)",
    "summary": "When friction (refusal, error, workaround) hits, fix the root cause in-session; never route around it silently.",
-   "when": "hitting unexpected friction (refusal, error, workaround)"
+   "when": "unexpected friction"
   },
   "1d50a3bb": {
    "always_on": true,
@@ -211,7 +211,7 @@
    "class": "a",
    "moment": "deciding what belongs in always-read core vs task-loaded files",
    "summary": "When deciding what's always-loaded, keep the core to universal needs and push task-specific content to loaded files.",
-   "when": "deciding what belongs in always-read core vs task-loaded files"
+   "when": "choosing core versus task-loaded context"
   },
   "204391be": {
    "always_on": false,
@@ -228,7 +228,7 @@
    "moment": "Joe's development: new builds, predictions, confident direction",
    "personal_to": "joe",
    "summary": "When Joe opens a build, predicts confidently, or rules on structure, surface open items and calibrate.",
-   "when": "Joe's development: new builds, predictions, confident direction"
+   "when": "new builds, predictions or confident direction"
   },
   "2271e684": {
    "always_on": true,
@@ -329,7 +329,7 @@
    "class": "c",
    "moment": "standing up a new capability, tool, or first-of-kind work",
    "summary": "Before building anything first-of-its-kind, run a deep research pass before designing or building.",
-   "when": "standing up a new capability, tool, or first-of-kind work"
+   "when": "first-of-kind implementation"
   },
   "2e8b4840": {
    "always_on": false,
@@ -345,7 +345,7 @@
    "class": "d",
    "moment": "pr_only_main_ruleset (GitHub server ruleset) - before a change reaches main",
    "summary": "Before branching or switching in a shared checkout, claim the working tree or use a worktree instead.",
-   "when": "pr_only_main_ruleset (GitHub server ruleset) - before a change reaches main"
+   "when": "before a change reaches main"
   },
   "30a189fb": {
    "always_on": false,
@@ -363,7 +363,7 @@
    "class": "a",
    "moment": "any turn reasoning from a session's own or another's name",
    "summary": "Never infer safety, scope, or isolation needs from a session's name; judge by observed work.",
-   "when": "any turn reasoning from a session's own or another's name"
+   "when": "reasoning from a session name"
   },
   "3578d799": {
    "always_on": true,
@@ -381,7 +381,7 @@
    "class": "d",
    "moment": "candidate_match schema check - candidate-pool duplicate classification",
    "summary": "When matching candidate records across datasets, never merge on a single field; require a second corroborating field.",
-   "when": "candidate_match schema check - candidate-pool duplicate classification"
+   "when": "candidate duplicate classification"
   },
   "38b15dc6": {
    "always_on": true,
@@ -509,7 +509,7 @@
    "class": "d",
    "moment": "canonical_edit gate, first write to tracked canonical files",
    "summary": "Before any first edit to tracked repo files, take an isolated worktree; never edit the canonical tree.",
-   "when": "canonical_edit gate, first write to tracked canonical files"
+   "when": "first tracked repository edit"
   },
   "4a9188f3": {
    "always_on": false,
@@ -517,7 +517,7 @@
    "class": "b",
    "moment": "the teach verb, at a partner-correction/decision trigger",
    "summary": "When a partner corrects, decides, or states a durable fact, teach it immediately, not at session close.",
-   "when": "the teach verb, at a partner-correction/decision trigger"
+   "when": "partner correction, decision or durable fact"
   },
   "4c21d86b": {
    "always_on": false,
@@ -577,7 +577,7 @@
    "class": "d",
    "moment": "trigger_grant check, migration adding/modifying a trigger",
    "summary": "Before shipping a new trigger, grant-check every table it reads as the role that fires it.",
-   "when": "trigger_grant check, migration adding/modifying a trigger"
+   "when": "adding or changing a trigger"
   },
   "54e2bcb9": {
    "always_on": false,
@@ -585,7 +585,7 @@
    "class": "d",
    "moment": "versioned_record schema (tools.js+db) - contact fact promotion",
    "summary": "Never write a CARR agent's own contact info into a client/vendor/lead contact field; treat it as null.",
-   "when": "versioned_record schema (tools.js+db) - contact fact promotion"
+   "when": "promoting contact facts"
   },
   "557838a5": {
    "always_on": false,
@@ -620,7 +620,7 @@
    "class": "d",
    "moment": "record_research deny_gate (tools.js) - new-client creation",
    "summary": "On every new client, verify the intake record against open-source research and report discrepancies.",
-   "when": "record_research deny_gate (tools.js) - new-client creation"
+   "when": "creating a client"
   },
   "58b44ccb": {
    "always_on": false,
@@ -656,7 +656,7 @@
    "class": "a",
    "moment": "any turn - diagnosing a tool error that blames a subsystem",
    "summary": "When a tool error blames a subsystem, verify the claim and check the call for missing arguments first.",
-   "when": "any turn - diagnosing a tool error that blames a subsystem"
+   "when": "a tool error blames a subsystem"
   },
   "5be2f462": {
    "always_on": true,
@@ -673,7 +673,7 @@
    "class": "b",
    "moment": "a blocked terminal command with a self-serve fix available",
    "summary": "When a command is blocked but self-serve fixable, fix the block yourself and run the command.",
-   "when": "a blocked terminal command with a self-serve fix available"
+   "when": "a self-serve-fixable command block"
   },
   "5d44d3f3": {
    "always_on": false,
@@ -777,7 +777,7 @@
    "class": "d",
    "moment": "completion_evidence gate (shipping claim)",
    "summary": "Before client-facing or public work ships, get an independent fresh-eyes review; fix flags, never caveat; drafts Joe line-reviews exempt.",
-   "when": "about to ship, or claim shipped, any client-facing or public work"
+   "when": "before client-facing or public work ships"
   },
   "6cfb67f5": {
    "always_on": false,
@@ -827,7 +827,7 @@
    "class": "d",
    "moment": "completion_evidence stop_gate - config-file change completion",
    "summary": "After a config-file change, enumerate and verify every consumer, since format fixes for one can break another.",
-   "when": "completion_evidence stop_gate - config-file change completion"
+   "when": "after config-file changes"
   },
   "737a68d6": {
    "always_on": false,
@@ -860,7 +860,7 @@
    "class": "d",
    "moment": "record_home deny_gate - blocked markdown write workaround",
    "summary": "When a markdown write is blocked, route content through record verbs, never redirect it to an unwatched file.",
-   "when": "record_home deny_gate - blocked markdown write workaround"
+   "when": "a markdown write is blocked"
   },
   "7e9739f2": {
    "always_on": true,
@@ -895,7 +895,7 @@
    "class": "d",
    "moment": "completion_evidence stop_gate - unattended-path credential verification",
    "summary": "When building or reviewing any unattended/scheduled job, never let it depend on an expiring interactive credential.",
-   "when": "completion_evidence stop_gate - unattended-path credential verification"
+   "when": "unattended-path credential verification"
   },
   "86647daf": {
    "always_on": false,
@@ -903,7 +903,7 @@
    "class": "b",
    "moment": "finishing a substantive build/change/decision (posting to shared files)",
    "summary": "When a build or decision changes the shared system, post it to shared files immediately",
-   "when": "finishing a substantive build/change/decision (posting to shared files)"
+   "when": "finishing a substantive build, change or decision"
   },
   "88e9b5eb": {
    "always_on": false,
@@ -928,7 +928,7 @@
    "class": "d",
    "moment": "chat_lint stop_gate - asking a partner to open/edit/review a file",
    "summary": "When asking a partner to open, edit, or review a file, include a clickable markdown link to it.",
-   "when": "chat_lint stop_gate - asking a partner to open/edit/review a file"
+   "when": "asking a partner to open, edit or review a file"
   },
   "8c812bed": {
    "always_on": false,
@@ -944,7 +944,7 @@
    "class": "b",
    "moment": "renaming a shared-by-design row (party.org_id, vendor_category.slug)",
    "summary": "Before renaming a shared row, count its attachments; if more than one, mint a new row instead.",
-   "when": "renaming a shared-by-design row (party.org_id, vendor_category.slug)"
+   "when": "renaming a shared-by-design row"
   },
   "9293d609": {
    "always_on": true,
@@ -962,7 +962,7 @@
    "class": "a",
    "moment": "any turn - a partner asks for something risky or mistaken",
    "summary": "When either partner requests something risky or mistaken, say so with the specific reason before doing it.",
-   "when": "any turn - a partner asks for something risky or mistaken"
+   "when": "a partner requests something risky or mistaken"
   },
   "94806da2": {
    "always_on": false,
@@ -1032,7 +1032,7 @@
    "class": "d",
    "moment": "index_upkeep pre-commit - content added under indexed multi-folder category",
    "summary": "When adding content under an indexed multi-folder category, update its INDEX.md in the same session.",
-   "when": "index_upkeep pre-commit - content added under indexed multi-folder category"
+   "when": "adding content under an indexed category"
   },
   "9b081605": {
    "always_on": false,
@@ -1065,7 +1065,7 @@
    "class": "d",
    "moment": "deal_guard schema (tools.js+sql) - national-account deal assignment",
    "summary": "For national-account deals, attach each franchisee's own deal to their sub-client, never to the parent brand.",
-   "when": "deal_guard schema (tools.js+sql) - national-account deal assignment"
+   "when": "assigning national-account deals"
   },
   "9ff56260": {
    "always_on": false,
@@ -1099,7 +1099,7 @@
    "class": "d",
    "moment": "completion_evidence stop_gate - changed-system completion",
    "summary": "When modifying something that already worked, compare before-and-after, not only against the spec.",
-   "when": "completion_evidence stop_gate - changed-system completion"
+   "when": "verifying a changed system"
   },
   "a7784a18": {
    "always_on": false,
@@ -1133,7 +1133,7 @@
    "class": "d",
    "moment": "completion_evidence stop_gate - check-result reporting",
    "summary": "A check compares the artifact to its known-good shape; a success signal must read the artifact, never exit code alone.",
-   "when": "building or reviewing any guard/check, or wiring any signal that reports on work"
+   "when": "building guards or wiring work signals"
   },
   "ab814a26": {
    "always_on": false,
@@ -1200,7 +1200,7 @@
    "class": "c",
    "moment": "architecture/mechanism-class design fork with no deterministic verifier",
    "summary": "For an architecture fork with no deterministic verifier and expensive reversal, convene a frontier-model council.",
-   "when": "architecture/mechanism-class design fork with no deterministic verifier"
+   "when": "costly architecture forks without deterministic verification"
   },
   "b7ec8f3b": {
    "always_on": true,
@@ -1218,7 +1218,7 @@
    "moment": "Joe overrules, predicts, compresses, rules, or corrects within CARR work",
    "personal_to": "joe",
    "summary": "When Joe overrules, predicts, compresses, rules, or corrects within work scope, log it to the ledger.",
-   "when": "Joe overrules, predicts, compresses, rules, or corrects within CARR work"
+   "when": "Joe overrides, predicts, compresses, rules or corrects"
   },
   "bc4145f6": {
    "always_on": false,
@@ -1235,7 +1235,7 @@
    "class": "d",
    "moment": "loose_work stop_gate - session Stop",
    "summary": "Every run commits files it wrote by named path before ending or checkout; never add -A; push; leave others' files.",
-   "when": "a run about to end, or any git checkout, while files it wrote are uncommitted"
+   "when": "ending a run or switching with own work uncommitted"
   },
   "bd4a6d22": {
    "always_on": false,
@@ -1301,7 +1301,7 @@
    "class": "d",
    "moment": "versioned_record schema (tools.js+db) - record mutation acknowledgement",
    "summary": "After any record write with long/multiline text, re-read the row and check for swallowed parameter tags.",
-   "when": "versioned_record schema (tools.js+db) - record mutation acknowledgement"
+   "when": "after record mutations"
   },
   "c66dc739": {
    "always_on": false,
@@ -1372,7 +1372,7 @@
    "class": "d",
    "moment": "record_research deny_gate (tools.js) - new party creation with blank field",
    "summary": "Before creating or updating a party with a blank field, research it yourself; never ask Joe first.",
-   "when": "record_research deny_gate (tools.js) - new party creation with blank field"
+   "when": "creating a party with blank fields"
   },
   "d26d63b0": {
    "always_on": false,
@@ -1444,7 +1444,7 @@
    "moment": "about to name capability as a blocker or request a permission",
    "reclassified_from": "b",
    "summary": "Before naming capability as a blocker, prove it's not throughput by testing a smaller request first.",
-   "when": "about to name capability as a blocker or request a permission"
+   "when": "before claiming capability or requesting permission"
   },
   "d9ce2b08": {
    "always_on": true,
@@ -1463,7 +1463,7 @@
    "moment": "completion_evidence gate (human verification instruction)",
    "personal_to": "joe",
    "summary": "When handing Joe verification steps, give precise instructions in full; never simplify them away.",
-   "when": "completion_evidence gate (human verification instruction)"
+   "when": "giving human verification instructions"
   },
   "def3e84e": {
    "always_on": false,
@@ -1523,7 +1523,7 @@
    "class": "d",
    "moment": "completion_evidence gate",
    "summary": "(Full text is in the always-on section; no summary is faithful enough to stand for it.)",
-   "when": "before shipping any build/automation/agent/task, before parking work on Joe, and on Fridays or weekend-spanning runs"
+   "when": "shipping, parking work on Joe, or weekend-spanning runs"
   },
   "eaa31ac5": {
    "always_on": true,
@@ -1540,7 +1540,7 @@
    "class": "b",
    "moment": "dispatching work to another model or launching a cloud session (model choice)",
    "summary": "When launching a cloud session, pick Sonnet 5.5 for well-scoped checkable work and Opus 5.5 for design, gates and reviews.",
-   "when": "dispatching work to another model or launching a cloud session (model choice)"
+   "when": "model dispatch or cloud-session launch"
   },
   "ede4c735": {
    "always_on": false,
@@ -1627,7 +1627,7 @@
    "class": "d",
    "moment": "costar_lane deny_gate - Chrome-extension tool call targeting costar.com",
    "summary": "Drive CoStar only in the desktop app's own Browser pane, never Chrome or its extension.",
-   "when": "costar_lane deny_gate - Chrome-extension tool call targeting costar.com"
+   "when": "Chrome-extension calls targeting CoStar"
   },
   "f92dfab2": {
    "always_on": false,
@@ -1677,7 +1677,7 @@
    "class": "b",
    "moment": "after deciding or building, checking other index/context files",
    "summary": "After deciding or building anything, grep other index files for stale phrasing before declaring it propagated.",
-   "when": "after deciding or building, checking other index/context files"
+   "when": "after decisions or builds, checking propagation"
   },
   "fc21a431": {
    "always_on": true,
