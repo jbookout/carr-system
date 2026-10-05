@@ -117,6 +117,12 @@ def git(repo, *args):
     return subprocess.check_output(["git", "-C", str(repo), *args], env=scrubbed_env())
 
 
+def workspace_parent(repo):
+    common = (repo / git(repo, "rev-parse", "--git-common-dir").decode().strip()).resolve()
+    scope = hashlib.sha256(str(common).encode()).hexdigest()[:24]
+    return Path.home() / ".cache/carr-jevlint" / scope
+
+
 def materialize(repo, base, head, workspace, config):
     """Exact head blobs only; clean PR commits become dirty inputs in scratch."""
     paths = git(repo, "diff", "--name-only", "-z", "--diff-filter=ACMRT", base, head).split(b"\0")
@@ -200,8 +206,7 @@ def main():
         repo = args.repo.resolve()
         head = git(repo, "rev-parse", "--verify", args.head + "^{commit}").decode().strip()
         base = git(repo, "merge-base", args.base, head).decode().strip() if args.base else None
-        scope = hashlib.sha256(str(repo).encode()).hexdigest()[:24]
-        parent = ROOT / "out/jevlint" / scope
+        parent = workspace_parent(repo)
         parent.mkdir(parents=True, exist_ok=True)
         with (parent / "run.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

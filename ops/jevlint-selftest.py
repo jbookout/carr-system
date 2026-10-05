@@ -197,6 +197,10 @@ class DiffTests(unittest.TestCase):
             self.assertFalse((scratch / "deleted.py").exists())
             self.assertTrue((scratch / ".git").is_dir())
             self.assertEqual(git("status", "--porcelain"), "?? deleted.py")
+            peer = root / "peer"
+            git("worktree", "add", "--detach", "-q", str(peer), "HEAD")
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(review.workspace_parent(repo), review.workspace_parent(peer))
 
 
 class EvidenceTests(unittest.TestCase):
