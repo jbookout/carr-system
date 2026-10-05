@@ -84987,6 +84987,1594 @@
       ],
       "expected_count": 1112,
       "expected_sha256": "d9fe744790181cc1dc88a4a8a41e32a3306dc8f16fee149bfc13af399d1d0ebf"
+    },
+    {
+      "version": "v111",
+      "reason": "Append audited automation after delivered invoice tracker v110. Preserve main seals; enforce partner archive authority, lock ordering and observed mutation effects.",
+      "remove": [
+        "script-entrypoint:hooks/stale-claim-gate.py",
+        "script-entrypoint:ops/core-rule-ids-check.py",
+        "script-entrypoint:ops/rule-boot-classes-check.py",
+        "script-entrypoint:ops/schema-snapshot-dsn.py",
+        "script-entrypoint:tools/diff-dossier-renders.py",
+        "script-entrypoint:tools/parity-lead-board.py",
+        "script-entrypoint:tools/parity-records.py"
+      ],
+      "upsert": [
+        {
+          "ingress_key": "github-workflow:ci-setup-shadow.yml",
+          "ingress_kind": "workflow_entrypoint",
+          "operation": ".github/workflows/ci-setup-shadow.yml",
+          "effect_class": "administrative_mutation",
+          "source_locator": ".github/workflows/ci-setup-shadow.yml",
+          "schema_digest": "da60b7fbf6ce7694a8818ed7ca318fa4c5533e424852aba85cde091bdffba9e5",
+          "handler_digest": "da60b7fbf6ce7694a8818ed7ca318fa4c5533e424852aba85cde091bdffba9e5",
+          "trigger_contract_digest": "e4da559882e69442d4660dd926313961cd74e7cdef5c03f0ece3c218de658bdb",
+          "permissions_contract_digest": "0b93c74ef19f2e9cf3df232ff21412669837d7fe46d1380b02c1dece42a38857",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "github_actions_token_and_declared_workflow_permissions",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [
+            "github-action:actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "github-action:actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "github-action:actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "github-action:actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "script:ops/ci-setup-shadow.py"
+          ],
+          "request_shape": "github_workflow_trigger_and_permissions_source_bound",
+          "idempotency_mode": "github_run_and_attempt_bound_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:invoice-close-queue",
+          "ingress_kind": "mcp_tool",
+          "operation": "invoice-close-queue",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/invoice-automation.js",
+          "schema_digest": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+          "source_digest": "d0c1d1e7ca72e52dfb7a902b06e6daea391eb054cb1564d439ca783a9b58edd6",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:record-deal-invoice",
+          "ingress_kind": "mcp_tool",
+          "operation": "record-deal-invoice",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/invoice-automation.js",
+          "schema_digest": "31ec07b95f6e58554e3cdfd13f3498671a2ede155a53c84a759954948589f8b6",
+          "source_digest": "d0c1d1e7ca72e52dfb7a902b06e6daea391eb054cb1564d439ca783a9b58edd6",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:undo-invoice-close",
+          "ingress_kind": "mcp_tool",
+          "operation": "undo-invoice-close",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/invoice-automation.js",
+          "schema_digest": "fed6108dc0ceae873f770789b0372493709217599ad15839962d65d8daf02b16",
+          "source_digest": "d0c1d1e7ca72e52dfb7a902b06e6daea391eb054cb1564d439ca783a9b58edd6",
+          "write": true,
+          "human_only": true,
+          "authority_only": false,
+          "principal_mode": "server_verified_human_or_native_agent",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:undo-lead-move",
+          "ingress_kind": "mcp_tool",
+          "operation": "undo-lead-move",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/lead-automation.js",
+          "schema_digest": "5bd96e7e972b700c9e8641b38b0887ee43d57e6754b3cff4b5803fdd9fdd8da0",
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65",
+          "write": true,
+          "human_only": true,
+          "authority_only": false,
+          "principal_mode": "server_verified_human_or_native_agent",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:evals/jev-judgments/run_eval.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "evals/jev-judgments/run_eval.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "evals/jev-judgments/run_eval.py",
+          "schema_digest": "b7981bd931f1a1f134437fc3721225d1d4bb54a7a3622106432515c15e19f3cf",
+          "handler_digest": "b7981bd931f1a1f134437fc3721225d1d4bb54a7a3622106432515c15e19f3cf",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:lib/disposable_pg_fixture.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "lib/disposable_pg_fixture.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "lib/disposable_pg_fixture.py",
+          "schema_digest": "d439a0c76142647bee2d390df90cbf49756bb74b2e449b18e1971cdc6bb8d960",
+          "handler_digest": "d439a0c76142647bee2d390df90cbf49756bb74b2e449b18e1971cdc6bb8d960",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:lib/review_tiers.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "lib/review_tiers.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "lib/review_tiers.py",
+          "schema_digest": "47452315faf06faf05f0013be4188ba2f8672999ca9befc328869cdd1e691a30",
+          "handler_digest": "47452315faf06faf05f0013be4188ba2f8672999ca9befc328869cdd1e691a30",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/check-jev-conformance.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/check-jev-conformance.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/check-jev-conformance.py",
+          "schema_digest": "c2a72a3f7a2cf16e14f34e0b1ecfb9e85209bccd7cdb1afd3df801d11d362942",
+          "handler_digest": "c2a72a3f7a2cf16e14f34e0b1ecfb9e85209bccd7cdb1afd3df801d11d362942",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/ci-setup-shadow.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/ci-setup-shadow.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/ci-setup-shadow.py",
+          "schema_digest": "e377c373b34603ba7cf7369f94504cb387e738fc08fe60f34c406ffeba9d8e02",
+          "handler_digest": "e377c373b34603ba7cf7369f94504cb387e738fc08fe60f34c406ffeba9d8e02",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/engineering-fixture-schedule-local-pg-gate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/engineering-fixture-schedule-local-pg-gate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/engineering-fixture-schedule-local-pg-gate.py",
+          "schema_digest": "694f6fbdaa50b5e4950703c17b504daa745f6533fa9b91804698d43e19c47867",
+          "handler_digest": "694f6fbdaa50b5e4950703c17b504daa745f6533fa9b91804698d43e19c47867",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/jevlint_review.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/jevlint_review.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/jevlint_review.py",
+          "schema_digest": "b4f143b58d9f598f5729e694b136a621ddd107e35dbcba569e5e38063975156b",
+          "handler_digest": "b4f143b58d9f598f5729e694b136a621ddd107e35dbcba569e5e38063975156b",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/local-review-evidence.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/local-review-evidence.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/local-review-evidence.py",
+          "schema_digest": "56d2fd7168487a1d467a1da124e18cef4e0ef0e65fd328dde9c25f0260d16611",
+          "handler_digest": "56d2fd7168487a1d467a1da124e18cef4e0ef0e65fd328dde9c25f0260d16611",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/scripts/bundle.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/scripts/bundle.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/scripts/bundle.py",
+          "schema_digest": "5da91f25aef11c5ccc3026010cdd800ee61ef6c75507780b7588555647d94ffc",
+          "handler_digest": "5da91f25aef11c5ccc3026010cdd800ee61ef6c75507780b7588555647d94ffc",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/scripts/install.sh",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/scripts/install.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/scripts/install.sh",
+          "schema_digest": "5e6b5554a10de67685c941e7d6a0ed323cce24fb6d62aa4fa5e61237afe824d5",
+          "handler_digest": "5e6b5554a10de67685c941e7d6a0ed323cce24fb6d62aa4fa5e61237afe824d5",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/scripts/port.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/scripts/port.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/scripts/port.py",
+          "schema_digest": "895c6bf622f8a65b890d60c1c3b6e2b327f9f34e299a331cfe038d195cdbc90c",
+          "handler_digest": "895c6bf622f8a65b890d60c1c3b6e2b327f9f34e299a331cfe038d195cdbc90c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/skills/poteto-mode/scripts/check-plan.mjs",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/skills/poteto-mode/scripts/check-plan.mjs",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/skills/poteto-mode/scripts/check-plan.mjs",
+          "schema_digest": "4f9432d9989880b6afc2bdda503d5b12a9d07d357ecf31936b7ab5e83bc80523",
+          "handler_digest": "4f9432d9989880b6afc2bdda503d5b12a9d07d357ecf31936b7ab5e83bc80523",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/skills/poteto-mode/scripts/orch/orch.ts",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/skills/poteto-mode/scripts/orch/orch.ts",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/skills/poteto-mode/scripts/orch/orch.ts",
+          "schema_digest": "f091687df627a0b75fabd54af58945a9cd6c7039ef0622012ac9ed60cd8ec434",
+          "handler_digest": "f091687df627a0b75fabd54af58945a9cd6c7039ef0622012ac9ed60cd8ec434",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/skills/poteto-mode/scripts/watch-pr/watch-pr",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/skills/poteto-mode/scripts/watch-pr/watch-pr",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/skills/poteto-mode/scripts/watch-pr/watch-pr",
+          "schema_digest": "d955603be6cc0e8b8ffcec722f635192b2261410b1f2929abea94480e47eb5d4",
+          "handler_digest": "d955603be6cc0e8b8ffcec722f635192b2261410b1f2929abea94480e47eb5d4",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/skills/poteto-mode/scripts/worktree-audit.sh",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/skills/poteto-mode/scripts/worktree-audit.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/skills/poteto-mode/scripts/worktree-audit.sh",
+          "schema_digest": "95b8530f3c0ccada8cabc4b0727c052fbc85c141531375aaace65c427af8aecc",
+          "handler_digest": "95b8530f3c0ccada8cabc4b0727c052fbc85c141531375aaace65c427af8aecc",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:plugins/pstack/skills/show-me-your-work/scripts/log.sh",
+          "ingress_kind": "script_entrypoint",
+          "operation": "plugins/pstack/skills/show-me-your-work/scripts/log.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "plugins/pstack/skills/show-me-your-work/scripts/log.sh",
+          "schema_digest": "a65a4bc5fb7cdeadbdb7b7ff1ca4682f4d9c42420942b2977cd17b46c4ac338e",
+          "handler_digest": "a65a4bc5fb7cdeadbdb7b7ff1ca4682f4d9c42420942b2977cd17b46c4ac338e",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:tools/integration_candidate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "tools/integration_candidate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/integration_candidate.py",
+          "schema_digest": "06c9e2e78071901e4e71ac9820900064ffc5e89b4107a2907301a913b61b7aa1",
+          "handler_digest": "06c9e2e78071901e4e71ac9820900064ffc5e89b4107a2907301a913b61b7aa1",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:tools/jev-value-report.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "tools/jev-value-report.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "tools/jev-value-report.py",
+          "schema_digest": "3da4405827a1bbf33ba88d8112cc41e2c2e10b7b9e80bbf13444466e29021f91",
+          "handler_digest": "3da4405827a1bbf33ba88d8112cc41e2c2e10b7b9e80bbf13444466e29021f91",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "row_replacements": {
+        "external-admin:bin/migrate-dell.sh": {
+          "schema_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0",
+          "handler_digest": "b05259d04b52887f3d1d516fbe7bdd87da5a44635e33f2dfa849f39c1706d4a0"
+        },
+        "external-admin:bin/migrate-prod.sh": {
+          "schema_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88",
+          "handler_digest": "6dd59622bfe283fabab9d3c9eabc0263c4b46ad73bd5c5e6afc2b70f4c81ec88"
+        },
+        "external-admin:tools/migrate-prod-support.py": {
+          "schema_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e",
+          "handler_digest": "65bf66fe43dcd9bc79cd84c431243ff50e142232dc26026f0ddfee839bf59d8e"
+        },
+        "external-admin:tools/migrate.py": {
+          "schema_digest": "c10c8d526fa04a913d3ec78674ee29564d72bfc7343c5db4669b4fef6093ec0f",
+          "handler_digest": "c10c8d526fa04a913d3ec78674ee29564d72bfc7343c5db4669b4fef6093ec0f"
+        },
+        "external-admin:tools/rotate-credential.py": {
+          "schema_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672",
+          "handler_digest": "4ed693be3967044d4c2080e6385df47c955adebe91ed2800c6e584220aa58672"
+        },
+        "github-workflow:automerge-pilot.yml": {
+          "schema_digest": "c5b8d6e02133c93f9e06ea9b7a040d58edae99b2a3b2b905768fbe6ab20320e6",
+          "handler_digest": "c5b8d6e02133c93f9e06ea9b7a040d58edae99b2a3b2b905768fbe6ab20320e6",
+          "permissions_contract_digest": "a5bfdcfe72f2b36a7b357c5855542abde71cc7728ebc6a1dddbfb986941817e8"
+        },
+        "github-workflow:ci.yml": {
+          "schema_digest": "2b4c7be4e235aa00bfe8580d66907fcfcf333fe2db0bd99711d7eb64ac19fcaa",
+          "handler_digest": "2b4c7be4e235aa00bfe8580d66907fcfcf333fe2db0bd99711d7eb64ac19fcaa",
+          "trigger_contract_digest": "4ad3b4954a98ee6d538d0e69c3e50a1f3c77f5a53552bb0950e25c2c7b2c7a48",
+          "delegates_to": [
+            "github-action:actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "github-action:actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "github-action:actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "script:ops/ci.sh",
+            "script:ops/pr-description-check.py"
+          ]
+        },
+        "github-workflow:db-acceptance.yml": {
+          "schema_digest": "eb39fa4da3828039603b7403d215823d60433c0effc476b839bf8757991ba753",
+          "handler_digest": "eb39fa4da3828039603b7403d215823d60433c0effc476b839bf8757991ba753"
+        },
+        "github-workflow:main-canary.yml": {
+          "schema_digest": "313860c3c6b72aaa899586f65acb6244f58e9ec8463a57db6123c2f951406fd7",
+          "handler_digest": "313860c3c6b72aaa899586f65acb6244f58e9ec8463a57db6123c2f951406fd7"
+        },
+        "github-workflow:source-merge-controller.yml": {
+          "schema_digest": "dfdd95bde295557a4695719f83cf9d586777d5bf07ce0a93033a5bab8fc3897b",
+          "handler_digest": "dfdd95bde295557a4695719f83cf9d586777d5bf07ce0a93033a5bab8fc3897b",
+          "permissions_contract_digest": "63155915d4403df74d8f590384e1757360618831af4854080b7f970b1858ac3d"
+        },
+        "launchd-workflow:com.carr.calendar-eventkit": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.calendar-prebrief-joe": {
+          "schema_digest": "81dbd0e4f2e6c60866de2a19a0f61e8b3ddba9a199e68eec0306c7c7bb8a8835",
+          "handler_digest": "81dbd0e4f2e6c60866de2a19a0f61e8b3ddba9a199e68eec0306c7c7bb8a8835",
+          "environment_contract_digest": "cb53c86943d8956c44076893e360a3656b0af1cd67a2b28a56ccdf1a1386b995",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.call-mode": {
+          "schema_digest": "22f6a7d4e25eb90fde7ed9be85fac29aaf8dab528f1ea46e1be73e9ffe4e96ec",
+          "handler_digest": "22f6a7d4e25eb90fde7ed9be85fac29aaf8dab528f1ea46e1be73e9ffe4e96ec",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.canary-ingest-sink": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.canonical-dirty-watchdog": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.canonical-fast-forward": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.capture-poll": {
+          "schema_digest": "0153f7247ce954959a3b19c1300aba0e6d6fb31db1eb3b97ea612c4575747119",
+          "handler_digest": "0153f7247ce954959a3b19c1300aba0e6d6fb31db1eb3b97ea612c4575747119",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.capture-watch": {
+          "schema_digest": "780a9972b272b2f731f11bb5bc0409856493d83596e493e70694df30948b9bf4",
+          "handler_digest": "780a9972b272b2f731f11bb5bc0409856493d83596e493e70694df30948b9bf4",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.cc-version-sentinel": {
+          "schema_digest": "2fcf68bd3ea0bd326b68fc33e9b987ee85a15e6d8a54a2512b920b7019266ab7",
+          "handler_digest": "2fcf68bd3ea0bd326b68fc33e9b987ee85a15e6d8a54a2512b920b7019266ab7",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.control-plane-tick": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.cutover-watch": {
+          "schema_digest": "b96d5d1c8e54b2faa8998e93f5bbb57b6784429dad79760941e2aa1426c32cd3",
+          "handler_digest": "b96d5d1c8e54b2faa8998e93f5bbb57b6784429dad79760941e2aa1426c32cd3",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.delivery-cadence-a05-sweep": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.dictation-consent": {
+          "schema_digest": "c6e575f39f1396d0a8b2710ea412a1b7597a195c7c1d8862b1be770245311f62",
+          "handler_digest": "c6e575f39f1396d0a8b2710ea412a1b7597a195c7c1d8862b1be770245311f62",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.doc-engine": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.fetch-allowlist": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.fleet-sync": {
+          "schema_digest": "1360c2de61b85b83aac9e7c7e3b871f4b6821fb10a6b52defeea53e512f8d680",
+          "handler_digest": "1360c2de61b85b83aac9e7c7e3b871f4b6821fb10a6b52defeea53e512f8d680",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.gate-zero-canary": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.job-watchdog": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.keepalive-probe": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.local-briefs": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.logitech-keymap": {
+          "schema_digest": "5eb9ee7ac3d6b973c2baaae0d617e45be239183f22483506e0a3c10bf04e74da",
+          "handler_digest": "5eb9ee7ac3d6b973c2baaae0d617e45be239183f22483506e0a3c10bf04e74da",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.nightly-exports-daytime-retry": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.nightly-record-layer": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.notes-sweep": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.partner-ping": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.quill-dictate": {
+          "schema_digest": "58b24675fd31693ba9cc8ea9073c9d2a901e33472aa69d55c5af5a96029fc7a9",
+          "handler_digest": "58b24675fd31693ba9cc8ea9073c9d2a901e33472aa69d55c5af5a96029fc7a9",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.recordings-purge": {
+          "schema_digest": "250243100136779aafe8b077b876dac8651163b8d9e2ea4997bd0d2ba4d1c29c",
+          "handler_digest": "250243100136779aafe8b077b876dac8651163b8d9e2ea4997bd0d2ba4d1c29c",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.release-pipeline": {
+          "schema_digest": "7282dbd30c4e4408f882e8f5e50e070e763898e23ac7e7497e344554bed8ed33",
+          "handler_digest": "7282dbd30c4e4408f882e8f5e50e070e763898e23ac7e7497e344554bed8ed33",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.repo-hygiene-janitor": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.resource-collector": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.room-bridge": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.rules-refresh": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.run-spool-flush": {
+          "schema_digest": "87da4ae2be3d5fa15c10c3b287601f0a315ddf563c0bf3b064f5de3d75cbcadb",
+          "handler_digest": "87da4ae2be3d5fa15c10c3b287601f0a315ddf563c0bf3b064f5de3d75cbcadb",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.session-trace-archive": {
+          "schema_digest": "5c8b9c938d75cbf5199fea39922d80ddadef3e125354a224f0467a5e328f3fc3",
+          "handler_digest": "5c8b9c938d75cbf5199fea39922d80ddadef3e125354a224f0467a5e328f3fc3",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.tailscale-up": {
+          "schema_digest": "2b9541c2545f709e3aab9e05f899af1cf5a20a3738f0dcb0e940a3045ed78ff2",
+          "handler_digest": "2b9541c2545f709e3aab9e05f899af1cf5a20a3738f0dcb0e940a3045ed78ff2",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.timebomb-audit": {
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "launchd-workflow:com.carr.videopipeline": {
+          "schema_digest": "0fc3016908df61c995cc32568c1d4b689c9405902333d48a514795054d9d971e",
+          "handler_digest": "0fc3016908df61c995cc32568c1d4b689c9405902333d48a514795054d9d971e",
+          "environment_contract_digest": "bb012a64084c17cbd90aaedf5bfd28823c30fbc19e296ece63ed8ea03cc2a7de",
+          "physical_authority_catalog_digests": {
+            "services": "sha256:2131de15c79374f7e2b3623d24499cfbf32aa4c94f41245e8e344aef83384f94",
+            "legacy_schedule_launchd": "sha256:125578b6ce147356764cca38bf010e5d396e996b39c85163c03eaf04cdbcd5df"
+          }
+        },
+        "mcp-tool:accept-workflow": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:activate-guidance-registry": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:activate-rule": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:add-critical-date": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:add-deal-note": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:add-industry-event": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:add-loop": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:add-party": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:add-premises": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:add-room-turn": {
+          "source_digest": "208714703f83e1c4872caaf70b33bcf9f4833882aa129d180923ce37f8ca49cb"
+        },
+        "mcp-tool:admit-rule": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:advance-leads": {
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65"
+        },
+        "mcp-tool:amend-closed-loop": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:amend-rule": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:applicable-rules": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:approve-lead-draft": {
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65"
+        },
+        "mcp-tool:approve-lead-move": {
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65"
+        },
+        "mcp-tool:approve-rule": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:ask-jev": {
+          "source_digest": "71234bd37a8dbe81eb9a5b0e9ea0399b435a36b105f3ec25a5ae59d64849fa94"
+        },
+        "mcp-tool:attach-to-campaign": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:call-verb": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:capture-queue": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:catch-me-up": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:claim-card": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:close-loop": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:complete-action": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:confirm-merge": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:counterparty-history": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:create-national-account": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:create-national-market-deal": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:deactivate-guidance-registry": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:deal-board": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:deal-room-board": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:decide-guidance-import-batch": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:decline-candidate": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:detach-decision": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:disable-legacy-schedule": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:edit-loop-header": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:end-deal-review": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:export-email-domains": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:find": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:find-and-catch-up": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:find-precedent": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:find-rule": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:get-call-context": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:get-deal-room": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:governance-queue": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:integrity-digest": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:last-new-lead-search": {
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65"
+        },
+        "mcp-tool:lead-approval-queue": {
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65"
+        },
+        "mcp-tool:lead-board": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:lead-hot": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:lead-stage-preview": {
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65"
+        },
+        "mcp-tool:link-parties": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:list-industry-events": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:list-verbs": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:log-activity": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:log-capture": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:log-decision": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:log-outreach": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:loop-board": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:loop-headers": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:measure-placement": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:merge-vendor-rows": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:morning-brief": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:new-client": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:new-deal": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:new-lead": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:new-vendor": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:open-campaign": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:patch-deal-field": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:prepare-conversation": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:prepare-document": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:presence-lease": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:project-room-queue": {
+          "source_digest": "208714703f83e1c4872caaf70b33bcf9f4833882aa129d180923ce37f8ca49cb"
+        },
+        "mcp-tool:promote-pool": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:read-deal-reconciliation": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:read-doc-outcome-cards": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:read-jev-call-receipt-integrity": {
+          "source_digest": "71234bd37a8dbe81eb9a5b0e9ea0399b435a36b105f3ec25a5ae59d64849fa94"
+        },
+        "mcp-tool:read-jev-call-receipts": {
+          "source_digest": "71234bd37a8dbe81eb9a5b0e9ea0399b435a36b105f3ec25a5ae59d64849fa94"
+        },
+        "mcp-tool:read-loop": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:read-resource-dashboard": {
+          "source_digest": "c9dc98144dac230ce4c8f7e8db081b758fc6c1b96b7196b9d300057418aeed28"
+        },
+        "mcp-tool:read-room": {
+          "source_digest": "208714703f83e1c4872caaf70b33bcf9f4833882aa129d180923ce37f8ca49cb"
+        },
+        "mcp-tool:read-room-queue": {
+          "source_digest": "208714703f83e1c4872caaf70b33bcf9f4833882aa129d180923ce37f8ca49cb"
+        },
+        "mcp-tool:read-v5-a02-rule-enforcement-coverage": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:reassign-deal": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:record-counter": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:record-defect": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:record-executed-lease": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:record-finding": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:record-gate-zero-read-only-outcome": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:record-lead-contact": {
+          "schema_digest": "8a219fa2443d70ed68f4752bbf5ea13364d41f5dc023bd9b2052c446567d8880",
+          "source_digest": "b7ec6413c04f0564645c9afa1638c56ff64ddaef552dd0bf6ce5832c7f446f65"
+        },
+        "mcp-tool:record-resource-observation": {
+          "source_digest": "c9dc98144dac230ce4c8f7e8db081b758fc6c1b96b7196b9d300057418aeed28"
+        },
+        "mcp-tool:record-rule-enforcement-fallback": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:register-template": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:resolve-candidate": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:resolve-conflict": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:resolve-post-call-candidate": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:retire-rule": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:revert-deal-field": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:review-deal": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:score-campaign": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:set-lead": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:set-market-agent": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:set-national-account-owner": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:set-next-action": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:set-next-step": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:source-attribution": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:stale-records": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:stamp-touch": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:start-deal-review": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:state-as-of": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:teach": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:today-triage": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:triage-item": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-deal": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-decision": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-document-status": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-industry-event": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-lead": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-loop": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-party-contact": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:update-vendor": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "mcp-tool:who-do-we-know": {
+          "source_digest": "79a18e6210609eee64f5f4d435f45d551998baf1f2f6f0a6d6a0e3db0d9b3240"
+        },
+        "script-entrypoint:bin/calendar-eventkit-capture.sh": {
+          "schema_digest": "d7a81804b7143bb7a3faba08b525d6b831f7b33edc88fbcb2ea5efeac5d86998",
+          "handler_digest": "d7a81804b7143bb7a3faba08b525d6b831f7b33edc88fbcb2ea5efeac5d86998"
+        },
+        "script-entrypoint:bin/council-lib.sh": {
+          "schema_digest": "b96939ad8d8feebef8720dac8e73b0a595859009ec4382b972e8bf815f2aeb61",
+          "handler_digest": "b96939ad8d8feebef8720dac8e73b0a595859009ec4382b972e8bf815f2aeb61"
+        },
+        "script-entrypoint:bin/council.sh": {
+          "schema_digest": "ac2bb9b391d9fe776ccd2d3b16abaff0f65b55de49ae84696a8c61bf5c45e83f",
+          "handler_digest": "ac2bb9b391d9fe776ccd2d3b16abaff0f65b55de49ae84696a8c61bf5c45e83f"
+        },
+        "script-entrypoint:bin/dot-relay": {
+          "schema_digest": "d6bfcae350cce93466c0d72964ccc62c1469d831bacccc016acef2e3d533bb21",
+          "handler_digest": "d6bfcae350cce93466c0d72964ccc62c1469d831bacccc016acef2e3d533bb21"
+        },
+        "script-entrypoint:bin/grok_run.py": {
+          "schema_digest": "8411423ec61ae026c99a9bcdd588319846fa0a38d7139d1daab9c0b680f62bad",
+          "handler_digest": "8411423ec61ae026c99a9bcdd588319846fa0a38d7139d1daab9c0b680f62bad"
+        },
+        "script-entrypoint:bin/key-recovery-test.sh": {
+          "schema_digest": "ebd65142568a7f1c54c0beae6747a256c4308bae292efaaa2a323ba350eda153",
+          "handler_digest": "ebd65142568a7f1c54c0beae6747a256c4308bae292efaaa2a323ba350eda153"
+        },
+        "script-entrypoint:bin/lead-stage-job.py": {
+          "schema_digest": "a2a165a52fd647bb18bd65306c021d46b1f5e3ba45a2a9075f7581f02042addf",
+          "handler_digest": "a2a165a52fd647bb18bd65306c021d46b1f5e3ba45a2a9075f7581f02042addf"
+        },
+        "script-entrypoint:bin/nightly.sh": {
+          "schema_digest": "de80ffdc5966abed1b79308a5525101f69254595b26251b064f47e5aa267a545",
+          "handler_digest": "de80ffdc5966abed1b79308a5525101f69254595b26251b064f47e5aa267a545"
+        },
+        "script-entrypoint:bin/probe-keepalive.py": {
+          "schema_digest": "5410931c2d697c26976ece8a79ff9cc8c9890da41266a5c8cbca4d5d82eda4eb",
+          "handler_digest": "5410931c2d697c26976ece8a79ff9cc8c9890da41266a5c8cbca4d5d82eda4eb"
+        },
+        "script-entrypoint:bin/schema-snapshot.sh": {
+          "schema_digest": "8c7e31fef93bdda898ba06f5178fbb22eebeaa23d094156c4fd0192187691e64",
+          "handler_digest": "8c7e31fef93bdda898ba06f5178fbb22eebeaa23d094156c4fd0192187691e64"
+        },
+        "script-entrypoint:evals/rule-delivery/make_report.py": {
+          "schema_digest": "868f75651f7b80d6303d293a77ea151f4a8b69ed3ca49122cc474ac03ce86b26",
+          "handler_digest": "868f75651f7b80d6303d293a77ea151f4a8b69ed3ca49122cc474ac03ce86b26"
+        },
+        "script-entrypoint:evals/rule-delivery/run_eval.py": {
+          "schema_digest": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
+          "handler_digest": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e"
+        },
+        "script-entrypoint:exporters/run_exports.py": {
+          "schema_digest": "8e30ff0fe1d341d93a8b4da5822dbf241b570df4f397e0e562e18202b403ba02",
+          "handler_digest": "8e30ff0fe1d341d93a8b4da5822dbf241b570df4f397e0e562e18202b403ba02"
+        },
+        "script-entrypoint:generators/build-deal-room.py": {
+          "schema_digest": "14e5f0fbf8737599c20dbe4e7a2efc35ea4d2347126e42a17d5ddacf135ae787",
+          "handler_digest": "14e5f0fbf8737599c20dbe4e7a2efc35ea4d2347126e42a17d5ddacf135ae787"
+        },
+        "script-entrypoint:generators/build-lead-board.py": {
+          "schema_digest": "955960493dd97902bf436332e73984582e7989dcb0ca1806e70c6f32f264a273",
+          "handler_digest": "955960493dd97902bf436332e73984582e7989dcb0ca1806e70c6f32f264a273"
+        },
+        "script-entrypoint:hooks/completion-evidence-gate.py": {
+          "schema_digest": "b8e1535b47c76ff6cea93689ee14bd667d302209077e3574225bef650e35da0e",
+          "handler_digest": "b8e1535b47c76ff6cea93689ee14bd667d302209077e3574225bef650e35da0e"
+        },
+        "script-entrypoint:hooks/conduct_patterns.py": {
+          "schema_digest": "c05aea5ac2b4bf77372942b286d10ec3b37d31f89104777544fc91e139c84f89",
+          "handler_digest": "c05aea5ac2b4bf77372942b286d10ec3b37d31f89104777544fc91e139c84f89"
+        },
+        "script-entrypoint:hooks/conduct-stop-gate.py": {
+          "schema_digest": "c417cdbb1bc16c15b04764a0445e898a97e6337fc9697d823ca39c306cad6b4a",
+          "handler_digest": "c417cdbb1bc16c15b04764a0445e898a97e6337fc9697d823ca39c306cad6b4a"
+        },
+        "script-entrypoint:hooks/draft-export-gate.py": {
+          "schema_digest": "0b8dfead4a6d22d967b0801e42b64950adc0d2424916fffb86fca597220e3260",
+          "handler_digest": "0b8dfead4a6d22d967b0801e42b64950adc0d2424916fffb86fca597220e3260"
+        },
+        "script-entrypoint:hooks/escalation-gate.py": {
+          "schema_digest": "f3e813aff2b7bdfbf088561859eddee34906d0636d75afe2be2eed240ad5c81e",
+          "handler_digest": "f3e813aff2b7bdfbf088561859eddee34906d0636d75afe2be2eed240ad5c81e"
+        },
+        "script-entrypoint:hooks/executor-tier-gate.py": {
+          "schema_digest": "82d56dc26086c9dc7d54ce201b9c906e10157f1f6d19d0d7461ebb56faccf8bd",
+          "handler_digest": "82d56dc26086c9dc7d54ce201b9c906e10157f1f6d19d0d7461ebb56faccf8bd"
+        },
+        "script-entrypoint:hooks/gate-integrity.py": {
+          "schema_digest": "7a01fd2ace7df6737156cf132589c36711b9f83f1a4b745a1470ac1e67ad52c3",
+          "handler_digest": "7a01fd2ace7df6737156cf132589c36711b9f83f1a4b745a1470ac1e67ad52c3"
+        },
+        "script-entrypoint:hooks/hook-meter-run.py": {
+          "schema_digest": "4f00891c0d6efa841d048540825678490aab03f285517a8dd9b2839ca10fa16a",
+          "handler_digest": "4f00891c0d6efa841d048540825678490aab03f285517a8dd9b2839ca10fa16a"
+        },
+        "script-entrypoint:hooks/jev-supervisor.py": {
+          "schema_digest": "22c947a85879ac6e69296469e08dbb00bc3ed37e45b04ec31a5b89f6953c6e11",
+          "handler_digest": "22c947a85879ac6e69296469e08dbb00bc3ed37e45b04ec31a5b89f6953c6e11"
+        },
+        "script-entrypoint:hooks/lint-gate.py": {
+          "schema_digest": "02fdae6359922f60d9701981ac5453767e5beff8e0226851e64cd111fb66d285",
+          "handler_digest": "02fdae6359922f60d9701981ac5453767e5beff8e0226851e64cd111fb66d285"
+        },
+        "script-entrypoint:hooks/machine-converge.py": {
+          "schema_digest": "171cb8f02e6ce258580b213f3ad46a3d4241d81076bcb37875710ff68ddcaf09",
+          "handler_digest": "171cb8f02e6ce258580b213f3ad46a3d4241d81076bcb37875710ff68ddcaf09"
+        },
+        "script-entrypoint:hooks/rule-pack-preuse-reselection.py": {
+          "schema_digest": "a2b66119a644ebd84ed0e0b5da02bccd962629ac834dee406eb7f431d13bcc17",
+          "handler_digest": "a2b66119a644ebd84ed0e0b5da02bccd962629ac834dee406eb7f431d13bcc17"
+        },
+        "script-entrypoint:hooks/worktree-self-plumb.py": {
+          "schema_digest": "5e263dce6cdc5f5f4697e001eeb3a6054cef5b1cfe746c4fa36e519b2f83c2f1",
+          "handler_digest": "5e263dce6cdc5f5f4697e001eeb3a6054cef5b1cfe746c4fa36e519b2f83c2f1"
+        },
+        "script-entrypoint:mcp-server/local-verb.mjs": {
+          "schema_digest": "2c96868b4c2458decb95755674c51c380d10a8d3d8c8a4d9e50a45f0bba5e06c",
+          "handler_digest": "2c96868b4c2458decb95755674c51c380d10a8d3d8c8a4d9e50a45f0bba5e06c"
+        },
+        "script-entrypoint:mcp-server/run-tests.mjs": {
+          "schema_digest": "c8212a0e5e634eb65f5223d009fd5f22b12360296a1fe2a04b80ba873f6f39e6",
+          "handler_digest": "c8212a0e5e634eb65f5223d009fd5f22b12360296a1fe2a04b80ba873f6f39e6"
+        },
+        "script-entrypoint:ops/boot-budget-check.py": {
+          "schema_digest": "e147119e90395bfbae88b5c658aefc0891e24551848238a46a1e4cfc3290f17c",
+          "handler_digest": "e147119e90395bfbae88b5c658aefc0891e24551848238a46a1e4cfc3290f17c"
+        },
+        "script-entrypoint:ops/check-eval-receipt.py": {
+          "schema_digest": "c5599f688e9f7f3ee2cd5dbddbb9be51faf0320370a5ccbefacf796651804242",
+          "handler_digest": "c5599f688e9f7f3ee2cd5dbddbb9be51faf0320370a5ccbefacf796651804242"
+        },
+        "script-entrypoint:ops/ci.sh": {
+          "schema_digest": "b727901c1dd456ba012824bc784299436a0672a47f069a8ce7c6109acd036d46",
+          "handler_digest": "b727901c1dd456ba012824bc784299436a0672a47f069a8ce7c6109acd036d46"
+        },
+        "script-entrypoint:ops/claude-continuity-hook.py": {
+          "schema_digest": "5b23f330f6a27fcbd1fb3e90e38934c483e828499441a953efc52d638daa6cc8",
+          "handler_digest": "5b23f330f6a27fcbd1fb3e90e38934c483e828499441a953efc52d638daa6cc8"
+        },
+        "script-entrypoint:ops/codex_hook_smoke_judge.py": {
+          "schema_digest": "6bf0d63a7d693eb0663022a1beb3456dcc4745870a5b39fc9a31b2a4b801bd8c",
+          "handler_digest": "6bf0d63a7d693eb0663022a1beb3456dcc4745870a5b39fc9a31b2a4b801bd8c"
+        },
+        "script-entrypoint:ops/codex-hook-smoke.sh": {
+          "schema_digest": "4a12048a70674a3256c4bd522f7dfa680c8da88afa8c0ff0cea930d056338b39",
+          "handler_digest": "4a12048a70674a3256c4bd522f7dfa680c8da88afa8c0ff0cea930d056338b39"
+        },
+        "script-entrypoint:ops/config-as-code.py": {
+          "schema_digest": "a8f707ed60948403d586dac60a6e1306e409c8a306b8dedfc0330e4cdf90e30d",
+          "handler_digest": "a8f707ed60948403d586dac60a6e1306e409c8a306b8dedfc0330e4cdf90e30d"
+        },
+        "script-entrypoint:ops/engineering-claim-local-pg-gate.py": {
+          "schema_digest": "5378909088446fd3bd973a054764cd5d50fc8a7c5eeda17564ecd9308914c191",
+          "handler_digest": "5378909088446fd3bd973a054764cd5d50fc8a7c5eeda17564ecd9308914c191"
+        },
+        "script-entrypoint:ops/engineering-envelope-race-local-pg-gate.py": {
+          "schema_digest": "e9796d1902777e7ef2a1dbd4acdedd5af65a8afa6f132bc080c940806ec536ce",
+          "handler_digest": "e9796d1902777e7ef2a1dbd4acdedd5af65a8afa6f132bc080c940806ec536ce"
+        },
+        "script-entrypoint:ops/githooks/path-hygiene-check.py": {
+          "schema_digest": "a836603f9b5fdf96f4ec0e626b7909c682ca780e7996e92a5363bd8f074986ea",
+          "handler_digest": "a836603f9b5fdf96f4ec0e626b7909c682ca780e7996e92a5363bd8f074986ea"
+        },
+        "script-entrypoint:ops/jev_model_route.py": {
+          "schema_digest": "0e90b56f16126262451be48a10222185f62d82f0d2872b676f6326526445a527",
+          "handler_digest": "0e90b56f16126262451be48a10222185f62d82f0d2872b676f6326526445a527"
+        },
+        "script-entrypoint:ops/jev-boundary-replay.py": {
+          "schema_digest": "a1fcde5fab15aab8732405ab76466d893d02bebc79b7c15a46bd1e6298f76009",
+          "handler_digest": "a1fcde5fab15aab8732405ab76466d893d02bebc79b7c15a46bd1e6298f76009"
+        },
+        "script-entrypoint:ops/lead-stage-db-gate.py": {
+          "schema_digest": "c6b2ef368b8c89c9901dc3ff9236d350ff1826a6871bee719dce56e8db035a35",
+          "handler_digest": "c6b2ef368b8c89c9901dc3ff9236d350ff1826a6871bee719dce56e8db035a35"
+        },
+        "script-entrypoint:ops/local-pg-ci.py": {
+          "schema_digest": "292ef63f035a8f18277c18e2a4cd2f97fa72da3a896463d8bc91932c921e25f9",
+          "handler_digest": "292ef63f035a8f18277c18e2a4cd2f97fa72da3a896463d8bc91932c921e25f9"
+        },
+        "script-entrypoint:ops/onedrive-prepublish-wake.py": {
+          "schema_digest": "81bb52ab25d43829b1899781ac7d193955cbde2ded81c4dfa9120d8178c30ab9",
+          "handler_digest": "81bb52ab25d43829b1899781ac7d193955cbde2ded81c4dfa9120d8178c30ab9"
+        },
+        "script-entrypoint:ops/reachability-check.py": {
+          "schema_digest": "8f87e47780cd9c20de42ad2cb2913638d469d9fd8c9d5dfaf9a8081bd62f1556",
+          "handler_digest": "8f87e47780cd9c20de42ad2cb2913638d469d9fd8c9d5dfaf9a8081bd62f1556"
+        },
+        "script-entrypoint:ops/release-pipeline.py": {
+          "schema_digest": "36b2c0d6542e925515307cf499d5616419176368c0a6c5c53f6cd36cfafd3f69",
+          "handler_digest": "36b2c0d6542e925515307cf499d5616419176368c0a6c5c53f6cd36cfafd3f69"
+        },
+        "script-entrypoint:ops/rule-admission-audit.py": {
+          "schema_digest": "210280ae760f1da7888ca31ba17a779857aa6a7a6f6b63d1836e50c3252c5d29",
+          "handler_digest": "210280ae760f1da7888ca31ba17a779857aa6a7a6f6b63d1836e50c3252c5d29"
+        },
+        "script-entrypoint:ops/rule-delivery-local-pg-acceptance.py": {
+          "schema_digest": "d73fd3370633657d066027a1f88734bc695484f9de00769d288dae56f9f0fe11",
+          "handler_digest": "d73fd3370633657d066027a1f88734bc695484f9de00769d288dae56f9f0fe11"
+        },
+        "script-entrypoint:ops/scac-mutation-inventory.mjs": {
+          "schema_digest": "4b91e5b4ade1de0432c9bb94dc9ced0ff99884f4820628fdb229777f17ca8ec8",
+          "handler_digest": "4b91e5b4ade1de0432c9bb94dc9ced0ff99884f4820628fdb229777f17ca8ec8"
+        },
+        "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py": {
+          "schema_digest": "1aa7fd618849d3ea67e64240c9596462471266dbf88d7a0e0c2bb6afbcbcfe39",
+          "handler_digest": "1aa7fd618849d3ea67e64240c9596462471266dbf88d7a0e0c2bb6afbcbcfe39"
+        },
+        "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py": {
+          "schema_digest": "df1811946efce0edd43ae5a5b4d5ea26e825cf20e3db98e686fd7d7c1b107584",
+          "handler_digest": "df1811946efce0edd43ae5a5b4d5ea26e825cf20e3db98e686fd7d7c1b107584"
+        },
+        "script-entrypoint:ops/slice-done-marker.py": {
+          "schema_digest": "fe375a811727f2c675a7aed1bd84f4e3e3988c55ed774a0500ffff5b045b3c7f",
+          "handler_digest": "fe375a811727f2c675a7aed1bd84f4e3e3988c55ed774a0500ffff5b045b3c7f"
+        },
+        "script-entrypoint:ops/snapshot-seed-coverage.py": {
+          "schema_digest": "6a5be82a49615bbc0533854d4172035c1c95e97d576497f09b7eb24aeb855f7b",
+          "handler_digest": "6a5be82a49615bbc0533854d4172035c1c95e97d576497f09b7eb24aeb855f7b"
+        },
+        "script-entrypoint:ops/stale-config-check.py": {
+          "schema_digest": "f6ed368084a320857e3f1fa09c75f1ca2b20669d440c0ae90c8104e07c10587b",
+          "handler_digest": "f6ed368084a320857e3f1fa09c75f1ca2b20669d440c0ae90c8104e07c10587b"
+        },
+        "script-entrypoint:ops/sync-review-tiers.py": {
+          "schema_digest": "2231291ca28975a25b4f779de039b4def719ea6e08ec680fd8d19559d0789731",
+          "handler_digest": "2231291ca28975a25b4f779de039b4def719ea6e08ec680fd8d19559d0789731"
+        },
+        "script-entrypoint:ops/timebomb-audit.py": {
+          "schema_digest": "be9f06f2a70054788a281ef4c1dbd81536b92dc1f074efc0b45c1e4beb136bfc",
+          "handler_digest": "be9f06f2a70054788a281ef4c1dbd81536b92dc1f074efc0b45c1e4beb136bfc"
+        },
+        "script-entrypoint:shared/build-lead-board-template.py": {
+          "schema_digest": "7d67158c3b3c588e21922a6f2a666453c5746940f80f921e8a0ed9cff98a4e14",
+          "handler_digest": "7d67158c3b3c588e21922a6f2a666453c5746940f80f921e8a0ed9cff98a4e14"
+        },
+        "script-entrypoint:tools/calendar-attendee-dump.py": {
+          "schema_digest": "e6820344d4c80b99e3d75722210e69ae13703cef041aa87d1301856506ce3381",
+          "handler_digest": "e6820344d4c80b99e3d75722210e69ae13703cef041aa87d1301856506ce3381"
+        },
+        "script-entrypoint:tools/calendar-intake-gate.py": {
+          "schema_digest": "46523ea769b9bfc77bf90d55715679a22c59103e6b247d3f292ca466c3841e3e",
+          "handler_digest": "46523ea769b9bfc77bf90d55715679a22c59103e6b247d3f292ca466c3841e3e"
+        },
+        "script-entrypoint:tools/calendar-touch-matcher.py": {
+          "schema_digest": "485f3bf36751e7cd41f1c3a2780e9ffd9a3f9e6e9bf9026445549fb240383e66",
+          "handler_digest": "485f3bf36751e7cd41f1c3a2780e9ffd9a3f9e6e9bf9026445549fb240383e66"
+        },
+        "script-entrypoint:tools/calendar-triage-plan.py": {
+          "schema_digest": "6d61d90357018f3f8438a6bf396a77f6830cc921416b277be1a391b816d3df44",
+          "handler_digest": "6d61d90357018f3f8438a6bf396a77f6830cc921416b277be1a391b816d3df44"
+        },
+        "script-entrypoint:tools/control-plane.py": {
+          "schema_digest": "d7b589362a9da81c494d4bdc156cd9b8e8580453441dc7026fcdf2ce8b2c2ac7",
+          "handler_digest": "d7b589362a9da81c494d4bdc156cd9b8e8580453441dc7026fcdf2ce8b2c2ac7"
+        },
+        "script-entrypoint:tools/dictation-rig/bin/post_call.py": {
+          "schema_digest": "8a818f55d44eb9c0bf5918e8e46342e11fbccd5d907414e998a83d6f0b664269",
+          "handler_digest": "8a818f55d44eb9c0bf5918e8e46342e11fbccd5d907414e998a83d6f0b664269"
+        },
+        "script-entrypoint:tools/flash-prompt-rules.py": {
+          "schema_digest": "6657d1d2a4ba0ea32d521a2eb34612aba792221221657934eeb91f512be96caf",
+          "handler_digest": "6657d1d2a4ba0ea32d521a2eb34612aba792221221657934eeb91f512be96caf"
+        },
+        "script-entrypoint:tools/flash-run.py": {
+          "schema_digest": "e655629d3154f47f80a05cab0c1ee585e607be3fb0792f5ca529a0d82ca1f84e",
+          "handler_digest": "e655629d3154f47f80a05cab0c1ee585e607be3fb0792f5ca529a0d82ca1f84e"
+        },
+        "script-entrypoint:tools/flash-script.py": {
+          "schema_digest": "31e76d9ac09bf4ac9da7df9e0a70639953276d3f87c8883b56780ac1b91a8c24",
+          "handler_digest": "31e76d9ac09bf4ac9da7df9e0a70639953276d3f87c8883b56780ac1b91a8c24"
+        },
+        "script-entrypoint:tools/health-check.py": {
+          "schema_digest": "2d03fd0e1da35ff203c0d17fb9efce8f5357c09503605c9c20639e4a2a509a64",
+          "handler_digest": "2d03fd0e1da35ff203c0d17fb9efce8f5357c09503605c9c20639e4a2a509a64"
+        },
+        "script-entrypoint:tools/progress_board.py": {
+          "schema_digest": "0b116a70c82b5bcf73bbe5be269ccad27008f80db6bd475eaa61a00fcc9de85a",
+          "handler_digest": "0b116a70c82b5bcf73bbe5be269ccad27008f80db6bd475eaa61a00fcc9de85a"
+        },
+        "script-entrypoint:tools/r03-settlement-sweep-runner.py": {
+          "schema_digest": "15660ed79eadd1c63767e39aa68ad11cb11915d193e76a32571d5d35e7d4ef4c",
+          "handler_digest": "15660ed79eadd1c63767e39aa68ad11cb11915d193e76a32571d5d35e7d4ef4c"
+        },
+        "script-entrypoint:tools/room-bridge/bridge.py": {
+          "schema_digest": "4c90226bcc82f51f47cc2b60381275ccbd0442244fb178cb5f8169a402e680cb",
+          "handler_digest": "4c90226bcc82f51f47cc2b60381275ccbd0442244fb178cb5f8169a402e680cb"
+        },
+        "script-entrypoint:tools/room-bridge/claude_desktop_wire.py": {
+          "schema_digest": "f886d1e4c8cf4ea9da82cb3cf8a3d6b32c12d757de88735f9630ebab512f1c57",
+          "handler_digest": "f886d1e4c8cf4ea9da82cb3cf8a3d6b32c12d757de88735f9630ebab512f1c57"
+        },
+        "script-entrypoint:tools/room-bridge/codex_ipc.py": {
+          "schema_digest": "441b947ffa1202e53ded0ff5473657ed568ed948faa8806107902ccf1dd57be9",
+          "handler_digest": "441b947ffa1202e53ded0ff5473657ed568ed948faa8806107902ccf1dd57be9"
+        },
+        "script-entrypoint:tools/room-bridge/codex_wire.py": {
+          "schema_digest": "9b995b1c9266179dd2902d66fe8b74a6a3faf61d6b6c2b76f88a7955e6f3efc9",
+          "handler_digest": "9b995b1c9266179dd2902d66fe8b74a6a3faf61d6b6c2b76f88a7955e6f3efc9"
+        },
+        "script-entrypoint:tools/room-bridge/desk_cli.py": {
+          "schema_digest": "1bdcd27a462538038b88a99d7fe5e2f123eb5900adddacdfd643a7cf4e3d54ad",
+          "handler_digest": "1bdcd27a462538038b88a99d7fe5e2f123eb5900adddacdfd643a7cf4e3d54ad"
+        },
+        "script-entrypoint:tools/room-bridge/desks.py": {
+          "schema_digest": "edc948d0fc09ea9bb65388880fc328c0a4e00165df8458fcd7d9495f06acf142",
+          "handler_digest": "edc948d0fc09ea9bb65388880fc328c0a4e00165df8458fcd7d9495f06acf142"
+        },
+        "script-entrypoint:tools/room-bridge/dispatch.py": {
+          "schema_digest": "340d07b090105ad51126adf2a4eed93937628cbb1821a314250834cec3f07b89",
+          "handler_digest": "340d07b090105ad51126adf2a4eed93937628cbb1821a314250834cec3f07b89"
+        },
+        "script-entrypoint:tools/room-bridge/session_directory.py": {
+          "schema_digest": "325fba370999eec59c0049d7b2e697b8f0338f8f2ffd098b36a89e4e7ab833ae",
+          "handler_digest": "325fba370999eec59c0049d7b2e697b8f0338f8f2ffd098b36a89e4e7ab833ae"
+        },
+        "script-entrypoint:tools/rule-gold-label.py": {
+          "schema_digest": "0b8928c55a51675f1e11eab51694810eab299e18f130ebec538c1b02a3fdacbd",
+          "handler_digest": "0b8928c55a51675f1e11eab51694810eab299e18f130ebec538c1b02a3fdacbd"
+        },
+        "script-entrypoint:tools/scheduler-truth.py": {
+          "schema_digest": "2deb14766627d15765bf52c11be8db1948ecf7b99311cf46a0c28714c475ff03",
+          "handler_digest": "2deb14766627d15765bf52c11be8db1948ecf7b99311cf46a0c28714c475ff03"
+        },
+        "worker-route:deal-room-turn": {
+          "schema_digest": "4654a7188a03564cc334ecfc4e907b7045ec451afd58ccbc2b0967ab54e60b30",
+          "handler_digest": "4654a7188a03564cc334ecfc4e907b7045ec451afd58ccbc2b0967ab54e60b30"
+        },
+        "worker-route:ingest": {
+          "schema_digest": "4654a7188a03564cc334ecfc4e907b7045ec451afd58ccbc2b0967ab54e60b30",
+          "handler_digest": "4654a7188a03564cc334ecfc4e907b7045ec451afd58ccbc2b0967ab54e60b30"
+        },
+        "worker-route:oauth-kv": {
+          "schema_digest": "1f85421979dc24050065ec8dbf8000ac6dacbdde933dbbdc35030285df6a5c2e",
+          "handler_digest": "1f85421979dc24050065ec8dbf8000ac6dacbdde933dbbdc35030285df6a5c2e"
+        },
+        "worker-route:program6-routine": {
+          "schema_digest": "dc8c7278c8d6dfb2eaa3af56af489521d157c008eb71d8197ce56b1898ad9826",
+          "handler_digest": "dc8c7278c8d6dfb2eaa3af56af489521d157c008eb71d8197ce56b1898ad9826"
+        },
+        "worker-sidewrite:tool-read-call": {
+          "schema_digest": "d8187d95b668f29e2a84bbaf63de6d74dd718200d2f2da77768c482dc4aa6973",
+          "handler_digest": "d8187d95b668f29e2a84bbaf63de6d74dd718200d2f2da77768c482dc4aa6973"
+        }
+      },
+      "expected_count": 1128,
+      "expected_sha256": "a918bd47591448aa8db2cba16d76564a0eb061b6e35b1f0ba5a7d387a36dfd48"
     }
   ],
   "current_source_review": {

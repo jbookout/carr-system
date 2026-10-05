@@ -4,6 +4,7 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
+// v111 admits audited undo, partner archive proposals and invoice closes.
 // v110 admits invoices after the delivered relationship v109 contract.
 // v103 admits rule lookup and atomic teach supersession.
 // v102 seals confirm-merge as a human identity act; machines are refused.
@@ -200,7 +201,7 @@ import {
 // registered from it. Older registries must continue to refuse the new shapes
 // as a contract mismatch: a registry that has not sealed the change does not
 // know it.
-} from "./scac-mutation-registry.v110.generated.js";
+} from "./scac-mutation-registry.v111.generated.js";
 
 // v107 admits exact referral attribution after lead automation.
 // v106 admits evidence-driven lead stages and approval-only drafts.
