@@ -320,7 +320,7 @@ and server-issued runbook; all bindings and refusal conditions remain mandatory.
 
 ## Before every PR: design and debt pass
 
-Before every PR, apply both skills and [standards](docs/standards/review-retro.md) to its diff:
+Before opening or updating any pull request, apply both skills and [rules](docs/standards/review-retro.md):
 
 1. `~/.agents/skills/codebase-design/SKILL.md`: deep modules, real seams, design the interface twice when it matters.
 2. `~/.agents/skills/zero-tech-debt/SKILL.md`: rework the change from its intended end state; delete dead compatibility paths and duplicated rules.
