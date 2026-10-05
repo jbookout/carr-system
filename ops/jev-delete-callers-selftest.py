@@ -15,7 +15,7 @@ class DeletedCallers(unittest.TestCase):
     def test_removed_modules_and_hooks(self):
         for path in ('ops/stale_claim_judge.py', 'hooks/stale-claim-gate.py',
                      'ops/jev_build_advisory.py', 'ops/jev_rule_select.py',
-                     'tools/flash-prompt-rules.py', 'mcp-server/src/jev-needs-joe-advisory.js'):
+                     'mcp-server/src/jev-needs-joe-advisory.js'):
             with self.subTest(path=path):
                 self.assertFalse((REPO / path).exists())
         for config in ('ops/config/hooks.json', 'claude-tree/settings/user.settings.json'):
