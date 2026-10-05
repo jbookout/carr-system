@@ -206,6 +206,20 @@
       "owner": "orchestrator",
       "value": "64 explicit review/diagnosis judgments in 7 days under ad-hoc caller names; they now share one prefix and one budget",
       "sources": ["ops/typesafe_client.py"]
+    },
+    {
+      "caller": "jevlint_review",
+      "trigger": "Explicit advisory PR diff check or bounded rule calibration; never a scheduled full-repo run",
+      "runs_in": "ops/jevlint_review.py loopback SystemOne shim for pinned jevlint",
+      "attribution": "session",
+      "unattended": "allowed",
+      "hourly_budget": 150,
+      "daily_budget": 200,
+      "owner": "orchestrator",
+      "value": "Code taste findings for the reviewer, measured against real deletion fixtures",
+      "sources": [
+        "ops/jevlint_review.py"
+      ]
     }
   ]
 }

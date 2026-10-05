@@ -26,8 +26,9 @@ WHAT IT GUARANTEES
     2. JSON has no date or Decimal type — the deals exporter serialises with
        `default=str`. Records mode round-trips the deal list through json for
        the same reason.
-  Proven, not asserted: `tools/parity-records.py` runs every consumer in both
-  modes on the same day's data and diffs the derived output.
+  These conversions preserve the file-reader shapes. Whole-output equality
+  still requires comparing both modes on the same data; no retained harness
+  proves that equality across every consumer.
 
 MODE SELECTION (per consumer, highest precedence first)
     --files / --records on the command line
