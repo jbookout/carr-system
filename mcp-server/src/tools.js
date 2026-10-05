@@ -1,5 +1,6 @@
 import { invoiceTrackerTools } from "./invoice-tracker.js";
 import { isCalendarDate } from "./calendar-date.js";
+import { trustedOverride, dealEvidenceEntries, requireRelationshipPartner, mergeRelationshipFields } from "./vendor-relationship.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
 // the verified token (never the payload), base_version conflicts ask and never
@@ -33,6 +34,7 @@ import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
+import { leadAutomationTools } from "./lead-automation.js";
 import { jevCallReceiptTools } from "./jev-call-receipt.js";
 import { workflowCutoverTools } from "./workflow-cutover.v5.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
@@ -339,7 +341,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "record-commission-receipt" || verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "record-commission-receipt" || ["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move"].includes(verb) || verb === "teach" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -3293,6 +3295,7 @@ export const TOOLS = {
           order by sort,slug`)).rows;
       const leads = (await c.query(
         `select id,registry_ref,name,specialty,city,county,state,lane,stage,
+                (select party_id from lead where lead.id=v_lead_board.id) as party_id,
                 stage_label,stage_sort,score,segment,suppressed,est_lease_event,
                 event_confidence,last_touch,next_action_date,owner,owner_label,
                 base_version,created_at,updated_at
@@ -4685,9 +4688,9 @@ export const TOOLS = {
       // vendors unfixable (loop #199). category_slug, not free-text category: 0050
       // deprecated the free-text field after a stage value got stored as a
       // profession, and reopening it here would reopen that defect.
-      const allowed = ["stage","seeking","offers","referral_active","territory","rivalry_group","out_of_market","intro_notes","category_slug","verticals"];
+      const allowed = ["stage","seeking","offers","referral_active","territory","rivalry_group","out_of_market","intro_notes","category_slug","verticals","loan_programs","trust_override","deal_evidence"];
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
-      if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      if (!keys.length && !Object.hasOwn(args.fields,"deal_evidence") && !Object.hasOwn(args.fields,"verify_deal_history")) throw new ToolError({ error: "no_updatable_fields", allowed });
       // Pre-validate rather than letting the FK abort the transaction: a poisoned
       // transaction cannot even fetch the slug list to explain itself.
       if (keys.includes("category_slug") && args.fields.category_slug !== null) {
@@ -4701,10 +4704,36 @@ export const TOOLS = {
       if (keys.includes("verticals") && args.fields.verticals !== null &&
           !(Array.isArray(args.fields.verticals) && args.fields.verticals.every(v => typeof v === "string")))
         throw new ToolError({ error: "verticals_not_array", hint: 'pass an array of strings, e.g. ["dental","vet"]' });
-      const old = (await c.query(`select ${keys.join(",")} from vendor where id=$1`, [s.id])).rows[0];
+      if (keys.includes("trust_override")) {
+        try { args.fields.trust_override = trustedOverride(args.fields.trust_override, actor); }
+        catch (error) { throw new ToolError({ error: error.code }); }
+      }
+      if (keys.includes("loan_programs") && args.fields.loan_programs !== null &&
+          !(Array.isArray(args.fields.loan_programs) && args.fields.loan_programs.every(v => typeof v === "string" && v.length <= 200)))
+        throw new ToolError({ error: "loan_programs_invalid" });
+      let entries = [];
+      if (Object.hasOwn(args.fields, "deal_evidence")) {
+        try { entries = dealEvidenceEntries(args.fields.deal_evidence); }
+        catch (error) { throw new ToolError({ error: error.code }); }
+        for (const entry of entries) {
+          const live = await c.query("select d.id from public.deal d join public.client dc on dc.id=d.client_id join public.party dp on dp.id=dc.party_id where d.id=$1 and dc.merged_into is null and dp.merged_into is null and dp.deleted_at is null", [entry.deal_id]);
+          if (!live.rows.length) throw new ToolError({ error: "deal_evidence_deal_not_found" });
+        }
+        args.fields.deal_evidence = entries;
+      }
+      if (Object.hasOwn(args.fields, "verify_deal_history")) {
+        try { requireRelationshipPartner(actor, "deal_history_verification_refused"); }
+        catch (error) { throw new ToolError({ error: error.code }); }
+        if (args.fields.verify_deal_history !== true) throw new ToolError({ error: "deal_history_verification_refused" });
+        args.fields.deal_history_verified_at = new Date().toISOString();
+        keys.push("deal_history_verified_at");
+      } else if (Object.hasOwn(args.fields, "deal_evidence")) {
+        args.fields.deal_history_verified_at = null; keys.push("deal_history_verified_at");
+      }
+      const old = keys.length ? (await c.query(`select ${keys.join(",")} from vendor where id=$1`, [s.id])).rows[0] : {};
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
-      await c.query(`update vendor set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
-        [actor.id, ...keys.map(k => args.fields[k]), s.id]);
+      await c.query(`update vendor set ${sets ? sets + ", " : ""}updated_by=$1 where id=$${keys.length + 2}`,
+        [actor.id, ...keys.map(k => k === "deal_evidence" ? JSON.stringify(args.fields[k]) : args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-vendor", "vendor", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
@@ -5549,7 +5578,7 @@ export const TOOLS = {
         "referral_active","territory","offers","seeking","rivalry_group","originated",
         "intro_notes","links_label","last_touch","relationship_level"];
       const rows = (await c.query(
-        `select id, vendor_ref, party_id, merged_into, ${FIELDS.join(",")} from vendor where id = any($1)`,
+        `select id, vendor_ref, party_id, merged_into, loan_programs, deal_evidence, deal_history_verified_at, trust_override, ${FIELDS.join(",")} from vendor where id = any($1) order by id for update`,
         [[survId, mergId]])).rows;
       const surv = rows.find(r => r.id === survId), merg = rows.find(r => r.id === mergId);
       if (surv.merged_into || merg.merged_into)
@@ -5569,11 +5598,14 @@ export const TOOLS = {
         else if (!empty(a) && !empty(b) && JSON.stringify(a) !== JSON.stringify(b))
           conflicts.push({ field: f, survivor: a, merged: b });
       }
+      const relationship = mergeRelationshipFields(surv, merg);
+      Object.assign(filled, relationship.filled);
+      conflicts.push(...relationship.conflicts);
       const fk = Object.keys(filled);
       if (fk.length) {
         const sets = fk.map((k, i) => `${k}=$${i + 2}`).join(", ");
         await c.query(`update vendor set ${sets}, updated_by=$1 where id=$${fk.length + 2}`,
-          [actor.id, ...fk.map(k => filled[k]), survId]);
+          [actor.id, ...fk.map(k => k === "deal_evidence" ? JSON.stringify(filled[k]) : filled[k]), survId]);
       }
 
       // Dependents move; event rows stay where they happened (history is immutable).
@@ -8728,6 +8760,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "evidence-activation": "mcp-server/src/evidence-activation.js",
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
+  "lead-automation": "mcp-server/src/lead-automation.js",
   "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
@@ -9859,6 +9892,7 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 // server-timestamped receipt (migration 0587) before returning the answers, so
 // Jev gates credit only rows the gated model could not forge locally. See
 // src/jev-call-receipt.js.
+registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError }), "lead-automation");
 registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
 // DoctorCRE V5-R02: workflow cutover, caller migration and retirement
 // readiness. Composes accept-workflow / disable-legacy-schedule rather than

@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:dd2ba785be0c82b48607d6d532e01bffa3f2b957123fb33cf79216a029f6af87",
+    "configuration_fingerprint": "sha256:1630b01d6d0de3244a12a38508b67095e0eb41a7ff35866cddcea8c472ecc4a4",
     "harness_id": "evals/rule-delivery/run_eval.py",
-    "harness_version": "8e1acfe717a87e4609fc3cee183122bd29d285541ca7459108ccd70e4157bbac",
+    "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a100bc-f78b-7d52-932d-a1beece0d5fd",
+    "native_session_ref": "01a10808-641a-7bc2-be33-d2c95c730c75",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -46,19 +46,20 @@
       "dimension_id": "envelope-prompt-clean-delivery",
       "direction_vs_baseline": "improved",
       "evidence_refs": [
-        "evals/rule-delivery/pr1325-replay.json"
+        "evals/rule-delivery/evidence/baseline.jsonl",
+        "evals/rule-delivery/evidence/candidate.jsonl"
       ],
       "status": "passed"
     },
     {
       "baseline": {
-        "ci_high": 0.5066666666666667,
-        "ci_low": 0.288135593220339,
+        "ci_high": 0.5032258064516129,
+        "ci_low": 0.28776978417266186,
         "score": 0.4
       },
       "candidate": {
-        "ci_high": 0.5028571428571429,
-        "ci_low": 0.2824858757062147,
+        "ci_high": 0.4970414201183432,
+        "ci_low": 0.2810810810810811,
         "score": 0.39375
       },
       "critical": true,
@@ -70,19 +71,20 @@
       "dimension_id": "human-required-recall",
       "direction_vs_baseline": "equivalent",
       "evidence_refs": [
-        "evals/rule-delivery/pr1325-replay.json"
+        "evals/rule-delivery/evidence/baseline.jsonl",
+        "evals/rule-delivery/evidence/candidate.jsonl"
       ],
       "status": "passed"
     },
     {
       "baseline": {
-        "ci_high": 0.3265895953757225,
-        "ci_low": 0.20285714285714285,
+        "ci_high": 0.3265993265993266,
+        "ci_low": 0.20520231213872833,
         "score": 0.2640449438202247
       },
       "candidate": {
-        "ci_high": 0.3251366120218579,
-        "ci_low": 0.20168067226890757,
+        "ci_high": 0.32608695652173914,
+        "ci_low": 0.20234604105571846,
         "score": 0.2627118644067797
       },
       "critical": true,
@@ -94,11 +96,95 @@
       "dimension_id": "human-delivery-precision",
       "direction_vs_baseline": "equivalent",
       "evidence_refs": [
-        "evals/rule-delivery/pr1325-replay.json"
+        "evals/rule-delivery/evidence/baseline.jsonl",
+        "evals/rule-delivery/evidence/candidate.jsonl"
       ],
       "status": "passed"
     }
   ],
+  "evidence": {
+    "baseline": {
+      "dependencies": {
+        "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
+        "hooks/rule-pack-preuse-reselection.py": "686d531165ac24836d8e82cbf85ab64e536a8612a739a00357eb2cdc1505b4a1",
+        "lib/claude_continuity_config.py": "9e6d1afd1c5714bd61892ca1da7de058dbcfebae84f9131fd70d24d6a91985f5",
+        "lib/claude_rule_delivery_dedupe.py": "6b37b3e0cd950410332fcc4099c17b61650d87eb63158bf550c5d259ca0540b4",
+        "lib/rule_delivery_preuse.py": "8a356537cac8c476aee4fa70d0fb3287af2e304fad08a0840e7849464db90a74",
+        "lib/rule_delivery_shadow.py": "b39b504ff0bf77819b578a12f97821bc3da2e8226e90b5f17d3a40ccb1cb7417",
+        "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
+        "ops/config/jev-cost-guard.v1.json": "62aab9867fa6b200677d405b2e1588ac248e443625cfcb0e3710d0b573f24cc6",
+        "ops/config/rule-classes.v1.json": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23",
+        "ops/config/rule-enforcement-map.json": "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada",
+        "ops/config/rule-jev-triggers.v1.json": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
+        "ops/config/rule-jit-triggers.v1.json": "32aa6c4843022a334e9088069c7a56a84b3c02bb0c4bc0b52a661b04a147b871",
+        "ops/config/rule-routes.v1.json": "6bd10a8e9801debf21c81d8371c2eddb7052d3cc08a7d7abc23b814fd37f7114",
+        "ops/config/rule-selection-corpus.v1.json": "90f0e31475f1cd2c445475f8742de3dc94b62a2474d581fcefb5429a5eae102f",
+        "ops/config/rule-triage.v1.json": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c",
+        "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
+        "ops/fixtures/real-replay/read-calls.jsonl": "19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
+        "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+        "ops/jev_rule_select.py": "89fce70b4056a160b4dc9cd78a9123bf895fb1b91d000d69e308c5088dda7833",
+        "ops/machine_envelope.py": "749970f4dfb838af4e6cd1e6537988a278fc0006a02b32f665dfd0f943266c3f",
+        "ops/rule_delivery_eval.py": "7c846223ccc026f4f16a51dca0f695986cefadfc5f412c23adf73f57d08d022a",
+        "ops/rule_trigger_compile.py": "01fbf5c73a0e29c1d8c1660f5c2053a0fd048f460adad6b7bf00391dd5dd6291",
+        "ops/rule_trigger_delivery.py": "9ae37d7c4d334f5fee1362c7d476fcbd8b5495bb5cfe84c3cdf6d9864f3836be",
+        "ops/typesafe_client.py": "7f826dc29e501f4f5ccd5eeb838ea089d7274688b8615ef658b21b21cdf2d0af",
+        "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
+      },
+      "ref": "c11c1153a59ff90f7d348f11330c97a25cb0f2f9"
+    },
+    "cohorts": {
+      "baseline": {
+        "path": "evals/rule-delivery/evidence/baseline.jsonl",
+        "sha256": "12bda6abafad12dace8e11b2ff974abdc5826cdd100d5cedea4bcb62475b867d"
+      },
+      "candidate": {
+        "path": "evals/rule-delivery/evidence/candidate.jsonl",
+        "sha256": "e8e81c8f02992bd4dba2510db8fd8a6554c893144d8290c08105b8d0b55335ca"
+      }
+    },
+    "dependencies": {
+      "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
+      "hooks/rule-pack-preuse-reselection.py": "686d531165ac24836d8e82cbf85ab64e536a8612a739a00357eb2cdc1505b4a1",
+      "lib/claude_continuity_config.py": "9e6d1afd1c5714bd61892ca1da7de058dbcfebae84f9131fd70d24d6a91985f5",
+      "lib/claude_rule_delivery_dedupe.py": "6b37b3e0cd950410332fcc4099c17b61650d87eb63158bf550c5d259ca0540b4",
+      "lib/rule_delivery_preuse.py": "8a356537cac8c476aee4fa70d0fb3287af2e304fad08a0840e7849464db90a74",
+      "lib/rule_delivery_shadow.py": "b39b504ff0bf77819b578a12f97821bc3da2e8226e90b5f17d3a40ccb1cb7417",
+      "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
+      "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
+      "ops/config/jev-cost-guard.v1.json": "f8da9d20d6019c5bd9528683c61594dca09f07488d66ce998c53ae8bc3c24089",
+      "ops/config/rule-classes.v1.json": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23",
+      "ops/config/rule-enforcement-map.json": "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada",
+      "ops/config/rule-jev-triggers.v1.json": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
+      "ops/config/rule-jit-triggers.v1.json": "bcf2c4dd152c1df6613a62ddfc333ca4060da6dd983c51d27f51125713ab323e",
+      "ops/config/rule-routes.v1.json": "6bd10a8e9801debf21c81d8371c2eddb7052d3cc08a7d7abc23b814fd37f7114",
+      "ops/config/rule-selection-corpus.v1.json": "90f0e31475f1cd2c445475f8742de3dc94b62a2474d581fcefb5429a5eae102f",
+      "ops/config/rule-triage.v1.json": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c",
+      "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
+      "ops/fixtures/real-replay/read-calls.jsonl": "19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
+      "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+      "ops/jev_rule_select.py": "89fce70b4056a160b4dc9cd78a9123bf895fb1b91d000d69e308c5088dda7833",
+      "ops/machine_envelope.py": "749970f4dfb838af4e6cd1e6537988a278fc0006a02b32f665dfd0f943266c3f",
+      "ops/rule_delivery_eval.py": "7c846223ccc026f4f16a51dca0f695986cefadfc5f412c23adf73f57d08d022a",
+      "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
+      "ops/rule_trigger_delivery.py": "64746e5fc5c65e2ff67a72dfb0217598964448283e1c7f7d0fb56dde0c3bc3f3",
+      "ops/typesafe_client.py": "b5a0555d7b2a787ae18629882664f308153fcb1ff3aae1d587b56e169eeb5641",
+      "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
+    },
+    "expectations": {
+      "path": "evals/rule-delivery/expectations.v1.json",
+      "sha256": "e1a843ae09d271e8a1390209bd0519ecef9db771aa51ef20b570283f36ed2aaa",
+      "version": "rule-delivery-expectations/v1"
+    },
+    "scorer": {
+      "function": "score_receipt",
+      "path": "evals/rule-delivery/run_eval.py"
+    },
+    "source": {
+      "evals/rule-delivery/make_report.py": "868f75651f7b80d6303d293a77ea151f4a8b69ed3ca49122cc474ac03ce86b26",
+      "evals/rule-delivery/run_eval.py": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e"
+    }
+  },
   "grader": {
     "kind": "programmatic",
     "validation": {
@@ -109,7 +195,7 @@
       "result": "pass"
     }
   },
-  "measured_on": "2026-10-03",
+  "measured_on": "2026-10-04",
   "min_useful_gain": 0.7,
   "noise_floor": 0.3,
   "notes": [
@@ -118,12 +204,13 @@
     "All-traffic recall decreases due to suppressing compiled cues on complete machine envelopes. Do not describe all-traffic recall as preserved.",
     "No live-provider or production deployment measurement. The regression property separately exercises spent deadlines and synthetic provider failures.",
     "Native /claude-api slash commands are unavailable in this runtime. Used the existing production-function replay and programmatic grader, without a model call. The test split was scored but no new test transcripts were read to propose the fix.",
-    "Complete-envelope prompt false deliveries: test 14 -> 0; train 40 -> 1. Both exceed the original 70% reduction target. Prompt-clean is measured before tool events."
+    "Complete-envelope prompt false deliveries: test 14 -> 0; train 40 -> 1. Both exceed the original 70% reduction target. Prompt-clean is measured before tool events.",
+    "Evidence: the baseline arm is the tree at c11c1153 (main before PR #1325) and the candidate arm is this tree, both replayed by the same harness; make_report.py receipt --baseline-ref c11c1153a59ff90f7d348f11330c97a25cb0f2f9 regenerates both cohorts, which match PR #1325's recorded replay case for case. Per-arm intervals resample cases in case-id order, so they no longer depend on cohort row order; point estimates and paired delta intervals are unchanged."
   ],
   "primary_dimension": "envelope-prompt-clean-delivery",
   "repeats": 2,
   "rung": "regression",
-  "schema_version": 1,
+  "schema_version": 2,
   "split": {
     "method": "Existing frozen v2 split plus hard-case hash split; historical reuse disclosed in notes",
     "sealed_test": true,
@@ -137,7 +224,8 @@
         "human-delivery-precision"
       ],
       "evidence_refs": [
-        "evals/rule-delivery/pr1325-replay.json"
+        "evals/rule-delivery/evidence/baseline.jsonl",
+        "evals/rule-delivery/evidence/candidate.jsonl"
       ],
       "stage_id": "rule_delivery",
       "status": "passed"

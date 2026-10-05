@@ -842,8 +842,9 @@ def inspect_stop_boundary(final_message, evidence, diff_text, task_text, session
                           receipt_path=None):
     """Judge a new completion claim and a new diff in one typed request.
 
-    The state key is content, not Stop count. A repeated Stop with no new claim
-    or diff reuses the previous decision without another paid request.
+    Reuse a claim judgment only while its evidence and task are unchanged.
+    Diff judgments also belong to their task; new test evidence alone does not
+    require reviewing an unchanged diff again.
     """
     folder = state_dir or STOP_STATE_DIR
     session_key = hashlib.sha256(str(session_id).encode()).hexdigest()[:32]
@@ -852,13 +853,20 @@ def inspect_stop_boundary(final_message, evidence, diff_text, task_text, session
     diff = (diff_text or "")[:40000]
     claim_key = hashlib.sha256(claim.encode()).hexdigest() if claim else ""
     diff_key = hashlib.sha256(diff.encode()).hexdigest() if diff.strip() else ""
+    task_key = hashlib.sha256((task_text or "").encode()).hexdigest()
+    claim_context = hashlib.sha256(json.dumps({
+        "task": task_key,
+        "evidence": evidence or {},
+    }, sort_keys=True, default=str).encode()).hexdigest()
     try:
         with open(marker, encoding="utf-8") as fh:
             previous = json.load(fh)
     except (OSError, ValueError):
         previous = {}
-    claim_due = bool(claim and claim_key != previous.get("claim"))
-    diff_due = bool(diff_key and diff_key != previous.get("diff"))
+    claim_due = bool(claim and (claim_key != previous.get("claim") or
+                               claim_context != previous.get("claim_context")))
+    diff_due = bool(diff_key and (diff_key != previous.get("diff") or
+                                 task_key != previous.get("task")))
     if not claim_due and not diff_due:
         return []
     jj = judge_module or _sibling("jev_judge")
@@ -928,10 +936,11 @@ def inspect_stop_boundary(final_message, evidence, diff_text, task_text, session
             if not all(qid in bodies for qid in questions):
                 raise ValueError("missing typed Stop answer")
             status = "answered"
-        except Exception:
+        except Exception as exc:
             answer = {}
             status = "unavailable"
             results.append(_result("stop_boundary", "unavailable",
+                                   detail={"reason": getattr(exc, "reason", "inspection_error")},
                                    advice="Jev Stop judgment unavailable; inspect the claim and diff"))
             if claim_due and failed_test:
                 results.append(_result("done_claim", "unsupported",
@@ -992,7 +1001,8 @@ def inspect_stop_boundary(final_message, evidence, diff_text, task_text, session
             os.makedirs(folder, exist_ok=True)
             temp = marker + ".tmp"
             with open(temp, "w", encoding="utf-8") as fh:
-                json.dump({"claim": claim_key, "diff": diff_key}, fh)
+                json.dump({"claim": claim_key, "diff": diff_key,
+                           "claim_context": claim_context, "task": task_key}, fh)
             os.replace(temp, marker)
     except OSError:
         pass

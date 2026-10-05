@@ -627,6 +627,73 @@ class HandoffTests(unittest.TestCase):
 
 
 class StopBoundaryBatchTests(unittest.TestCase):
+    def test_stop_unavailability_preserves_typed_reason_for_notice_policy(self):
+        for reason in ("vendor_unavailable", "site_hourly_budget", "inspection_error"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                error = RuntimeError("fixture unavailable")
+                error.reason = reason
+                results = jdc.inspect_stop_boundary(
+                    "All tests pass.", {"test_output": "OK", "test_exit_code": 0}, "", "repair app",
+                    "session-reason", client=FakeClient, judge_module=FakeJudge(error=error),
+                    state_dir=tmp, receipt_path=os.path.join(tmp, "receipt.jsonl"))
+                self.assertEqual(results[0]["detail"]["reason"], reason)
+
+    def test_same_claim_is_rejudged_after_passing_evidence_becomes_failing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.99},
+                "omitted_failure": {"type": "noul", "noul": 0.01},
+            })
+            def inspect(evidence):
+                return jdc.inspect_stop_boundary(
+                    "All tests pass.", evidence, "", "repair app", "session-evidence",
+                    client=FakeClient, judge_module=judge, state_dir=tmp,
+                    receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            passing = {"test_output": "OK", "test_exit_code": 0}
+            failing = {"test_output": "FAILED test_x", "test_exit_code": 1}
+            self.assertEqual(inspect(passing)[0]["verdict"], "supported")
+            self.assertEqual(inspect(passing), [])
+            second = inspect(failing)
+            self.assertEqual([row["verdict"] for row in second], ["unsupported"])
+            self.assertEqual(inspect(failing), [])
+            self.assertEqual(judge.calls, 2)
+
+    def test_failed_test_flag_invalidates_the_claim_judgment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.99},
+                "omitted_failure": {"type": "noul", "noul": 0.01},
+            })
+            def inspect(failed):
+                return jdc.inspect_stop_boundary(
+                    "All tests pass.", {"test_failed": failed}, "", "repair app", "session-flag",
+                    client=FakeClient, judge_module=judge, state_dir=tmp,
+                    receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(inspect(False)[0]["verdict"], "supported")
+            self.assertEqual([row["verdict"] for row in inspect(True)], ["unsupported"])
+
+    def test_new_task_rejudges_the_same_claim_and_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            judge = FakeJudge({
+                "claim_scope": {"type": "choice", "choice": "current_completion", "confidence": 0.98},
+                "claims_supported": {"type": "noul", "noul": 0.99},
+                "omitted_failure": {"type": "noul", "noul": 0.01},
+            })
+            def inspect(task):
+                return jdc.inspect_stop_boundary(
+                    "All tests pass.", {"test_exit_code": 0},
+                    "diff --git a/app.py b/app.py\n+x\n", task, "session-task",
+                    client=FakeClient, judge_module=judge, state_dir=tmp,
+                    receipt_path=os.path.join(tmp, "receipt.jsonl"))
+            self.assertEqual(inspect("repair app")[0]["verdict"], "supported")
+            self.assertEqual(inspect("repair app"), [])
+            self.assertEqual([row["verdict"] for row in inspect("add input validation")],
+                             ["supported"])
+            self.assertEqual(judge.calls, 2)
+            self.assertTrue(any(q.startswith("risk_") for q in judge.last[1]))
+
     def test_diff_uses_review_tier_map_without_paid_judgment(self):
         with tempfile.TemporaryDirectory() as tmp:
             judge = FakeJudge({})

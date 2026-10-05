@@ -48,7 +48,20 @@ def _client():
     # Production-shaped fake transports exercise real reservation code, but
     # their synthetic attempts must never read or change the live counter.
     mod.JEV_DAILY_CAP_LOG = Path(tempfile.mkdtemp(dir=_FIXTURE_STORAGE.name)) / "jev-calls.jsonl"
+    # Admission (registry, attribution, fixture refusal) is covered by
+    # ops/jev-call-sites-selftest.py; this suite tests the transport beneath it.
+    site = {"caller": "*", "trigger": "selftest", "runs_in": "selftest",
+            "attribution": "session_or_job", "unattended": "allowed",
+            "hourly_budget": 10**9, "daily_budget": 10**9, "owner": "selftest",
+            "value": "selftest", "sources": ["ops/typesafe_client.py"]}
+    mod.load_call_sites = lambda path=None: {"hourly_paid_call_cap": 10**9, "sites": {"*": site}}
+    mod.call_site = lambda caller, registry: site
     return mod
+
+
+for _name in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER"):
+    os.environ.pop(_name, None)
+os.environ["CARR_JEV_JOB"] = "jev-server-receipts-selftest"
 
 class _Proc:
     def __init__(self, code, out="", err=""):

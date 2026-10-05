@@ -42,7 +42,7 @@ function fakeFetch(responses) {
 const ANSWERS = { q1: { noul: 0.82 }, q2: { choice: "b", probabilities: { a: 0.1, b: 0.9 } } };
 const QUESTIONS = {
   q1: { type: "noul", instructions: "Is the plan sound?" },
-  q2: { type: "choice", instructions: "Which option?", choices: ["a", "b"] },
+  q2: { type: "choice", instructions: "Which option?", criteria: { a: "A", b: "B" } },
 };
 const ACTORS = new Map([[AGENT.slug, AGENT.id], [OTHER.slug, OTHER.id]]);
 
@@ -55,8 +55,11 @@ test("the cap successor changes only ask-jev's bound schema and preserves the pr
   assert.equal(changed.length, 1);
   assert.equal(changed[0].ingress_key, "mcp-tool:ask-jev");
   assert.equal(inventory.assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
-  assert.equal((await import("../src/mutation-registry.js")).SCAC_MUTATION_REGISTRY_VERSION,
-    "scac-mutation-registry.v105");
+  const { SCAC_MUTATION_REGISTRY_VERSION } = await import("../src/mutation-registry.js");
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, inventory.CURRENT_REGISTRY_VERSION);
+  const activeRows = inventory.boundInventoryRows(inventory.frozenInventory(SCAC_MUTATION_REGISTRY_VERSION));
+  assert.deepEqual(activeRows.find(row => row.ingress_key === "mcp-tool:ask-jev"),
+    newRows.find(row => row.ingress_key === "mcp-tool:ask-jev"));
 });
 
 test("budgeted cache-only misses never reserve or fetch, including a broken cache", async () => {
