@@ -3,6 +3,8 @@
 import argparse
 import csv
 import hashlib
+import importlib.util
+import re
 import html
 import json
 from collections import Counter
@@ -15,8 +17,33 @@ def load(path):
     return json.loads(Path(path).read_text())
 
 
+REDACTIONS: list[tuple[re.Pattern[str], str]] = []
+
+
+def redact(value):
+    if isinstance(value, str):
+        for pattern, alias in REDACTIONS:
+            value = pattern.sub(alias, value)
+        return value
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact(item) for key, item in value.items()}
+    return value
+
+
+def prepare_labels(values):
+    spec = importlib.util.spec_from_file_location("client_label_names", ROOT / "ops/githooks/client-name-warn.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    tokens = " " + " ".join(module.tokens(json.dumps(values, ensure_ascii=False))) + " "
+    names = sorted((name for name in module.load_names() if " " + name + " " in tokens), key=len, reverse=True)
+    REDACTIONS[:] = [(re.compile(r"\b" + r"[^a-zA-Z0-9]*".join(name.split()) + r"\b", re.I),
+                      "Historical example " + str(i + 1)) for i, name in enumerate(names)]
+
+
 def cell(value):
-    text = str(value)
+    text = redact(str(value))
     if text.startswith("https://github.com/jbookout/carr-system/pull/"):
         return '<a href="' + html.escape(text, quote=True) + '">PR #' + html.escape(text.rsplit('/', 1)[-1]) + '</a>'
     return html.escape(text)
@@ -29,7 +56,7 @@ def table(headers, rows):
 def page(title, subtitle, body):
     return '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>''' + html.escape(title) + '''</title><style>
 :root{color-scheme:dark;font:16px/1.55 system-ui;background:#080d18;color:#e4eaf5}body{margin:0}main{max-width:1500px;margin:auto;padding:42px 28px}h1{font-size:clamp(30px,5vw,52px);letter-spacing:-.04em;margin:12px 0}h2{margin-top:38px;color:#a8c6ff}p{max-width:1000px}nav{display:flex;gap:20px;flex-wrap:wrap}a{color:#a8c6ff}small{color:#99a9c4}.stat{font-size:32px;color:#65dcb4}.card{border:1px solid #273650;background:#10192a;border-radius:14px;padding:20px;margin:24px 0}.scroll{overflow:auto;max-height:720px;border:1px solid #26344b;border-radius:12px}table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:12px 14px;text-align:left;vertical-align:top;border-bottom:1px solid #26344b;min-width:90px}th{position:sticky;top:0;background:#152139;z-index:1}tr:hover{background:#152139}input{font:inherit;border-radius:8px;border:1px solid #415678;background:#10192a;color:inherit;padding:12px;width:min(92%,600px);margin:14px 0}button{font:inherit;background:#203553;color:inherit;border:1px solid #415678;border-radius:8px;padding:10px;cursor:pointer}details{margin:20px 0}summary{cursor:pointer}footer{margin-top:40px;color:#9faec5}@media(prefers-reduced-motion:no-preference){main{animation:appear .3s ease}a,button{transition:background .15s} @keyframes appear{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}}
-</style><main><nav><a href="followup.html">Earlier exercise</a><a href="dead-rules.html">Delivery silence</a><a href="design.html">Guaranteed delivery</a></nav><h1>''' + html.escape(title) + '</h1><p>' + html.escape(subtitle) + '''</p><label>Search all rows <input id="filter" type="search" placeholder="Rule, source, status or subject"></label><button onclick="document.getElementById('filter').value='';filterRows('')">Clear search</button>''' + body + '''<footer>Read-only audit • 5 October 2026 • No rule amendments, retirements, production installation or merge. Counts are snapshot evidence; empty observations do not establish obsolete policy.</footer></main><script>function filterRows(q){q=q.toLowerCase();document.querySelectorAll('tbody tr').forEach(r=>r.hidden=!r.textContent.toLowerCase().includes(q))}document.getElementById('filter').addEventListener('input',e=>filterRows(e.target.value))</script></html>'''
+</style><main><nav><a href="followup.html">Earlier exercise</a><a href="dead-rules.html">Delivery silence</a><a href="design.html">Guaranteed delivery</a></nav><h1>''' + html.escape(title) + '</h1><p>' + html.escape(subtitle) + '''</p><label>Search all rows <input id="filter" type="search" placeholder="Rule, source, status or subject"></label><button onclick="document.getElementById('filter').value='';filterRows('')">Clear search</button>''' + body + '''<footer>Read-only audit • 5 October 2026 • No rule amendments, retirements, production installation or merge. Counts are snapshot evidence; empty observations do not establish obsolete policy. Historical client labels are pseudonyms; stable IDs locate canonical records.</footer></main><script>function filterRows(q){q=q.toLowerCase();document.querySelectorAll('tbody tr').forEach(r=>r.hidden=!r.textContent.toLowerCase().includes(q))}document.getElementById('filter').addEventListener('input',e=>filterRows(e.target.value))</script></html>'''
 
 
 def main():
@@ -81,7 +108,8 @@ def main():
         recommendations.append([row['name']+' → '+row['verdict'], 'rules-triage/triage.json:'+row['short_id'], 'built' if row['verdict']=='ALREADY-ENFORCED' else 'not built', '; '.join(row.get('evidence',[])), row['reason']+' Audit-only82 proposed rules; no activation, retirement or source effect performed by that exercise.'])
     doc_sources = [x.name for x in p.glob('doc-*.json')]
     collections = ['Live standing-context full and all 7 boot pages (168 shared, 31 personal)','doctrine-index: 265 documents; active section catalogue: 2281','search-doctrine: 7 queries; retrieve live canonical search','Full doctrine reads: '+', '.join(doc_sources),'Decision history: 40 guidance/routing/playbook/prose-related records; find-precedent: 8 playbook rulings','loop-board (60 visible rows), loop-headers (14 blocks), current-work-requests (captured inventory; closed WR19 recovered through history)','GitHub: 22 candidate PR reads, 28 WR19 PR search hits, all-state guidance/rule delivery/prose PR search; PR124 recovered on bounded retry','Full git history of rule-classification.v1.csv, rule-classes.v1.json and rule-enforcement-map.json','Tracked audits: enforceability, 93-row typed manifest, curation review/batch, shadow adjudication and cause split','Canonical out/ report path census, rulebench report/results, rules-triage 82-row report, unfinished census brief','Model Room / Dot: 478 report files searched for rule/guidance/prose/playbook/doctrine audit terms; 6 reports matched; related recommendations attributed in table','Local delivery logs, hook telemetry, gate decisions, route receipts and CARR Claude project transcripts: '+str(len(usage['inventory']))+' files (individual sanitized names in inventory.json)']
-    (p / 'followup-data.json').write_text(json.dumps({'collections':collections,'recommendations':recommendations},indent=2)+'\n')
+    prepare_labels([recommendations, usage['sections'], classes])
+    (p / 'followup-data.json').write_text(json.dumps(redact({'label_status':'Client names are pseudonyms; source IDs remain canonical','collections':collections,'recommendations':recommendations}),indent=2)+'\n')
     body = '<div class="card"><span class="stat">'+str(len(recommendations))+'</span> recommendation rows recovered. Source delivery repeatedly preceded proof that guidance reached its binding moment.</div>'
     body += '<h2>Collections searched</h2><ul>'+''.join('<li>'+html.escape(x)+'</li>' for x in collections)+'</ul><p>Negative findings are bounded by these collections. Search limits, unlogged retrieval and provider history prevent an exhaustive claim about all possible historical evidence. Source merge, store admission and live consumption are separate facts.</p>'
     body += '<h2>Recommendation → delivery evidence → remaining work</h2>'+table(['Recommendation','Source','Status','Commit / PR evidence','Why unfinished or scope of completion'],recommendations)
@@ -122,7 +150,7 @@ def main():
     unread_docs = [slug for slug in doc_counts if all(not s['observed_read_calls'] for s in sections if s['slug']==slug)]
     sanitized = [{'collection':str(Path(x['collection']).relative_to(Path.home())) if str(x['collection']).startswith(str(Path.home())+'/') else x['collection'],**{k:v for k,v in x.items() if k!='collection'}} for x in usage['inventory']]
     (p / 'inventory.json').write_text(json.dumps(sanitized,indent=2)+'\n')
-    (p / 'rule-data.json').write_text(json.dumps({'rules':dead,'routes':design,'sections':sections,'unread_documents':unread_docs,'window_start':usage['deliveries_30d']['start'],'window_end':usage['now'],'limitations':usage['limitations']},indent=2)+'\n')
+    (p / 'rule-data.json').write_text(json.dumps(redact({'label_status':'Display metadata with client pseudonyms; use stable section IDs for canonical lookup','rules':dead,'routes':design,'sections':sections,'unread_documents':unread_docs,'window_start':usage['deliveries_30d']['start'],'window_end':usage['now'],'limitations':usage['limitations']}),indent=2)+'\n')
     body = f'<div class="card"><span class="stat">{len(zeros)} / {len(rules)}</span> active rules with zero observed full-text deliveries in 30 days.<br>{len(unread)} / {len(sections)} active doctrine sections with no observed direct read request. {len(unread_docs)} documents have no observed direct section or document read.</div>'
     body += '<p>Window: '+html.escape(usage['deliveries_30d']['start'])+' through '+html.escape(usage['now'])+'. Active means the live Joe-scoped standing-context set: 199, not the 210-row committed evaluation corpus. Deliveries are deduplicated full-text receipts and complete boot observations. Route matches, summaries and overflow pointers do not count.</p>'
     body += '<p>'+str(usage['unattributed_gate_firings'])+' refusals lack rule attribution. Per-rule attributed zeros therefore cannot establish “never fired.” Hook invocation meters have no rule IDs. Topic absence, wiped history, tool-only sessions and search/retrieve may leave reads unobserved.</p>'

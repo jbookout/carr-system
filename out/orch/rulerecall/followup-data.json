@@ -1,4 +1,5 @@
 {
+  "label_status": "Client names are pseudonyms; source IDs remain canonical",
   "collections": [
     "Live standing-context full and all 7 boot pages (168 shared, 31 personal)",
     "doctrine-index: 265 documents; active section catalogue: 2281",
@@ -1212,18 +1213,18 @@
       "A subscription launcher exists; a different adapter can still introduce paid API use. Audit-only82 proposed rules; no activation, retirement or source effect performed by that exercise."
     ],
     [
-      "Assign Musicologie referrals to Dell \u2192 ENCODE",
+      "Assign Historical example 1 referrals to Dell \u2192 ENCODE",
       "rules-triage/triage.json:084cd9f2",
       "not built",
       "084cd9f2: corrects c3930d4a; /Users/booko/carr-system/mcp-server/src/tools.js:3971",
-      "The franchise structure is modeled; Musicologie-specific owner selection is not a validated invariant. Audit-only82 proposed rules; no activation, retirement or source effect performed by that exercise."
+      "The franchise structure is modeled; Historical example 1-specific owner selection is not a validated invariant. Audit-only82 proposed rules; no activation, retirement or source effect performed by that exercise."
     ],
     [
       "Assign every music deal to Dell \u2192 RETIRE-CONTRADICTED",
       "rules-triage/triage.json:c3930d4a",
       "not built",
-      "084cd9f2: The later correction explicitly says Musicologie only; the music-wide proposal misread Joe.",
-      "The later correction explicitly says Musicologie only; the music-wide proposal misread Joe. Audit-only82 proposed rules; no activation, retirement or source effect performed by that exercise."
+      "084cd9f2: The later correction explicitly says Historical example 1 only; the music-wide proposal misread Joe.",
+      "The later correction explicitly says Historical example 1 only; the music-wide proposal misread Joe. Audit-only82 proposed rules; no activation, retirement or source effect performed by that exercise."
     ],
     [
       "Create the missing closed deal from an invoice \u2192 ENCODE",

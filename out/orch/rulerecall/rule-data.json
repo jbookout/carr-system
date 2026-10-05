@@ -1,4 +1,5 @@
 {
+  "label_status": "Display metadata with client pseudonyms; use stable section IDs for canonical lookup",
   "rules": [
     [
       "When classifying or defining terms, state the ordered decision procedure, not just the conclusion. (015183f5)",
@@ -3688,8 +3689,8 @@
     {
       "id": "11e233b4-9e9e-43a6-ad56-832ec097bd98",
       "slug": "2026-07-06-panhandle-healthcare-cre-snapshot",
-      "key": "re-engagement-ammunition-for-the-4-drafted-emails-beasley",
-      "title": "Re-engagement ammunition (for the 4 drafted emails + Beasley)",
+      "key": "re-engagement-ammunition-for-the-4-drafted-emails-Historical example 3",
+      "title": "Re-engagement ammunition (for the 4 drafted emails + Historical example 3)",
       "status": "no_observed_read_request",
       "version": 1,
       "observed_read_calls": 0
@@ -4875,7 +4876,7 @@
     },
     {
       "id": "e0ea9f70-1e7c-4c57-bfe1-c80b8d0163b4",
-      "slug": "beasley-intake",
+      "slug": "Historical example 3-intake",
       "key": "preamble",
       "title": null,
       "status": "no_observed_read_request",
@@ -4884,7 +4885,7 @@
     },
     {
       "id": "3787ee5e-a786-4bbf-8383-2f63d280d439",
-      "slug": "beasley-intake",
+      "slug": "Historical example 3-intake",
       "key": "current-situation",
       "title": "Current situation",
       "status": "no_observed_read_request",
@@ -4893,7 +4894,7 @@
     },
     {
       "id": "66b5cc40-af7a-443a-932b-5534bf05fb1b",
-      "slug": "beasley-intake",
+      "slug": "Historical example 3-intake",
       "key": "current-space",
       "title": "Current space",
       "status": "no_observed_read_request",
@@ -4902,7 +4903,7 @@
     },
     {
       "id": "616d3f7b-41ce-457b-9218-fc25f5ad8e1e",
-      "slug": "beasley-intake",
+      "slug": "Historical example 3-intake",
       "key": "what-they-want",
       "title": "What they want",
       "status": "no_observed_read_request",
@@ -4911,7 +4912,7 @@
     },
     {
       "id": "6a47e843-b981-4c64-832e-20da2ac4de71",
-      "slug": "beasley-intake",
+      "slug": "Historical example 3-intake",
       "key": "financials",
       "title": "Financials",
       "status": "no_observed_read_request",
@@ -4920,7 +4921,7 @@
     },
     {
       "id": "18cf2a69-268f-4470-9a47-c1aa01309c73",
-      "slug": "beasley-intake",
+      "slug": "Historical example 3-intake",
       "key": "key-players-your-dell-s-network-fills-gaps",
       "title": "Key players (your & Dell's network fills gaps)",
       "status": "no_observed_read_request",
@@ -4929,7 +4930,7 @@
     },
     {
       "id": "5e12f8fe-0848-41d4-ab1a-7b452fc060f4",
-      "slug": "beasley-intake",
+      "slug": "Historical example 3-intake",
       "key": "logistics-notes",
       "title": "Logistics & notes",
       "status": "no_observed_read_request",
@@ -4957,8 +4958,8 @@
     {
       "id": "f6316e04-3077-4847-8e18-9b7c8765cb47",
       "slug": "benefit-summary-sop",
-      "key": "what-it-is-format-from-the-real-cottis-sheet",
-      "title": "What it is (format, from the real Cottis sheet)",
+      "key": "what-it-is-format-from-the-real-Historical example 4-sheet",
+      "title": "What it is (format, from the real Historical example 4 sheet)",
       "status": "no_observed_read_request",
       "version": 1,
       "observed_read_calls": 0
@@ -17629,8 +17630,8 @@
     {
       "id": "5df89c25-0155-46a9-9f74-87a999215037",
       "slug": "pipeline-coo-doctrine",
-      "key": "data-integrity-rule-joe-jul-22-2026-after-garabadian-was-mis-tagged",
-      "title": "Data-integrity rule (Joe, Jul 22 2026, after Garabadian was mis-tagged)",
+      "key": "data-integrity-rule-joe-jul-22-2026-after-Historical example 2-was-mis-tagged",
+      "title": "Data-integrity rule (Joe, Jul 22 2026, after Historical example 2 was mis-tagged)",
       "status": "no_observed_read_request",
       "version": 1,
       "observed_read_calls": 0
@@ -24170,7 +24171,7 @@
     "associate-lane-sop",
     "audio-license-note",
     "automation-index",
-    "beasley-intake",
+    "Historical example 3-intake",
     "benefit-summary-sop",
     "brand-assets-readme",
     "brand-voice",
