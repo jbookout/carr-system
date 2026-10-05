@@ -3,6 +3,7 @@ import importlib.util
 import pathlib
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent
 
@@ -13,6 +14,42 @@ def load(name):
     return module
 
 class Conformance(unittest.TestCase):
+    def test_scan_separates_cache_probe_suites_from_production_violations(self):
+        checker = load('check-jev-conformance')
+        # CI collects both test naming styles. Cache probes deliberately repeat
+        # requests and may load the interface dynamically to inject transports.
+        probes = """from importlib import import_module
+api = import_module('jev_semantic')
+def probe(state, questions):
+ api.ask(state, questions, caller='fixture', version='v1')
+ api.ask(state, questions, caller='fixture', version='v1')
+"""
+        violations = """import typesafe_client as api
+def run(state, questions):
+ api.ask(state, questions)
+ api.ask(state, questions)
+"""
+        sources = {
+            'tools/test-cache.py': probes,
+            'tools/test_cache.py': probes,
+            'tools/cache-runtime.py': violations,
+            'tools/contest-cache.py': violations,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for rel, source in sources.items():
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source)
+            with patch.object(checker.subprocess, 'check_output',
+                              return_value='\n'.join(sources)):
+                errors = checker.scan(root)
+        self.assertEqual(errors, [rel + ':' + error
+                         for rel in ('tools/cache-runtime.py', 'tools/contest-cache.py')
+                         for error in checker.python_errors(violations)])
+        for kind in ('model', 'cache', 'fanout'):
+            self.assertTrue(any(kind in error for error in errors), errors)
+
     def test_semantic_imports_and_independent_function_scopes(self):
         checker = load('check-jev-conformance')
         for source in (

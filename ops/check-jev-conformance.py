@@ -124,7 +124,11 @@ def scan(root=ROOT):
     paths = subprocess.check_output(['git','ls-files','*.py','*.js','*.mjs'],cwd=root,text=True).splitlines()
     errors=[]
     for rel in paths:
-        if any(x in rel for x in ('selftest','/tests/','/fixtures/','.test.')) or rel.startswith('tests/'):
+        # Match CI's hyphen and underscore test-suite conventions as well as
+        # test directories. Cache/failure probes intentionally repeat requests.
+        if (any(x in rel for x in ('selftest','/tests/','/fixtures/','.test.'))
+                or rel.startswith('tests/')
+                or pathlib.PurePosixPath(rel).name.startswith(('test-', 'test_'))):
             continue
         source=(root/rel).read_text(errors='replace')
         if rel in legacy and hashlib.sha256(source.encode()).hexdigest()==legacy[rel]:
