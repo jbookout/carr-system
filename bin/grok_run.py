@@ -8,7 +8,8 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/room-bridge"))
-from grok_wire import MODEL, TIMEOUT_S, invoke_cli, parse_stream
+from grok_wire import (MODEL, TIMEOUT_S, invoke_cli, parse_stream, parse_result,
+                       requested_urls, retrieval_prompt, preserve_retrieval_receipt, retrieval_request_error)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ops"))
 from grok_session import sign_in_alert, authentication_result
 
@@ -83,7 +84,8 @@ def parse_output(lines, cli_version, returncode=0):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
-        "Exit 3: sign-in required; 4: incomplete run; 5: wrong model. "
+        "Exit 3: sign-in required; 4: incomplete run; 5: wrong model; 6: unusable retrieval. "
+        "URL tasks require retrieved source JSON and always retain a private diagnostic receipt. "
         "GROK_RUN_RECEIPT selects a receipt file instead of stderr. "
         "GROK_RUN_FAKE_NDJSON replays a fixture without calling Grok/npm."))
     parser.add_argument("--effort", choices=("low", "medium", "high"), default="high")
@@ -99,18 +101,47 @@ def main():
         parser.error("--max-turns must be a positive integer")
     if not 1 <= args.timeout_seconds <= 1800:
         parser.error("--timeout-seconds must be between 1 and 1800")
+    urls = []
+
+    def report_retrieval(outcome):
+        try:
+            outcome["diagnostic_path"] = preserve_retrieval_receipt(outcome, task=requested_prompt,
+                effort=args.effort, max_turns=args.max_turns, writable=args.writable,
+                timeout_seconds=args.timeout_seconds)
+        except OSError:
+            outcome.clear()
+            outcome.update(status="failed", detail="grok_receipt_unavailable")
+        sys.stdout.write(json.dumps(outcome, sort_keys=True) + "\n")
+
     try:
         requested_prompt = args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else args.prompt
+        urls = requested_urls(requested_prompt)
+        if error := retrieval_request_error(urls):
+            report_retrieval(error)
+            return 6
         fixture = os.environ.get("GROK_RUN_FAKE_NDJSON")
         if fixture:
             with open(fixture, encoding="utf-8") as stream:
-                output, receipt, code = parse_output(stream, "fixture")
+                raw = stream.read()
+            cli_version = "fixture"
+            returncode = 0
         else:
             cli_version = preflight()
-            result = invoke_cli(PREFIX + "\n\n" + requested_prompt, effort=args.effort,
+            result = invoke_cli(PREFIX + "\n\n" + retrieval_prompt(urls) + requested_prompt, effort=args.effort,
                                 max_turns=args.max_turns, writable=args.writable,
                                 timeout_seconds=args.timeout_seconds)
-            output, receipt, code = parse_output(result.stdout.splitlines(), cli_version, result.returncode)
+            raw, returncode = result.stdout, result.returncode
+        if urls:
+            outcome = parse_result(raw, returncode, urls=urls, artifact_root=Path.cwd(), effort=args.effort)
+            report_retrieval(outcome)
+            if outcome["status"] == "completed":
+                return 0
+            if outcome.get("detail") == "unusable_retrieval":
+                return 6
+            if outcome.get("detail") in ("grok_provider_model_mismatch", "grok_provider_usage_invalid"):
+                return 5
+            return 4
+        output, receipt, code = parse_output(raw.splitlines(), cli_version, returncode)
         serialized = json.dumps(receipt, sort_keys=True) + "\n"
         if os.environ.get("GROK_RUN_RECEIPT"):
             Path(os.environ["GROK_RUN_RECEIPT"]).write_text(serialized, encoding="utf-8")
@@ -127,9 +158,15 @@ def main():
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
                 line += " · alert FAILED"
         print(line, file=sys.stderr)
+        if urls:
+            outcome = {"status": "failed", "detail": "grok_sign_in_required" if error.code == 3 else "grok_preflight_failed"}
+            report_retrieval(outcome)
         return error.code
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f"grok-run: {type(error).__name__}", file=sys.stderr)
+        if urls:
+            outcome = {"status": "failed", "detail": "grok_cli_timeout" if isinstance(error, subprocess.TimeoutExpired) else "grok_invocation_failed"}
+            report_retrieval(outcome)
         return 4
 
 
