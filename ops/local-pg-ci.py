@@ -550,6 +550,9 @@ def run_local_ci(
             return 78
         ci_env = dict(clean_env)
         ci_env["CARR_CI_DATABASE_URL"] = dsn
+        # Contract probes run before the migration class. Give their read-only
+        # grant check the initialized reference, keeping migration's target empty.
+        ci_env["CARR_LOCAL_PG_DSN"] = pre_dsn
         ci_command: list[str | Path] = [repo / "ops/ci.sh"]
         if ci_class == "strict":
             ci_command.append("--strict")
