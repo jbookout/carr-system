@@ -74,7 +74,8 @@ import shutil
 import uuid
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 import time
 import urllib.error
 import urllib.request
@@ -655,7 +656,8 @@ def server_ask(state, questions, *, model, facets, purpose, session_id, timeout,
             # Before the reservation: a machine without the secret takes the
             # direct route's own reservation instead.
             return None, "admission_secret_missing"
-        probe = _reserve_paid_call(questions, facets, caller, kind, prompt, registry, site)
+        probe = _reserve_paid_call(questions, facets, caller, kind, prompt, registry, site,
+                                   session=session_id)
         idempotency_key = _admission_token(secret, idempotency_key, caller, session_id)
     args = {
         "idempotency_key": idempotency_key,
@@ -1565,8 +1567,28 @@ def _admit_paid_call(caller, session, questions, facets, question_kind, prompt_s
     return registry, entry
 
 
+_reservation_receipt: ContextVar[dict | None] = ContextVar("jev_reservation_receipt", default=None)
+
+
+@contextmanager
+def capture_paid_reservations(*, caller, session_id, run_id):
+    """Observe committed canonical admissions for this execution context.
+
+    This receipt does not admit, refund or reconstruct spending. Each UTC day
+    count comes only from the existing reservation transaction after commit,
+    including attempts whose transport later fails. Context-local observation
+    excludes concurrent callers, sessions and runs, without a second ledger.
+    """
+    receipt = {"caller": caller, "session_id": session_id, "run_id": run_id, "utc_days": {}}
+    token = _reservation_receipt.set(receipt)
+    try:
+        yield receipt
+    finally:
+        _reservation_receipt.reset(token)
+
+
 def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
-                       registry=None, site=None):
+                       registry=None, site=None, *, session=None):
     """Atomically reserve one transport attempt across processes and worktrees.
 
     The small counter lives beside the canonical call log, not inside a session.
@@ -1650,6 +1672,11 @@ def _reserve_paid_call(questions, facets, caller, question_kind, prompt_sha256,
                            "DO UPDATE SET count=count+1", (day, hour, site_id))
             alerts = _claim_spend_alerts(db, log_path, day, row[0], allowed, cap, caller)
             db.commit()
+            receipt = _reservation_receipt.get()
+            if (allowed and receipt is not None and receipt["caller"] == caller
+                    and receipt["session_id"] == session):
+                days = receipt["utc_days"]
+                days[day] = days.get(day, 0) + 1
         finally:
             db.close()
     except (OSError, sqlite3.Error) as exc:
@@ -2031,7 +2058,8 @@ def _ask_jev(state, questions, *, model=DEFAULT_MODEL, timeout=TIMEOUT_SECONDS,
         probe_token = None
         if opener is None:
             probe_token = _reserve_paid_call(questions, facets, caller,
-                                             question_kind, prompt_sha256, registry, site)
+                                             question_kind, prompt_sha256, registry, site,
+                                             session=dispatch_binding[0])
             # Accounting can wait on another worker's transaction. Preserve
             # the caller's absolute deadline before starting any transport.
             if deadline is not None:
@@ -2178,4 +2206,3 @@ def decide(answer, *, yes_at=0.8, no_at=0.2, min_confidence=0.6):
             "confidence": None if confidence is None else float(confidence),
         }
     raise TypeSafeError(f"unknown answer type: {kind!r}")
-

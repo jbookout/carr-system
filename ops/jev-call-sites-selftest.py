@@ -393,6 +393,18 @@ class BudgetTests(Harness):
             with self.assertRaisesRegex(client.TypeSafeError, "daily paid call cap"):
                 self.ask("2")
 
+    def test_shared_cap_holds_across_overlapping_site_limits(self):
+        self.write_registry([site("hook_site", hourly_budget=3, daily_budget=3),
+                             site("job_site", hourly_budget=3, daily_budget=3)], hourly=100)
+        with patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=2):
+            self.ask("first site")
+            self.ask("second site", caller="job_site")
+            for caller in ("hook_site", "job_site"):
+                with self.assertRaises(client.JevCallRefused) as caught:
+                    self.ask("exhausted", caller=caller)
+                self.assertEqual(caught.exception.code, "daily_paid_call_cap")
+        self.assertEqual(len(self.requests), 2)
+
 
 class QuietNoticeTests(Harness):
     def test_cap_reached_surfaces_one_line_per_session_per_window(self):
@@ -646,6 +658,15 @@ print(json.dumps({"paid":len(sent),"refused":refused,"budget":c.JEV_DAILY_CAP_LO
         with client.closing(client.sqlite3.connect(str(path))) as db:
             row = db.execute("SELECT attempts FROM daily_cap WHERE day='2026-10-04'").fetchone()
         return row[0] if row else 0
+
+    def test_public_worker_reservation_is_observed_only_by_matching_session(self):
+        calls, runner = WorkerBreakerTests.worker(self, failures=False)
+        with client.capture_paid_reservations(caller='hook_site', session_id='s', run_id='review') as receipt:
+            self.assertIsNone(self.paid_server_ask(runner)[1])
+            self.assertIsNone(self.paid_server_ask(runner, session_id='other')[1])
+        self.assertEqual(sum(receipt['utc_days'].values()), 1)
+        self.assertEqual(self.daily_attempts(), 2)
+        self.assertEqual(calls, ['paid_once', 'paid_once'])
 
     def test_public_worker_402_holds_the_next_paid_entry(self):
         calls = []
@@ -912,9 +933,9 @@ class RegistryCoverageTests(unittest.TestCase):
         registry = client.load_call_sites(REGISTRY_PATH)
         self.assertLessEqual(registry["hourly_paid_call_cap"] * 24,
                              client.JEV_COST_CONFIG["daily_paid_call_cap"] * 24)
-        total = sum(e["daily_budget"] for e in registry["sites"].values())
-        self.assertLessEqual(total, client.JEV_COST_CONFIG["daily_paid_call_cap"],
-                             "site daily budgets must fit inside the global daily cap")
+        for entry in registry["sites"].values():
+            self.assertLessEqual(entry["daily_budget"], client.JEV_COST_CONFIG["daily_paid_call_cap"],
+                                 "each site limit sits beneath the shared admission cap")
 
     def test_every_paid_call_source_is_registered(self):
         registry = client.load_call_sites(REGISTRY_PATH)

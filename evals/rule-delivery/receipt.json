@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:8a4a4bf981eacd0654e4d9d03ce7947219d9fafe826cce1573935b3a7a3115c1",
+    "configuration_fingerprint": "sha256:026c452b8ad203ac70aeb8f7fc0a3729bca247e98d86312e2d1dd232eb4c8dbd",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a108dd-a5f5-7b30-9ed6-0c11a7dad3a1",
+    "native_session_ref": "01a10b61-ce86-72b0-9ba5-63407460f9a5",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -152,7 +152,7 @@
       "lib/rule_delivery_shadow.py": "b39b504ff0bf77819b578a12f97821bc3da2e8226e90b5f17d3a40ccb1cb7417",
       "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
       "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
-      "ops/config/jev-cost-guard.v1.json": "f8da9d20d6019c5bd9528683c61594dca09f07488d66ce998c53ae8bc3c24089",
+      "ops/config/jev-cost-guard.v1.json": "8920873a41078dca949d8e31f50705e1330bcfa087b5260c22693f220488a2f8",
       "ops/config/rule-classes.v1.json": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23",
       "ops/config/rule-enforcement-map.json": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
       "ops/config/rule-jev-triggers.v1.json": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
@@ -167,7 +167,7 @@
       "ops/rule_delivery_eval.py": "ee881cb42a56b997bfd660ba50b61f6b3982343f15f82d45fd3b7303b6bac382",
       "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
       "ops/rule_trigger_delivery.py": "3b231db2919624a85b6dd2dcecd56afc15ec84a4fd9df0082f45abce9e1b2b77",
-      "ops/typesafe_client.py": "b5a0555d7b2a787ae18629882664f308153fcb1ff3aae1d587b56e169eeb5641",
+      "ops/typesafe_client.py": "91acd006df639e545a5fe6890712507652219fadb3d972b03b1fed42f1fa086d",
       "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
     },
     "expectations": {
@@ -194,7 +194,7 @@
       "result": "pass"
     }
   },
-  "measured_on": "2026-10-04",
+  "measured_on": "2026-10-05",
   "min_useful_gain": 0.7,
   "noise_floor": 0.3,
   "notes": [

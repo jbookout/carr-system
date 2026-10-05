@@ -216,14 +216,26 @@ def evidence_paths(receipt: dict) -> set[str]:
 
 
 def mirror(receipt: dict, dest: Path) -> None:
-    """Replay the historical receipt at its source revision, not today's tree."""
-    revision = subprocess.run(
-        ["git", "log", "-1", "--format=%H", "--", f"{RD}/receipt.json"],
-        cwd=ROOT, env=fixture_env(), check=True, capture_output=True, text=True).stdout.strip()
+    """Copy the receipt's bound bytes, including pending and historical evidence."""
+    ev = receipt['evidence']
+    hashes = {**ev['source'], **ev['dependencies'],
+              ev['expectations']['path']: ev['expectations']['sha256'],
+              **{c['path']: c['sha256'] for c in ev['cohorts'].values()}}
     for rel in evidence_paths(receipt) | {"evals/surfaces.json"}:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-        data = subprocess.run(["git", "show", f"{revision}:{rel}"], cwd=ROOT,
-                              env=fixture_env(), check=True, capture_output=True).stdout
+        data = (ROOT / rel).read_bytes()
+        expected = hashes.get(rel)
+        if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+            revisions = subprocess.run(['git', 'log', '--all', '--format=%H', '--', rel],
+                cwd=ROOT, env=fixture_env(), check=True, capture_output=True, text=True).stdout.splitlines()
+            for revision in revisions:
+                blob = subprocess.run(['git', 'show', f'{revision}:{rel}'], cwd=ROOT,
+                    env=fixture_env(), capture_output=True)
+                if blob.returncode == 0 and hashlib.sha256(blob.stdout).hexdigest() == expected:
+                    data = blob.stdout
+                    break
+            else:
+                raise ValueError(f'receipt evidence unavailable: {rel} at sha256 {expected}')
         (dest / rel).write_bytes(data)
     if not (dest / ".git").exists():
         env = fixture_env()
@@ -919,6 +931,47 @@ Path(a.trace_reads).write_text(json.dumps(['input.txt']))
             git("commit", "-qm", "new baseline")
             fourth = cer.replay_rule_delivery(root, git("rev-parse", "HEAD"))
             self.assertEqual(fourth["baseline"]["rows"], [{"value": 22}])
+
+
+class ReceiptMirrorTests(unittest.TestCase):
+    def test_pending_receipt_and_historical_receipt_bind_their_own_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'repo'
+            root.mkdir()
+            env = fixture_env()
+            def git(*args):
+                return subprocess.run(['git', *args], cwd=root, env=env,
+                                      check=True, capture_output=True).stdout
+            git('init', '-q')
+            git('config', 'user.name', 'selftest')
+            git('config', 'user.email', 'selftest@example.invalid')
+            source = root / 'input.txt'
+            source.write_text('committed source')
+            (root / 'evals').mkdir()
+            (root / 'evals/surfaces.json').write_text('{}')
+            receipt_path = root / RD / 'receipt.json'
+            receipt_path.parent.mkdir(parents=True)
+            receipt_path.write_text('{}')
+            git('add', 'input.txt', 'evals/surfaces.json', f'{RD}/receipt.json')
+            git('commit', '-qm', 'fixture receipt')
+            historical = {'evidence': {'source': {'input.txt': sha_file(source)},
+                'dependencies': {}, 'expectations': {'path': 'input.txt', 'sha256': sha_file(source)},
+                'cohorts': {}}}
+            source.write_text('pending source')
+            pending = copy.deepcopy(historical)
+            pending['evidence']['source']['input.txt'] = sha_file(source)
+            pending['evidence']['expectations']['sha256'] = sha_file(source)
+            with patch.dict(globals(), ROOT=root):
+                for receipt, expected in ((pending, 'pending source'), (historical, 'committed source')):
+                    dest = Path(tmp) / expected
+                    (dest / RD).mkdir(parents=True)
+                    mirror(receipt, dest)
+                    self.assertEqual((dest / 'input.txt').read_text(), expected)
+                broken = copy.deepcopy(pending)
+                broken['evidence']['source']['input.txt'] = '0' * 64
+                broken['evidence']['expectations']['sha256'] = '0' * 64
+                with self.assertRaisesRegex(ValueError, 'input.txt'):
+                    mirror(broken, Path(tmp) / 'missing')
 
 
 class RuleDeliveryEvidenceChain(unittest.TestCase):
