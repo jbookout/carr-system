@@ -52,31 +52,22 @@ TAIL_BYTES = 4 * 1024 * 1024
 TAIL_EVENTS = 400
 
 
-def _client():
-    """Load ops/typesafe_client.py by path, the way jev_judge._client() does.
-
-    This is ONLY for building noul()/choice() question objects before handing
-    them to jev_judge.judge(). The actual HTTP call always goes through
-    jev_judge, never through this loaded module directly.
-    """
-    path = os.path.join(REPO, "ops", "typesafe_client.py")
-    spec = importlib.util.spec_from_file_location("typesafe_client", path)
-    if spec is None or spec.loader is None:  # pragma: no cover - import plumbing
-        raise RuntimeError("cannot load ops/typesafe_client.py")
+def _module(name):
+    path = os.path.join(REPO, "ops", name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load " + path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _client():
+    return _module("typesafe_client")
 
 
 def _judge():
-    """Load ops/jev_judge.py by path. The only door to Jev, per the build brief."""
-    path = os.path.join(REPO, "ops", "jev_judge.py")
-    spec = importlib.util.spec_from_file_location("jev_judge", path)
-    if spec is None or spec.loader is None:  # pragma: no cover - import plumbing
-        raise RuntimeError("cannot load ops/jev_judge.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _module("jev_judge")
 
 
 def _result(check_id, verdict, confidence, escalate, detail):
@@ -480,8 +471,10 @@ def locate_bug(source_text, path, failure_output, *, client=None, log_path=None)
     subject_ref = {"path": path, "trigger": "traceback_seen", "mentioned_lines": mentioned,
                    "window_lines": len(window_lines)}
     try:
-        answer = jj.judge(subject, {"culprit_line": question}, client=client)
-    except jj.JudgeUnavailable as exc:
+        answer = _module("jev_semantic").ask(
+            subject, {"culprit_line": question}, caller="jev_session_watch",
+            version="bug-locator-v1", client=client, transport=jj.judge, retries=0)
+    except Exception as exc:
         _record(jj, check_id, subject_ref, {}, None, error=exc, log_path=log_path)
         return _result(check_id, "unavailable", None, True, subject_ref)
 
@@ -810,7 +803,9 @@ def inspect_tool_event(tool_name, tool_input, output, exit_code, task_text, repo
     subject_digest = hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest()
     jj = judge_module or _judge()
     try:
-        answer = jj.judge(state, questions, client=client)
+        answer = _module("jev_semantic").ask(
+            state, questions, caller="jev_session_watch", version="tool-result-v1",
+            client=client, transport=jj.judge, retries=0)
         bodies = answer.get("answers") or {}
         if not all(k in bodies for k in questions):
             raise ValueError("missing typed boundary answer")

@@ -15,6 +15,7 @@ changing result bytes and reusing a stale summary each fail the check.
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 import hashlib
 import importlib.util
 import json
@@ -215,11 +216,30 @@ def evidence_paths(receipt: dict) -> set[str]:
             | {c["path"] for c in ev["cohorts"].values()})
 
 
+@lru_cache(maxsize=128)
+def historical_dependency(root: Path, rel: str, expected: str) -> bytes:
+    """Find the immutable bytes by digest, including fetched merge parents."""
+    env = fixture_env()
+    revisions = subprocess.check_output(
+        ["git", "log", "--all", "--format=%H", "--", rel], cwd=root, env=env, text=True)
+    for rev in revisions.splitlines():
+        result = subprocess.run(["git", "show", rev + ":" + rel], cwd=root, env=env,
+                                capture_output=True)
+        if result.returncode == 0 and hashlib.sha256(result.stdout).hexdigest() == expected:
+            return result.stdout
+    raise AssertionError("historical receipt source binding unavailable: " + rel)
+
+
 def mirror(receipt: dict, dest: Path) -> None:
     """Copy every file the receipt's evidence binds, plus the registry, into dest."""
     for rel in evidence_paths(receipt) | {"evals/surfaces.json"}:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, dest / rel)
+        # The real receipt is immutable historical evidence. Mirror its bound
+        # revision when the current source has changed; never bless new bytes.
+        expected = receipt.get("evidence", {}).get("dependencies", {}).get(rel)
+        if expected and sha_file(dest/rel) != expected:
+            (dest / rel).write_bytes(historical_dependency(ROOT, rel, expected))
     if not (dest / ".git").exists():
         env = fixture_env()
         subprocess.run(["git", "init", "-q", str(dest)], env=env, check=True, capture_output=True)
@@ -916,6 +936,47 @@ Path(a.trace_reads).write_text(json.dumps(['input.txt']))
             self.assertEqual(fourth["baseline"]["rows"], [{"value": 22}])
 
 
+class MirrorBindings(unittest.TestCase):
+    def test_receipt_update_does_not_replace_digest_bound_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, dest = Path(tmp, "repo"), Path(tmp, "mirror")
+            root.mkdir()
+            env = fixture_env()
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=root, env=env,
+                                      check=True, capture_output=True)
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            rel = "ops/source.py"
+            bound = b"value = 1\n"
+            receipt = {"evidence": {"source": {}, "dependencies": {
+                rel: hashlib.sha256(bound).hexdigest()},
+                "expectations": {"path": RD + "/expectations.json"}, "cohorts": {}}}
+            for path, body in ((rel, bound), (RD + "/receipt.json", json.dumps(receipt).encode()),
+                               (RD + "/expectations.json", b"{}"), ("evals/surfaces.json", b"{}")):
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(body)
+            message = Path(tmp, "message")
+            message.write_text("Record bound source\n")
+            git("add", rel, RD + "/receipt.json", RD + "/expectations.json", "evals/surfaces.json")
+            git("commit", "-q", "-F", str(message))
+            (root / rel).write_text("value = 2\n")
+            receipt["note"] = "A later receipt amendment keeps the measured dependency."
+            (root / RD / "receipt.json").write_text(json.dumps(receipt))
+            message.write_text("Amend receipt after source changes\n")
+            git("add", rel, RD + "/receipt.json")
+            git("commit", "-q", "-F", str(message))
+            with patch.dict(globals(), ROOT=root):
+                mirror(receipt, dest)
+            self.assertEqual((dest / rel).read_bytes(), bound)
+            receipt["evidence"]["dependencies"][rel] = "0" * 64
+            with patch.dict(globals(), ROOT=root), self.assertRaisesRegex(
+                    AssertionError, "historical receipt source binding unavailable"):
+                mirror(receipt, Path(tmp, "unbound"))
+
+
 class RuleDeliveryEvidenceChain(unittest.TestCase):
     """The four refusals the evidence chain exists for, on the real rule-delivery receipt."""
 
@@ -940,7 +1001,7 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
 
     def test_checked_in_receipt_passes_against_its_own_evidence(self):
         self.assertEqual(self.r["schema_version"], 2)
-        self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", ROOT), [])
+        self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", self.root), [])
 
     def test_repeated_validation_reuses_immutable_baseline_across_roots(self):
         # One baseline snapshot per commit/harness, even for separate fixtures.
