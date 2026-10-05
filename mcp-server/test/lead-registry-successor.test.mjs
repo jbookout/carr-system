@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { TOOLS } from '../src/tools.js';
 import { assertRegisteredOperation, SCAC_MUTATION_REGISTRY_VERSION } from '../src/mutation-registry.js';
-import { CURRENT_REGISTRY_VERSION, frozenInventory, boundInventoryRows, assertCurrentSourceInventoryMatchesFixture } from '../../ops/scac-mutation-inventory.mjs';
+import { frozenInventory, boundInventoryRows, assertCurrentSourceInventoryMatchesFixture, CURRENT_REGISTRY_VERSION } from '../../ops/scac-mutation-inventory.mjs';
 
 test('lead successor preserves delivered Observatory v105 and admits both contracts', async () => {
   const v105 = readFileSync(new URL('../src/scac-mutation-registry.v105.generated.js', import.meta.url));

@@ -9,7 +9,7 @@ const LAUNCH_REGRESSIONS = "chrome-launch.test.mjs";
 const PRIVATE_POSTGRES_SUITES = new Set([
   "a02-rule-enforcement-postgres.test.mjs", "confirm-merge-schema.test.mjs",
   "journey-one-clock-input-store.v5.test.mjs", "journey-one-clock-store.v5.test.mjs",
-  "lease-radar-postgres.test.mjs", "local-deals-store.test.mjs", "whats-new-store.test.mjs",
+  "lease-radar-postgres.test.mjs", "local-deals-ci-fixture.test.mjs", "local-deals-store.test.mjs", "whats-new-store.test.mjs",
 ]);
 
 export function suiteBatches(files) {

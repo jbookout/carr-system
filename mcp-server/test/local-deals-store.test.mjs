@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -28,6 +29,7 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && !
   let database;
   let running = false;
   let c;
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try {
     let connection;
     if (ciDsn) {
@@ -58,7 +60,12 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && !
       assert.notEqual(isolated, new URL(process.env.CARR_CI_DATABASE_URL).pathname.slice(1));
       assert.equal((await c.query("select to_regclass('public.deal') existing")).rows[0].existing, null);
     }
-    if (!ciDsn) await c.query('create role carr_reader; create role carr_writer;');
+    // Roles belong to the cluster; an isolated database does not provide them.
+    // Preserve existing shared-cluster roles and their attributes.
+    await c.query(`do $$ begin
+      begin create role carr_reader; exception when duplicate_object then null; end;
+      begin create role carr_writer; exception when duplicate_object then null; end;
+    end $$;`);
     // Use the committed table definitions and caller views, without production data.
     for (const name of ['actor', 'party', 'client', 'deal', 'deal_phase', 'deal_participant', 'next_action', 'deal_note', 'national_account_owner', 'deal_market_assignment', 'deal_review_item', 'deal_review_session', 'event', 'tool_call', 'deal_conflict', 'critical_date', 'lease', 'activity', 'premises', 'negotiation_round', 'document', 'commission', 'capture_post_call_action', 'building', 'space', 'premises_space']) {
       const table = schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))?.[0];
@@ -329,11 +336,15 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && !
       }
     });
   } finally {
-    if (c) await c.end();
-    if (admin) {
-      try { if (database) await admin.query(`drop database "${database}"`); }
-      finally { await admin.end(); }
+    try {
+      if (c) await c.end();
+      if (admin) {
+        try { if (database) await admin.query(`drop database "${database}"`); }
+        finally { await admin.end(); }
+      }
+      if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' });
+    } finally {
+      await releaseBudget();
     }
-    if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' });
   }
 });

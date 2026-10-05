@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from lib.disposable_pg_fixture import postgres_fixture_group
 
 
 def main():
@@ -20,7 +22,7 @@ def main():
     found = module.find_postgres_binaries()
     binaries = {name: str(getattr(found, name)) for name in ('initdb', 'pg_ctl', 'psql')}
     env = module.scrub_cloud_environment(os.environ)
-    with tempfile.TemporaryDirectory(prefix='carr-jev-aging-') as temp:
+    with postgres_fixture_group(), tempfile.TemporaryDirectory(prefix='carr-jev-aging-') as temp:
         root = Path(temp)
         data = root / 'data'
         socket = root / 'socket'
