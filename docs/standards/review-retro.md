@@ -3,7 +3,7 @@
 Read these when changing the corresponding code. Counts are distinct PRs in the dated [evidence snapshot](../../audits/review-retro-standards.v1.json), including resolved findings; they are not current defect counts.
 
 - Reuse the owning policy predicate/configuration; adapters may translate inputs and errors but must not redefine eligibility, limits, dates, or permissions. (20 PRs; `single-policy-authority`.)
-- Exercise the owning production entry point without replacing the predicate/transaction under test; include a counterexample that fails if that behavior is removed or replaced. (6 PRs; `behavior-binding-tests`.)
+- Exercise the owning production entry point without replacing the predicate/transaction under test; include a counterexample that fails if that behavior is removed or replaced. (7 PRs; `behavior-binding-tests`.)
 - For changed inventoried source, run the current entry-class frontier check and deliver its required bindings; preserve frozen seals and honor current exclusions. (3 PRs; `sealed-source-cochange`.)
 - Read Git filenames as raw NUL-delimited bytes through the owning path reader; preserve whitespace and undecodable bytes, and test CR/LF, quoting, non-ASCII, and literal pathspecs. (5 PRs; `lossless-git-paths`.)
 - Record dedup/seen success only after the required durable write or delivery; retain retryable per-destination state after partial failure. (3 PRs; `ack-after-delivery`.)

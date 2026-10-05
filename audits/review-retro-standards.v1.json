@@ -226,11 +226,12 @@
     {
       "id": "behavior-binding-tests",
       "pattern": "Tests omit or replace their claimed mechanism",
-      "count": 6,
+      "count": 7,
       "supporting_prs": [
         855,
         1235,
         1273,
+        1483,
         1499,
         1526,
         1541
@@ -299,6 +300,13 @@
           "finding": "4",
           "pattern": "Both max and sum budget formulas pass fixture; presence assertion always true.",
           "later_disposition": "https://github.com/jbookout/carr-system/pull/1541#issuecomment-5990816179"
+        },
+        {
+          "pr": 1483,
+          "comment_url": "https://github.com/jbookout/carr-system/pull/1483#issuecomment-5945133873",
+          "finding": "6",
+          "pattern": "Replacing every new sort comparator with name/ID ordering leaves all five tests passing; fixtures do not assert ordered IDs or excluded owner/territory rows.",
+          "later_disposition": "https://github.com/jbookout/carr-system/pull/1483#issuecomment-5985534233"
         }
       ],
       "control": "c: standard; a: bounded negative-control fixtures in the new pin checker",
