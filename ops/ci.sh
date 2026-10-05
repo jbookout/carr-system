@@ -831,7 +831,7 @@ PYEOF
              drive-dependency-inventory drive-retirement-readiness-gate \
              mechanism-doctrine-gate scheduler-cutover-coverage-gate \
              boot-budget-check sync-core-rule-ids rule-route-coverage \
-             sync-rule-boot-classes check-eval-receipt migration-order-gate; do
+             sync-rule-boot-classes check-eval-receipt migration-order-gate check-jev-conformance; do
     [ -f "ops/$inv.py" ] || continue
     local inv_args=()
     case "$inv" in
