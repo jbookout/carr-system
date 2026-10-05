@@ -2,7 +2,7 @@
   "schema": "doc-drift/v1",
   "owner": "orchestrator",
   "scope": "full",
-  "source_sha": "38141752b7d9052fddb127a07508b77e6aae70ee",
+  "source_sha": "11acb2c9a2016fd5cdacd0e411bb9159a137f8f3",
   "files_checked": [
     ".github/PULL_REQUEST_TEMPLATE.md",
     "AGENTS.md",
@@ -4639,14 +4639,14 @@
       "file": "plugins/pstack/skills/why/references/synthesizer-prompt.md",
       "line": 65,
       "kind": "path",
-      "target": "url",
+      "target": "plugins/pstack/skills/why/references/url",
       "sources": [
-        "url"
+        "plugins/pstack/skills/why/references/url"
       ],
       "unchecked": null,
-      "message": "missing path: url",
-      "suggestion": null,
-      "suggestion_evidence": null
+      "message": "missing path: plugins/pstack/skills/why/references/url",
+      "suggestion": "plugins/pstack/skills/why/references/sources/slack.md",
+      "suggestion_evidence": "name similarity, unverified"
     },
     {
       "file": "runbooks/rollback-worker.md",
@@ -5429,7 +5429,7 @@
       "suggestion_evidence": null
     }
   ],
-  "scanned_at": "2026-10-05T20:00:09.837384+00:00",
+  "scanned_at": "2026-10-05T20:04:14.902967+00:00",
   "unchecked_count": 1091,
   "note": "Remaining static-reference candidates for orchestrator triage. Archived, intended, machine-local, upstream and generated references require context; only source paths with certain replacements were corrected in this PR."
 }
