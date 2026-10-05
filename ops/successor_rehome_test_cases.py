@@ -86,6 +86,25 @@ class SuccessorCommands(unittest.TestCase):
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertFalse((self.repo / ".git" / "successor-rehome.json").exists())
 
+    def test_owned_json_conflict_preserves_main_history(self):
+        path = "ops/config/scac-registry-full-entry-set-seals.json"
+        self.git("switch", "-q", "main")
+        self.write(path, '{"v1":"historical"}\n')
+        self.commit(path)
+        self.git("fetch", "-q", "origin")
+        self.git("switch", "-q", "feature")
+        self.git("merge", "-q", "main")
+        self.write(path, '{"v1":"historical","v2":"feature"}\n')
+        self.commit(path)
+        approved = self.head()
+        self.advance_main(path, '{"v1":"historical","v2":"main"}\n')
+        result = self.command("rehome-successor.py", str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.repo / path).read_text()), {"v1": "historical", "v2": "main"})
+        receipt = json.loads((self.repo / ".git/successor-rehome.json").read_text())
+        self.assertEqual(receipt["rewritten_paths"], [path])
+        self.assertEqual(self.command("successor-only-diff.py", approved, self.head()).returncode, 0)
+
     def test_checker_accepts_generated_changes_and_domain_migration_rename(self):
         self.write("migrations/0749_feature.sql", "select 'domain';\n")
         self.write("mcp-server/src/scac-mutation-registry.v98.generated.js", "old generated\n")

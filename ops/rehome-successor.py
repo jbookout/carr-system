@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Preflight successor ownership and merge clean branches.
+"""Merge current main and regenerate successor artifacts on disposable Postgres.
 
-Full seal regeneration is pending complete database catalog-row evidence; this
-command refuses any reallocation rather than inventing a combined seal.
+All preparation happens in an isolated local clone. The caller is advanced
+only after generation and the successor-only comparison succeed.
 """
 from __future__ import annotations
 
@@ -13,9 +13,13 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import re
+import importlib.util
 
 from git_env import scrubbed_env
-from successor_ownership import domain_bytes, is_owned_file
+from successor_ownership import domain_bytes, is_owned_file, REGISTRY_JS, _LEDGER
+from successor_generation import regenerate
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from integration_candidate import allocation_plan
@@ -81,6 +85,134 @@ def manifest(repo: Path, git_dir: Path, approved: str, main: str, rewritten: lis
     return target
 
 
+def commit(repo, message, amend=False):
+    target = Path(git(repo, "rev-parse", "--absolute-git-dir").decode().strip()) / "successor-message"
+    target.write_text(message + "\n")
+    git(repo, "commit", *( ["--amend"] if amend else []), "-F", str(target))
+
+
+def snapshot_bookkeeping(repo, migration, receipt):
+    path = repo / "bin/schema-snapshot.sh"
+    if not path.exists():
+        return
+    text = path.read_text()
+    number = int(receipt['version'].split('.v')[1])
+    previous = number - 1
+    ledger = ('REHOME_REGISTRY_APPLIED="$("$PSQL" -Atqc \\\n'
+              f'  "select exists (select 1 from schema_migrations where filename=\'{migration.name}\')" \\\n'
+              '  2>/dev/null)"\ncase "$REHOME_REGISTRY_APPLIED" in\n'
+              '  t|f) ;;\n  *) echo "schema-snapshot: could not read successor registry ledger state" >&2; exit 1 ;;\nesac\n')
+    found = _LEDGER.search(text)
+    if found is None:
+        raise RehomeError("bin/schema-snapshot.sh: ledger template missing")
+    text = text[:found.start()] + ledger + text[found.start():]
+    marker = f'SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v{previous}_current()"'
+    arm = ('\nif [ "$REHOME_REGISTRY_APPLIED" = t ]; then\n'
+           f'  SCAC_CURRENT_NUMBER={number}\n  SCAC_VERSION_COUNT={number}\n'
+           f'  SCAC_CURRENT_ENTRY_COUNT={receipt["entry_count"]}\n  SCAC_CURRENT_SOURCE_COUNT={receipt["source_count"]}\n'
+           f'  SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v{number}.generated.js"\n'
+           f'  SCAC_VERSION_ARRAY="$SCAC_VERSION_ARRAY,\'scac-mutation-registry.v{number}\'"\n'
+           f'  SCAC_HISTORICAL_ARRAY="$SCAC_HISTORICAL_ARRAY,\'scac-mutation-registry.v{previous}\'"\n'
+           f'  SCAC_FULL_SET_SEAL_COUNT={previous}\n'
+           f'  SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v{number}_current()"\nfi')
+    if text.count(marker) != 1:
+        raise RehomeError("bin/schema-snapshot.sh: frontier template ambiguous")
+    path.write_text(text.replace(marker, marker + arm))
+    test = repo / 'ops/schema-snapshot-registry-seed-selftest.py'
+    if test.exists():
+        content = test.read_text()
+        for key, value in (("CURRENT_NUMBER", number), ("VERSION_COUNT", number), ("CURRENT_ENTRY_COUNT", receipt['entry_count']), ("CURRENT_SOURCE_COUNT", receipt['source_count']), ("FULL_SET_SEAL_COUNT", previous)):
+            content = re.sub(rf'(?m)^(assert "SCAC_{key}=)[0-9]+(" in GENERATOR)$', rf'\g<1>{value}\2', content)
+        content = re.sub(r'(assert set\(FULL_SET_SEALS\) == \{f"scac-mutation-registry\.v\{version\}" for version in range\(1, )[0-9]+(\)\})', rf'\g<1>{number+1}\2', content)
+        test.write_text(content)
+
+
+def prepare(repo, base, approved, main, conflict_paths):
+    staging = Path(tempfile.mkdtemp(prefix="successor-integration-")) / "repo"
+    git(repo, "clone", "--quiet", "--no-checkout", "--shared", str(repo), str(staging))
+    for setting in ('user.name', 'user.email'):
+        identity = git(repo, 'config', '--get', setting, allowed=(0, 1)).decode().strip()
+        if identity:
+            git(staging, 'config', setting, identity)
+    git(staging, "remote", "set-url", "origin", git(repo, "remote", "get-url", "origin").decode().strip())
+    git(staging, "fetch", "--quiet", str(repo), main)
+    git(staging, "update-ref", "refs/remotes/origin/main", main)
+    git(staging, "switch", "--quiet", "-c", "successor-integration", approved)
+    git(staging, "merge", "--no-ff", "--no-commit", main, allowed=(0, 1))
+    unresolved = git(staging, "diff", "--name-only", "--diff-filter=U").decode().splitlines()
+    if unresolved != conflict_paths:
+        raise RehomeError("merge changed since preflight; staging retained at " + str(staging))
+    for path in conflict_paths:
+        theirs = file_at(repo, main, path)
+        if theirs is None:
+            old = staging / path
+            if old.exists():
+                old.rename(staging / ".git" / ("superseded-" + old.name))
+            git(staging, "add", "--", path)
+        else:
+            git(staging, "restore", "--source", main, "--staged", "--worktree", "--", path)
+    added = git(repo, "diff", "--diff-filter=A", "--name-only", base, approved, "--", "migrations", "mcp-server/src").decode().splitlines()
+    sql = [p for p in added if p.startswith('migrations/') and is_owned_file(p, None, file_at(repo, approved, p))]
+    pending = [p for p in added if p.startswith('migrations/') and p.endswith('.sql')]
+    regenerated = set(conflict_paths)
+    if sql:
+        if len(sql) != 1:
+            raise RehomeError("one successor seal is required per rehome: " + ', '.join(sql))
+        plan = allocation_plan(repo, main, [Path(p).name for p in pending])
+        for path in pending:
+            new = 'migrations/' + plan['migration_names'][Path(path).name]
+            if file_at(repo, main, path) is not None:
+                raise RehomeError("applied migration identity cannot be reallocated: " + path)
+            target = staging / path
+            if path == sql[0]:
+                if target.exists():
+                    target.rename(staging / '.git' / ('superseded-' + target.name))
+            elif new != path:
+                target.rename(staging / new)
+            regenerated.update((path, new))
+        for path in added:
+            if REGISTRY_JS.fullmatch(path) and is_owned_file(path, None, file_at(repo, approved, path)) and file_at(repo, main, path) is None:
+                (staging / path).rename(staging / '.git' / ('superseded-' + Path(path).name))
+                regenerated.add(path)
+        for path in ('bin/schema-snapshot.sh', 'ops/schema-snapshot-registry-seed-selftest.py', 'mcp-server/test/siep-11-mutation-registry.test.mjs', 'ops/config/scac-registry-source-inventory-fixtures.v1.json', 'ops/config/scac-registry-full-entry-set-seals.json'):
+            if file_at(repo, main, path) is not None:
+                # Whole generated JSON and pure bookkeeping can be rebuilt.
+                if path.endswith('.json') or domain_bytes(path, file_at(repo, base, path)) == domain_bytes(path, file_at(repo, approved, path)):
+                    git(staging, 'restore', '--source', main, '--staged', '--worktree', '--', path)
+                    regenerated.add(path)
+        changed = git(staging, 'diff', '--name-only').decode().splitlines()
+        if changed:
+            git(staging, 'add', '--', *changed)
+    git_dir = Path(git(staging, "rev-parse", "--absolute-git-dir").decode().strip())
+    if (git_dir / "MERGE_HEAD").exists():
+        commit(staging, "Merge current main for successor integration")
+    if sql:
+        modules = staging / 'mcp-server/node_modules'
+        installed = Path(__file__).resolve().parents[1] / 'mcp-server/node_modules'
+        if installed.is_dir():
+            modules.symlink_to(installed, target_is_directory=True)
+        else:
+            raise RehomeError('install the rehome command checkout dependencies with npm ci in mcp-server')
+        main_migrations = git(repo, 'ls-tree', '-r', '--name-only', main, '--', 'migrations').decode().splitlines()
+        version = plan['registry_predecessor']
+        matches = [p for p in main_migrations if p.endswith('.sql') and is_owned_file(p, None, file_at(repo, main, p)) and f"values ('scac-mutation-registry.v{version}',".encode() in file_at(repo, main, p)]
+        if len(matches) != 1:
+            raise RehomeError("cannot identify current-main successor SQL template")
+        seal_path = staging / 'migrations' / plan['migration_names'][Path(sql[0]).name]
+        domains = [staging / 'migrations' / plan['migration_names'][Path(p).name] for p in pending if p != sql[0]]
+        receipt = regenerate(staging, plan, domains, seal_path, staging / matches[0])
+        snapshot_bookkeeping(staging, seal_path, receipt)
+        regenerated.add(f"mcp-server/src/{receipt['version']}.generated.js")
+        changed = git(staging, 'diff', '--name-only').decode().splitlines()
+        untracked = git(staging, 'ls-files', '--others', '--exclude-standard').decode().splitlines()
+        git(staging, 'add', '--', *sorted(set(changed + untracked)))
+        commit(staging, "Regenerate successor from disposable current-main replay")
+    check = subprocess.run([sys.executable, str(Path(__file__).with_name('successor-only-diff.py')), approved, git(staging, 'rev-parse', 'HEAD').decode().strip()], cwd=staging, env=scrubbed_env(), capture_output=True, timeout=120)
+    if check.returncode:
+        raise RehomeError("domain patch changed; staging retained at " + str(staging) + ': ' + check.stderr.decode().strip())
+    return staging, sorted(regenerated)
+
+
 def rehome(repo: Path) -> Path:
     repo = repo.resolve(strict=True)
     root = Path(git(repo, "rev-parse", "--show-toplevel").decode().strip()).resolve()
@@ -111,37 +243,21 @@ def rehome(repo: Path) -> Path:
         refused = [p for p in conflict_paths if not owned_conflict(repo, base, approved, main, p)]
         if refused:
             raise RehomeError("conflict outside successor ownership: " + ", ".join(refused))
-        if conflict_paths:
-            raise RehomeError("successor regeneration needs complete database catalog rows: " + ", ".join(conflict_paths))
-        added = git(repo, "diff", "--diff-filter=A", "--name-only", base, approved,
-                    "--", "migrations", "mcp-server/src").decode().splitlines()
-        successors = [p for p in added if is_owned_file(p, None, file_at(repo, approved, p))]
-        if successors:
-            pending = [Path(p).name for p in added if p.startswith("migrations/") and p.endswith(".sql")]
-            plan = allocation_plan(repo, main, pending)
-            moves = [p for p in pending if plan["migration_names"][p] != p]
-            expected = f'mcp-server/src/scac-mutation-registry.v{plan["registry_successor"]}.generated.js'
-            moves.extend(p for p in successors if ".v" in p and p != expected)
-            if moves:
-                raise RehomeError("successor regeneration needs complete database catalog rows: " + ", ".join(moves))
-        result = subprocess.run(["git", "merge", "--no-ff", "--no-commit", main],
-                                cwd=repo, env=scrubbed_env(), capture_output=True, timeout=120)
-        if result.returncode:
-            if (git_dir / "MERGE_HEAD").exists():
-                git(repo, "merge", "--abort")
-            raise RehomeError("merge changed since preflight; no automatic retry")
-        if (git_dir / "MERGE_HEAD").exists():
-            message = git_dir / "successor-rehome-message"
-            message.write_text("Merge current main for successor integration\n")
-            try:
-                git(repo, "commit", "-F", str(message))
-            except RehomeError:
-                git(repo, "merge", "--abort")
-                raise
-        return manifest(repo, git_dir, approved, main, [])
+        staging, rewritten = prepare(repo, base, approved, main, conflict_paths)
+        if git(repo, 'rev-parse', 'HEAD').decode().strip() != approved or git(repo, 'status', '--porcelain').strip():
+            raise RehomeError('worktree changed during preparation; staging retained at ' + str(staging))
+        git(repo, 'fetch', '--quiet', 'origin', 'main')
+        if git(repo, 'rev-parse', 'origin/main').decode().strip() != main:
+            raise RehomeError('main changed during preparation; staging retained at ' + str(staging))
+        git(repo, 'fetch', '--quiet', str(staging), 'HEAD')
+        git(repo, 'merge', '--ff-only', 'FETCH_HEAD')
+        return manifest(repo, git_dir, approved, main, rewritten)
 
 
 def main() -> int:
+    python = Path(__file__).resolve().parents[1] / '.venv/bin/python'
+    if importlib.util.find_spec('psycopg') is None and python.is_file() and Path(sys.executable) != python:
+        return subprocess.call([str(python), str(Path(__file__).resolve()), *sys.argv[1:]], env=scrubbed_env())
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("worktree", type=Path)
     args = parser.parse_args()
