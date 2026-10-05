@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from "../../mcp-server/test/helpers/disposable-postgres.mjs";
 // Synthetic SQL evaluation support, imported by tests. No production DSN or writes.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -34,15 +35,31 @@ export async function syntheticDatabase() {
   const dir = mkdtempSync(join(tmpdir(), "br-"));
   const data = join(dir, "pg");
   const ctl = binary("pg_ctl");
-  command(binary("initdb"), ["-D", data, "-U", "synthetic_owner", "-A", "trust", "--no-locale", "--encoding=UTF8"]);
-  command(ctl, ["-D", data, "-l", join(dir, "server.log"), "-o", `-F -k ${dir} -c listen_addresses=''`, "-w", "start"]);
+  const releaseBudget = await acquirePostgresFixtureGroup();
+  let running = false;
+  try {
+    command(binary("initdb"), ["-D", data, "-U", "synthetic_owner", "-A", "trust", "--no-locale", "--encoding=UTF8"]);
+    command(ctl, ["-D", data, "-l", join(dir, "server.log"), "-o", `-F -k ${dir} -c listen_addresses=''`, "-w", "start"]);
+    running = true;
+  } catch (error) {
+    try {
+      if (existsSync(join(data, "postmaster.pid"))) command(ctl, ["-D", data, "-w", "stop"]);
+    } finally {
+      await releaseBudget();
+    }
+    throw error;
+  }
   const client = new Client({ host: dir, user: "synthetic_owner", database: "postgres" });
   const close = async () => {
-    try { await client.end(); } finally {
-      command(ctl, ["-D", data, "-w", "stop"]);
-      const staged = join(tmpdir(), "_to_delete");
-      mkdirSync(staged, { recursive: true });
-      renameSync(dir, join(staged, dir.split("/").at(-1)));
+    try {
+      try { await client.end(); } finally {
+        if (running) command(ctl, ["-D", data, "-w", "stop"]);
+        const staged = join(tmpdir(), "_to_delete");
+        mkdirSync(staged, { recursive: true });
+        renameSync(dir, join(staged, dir.split("/").at(-1)));
+      }
+    } finally {
+      await releaseBudget();
     }
   };
   try {

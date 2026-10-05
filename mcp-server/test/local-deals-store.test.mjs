@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -24,6 +25,7 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
   const dir = mkdtempSync('/tmp/local-deals-');
   let running = false;
   let c;
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try {
     execFileSync(path.join(bin, 'initdb'), ['-D', dir, '-U', 'fixture', '--auth=trust', '--no-locale'], { stdio: 'pipe' });
     execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-l', path.join(dir, 'server.log'), '-o', `-k ${dir} -h ''`, '-w', 'start'], { stdio: 'pipe' });
@@ -304,7 +306,11 @@ test('Local Deals PostgreSQL caller and evidence regressions', { skip: !bin && '
       }
     });
   } finally {
-    if (c) await c.end();
-    if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' });
+    try {
+      if (c) await c.end();
+      if (running) execFileSync(path.join(bin, 'pg_ctl'), ['-D', dir, '-m', 'immediate', '-w', 'stop'], { stdio: 'pipe' });
+    } finally {
+      await releaseBudget();
+    }
   }
 });
