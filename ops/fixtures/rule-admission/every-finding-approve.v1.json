@@ -1,0 +1,9 @@
+{
+  "idempotency_key": "rule-every-finding-approve-2026-10-05-v1",
+  "rule_id": "729770dd-5a88-4521-84ef-10210c886ba4",
+  "policy_kind": "machine_enforceable",
+  "control_keys": [
+    "findings_coverage"
+  ],
+  "reason": "Carry Joe's 2026-10-05 verbatim Approve after admitted delivery and installed findings coverage are read back and verified."
+}

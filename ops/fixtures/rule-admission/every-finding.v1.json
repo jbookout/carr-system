@@ -1,0 +1,74 @@
+{
+  "idempotency_key": "rule-every-finding-admit-2026-10-05-v1",
+  "rule_id": "729770dd-5a88-4521-84ef-10210c886ba4",
+  "enforcement_class": "machine_enforceable",
+  "binding_moment": "Before writing a fixer or builder brief, triaging review or audit findings, or reporting findings to Joe or Dell.",
+  "applicability": {
+    "workflows": [
+      "e2e",
+      "architecture-review",
+      "code-review",
+      "QA",
+      "audit"
+    ],
+    "actions": [
+      "brief-fix-work",
+      "triage-findings",
+      "report-findings"
+    ],
+    "severity_scope": "all; severity sets order only",
+    "unfixed_exception": "The fixer shows the finding is not a defect and writes the reason in the PR."
+  },
+  "projection": {
+    "targets": [
+      "standing-context",
+      "applicable-rules"
+    ],
+    "delivery": {
+      "load_layer": "pack",
+      "packs": [
+        "engineering-git",
+        "governance-rules"
+      ],
+      "why": "Deliver at agent briefs, findings-file writes, record-finding calls and PR creation or report edits; routine reads remain silent."
+    },
+    "route_ref": "ops/config/rule-routes.v1.json#rules.729770dd",
+    "boot_class_ref": "ops/config/rule-classes.v1.json#rules.729770dd"
+  },
+  "reachability": {
+    "delivery": "hooks/rule-pack-preuse-reselection.py -> lib/rule_routes.py -> standing-context(rule_ids)",
+    "enforcement": "ops/ci.sh gates class -> ops/findings-coverage-gate.py -> GitHub required ops/ci.sh --strict",
+    "brief_check": "ops/findings-coverage-gate.py --brief <brief-file> --phase brief",
+    "scope_limit": "CI enforces reports that declare Findings-source. Undeclared or non-file findings and semantic fix or non-defect truth remain judgment obligations; route delivery reminds the fixer."
+  },
+  "input_contract": {
+    "source": {
+      "type": "object",
+      "required": [
+        "findings"
+      ],
+      "findings": "Array of objects with unique nonempty id strings across sources; severity is never filtered."
+    },
+    "report": [
+      "Findings-source: <repo-relative JSON path> (one per source)",
+      "Findings-total: <full unique finding count>",
+      "Finding: <id> | fixed | <fix evidence> OR Finding: <id> | not_a_defect | <reason>"
+    ],
+    "brief": "Same source and total; use planned with the fix action in place of fixed. A report cannot use planned."
+  },
+  "fixture_refs": [
+    "evals/rule-delivery/fixtures/every-finding.v1.json#fixer-brief",
+    "evals/rule-delivery/fixtures/every-finding.v1.json#routine-read",
+    "ops/findings-coverage-gate-selftest.py"
+  ],
+  "enforcement_points": [
+    {
+      "control_key": "findings_coverage",
+      "implementation_ref": "ops/findings-coverage-gate.py; ops/ci.sh",
+      "test_ref": "ops/findings-coverage-gate-selftest.py",
+      "enforcement_class": "deny_gate",
+      "installed": true
+    }
+  ],
+  "reason": "Joe approved verbatim Approve on 2026-10-05. Admit only after the merged control catalog migration is applied and the exact merged CI/brief checks and live delivery pass; manifest completeness is mechanical, semantic defect and fix judgments remain with the reviewer."
+}

@@ -9,7 +9,7 @@
 // at request time. A Worker has no filesystem, so this is a checked-in module.
 
 export const RULE_BOOT_CLASSES_SOURCE = "ops/config/rule-classes.v1.json";
-export const RULE_BOOT_CLASSES_DIGEST = "sha256:7663735056573c5c6055640f932128b4868a18cfd90ecdcbc5aff80029cf2efe";
+export const RULE_BOOT_CLASSES_DIGEST = "sha256:83abdc748a150878ce988805fd4c223b96fa30c43751cd80b915d973ae48b2b5";
 export const RULE_BOOT_BUDGET_TOKENS = 40000;
 export const RULE_BOOT_CHARS_PER_TOKEN = 3.6;
 
@@ -107,6 +107,7 @@ export const RULE_BOOT_CLASSES = Object.freeze({
   "70e372f0": Object.freeze({"cls": "c", "on": false, "summary": "When calibrating to Dell's style, learn only from what he says/asks/corrects; never assess his personality.", "when": "calibrating to Dell's working style"}),
   "7105955b": Object.freeze({"cls": "d", "on": false, "summary": "When closing a renumbered or superseded loop, use dropped and say it was superseded, not abandoned", "when": "loop_successor schema (close-loop verb)"}),
   "725dff46": Object.freeze({"cls": "b", "on": false, "summary": "When writing prospect-visible content, credit the vendor network to the team, never to Dell alone.", "when": "writing prospect-visible content"}),
+  "729770dd": Object.freeze({"cls": "b", "on": false, "summary": "Fix every finding regardless of severity; show non-defect evidence in the PR and report the full count.", "when": "writing a fixer or builder brief, triaging findings, or reporting findings to a partner"}),
   "72e06bdf": Object.freeze({"cls": "b", "on": false, "summary": "Never pre-qualify leads before the board; present every lead with an estimated score, Joe qualifies.", "when": "lead board presentation"}),
   "73381d78": Object.freeze({"cls": "d", "on": true, "summary": "After a config-file change, enumerate and verify every consumer, since format fixes for one can break another.", "when": "completion_evidence stop_gate - config-file change completion"}),
   "737a68d6": Object.freeze({"cls": "e", "on": false, "summary": "Duplicate of 204391be: a missing record-layer verb should be built immediately, not left manual", "when": "duplicate of 204391be"}),

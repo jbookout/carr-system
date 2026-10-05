@@ -1620,6 +1620,34 @@
     }
    ]
   },
+  "729770dd": {
+   "moment": "writing a fixer or builder brief, triaging findings, or reporting findings to a partner",
+   "routes": [
+    {
+     "kind": "trigger",
+     "tools": [
+      "Agent"
+     ],
+     "verbs": [
+      "record-finding"
+     ],
+     "bash_patterns": [
+      "\\bgh\\s+pr\\s+(?:create|edit|comment)\\b",
+      "\\b(?:check-)?findings-coverage(?:-gate)?\\.py\\b"
+     ]
+    },
+    {
+     "kind": "path_rule",
+     "path_globs": [
+      "*fixer*brief*",
+      "*builder*brief*",
+      "*findings*",
+      "*fix-report*"
+     ]
+    }
+   ],
+   "note": "Conservative delivery on agent briefs and reports; routine reads stay silent. Proposed until record-layer admission and approval."
+  },
   "72e06bdf": {
    "moment": "lead board presentation",
    "routes": [

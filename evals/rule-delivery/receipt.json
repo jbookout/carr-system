@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:014966d863e972c42370031a1d2a08db84c6cd7bca8dedb804320e8f173bf63e",
+    "configuration_fingerprint": "sha256:218221d2c8a2e531eb4efe371f6701e94f7da440b3f25bf480a130012d1467e5",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "e7662e16e2007982b67031209807aac4340b2135c4c8000a947dbfd212477a6e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a10b58-ff3f-7d12-9991-48e7da320455",
+    "native_session_ref": "01a10df7-f01d-7b80-a600-52a360ab93b9",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -20,7 +20,7 @@
     "total": 338,
     "train": 212
   },
-  "change": "Remove the retired parity command route and refresh source-bound deterministic rule-delivery evidence for PR 1546.",
+  "change": "Register every-finding repair delivery and refresh deterministic regression evidence; new-rule recall is tested separately by the every-finding fixtures.",
   "cost": {
     "baseline_usd_per_case": 0.0,
     "candidate_usd_per_case": 0.0
@@ -83,18 +83,18 @@
         "score": 0.2640449438202247
       },
       "candidate": {
-        "ci_high": 0.32608695652173914,
-        "ci_low": 0.20234604105571846,
-        "score": 0.2627118644067797
+        "ci_high": 0.3438202247191011,
+        "ci_low": 0.21551724137931033,
+        "score": 0.27900552486187846
       },
       "critical": true,
       "delta": {
-        "ci_high": 0.0,
-        "ci_low": -0.005072208524128208,
-        "value": -0.0013330794134450152
+        "ci_high": 0.023181686467690532,
+        "ci_low": 0.005179593961478379,
+        "value": 0.014960581041653764
       },
       "dimension_id": "human-delivery-precision",
-      "direction_vs_baseline": "equivalent",
+      "direction_vs_baseline": "improved",
       "evidence_refs": [
         "evals/rule-delivery/evidence/baseline.jsonl",
         "evals/rule-delivery/evidence/candidate.jsonl"
@@ -140,7 +140,7 @@
       },
       "candidate": {
         "path": "evals/rule-delivery/evidence/candidate.jsonl",
-        "sha256": "e8e81c8f02992bd4dba2510db8fd8a6554c893144d8290c08105b8d0b55335ca"
+        "sha256": "6226a4ac71cb1da2bef08d690c357b3d930498d9a74d6c88e6acd2433281e561"
       }
     },
     "dependencies": {
@@ -153,21 +153,20 @@
       "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
       "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
       "ops/config/jev-cost-guard.v1.json": "8920873a41078dca949d8e31f50705e1330bcfa087b5260c22693f220488a2f8",
-      "ops/config/rule-classes.v1.json": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23",
+      "ops/config/rule-classes.v1.json": "50c874ab810f85f06fc37a61e70027de6c760da466d84504943ec3b8fa267d93",
       "ops/config/rule-enforcement-map.json": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
       "ops/config/rule-jev-triggers.v1.json": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
       "ops/config/rule-jit-triggers.v1.json": "b0b23e68c4121e649b82f5d7f93704f1574e2a7ce798a5e3d823b1322c04dd59",
-      "ops/config/rule-routes.v1.json": "1d94a8dab3d249fd86da466743dc3b904e6e27d2cd289de108d9cbb0c9fadbb5",
-      "ops/config/rule-selection-corpus.v1.json": "90f0e31475f1cd2c445475f8742de3dc94b62a2474d581fcefb5429a5eae102f",
-      "ops/config/rule-triage.v1.json": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c",
+      "ops/config/rule-routes.v1.json": "8750c760c09774587c21c97aa13c41318d81e65b117d063a1d3efe55bc7ed48d",
+      "ops/config/rule-selection-corpus.v1.json": "9bdcd262edfee3c4e1c6674b74dbfbdc717d322d7b3d6449f91527b1f3af88a6",
       "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
       "ops/fixtures/real-replay/read-calls.jsonl": "19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
       "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
       "ops/machine_envelope.py": "749970f4dfb838af4e6cd1e6537988a278fc0006a02b32f665dfd0f943266c3f",
-      "ops/rule_delivery_eval.py": "ee881cb42a56b997bfd660ba50b61f6b3982343f15f82d45fd3b7303b6bac382",
-      "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
-      "ops/rule_trigger_delivery.py": "3b231db2919624a85b6dd2dcecd56afc15ec84a4fd9df0082f45abce9e1b2b77",
-      "ops/typesafe_client.py": "798286fa008b772ba846c28249da0ce054dda88317288f134c58ae354fb20e6d",
+      "ops/rule_delivery_eval.py": "e59e392ec3cceae4df58d9aed14887c5e901105730e06020466b261b4803efc2",
+      "ops/rule_trigger_compile.py": "26e0595e793aaba54df070f206edfa9d72f33d861f77741e0f3947bf7dbccdce",
+      "ops/rule_trigger_delivery.py": "773911b40433f70242b7b85eb33c64a487e8be20dd6c9f2ba28ac70daf10edb1",
+      "ops/typesafe_client.py": "91acd006df639e545a5fe6890712507652219fadb3d972b03b1fed42f1fa086d",
       "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
     },
     "expectations": {
@@ -205,7 +204,8 @@
     "All-traffic recall against that historical baseline decreases through suppression of compiled cues on complete machine envelopes; do not claim all-traffic recall is preserved against it.",
     "The native /claude-api slash commands are unavailable in this runtime. The existing deterministic replay and programmatic grader regenerated source-bound evidence without a model call.",
     "Frozen expectations and split remain unchanged. No production deployment or live-model quality improvement is claimed.",
-    "The merged-source replay also preserves the measured complete-envelope prompt false-delivery reduction: test 14 to 0 and train 40 to 1 against the established historical baseline."
+    "The merged-source replay also preserves the measured complete-envelope prompt false-delivery reduction: test 14 to 0 and train 40 to 1 against the established historical baseline.",
+    "The new rule is not in the frozen legacy labels. ops/rule-every-finding-delivery-selftest.py replays evals/rule-delivery/fixtures/every-finding.v1.json through this same harness; six must-deliver and three must-stay-silent cases are a separate bounded regression, not part of the historical receipt scores."
   ],
   "primary_dimension": "envelope-prompt-clean-delivery",
   "repeats": 2,
@@ -234,6 +234,6 @@
   "surface": "rule-delivery",
   "verdict": {
     "decision": "ship",
-    "statement": "Fresh replay against the established pre-PR-1325 baseline preserves the accepted envelope clean-delivery gain. Human recall and precision intervals include zero; the recall point loss remains within the existing one-point constraint. The PR 1546 cleanup itself is at parity with its reviewed head and claims no quality gain."
+    "statement": "Fresh replay retains the accepted clean-delivery gain against the established pre-PR-1325 baseline. This change claims no isolated quality gain from the new rule: frozen legacy labels exclude its ID, so the nine new production replay cases verify its delivery separately."
   }
 }

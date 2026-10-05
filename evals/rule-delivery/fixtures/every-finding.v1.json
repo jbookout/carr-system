@@ -1,0 +1,76 @@
+{
+  "schema": "every-finding-delivery/v1",
+  "cases": [
+    {
+      "id": "fixer-brief",
+      "tool_name": "Agent",
+      "tool_input": {
+        "prompt": "Fix all findings from the e2e audit, including minor polish."
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "write-builder-brief",
+      "tool_name": "Write",
+      "tool_input": {
+        "file_path": "out/builder-brief.txt",
+        "content": "Repair review findings."
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "triage-findings",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "out/review-findings.json"
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "report-to-partner",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "gh pr create --body-file out/fix-report.txt"
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "report-record",
+      "tool_name": "mcp__carr__record_finding",
+      "tool_input": {},
+      "must_deliver": true
+    },
+    {
+      "id": "routine-read",
+      "tool_name": "Read",
+      "tool_input": {
+        "file_path": "out/review-findings.json"
+      },
+      "must_deliver": false
+    },
+    {
+      "id": "ordinary-shell",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "git status --short"
+      },
+      "must_deliver": false
+    },
+    {
+      "id": "unrelated-write",
+      "tool_name": "Write",
+      "tool_input": {
+        "file_path": "src/component.ts"
+      },
+      "must_deliver": false
+    },
+    {
+      "id": "report-pr-comment",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "gh pr comment 123 --body-file out/fix-report.txt"
+      },
+      "must_deliver": true
+    }
+  ]
+}
