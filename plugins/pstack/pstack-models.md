@@ -4,7 +4,7 @@ alwaysApply: true
 ---
 # pstack model configuration
 
-Read this file before selecting a delegate. PORT.md defines the native routes.
+Read this file before selecting a delegate. PORT.md defines the Model Room desk routes. Model slugs below are requested seat capabilities, not authorization to invoke model CLIs or to alter a live desk. Verify actual model and effort before dispatch and the returned result afterward.
 The budget is large. Claude judgment and hardest-task roles retain Joe's explicit max override.
 Code work uses Grok for fast tasks and Sol for the specified implementation roles.
 `inherit-parent` and `auto` omit the model. Each panel entry still creates one seat.

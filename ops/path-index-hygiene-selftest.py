@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import subprocess
 import sys
@@ -108,55 +107,18 @@ def main() -> int:
           not PATHS.violations(["ops/config/policy.v1.json"]), failures)
     check("ordinary descriptive filename passes", not PATHS.violations(["ops/report-2026.json"]), failures)
 
-    with tempfile.TemporaryDirectory(prefix="path-vendor-") as tmp:
-        root = Path(tmp)
-        git(root, "init", "-q")
-        manifest = root / "plugins/pstack/UPSTREAM.json"
-        manifest.parent.mkdir(parents=True)
-        deep = "plugins/pstack/skills/why/references/sources/linear.md"
-        sibling = "plugins/pstack/skills/why/references/sources/other.md"
-        files = [{"path": deep.removeprefix("plugins/pstack/"), "sha256": "a" * 64}]
-        data = {"repository": "https://github.com/cursor/plugins", "path": "pstack",
-                "commit": "e43c7ee2", "license": "MIT", "author": "Lauren Tan",
-                "files": files}
-        manifest.write_text(json.dumps(data))
-        git(root, "add", "plugins/pstack/UPSTREAM.json")
-        old_cwd = os.getcwd()
-        try:
-            os.chdir(root)
-            vendored = PATHS.vendored_paths()
-            check("manifest-listed upstream depth passes",
-                  not PATHS.violations([deep], vendored=vendored), failures)
-            check("unlisted sibling remains subject to depth limit",
-                  bool(PATHS.violations([sibling], vendored=vendored)), failures)
-            check("trailing whitespace alias receives no vendor exception",
-                  bool(PATHS.violations([deep + " "], vendored=vendored)), failures)
-            check("literal backslash alias receives no vendor exception",
-                  bool(PATHS.violations([deep.replace("skills/why", "skills\\why")],
-                                        vendored=vendored)), failures)
-            listed = subprocess.run(
-                [sys.executable, str(REPO / "ops/githooks/path-hygiene-check.py"),
-                 "--paths", deep], cwd=root, env=fixture_env(), capture_output=True, text=True)
-            check("explicit CLI paths honor staged upstream manifest",
-                  listed.returncode == 0 and not listed.stderr, failures)
-            unlisted = subprocess.run(
-                [sys.executable, str(REPO / "ops/githooks/path-hygiene-check.py"),
-                 "--paths", sibling], cwd=root, env=fixture_env(), capture_output=True, text=True)
-            check("explicit CLI paths refuse unlisted sibling",
-                  unlisted.returncode == 1 and sibling in unlisted.stderr, failures)
-            check("vendor exception preserves filename checks",
-                  bool(PATHS.violations(["plugins/pstack/a/b/c/report_final.md"],
-                       vendored={"plugins/pstack/a/b/c/report_final.md"})), failures)
-            files.append({"path": sibling.removeprefix("plugins/pstack/"), "sha256": "b" * 64})
-            manifest.write_text(json.dumps(data))
-            check("unstaged manifest expansion grants no exception",
-                  sibling not in PATHS.vendored_paths(), failures)
-            data["files"] = [{"path": "../outside.md", "sha256": "a" * 64}]
-            manifest.write_text(json.dumps(data))
-            git(root, "add", "plugins/pstack/UPSTREAM.json")
-            check("unsafe manifest grants no exception", not PATHS.vendored_paths(), failures)
-        finally:
-            os.chdir(old_cwd)
+    check("declared vendor-tree depth passes",
+          not PATHS.violations(["plugins/pstack/skills/why/references/sources/linear.md"]), failures)
+    check("vendor-tree prefix does not exempt neighboring paths",
+          bool(PATHS.violations(["plugins/pstack/skills-other/a/b/c/file.md"])), failures)
+    check("vendor-tree exception preserves filename checks",
+          bool(PATHS.violations(["plugins/pstack/skills/a/b/report_final.md"])), failures)
+    check("vendor-tree exception refuses parent traversal",
+          bool(PATHS.violations(["plugins/pstack/skills/../../a/b/c/file.md"])), failures)
+    check("vendor-tree exception refuses whitespace aliases",
+          bool(PATHS.violations(["plugins/pstack/skills/why/references/sources/linear.md "])), failures)
+    check("vendor-tree exception refuses backslash aliases",
+          bool(PATHS.violations(["plugins/pstack/skills\\why/references/sources/linear.md"])), failures)
 
     with tempfile.TemporaryDirectory(prefix="path-index-hygiene-") as tmp:
         root = Path(tmp)
