@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TOOLS, ToolError } from "../src/tools.js";
-import { BOARD_ANSWER_WRITE_VERBS } from "../src/board-answers.js";
 
 const joe = {
   id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe",
@@ -28,7 +27,6 @@ class Fake {
 test("board verbs expose typed versioned writes and a partner-only answer", () => {
   const writes = ["publish-board-snapshot", "ask-board-question", "revise-board-question",
     "answer-board-question", "acknowledge-board-answer", "record-board-answer-applied"];
-  assert.deepEqual([...BOARD_ANSWER_WRITE_VERBS], writes);
   for (const name of writes) {
     assert.equal(TOOLS[name]?.write, true, name);
     assert.ok(TOOLS[name].inputSchema.required.includes("idempotency_key"), name);

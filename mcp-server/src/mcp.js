@@ -732,9 +732,7 @@ export function requiresAuthorityConnection(tool, actor, args = {}) {
 }
 
 export function connectionRouteForTool(tool) {
-  if (!tool.write && !tool.writerConnection) return "reader";
-  if (tool.authorityOnly) return "authority";
-  return tool.writerConnection && !tool.write ? "writer_read_only" : "writer";
+  return tool.verbFacts.writerClass;
 }
 
 export async function executeWithTrustedPrincipal(actor, readback, requiredBundle, handler) {
@@ -961,7 +959,7 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     client.foundationAssuranceRuntime = foundationAssuranceRuntimeBinding(env);
   let jevPrefetched, jevAsk, jevRequest;
   let jevKeyLocked = false;
-  const writerRead = tool.writerConnection === true && !tool.write;
+  const writerRead = connectionRouteForTool(tool) === "writer_read_only";
   let readOk = true, readErrorKind = null;
   try {
     if (tool.jevProxy === true && (env?.TYPESAFE_API_KEY || judgeProviderFor(judgeWorkClass) === "decisions")) {
@@ -985,7 +983,7 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
         client.jevPrefetched = jevPrefetched;
       }
     }
-    await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
+    await client.query(writerRead ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
     // Guarded 2026-08-03. Unguarded, a missing actor row made this a raw
     // TypeError on `undefined.id` — a 500 with a stack trace where the real

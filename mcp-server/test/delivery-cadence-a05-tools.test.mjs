@@ -74,8 +74,8 @@ test("V5A05-READER-ROUTE: cadence-status leaves the carr_reader route mcp.js tak
     "ops.v5_a05_cadence_status is not executable by carr_reader; on the reader route the sweep's only read fails with 42501");
   // The same decision, held to its own contract so this test fails if the
   // helper is loosened rather than if the flag is dropped.
-  assert.equal(connectionRouteForTool({ write: false }), "reader");
-  assert.equal(connectionRouteForTool({ write: true }), "writer");
+  assert.equal(connectionRouteForTool(TOOLS["find-rule"]), "reader");
+  assert.equal(connectionRouteForTool(TOOLS["update-deal"]), "writer");
   assert.equal(connectionRouteForTool(TOOLS["record-cadence-receipt"]), "writer");
   assert.equal(connectionRouteForTool(TOOLS["raise-delivery-cadence-alert"]), "writer");
 });

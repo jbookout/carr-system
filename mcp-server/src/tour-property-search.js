@@ -188,7 +188,7 @@ export function tourPropertySearchTools({ withEnvelope, writeEvent, ToolError })
         return { ok: true, search };
       },
     },
-    "append-tour-selection-cart-version": {
+    "append-tour-selection-cart-version": { serialization: "idempotency-key",
       write: true,
       description: "Append one immutable internal selection-cart version. This does not create a route, projection, share, or client publication.",
       inputSchema: schema({

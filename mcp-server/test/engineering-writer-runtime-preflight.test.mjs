@@ -21,8 +21,8 @@ test("writer runtime preflight is a full-profile read routed only through the wr
   assert.equal(allowedIn("read", "engineering-writer-runtime-preflight", tool), false);
   assert.equal(tool.inputSchema.additionalProperties, false);
   const dispatcher = readFileSync(new URL("../src/mcp.js", import.meta.url), "utf8");
-  assert.match(dispatcher, /!tool\.write && !tool\.writerConnection/);
-  assert.match(dispatcher, /tool\.writerConnection && !tool\.write \? "begin read only" : "begin"/);
+  assert.equal(tool.verbFacts.writerClass, "writer_read_only");
+  assert.match(dispatcher, /writerRead \? "begin read only" : "begin"/);
 });
 
 test("writer runtime preflight returns only identity and bounded privilege booleans", async () => {

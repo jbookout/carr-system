@@ -48,13 +48,6 @@ import {
 
 export const MEETING_MODE_SCHEMA_VERSION = "doctorcre-meeting-mode.v1";
 
-/** The write verbs this file registers. tools.js serializes same-key calls to them. */
-export const MEETING_MODE_WRITE_VERBS = Object.freeze([
-  "start-meeting", "claim-meeting-processing", "add-meeting-note", "propose-meeting-action",
-  "decide-meeting-action", "record-meeting-action-outcome", "end-meeting",
-]);
-export const MEETING_MODE_VERBS = Object.freeze([...MEETING_MODE_WRITE_VERBS, "read-meeting"]);
-
 /** The four recap buckets the handoff names, and the one place a declined action goes. */
 export const MEETING_RECAP_BUCKETS = Object.freeze([
   "done", "delegated", "needs_approval", "unresolved",
@@ -248,7 +241,7 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
   const instance = { type: "string", description: "The calling device or app session; attribution only, never authority." };
 
   return {
-    "start-meeting": {
+    "start-meeting": { serialization: "idempotency-key",
       write: true,
       writerConnection: true,
       description: "Start, or rejoin, the ONE shared non-recording meeting for a native source identity (a Teams/Zoom meeting, a calendar event, or an app-minted ad-hoc id). Requires the signed-in partner's explicit one-tap (activation_intent one_tap_user_activation); captures no audio and raises no detection prompt. A second device or a retry returns the same meeting, never a second one.",
@@ -303,7 +296,7 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
       }),
     },
 
-    "claim-meeting-processing": {
+    "claim-meeting-processing": { serialization: "idempotency-key",
       write: true,
       writerConnection: true,
       description: "Claim, renew or release the single processing lease for a shared meeting. One device holds it; a second device is told who holds it and rejoins as a participant instead of starting a duplicate worker. An expired or released lease can be taken over, which advances the lease epoch that fences processing contributions.",
@@ -330,7 +323,7 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
       }),
     },
 
-    "add-meeting-note": {
+    "add-meeting-note": { serialization: "idempotency-key",
       write: true,
       writerConnection: true,
       description: "Append an attributed note to a shared meeting, or a new revision of an existing note under a compare-and-swap on its latest revision. Notes are append-only; a revision never overwrites history.",
@@ -362,7 +355,7 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
       }),
     },
 
-    "propose-meeting-action": {
+    "propose-meeting-action": { serialization: "idempotency-key",
       write: true,
       writerConnection: true,
       description: "Add a numbered action to a shared meeting's action stream, or revise a pending one. Tentative discussion stays a proposal. A signed-in partner's explicit_instruction naming a canonical command (an existing CARR write verb and its args) is accepted at once and returns the exact dispatch; nothing else is. A dedupe_key makes repeated contributions about the same action a no-op or a revision, never a duplicate. Processing contributions must present the current processing lease epoch.",
@@ -411,7 +404,7 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
       }),
     },
 
-    "decide-meeting-action": {
+    "decide-meeting-action": { serialization: "idempotency-key",
       write: true,
       writerConnection: true,
       description: "A signed-in partner accepts or declines a proposed meeting action at the revision they read. Acceptance requires a canonical command and mints the one idempotency key its dispatch must use; simultaneous or repeated acceptances resolve to that same decision. Accepting records a decision only: the effect happens when the returned dispatch is made through the existing verb and reconciled.",
@@ -451,7 +444,7 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
       }),
     },
 
-    "record-meeting-action-outcome": {
+    "record-meeting-action-outcome": { serialization: "idempotency-key",
       write: true,
       writerConnection: true,
       description: "Reconcile an accepted meeting action against the canonical record: it becomes done (or delegated) only when the existing verb's own committed envelope row is found under the action's operation key. When it is not found the answer is not_observed plus the exact retry, which must reuse the same key. Call this after any disconnect before retrying.",
@@ -480,7 +473,7 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
       }),
     },
 
-    "end-meeting": {
+    "end-meeting": { serialization: "idempotency-key",
       write: true,
       writerConnection: true,
       description: "A signed-in partner ends a shared meeting. The processing lease ends with it and no further notes or proposals are accepted; pending actions stay decidable and reconcilable, and read-meeting reports the done/delegated/needs-approval/unresolved recap.",
@@ -525,3 +518,5 @@ export function meetingModeTools({ withEnvelope, writeEvent, ToolError, lookupTo
     },
   };
 }
+
+export const MEETING_MODE_VERBS = Object.freeze(Object.keys(meetingModeTools({})));

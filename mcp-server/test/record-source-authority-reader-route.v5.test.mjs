@@ -142,7 +142,7 @@ test("F01-READER-ROUTE: the F01 door routes like the J102 door — reads writer_
   // The lifecycle read this mirrors.
   assert.equal(connectionRouteForTool(TOOLS["read-cre-lifecycle"]), "writer_read_only");
   // The helper itself is unchanged: an undeclared read still goes to the reader.
-  assert.equal(connectionRouteForTool({ write: false }), "reader");
+  assert.equal(connectionRouteForTool(TOOLS["find-rule"]), "reader");
 });
 
 test("F01-READER-ROUTE: the equality check is not relaxed — a writer transaction naming a different actor still refuses the read", async () => {

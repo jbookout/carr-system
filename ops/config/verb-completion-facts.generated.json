@@ -1,0 +1,1278 @@
+{
+  "schema": "verb-completion-facts/v1",
+  "unknown_write_prefixes": [
+    "accept",
+    "activate",
+    "add",
+    "admit",
+    "amend",
+    "append",
+    "approve",
+    "assign",
+    "attach",
+    "attest",
+    "begin",
+    "change",
+    "claim",
+    "close",
+    "complete",
+    "confirm",
+    "create",
+    "deactivate",
+    "decide",
+    "decline",
+    "detach",
+    "end",
+    "link",
+    "disable",
+    "log",
+    "measure",
+    "merge",
+    "new",
+    "patch",
+    "prepare",
+    "promote",
+    "propose",
+    "reassign",
+    "record",
+    "register",
+    "release",
+    "resolve",
+    "restore",
+    "retire",
+    "revert",
+    "revoke",
+    "score",
+    "seal",
+    "set",
+    "stamp",
+    "start",
+    "teach",
+    "triage",
+    "update",
+    "write"
+  ],
+  "verbs": {
+    "read-v5-a02-rule-enforcement-coverage": {
+      "completionClass": "read"
+    },
+    "find": {
+      "completionClass": "read"
+    },
+    "who-do-we-know": {
+      "completionClass": "read"
+    },
+    "counterparty-history": {
+      "completionClass": "read"
+    },
+    "source-attribution": {
+      "completionClass": "read"
+    },
+    "catch-me-up": {
+      "completionClass": "read"
+    },
+    "find-and-catch-up": {
+      "completionClass": "read"
+    },
+    "prepare-conversation": {
+      "completionClass": "write"
+    },
+    "today-triage": {
+      "completionClass": "read"
+    },
+    "morning-brief": {
+      "completionClass": "read"
+    },
+    "deal-board": {
+      "completionClass": "read"
+    },
+    "deal-room-board": {
+      "completionClass": "read"
+    },
+    "capture-queue": {
+      "completionClass": "read"
+    },
+    "get-call-context": {
+      "completionClass": "read"
+    },
+    "lead-hot": {
+      "completionClass": "read"
+    },
+    "lead-board": {
+      "completionClass": "read"
+    },
+    "claim-card": {
+      "completionClass": "write"
+    },
+    "stale-records": {
+      "completionClass": "read"
+    },
+    "integrity-digest": {
+      "completionClass": "read"
+    },
+    "read-loop": {
+      "completionClass": "read"
+    },
+    "loop-board": {
+      "completionClass": "read"
+    },
+    "record-rule-enforcement-fallback": {
+      "completionClass": "write"
+    },
+    "log-activity": {
+      "completionClass": "write"
+    },
+    "stamp-touch": {
+      "completionClass": "write"
+    },
+    "triage-item": {
+      "completionClass": "write"
+    },
+    "set-next-action": {
+      "completionClass": "write"
+    },
+    "complete-action": {
+      "completionClass": "write"
+    },
+    "add-critical-date": {
+      "completionClass": "write"
+    },
+    "record-executed-lease": {
+      "completionClass": "write"
+    },
+    "update-deal": {
+      "completionClass": "write"
+    },
+    "new-deal": {
+      "completionClass": "write"
+    },
+    "reassign-deal": {
+      "completionClass": "write"
+    },
+    "set-lead": {
+      "completionClass": "write"
+    },
+    "add-party": {
+      "completionClass": "write"
+    },
+    "add-premises": {
+      "completionClass": "write"
+    },
+    "new-lead": {
+      "completionClass": "write"
+    },
+    "promote-pool": {
+      "completionClass": "write"
+    },
+    "decline-candidate": {
+      "completionClass": "write"
+    },
+    "log-outreach": {
+      "completionClass": "write"
+    },
+    "new-client": {
+      "completionClass": "write"
+    },
+    "new-vendor": {
+      "completionClass": "write"
+    },
+    "update-vendor": {
+      "completionClass": "write"
+    },
+    "claim-lead": {
+      "completionClass": "write"
+    },
+    "link-lead-client": {
+      "completionClass": "write"
+    },
+    "update-lead": {
+      "completionClass": "write"
+    },
+    "update-party-contact": {
+      "completionClass": "write"
+    },
+    "record-counter": {
+      "completionClass": "write"
+    },
+    "register-template": {
+      "completionClass": "write"
+    },
+    "prepare-document": {
+      "completionClass": "write"
+    },
+    "update-document-status": {
+      "completionClass": "write"
+    },
+    "link-parties": {
+      "completionClass": "write"
+    },
+    "confirm-merge": {
+      "completionClass": "write"
+    },
+    "merge-vendor-rows": {
+      "completionClass": "write"
+    },
+    "record-finding": {
+      "completionClass": "write"
+    },
+    "find-rule": {
+      "completionClass": "read"
+    },
+    "teach": {
+      "completionClass": "write"
+    },
+    "admit-rule": {
+      "completionClass": "write"
+    },
+    "approve-rule": {
+      "completionClass": "write"
+    },
+    "activate-rule": {
+      "completionClass": "write"
+    },
+    "applicable-rules": {
+      "completionClass": "read"
+    },
+    "governance-queue": {
+      "completionClass": "read"
+    },
+    "accept-workflow": {
+      "completionClass": "write"
+    },
+    "disable-legacy-schedule": {
+      "completionClass": "write"
+    },
+    "activate-guidance-registry": {
+      "completionClass": "write"
+    },
+    "decide-guidance-import-batch": {
+      "completionClass": "write"
+    },
+    "deactivate-guidance-registry": {
+      "completionClass": "write"
+    },
+    "retire-rule": {
+      "completionClass": "write"
+    },
+    "amend-rule": {
+      "completionClass": "write"
+    },
+    "log-capture": {
+      "completionClass": "write"
+    },
+    "log-decision": {
+      "completionClass": "write"
+    },
+    "update-decision": {
+      "completionClass": "write"
+    },
+    "detach-decision": {
+      "completionClass": "write"
+    },
+    "add-loop": {
+      "completionClass": "write"
+    },
+    "update-loop": {
+      "completionClass": "write"
+    },
+    "loop-headers": {
+      "completionClass": "read"
+    },
+    "edit-loop-header": {
+      "completionClass": "write"
+    },
+    "close-loop": {
+      "completionClass": "write"
+    },
+    "amend-closed-loop": {
+      "completionClass": "write"
+    },
+    "open-campaign": {
+      "completionClass": "write"
+    },
+    "score-campaign": {
+      "completionClass": "write"
+    },
+    "attach-to-campaign": {
+      "completionClass": "write"
+    },
+    "measure-placement": {
+      "completionClass": "write"
+    },
+    "record-gate-zero-read-only-outcome": {
+      "completionClass": "write"
+    },
+    "add-industry-event": {
+      "completionClass": "write"
+    },
+    "list-industry-events": {
+      "completionClass": "read"
+    },
+    "update-industry-event": {
+      "completionClass": "write"
+    },
+    "read-invoice-tracker": {
+      "completionClass": "read"
+    },
+    "record-commission-receipt": {
+      "completionClass": "write"
+    },
+    "get-deal-room": {
+      "completionClass": "read"
+    },
+    "read-deal-reconciliation": {
+      "completionClass": "read"
+    },
+    "presence-lease": {
+      "completionClass": "write"
+    },
+    "patch-deal-field": {
+      "completionClass": "write"
+    },
+    "add-deal-note": {
+      "completionClass": "write"
+    },
+    "set-next-step": {
+      "completionClass": "write"
+    },
+    "start-deal-review": {
+      "completionClass": "write"
+    },
+    "review-deal": {
+      "completionClass": "write"
+    },
+    "end-deal-review": {
+      "completionClass": "write"
+    },
+    "set-market-agent": {
+      "completionClass": "write"
+    },
+    "set-national-account-owner": {
+      "completionClass": "write"
+    },
+    "create-national-account": {
+      "completionClass": "write"
+    },
+    "create-national-market-deal": {
+      "completionClass": "write"
+    },
+    "revert-deal-field": {
+      "completionClass": "write"
+    },
+    "resolve-conflict": {
+      "completionClass": "write"
+    },
+    "resolve-candidate": {
+      "completionClass": "write"
+    },
+    "resolve-post-call-candidate": {
+      "completionClass": "write"
+    },
+    "list-verbs": {
+      "completionClass": "read"
+    },
+    "export-email-domains": {
+      "completionClass": "read"
+    },
+    "record-defect": {
+      "completionClass": "write"
+    },
+    "find-precedent": {
+      "completionClass": "read"
+    },
+    "state-as-of": {
+      "completionClass": "read"
+    },
+    "call-verb": {
+      "completionClass": "write"
+    },
+    "new-doctrine-doc": {
+      "completionClass": "write"
+    },
+    "write-doctrine-section": {
+      "completionClass": "write"
+    },
+    "set-doctrine-refs": {
+      "completionClass": "write"
+    },
+    "retire-doctrine-section": {
+      "completionClass": "write"
+    },
+    "read-doctrine": {
+      "completionClass": "read"
+    },
+    "map-architecture": {
+      "completionClass": "read"
+    },
+    "doctrine-sections": {
+      "completionClass": "read"
+    },
+    "search-doctrine": {
+      "completionClass": "read"
+    },
+    "doctrine-index": {
+      "completionClass": "read"
+    },
+    "claim-doctrine-sections": {
+      "completionClass": "write"
+    },
+    "release-doctrine-claims": {
+      "completionClass": "write"
+    },
+    "change-doctrine-sections": {
+      "completionClass": "write"
+    },
+    "resolve-doctrine-rules": {
+      "completionClass": "write"
+    },
+    "standing-context": {
+      "completionClass": "read"
+    },
+    "dry-run-doctrine-gates": {
+      "completionClass": "write"
+    },
+    "unfinished-work": {
+      "completionClass": "read"
+    },
+    "publish-board-snapshot": {
+      "completionClass": "write"
+    },
+    "ask-board-question": {
+      "completionClass": "write"
+    },
+    "revise-board-question": {
+      "completionClass": "write"
+    },
+    "list-progress-boards": {
+      "completionClass": "read"
+    },
+    "read-progress-board": {
+      "completionClass": "read"
+    },
+    "answer-board-question": {
+      "completionClass": "write"
+    },
+    "read-board-answers": {
+      "completionClass": "read"
+    },
+    "acknowledge-board-answer": {
+      "completionClass": "write"
+    },
+    "record-board-answer-applied": {
+      "completionClass": "write"
+    },
+    "schedule-board": {
+      "completionClass": "read"
+    },
+    "propose-retrieval-concept": {
+      "completionClass": "write"
+    },
+    "propose-retrieval-phrase": {
+      "completionClass": "write"
+    },
+    "propose-retrieval-mapping": {
+      "completionClass": "write"
+    },
+    "propose-retrieval-retirement": {
+      "completionClass": "write"
+    },
+    "approve-retrieval-proposals": {
+      "completionClass": "write"
+    },
+    "retire-retrieval-curation": {
+      "completionClass": "write"
+    },
+    "next-signals": {
+      "completionClass": "read"
+    },
+    "record-signal": {
+      "completionClass": "write"
+    },
+    "open-investigation": {
+      "completionClass": "write"
+    },
+    "investigation-neighborhood": {
+      "completionClass": "read"
+    },
+    "open-investigation-branch": {
+      "completionClass": "write"
+    },
+    "record-branch-evidence": {
+      "completionClass": "write"
+    },
+    "adjudicate-investigation-branch": {
+      "completionClass": "write"
+    },
+    "get-investigation": {
+      "completionClass": "read"
+    },
+    "close-investigation": {
+      "completionClass": "write"
+    },
+    "add-doc-conversation-turn": {
+      "completionClass": "write"
+    },
+    "create-doc-conversation": {
+      "completionClass": "write"
+    },
+    "share-doc-conversation": {
+      "completionClass": "write"
+    },
+    "rename-doc-conversation": {
+      "completionClass": "write"
+    },
+    "read-doc-conversation": {
+      "completionClass": "read"
+    },
+    "list-doc-conversations": {
+      "completionClass": "read"
+    },
+    "complete-doc-suggestion-scan": {
+      "completionClass": "write"
+    },
+    "suggest-doc-work": {
+      "completionClass": "write"
+    },
+    "list-doc-suggestions": {
+      "completionClass": "read"
+    },
+    "decide-doc-suggestion": {
+      "completionClass": "write"
+    },
+    "propose-doc-correction": {
+      "completionClass": "write"
+    },
+    "read-doc-activity": {
+      "completionClass": "read"
+    },
+    "whats-new": {
+      "completionClass": "write"
+    },
+    "start-meeting": {
+      "completionClass": "write"
+    },
+    "claim-meeting-processing": {
+      "completionClass": "write"
+    },
+    "add-meeting-note": {
+      "completionClass": "write"
+    },
+    "propose-meeting-action": {
+      "completionClass": "write"
+    },
+    "decide-meeting-action": {
+      "completionClass": "write"
+    },
+    "record-meeting-action-outcome": {
+      "completionClass": "write"
+    },
+    "end-meeting": {
+      "completionClass": "write"
+    },
+    "read-meeting": {
+      "completionClass": "read"
+    },
+    "acknowledge-notification": {
+      "completionClass": "write"
+    },
+    "notification-feed": {
+      "completionClass": "read"
+    },
+    "read-notification-preferences": {
+      "completionClass": "read"
+    },
+    "set-notification-preference": {
+      "completionClass": "write"
+    },
+    "cadence-status": {
+      "completionClass": "read"
+    },
+    "record-cadence-receipt": {
+      "completionClass": "write"
+    },
+    "raise-delivery-cadence-alert": {
+      "completionClass": "write"
+    },
+    "read-session-identity": {
+      "completionClass": "read"
+    },
+    "read-dispatch-history": {
+      "completionClass": "read"
+    },
+    "record-dispatch-link": {
+      "completionClass": "write"
+    },
+    "acknowledge-dispatch": {
+      "completionClass": "write"
+    },
+    "read-doc-outcome-cards": {
+      "completionClass": "read"
+    },
+    "capability-program": {
+      "completionClass": "read"
+    },
+    "start-capability-project": {
+      "completionClass": "write"
+    },
+    "begin-capability-project": {
+      "completionClass": "write"
+    },
+    "prepare-capability-project": {
+      "completionClass": "write"
+    },
+    "attest-capability-project": {
+      "completionClass": "write"
+    },
+    "complete-capability-project": {
+      "completionClass": "write"
+    },
+    "cancel-capability-session": {
+      "completionClass": "write"
+    },
+    "read-work-shape": {
+      "completionClass": "read"
+    },
+    "set-work-shape-disposition": {
+      "completionClass": "write"
+    },
+    "write-work-shape": {
+      "completionClass": "write"
+    },
+    "current-work-requests": {
+      "completionClass": "read"
+    },
+    "current-work-item": {
+      "completionClass": "read"
+    },
+    "report-problem": {
+      "completionClass": "write"
+    },
+    "work-request-card": {
+      "completionClass": "read"
+    },
+    "review-and-triage": {
+      "completionClass": "write"
+    },
+    "answer-work-request-for-joe": {
+      "completionClass": "write"
+    },
+    "decline-work-request": {
+      "completionClass": "write"
+    },
+    "supersede-work-request": {
+      "completionClass": "write"
+    },
+    "propose-ready-plan": {
+      "completionClass": "write"
+    },
+    "review-heavy-build-plan": {
+      "completionClass": "write"
+    },
+    "propose-ready-plan-amendment": {
+      "completionClass": "write"
+    },
+    "accept-ready-plan-amendment": {
+      "completionClass": "write"
+    },
+    "effective-ready-plan": {
+      "completionClass": "read"
+    },
+    "ready-plan-amendment-discovery": {
+      "completionClass": "read"
+    },
+    "acknowledge-ready-plan-amendment": {
+      "completionClass": "write"
+    },
+    "accept-ready-plan": {
+      "completionClass": "write"
+    },
+    "propose-outcome-feedback": {
+      "completionClass": "write"
+    },
+    "accept-outcome-feedback": {
+      "completionClass": "write"
+    },
+    "read-portfolio": {
+      "completionClass": "read"
+    },
+    "propose-portfolio-revision": {
+      "completionClass": "write"
+    },
+    "review-portfolio-revision": {
+      "completionClass": "write"
+    },
+    "accept-portfolio-revision": {
+      "completionClass": "write"
+    },
+    "compare-lease-terms": {
+      "completionClass": "read"
+    },
+    "add-room-turn": {
+      "completionClass": "write"
+    },
+    "project-room-queue": {
+      "completionClass": "write"
+    },
+    "read-room": {
+      "completionClass": "read"
+    },
+    "read-room-latest": {
+      "completionClass": "read"
+    },
+    "read-room-queue": {
+      "completionClass": "read"
+    },
+    "read-profiles": {
+      "completionClass": "read"
+    },
+    "assign-profile": {
+      "completionClass": "write"
+    },
+    "bot-brief": {
+      "completionClass": "read"
+    },
+    "read-execution-environment-providers": {
+      "completionClass": "read"
+    },
+    "register-execution-environment-provider": {
+      "completionClass": "write"
+    },
+    "attest-execution-environment-conformance": {
+      "completionClass": "write"
+    },
+    "transition-execution-environment-provider": {
+      "completionClass": "write"
+    },
+    "assign-execution-route": {
+      "completionClass": "write"
+    },
+    "activate-context-bundle": {
+      "completionClass": "write"
+    },
+    "read-context-activation": {
+      "completionClass": "read"
+    },
+    "render-context-activation": {
+      "completionClass": "read"
+    },
+    "issue-execution-envelope": {
+      "completionClass": "write"
+    },
+    "record-attempt-receipt": {
+      "completionClass": "write"
+    },
+    "propose-evaluation-case": {
+      "completionClass": "write"
+    },
+    "attest-attempt-evaluation": {
+      "completionClass": "write"
+    },
+    "read-attempt-reliability": {
+      "completionClass": "read"
+    },
+    "transition-evaluation-case": {
+      "completionClass": "write"
+    },
+    "read-resource-dashboard": {
+      "completionClass": "read"
+    },
+    "record-resource-observation": {
+      "completionClass": "write"
+    },
+    "record-deal-invoice": {
+      "completionClass": "write"
+    },
+    "invoice-close-queue": {
+      "completionClass": "read"
+    },
+    "undo-invoice-close": {
+      "completionClass": "write"
+    },
+    "record-lead-contact": {
+      "completionClass": "write"
+    },
+    "lead-stage-preview": {
+      "completionClass": "read"
+    },
+    "advance-leads": {
+      "completionClass": "write"
+    },
+    "lead-approval-queue": {
+      "completionClass": "read"
+    },
+    "approve-lead-draft": {
+      "completionClass": "write"
+    },
+    "approve-lead-move": {
+      "completionClass": "write"
+    },
+    "undo-lead-move": {
+      "completionClass": "write"
+    },
+    "last-new-lead-search": {
+      "completionClass": "read"
+    },
+    "ask-jev": {
+      "completionClass": "write"
+    },
+    "read-jev-call-receipts": {
+      "completionClass": "read"
+    },
+    "read-jev-call-receipt-integrity": {
+      "completionClass": "read"
+    },
+    "open-workflow-cutover-plan": {
+      "completionClass": "write"
+    },
+    "cancel-workflow-cutover-plan": {
+      "completionClass": "write"
+    },
+    "advance-workflow-cutover-stage": {
+      "completionClass": "write"
+    },
+    "retire-workflow-cutover-plan": {
+      "completionClass": "write"
+    },
+    "record-workflow-caller": {
+      "completionClass": "write"
+    },
+    "workflow-cutover-board": {
+      "completionClass": "read"
+    },
+    "register-slice-checkable-done": {
+      "completionClass": "write"
+    },
+    "register-slice-criteria-from-catalog": {
+      "completionClass": "write"
+    },
+    "bind-slice-criterion-evidence": {
+      "completionClass": "write"
+    },
+    "rebind-slice-criterion-evidence": {
+      "completionClass": "write"
+    },
+    "record-release-slice-members": {
+      "completionClass": "write"
+    },
+    "list-shipped-releases": {
+      "completionClass": "read"
+    },
+    "mark-slice-progress": {
+      "completionClass": "write"
+    },
+    "mark-slice-completion": {
+      "completionClass": "write"
+    },
+    "propose-slice-completion": {
+      "completionClass": "write"
+    },
+    "confirm-slice-completions": {
+      "completionClass": "write"
+    },
+    "pending-slice-completion-proposals": {
+      "completionClass": "read"
+    },
+    "set-slice-mark-hold": {
+      "completionClass": "write"
+    },
+    "read-slice-completion": {
+      "completionClass": "read"
+    },
+    "observe-memory": {
+      "completionClass": "write"
+    },
+    "recall-memory": {
+      "completionClass": "read"
+    },
+    "review-memory": {
+      "completionClass": "read"
+    },
+    "promote-memory": {
+      "completionClass": "write"
+    },
+    "correct-memory": {
+      "completionClass": "write"
+    },
+    "forget-memory": {
+      "completionClass": "write"
+    },
+    "list-my-codex-sessions": {
+      "completionClass": "read"
+    },
+    "codex-checkpoint": {
+      "completionClass": "write"
+    },
+    "codex-read-recovery": {
+      "completionClass": "read"
+    },
+    "codex-record-event": {
+      "completionClass": "write"
+    },
+    "claude-checkpoint": {
+      "completionClass": "write"
+    },
+    "claude-read-recovery": {
+      "completionClass": "read"
+    },
+    "claude-record-event": {
+      "completionClass": "write"
+    },
+    "incident-board": {
+      "completionClass": "read"
+    },
+    "get-incident": {
+      "completionClass": "read"
+    },
+    "open-incident": {
+      "completionClass": "write"
+    },
+    "triage-incident": {
+      "completionClass": "write"
+    },
+    "link-incident-work-request": {
+      "completionClass": "write"
+    },
+    "close-incident": {
+      "completionClass": "write"
+    },
+    "adjudicate-incident": {
+      "completionClass": "write"
+    },
+    "engineering-passport-source": {
+      "completionClass": "read"
+    },
+    "register-engineering-slice-plan": {
+      "completionClass": "write"
+    },
+    "admit-engineering-slice": {
+      "completionClass": "write"
+    },
+    "review-engineering-slice": {
+      "completionClass": "write"
+    },
+    "engineering-passport": {
+      "completionClass": "read"
+    },
+    "source-merge-authority": {
+      "completionClass": "read"
+    },
+    "engineering-writer-runtime-preflight": {
+      "completionClass": "read"
+    },
+    "append-tour-rights-receipt": {
+      "completionClass": "write"
+    },
+    "revoke-tour-rights-receipt": {
+      "completionClass": "write"
+    },
+    "append-tour-source-evidence": {
+      "completionClass": "write"
+    },
+    "append-tour-field-assertion": {
+      "completionClass": "write"
+    },
+    "create-tour-public-projection-draft": {
+      "completionClass": "write"
+    },
+    "seal-tour-public-projection": {
+      "completionClass": "write"
+    },
+    "read-tour-public-projection": {
+      "completionClass": "read"
+    },
+    "append-tour-property-identifier-assertion": {
+      "completionClass": "write"
+    },
+    "register-tour-property": {
+      "completionClass": "write"
+    },
+    "append-tour-coordinate-candidate": {
+      "completionClass": "write"
+    },
+    "append-tour-entrance-verification-receipt": {
+      "completionClass": "write"
+    },
+    "create-tour-domain": {
+      "completionClass": "write"
+    },
+    "append-tour-route-version": {
+      "completionClass": "write"
+    },
+    "prepare-tour-route-version": {
+      "completionClass": "write"
+    },
+    "append-tour-route-stop": {
+      "completionClass": "write"
+    },
+    "append-tour-route-stop-transition": {
+      "completionClass": "write"
+    },
+    "accept-tour-route-version": {
+      "completionClass": "write"
+    },
+    "append-tour-cheat-sheet-revision": {
+      "completionClass": "write"
+    },
+    "restore-tour-cheat-sheet-revision": {
+      "completionClass": "write"
+    },
+    "search-tour-properties": {
+      "completionClass": "read"
+    },
+    "append-tour-selection-cart-version": {
+      "completionClass": "write"
+    },
+    "read-tour-selection-cart": {
+      "completionClass": "read"
+    },
+    "record-tour-map-promotion-receipt": {
+      "completionClass": "write"
+    },
+    "issue-tour-share-grant": {
+      "completionClass": "write"
+    },
+    "rotate-tour-share-grant": {
+      "completionClass": "write"
+    },
+    "revoke-tour-share-grant": {
+      "completionClass": "write"
+    },
+    "read-tour-feedback": {
+      "completionClass": "read"
+    },
+    "read-tour-sharing-library": {
+      "completionClass": "read"
+    },
+    "request-tour-pdf-render": {
+      "completionClass": "write"
+    },
+    "read-tour-pdf-render": {
+      "completionClass": "read"
+    },
+    "record-tour-pdf-render-result": {
+      "completionClass": "write"
+    },
+    "record-tour-pdf-human-review": {
+      "completionClass": "write"
+    },
+    "read-benchmark-manifest": {
+      "completionClass": "read"
+    },
+    "propose-benchmark-manifest-draft": {
+      "completionClass": "write"
+    },
+    "review-benchmark-manifest-draft": {
+      "completionClass": "write"
+    },
+    "accept-benchmark-manifest-draft": {
+      "completionClass": "write"
+    },
+    "read-model-role": {
+      "completionClass": "read"
+    },
+    "record-model-role-revision": {
+      "completionClass": "write"
+    },
+    "set-current-model-role-revision": {
+      "completionClass": "write"
+    },
+    "read-cre-lifecycle": {
+      "completionClass": "read"
+    },
+    "record-lifecycle-fact": {
+      "completionClass": "write"
+    },
+    "record-evidence-subject-link": {
+      "completionClass": "write"
+    },
+    "initialize-prospect-relationship": {
+      "completionClass": "write"
+    },
+    "initialize-assignment": {
+      "completionClass": "write"
+    },
+    "initialize-property-negotiation": {
+      "completionClass": "write"
+    },
+    "record-representation-agreement": {
+      "completionClass": "write"
+    },
+    "open-cre-assignment": {
+      "completionClass": "write"
+    },
+    "record-loi-submission": {
+      "completionClass": "write"
+    },
+    "record-loi-acceptance": {
+      "completionClass": "write"
+    },
+    "commit-winning-property": {
+      "completionClass": "write"
+    },
+    "record-deal-execution": {
+      "completionClass": "write"
+    },
+    "record-diligence-outcome": {
+      "completionClass": "write"
+    },
+    "record-deal-closing": {
+      "completionClass": "write"
+    },
+    "cancel-pending-deal": {
+      "completionClass": "write"
+    },
+    "record-deal-axis": {
+      "completionClass": "write"
+    },
+    "link-salesforce-reference": {
+      "completionClass": "write"
+    },
+    "record-lifecycle-correction": {
+      "completionClass": "write"
+    },
+    "record-lifecycle-reconciliation": {
+      "completionClass": "write"
+    },
+    "run-migration-shadow": {
+      "completionClass": "write"
+    },
+    "record-partner-lifecycle-fact": {
+      "completionClass": "write"
+    },
+    "record-salesforce-page-stop": {
+      "completionClass": "write"
+    },
+    "record-salesforce-duplicate-check": {
+      "completionClass": "write"
+    },
+    "record-salesforce-write-readback": {
+      "completionClass": "write"
+    },
+    "read-salesforce-action-evidence": {
+      "completionClass": "read"
+    },
+    "record-salesforce-run-outcome": {
+      "completionClass": "write"
+    },
+    "read-salesforce-autonomy-counter": {
+      "completionClass": "read"
+    },
+    "revoke-salesforce-read-consent": {
+      "completionClass": "write"
+    },
+    "read-record-source-authority": {
+      "completionClass": "read"
+    },
+    "register-record-source-authority-policy": {
+      "completionClass": "write"
+    },
+    "record-source-observation": {
+      "completionClass": "write"
+    },
+    "record-corporate-artifact": {
+      "completionClass": "write"
+    },
+    "record-parsed-proposal": {
+      "completionClass": "write"
+    },
+    "register-derivative-source-link": {
+      "completionClass": "write"
+    },
+    "record-document-identity": {
+      "completionClass": "write"
+    },
+    "record-artifact-preservation-hold": {
+      "completionClass": "write"
+    },
+    "evaluate-artifact-deletion": {
+      "completionClass": "write"
+    },
+    "produce-assurance-fabric-preactivation-receipt": {
+      "completionClass": "write"
+    },
+    "produce-foundation-assurance-benchmark-coverage": {
+      "completionClass": "write"
+    },
+    "produce-foundation-control-plane-preactivation-receipt": {
+      "completionClass": "write"
+    },
+    "produce-global-execution-contract-receipt": {
+      "completionClass": "write"
+    },
+    "produce-global-no-phi-boundary-receipt": {
+      "completionClass": "write"
+    },
+    "produce-global-prompt-injection-boundary-receipt": {
+      "completionClass": "write"
+    },
+    "produce-global-secrets-boundary-receipt": {
+      "completionClass": "write"
+    },
+    "produce-global-source-authority-receipt": {
+      "completionClass": "write"
+    },
+    "record-foundation-assurance-minimum-outcome": {
+      "completionClass": "write"
+    },
+    "read-global-boundaries": {
+      "completionClass": "read"
+    },
+    "read-journey-one-clock": {
+      "completionClass": "read"
+    },
+    "advance-journey-one-clock": {
+      "completionClass": "write"
+    },
+    "correspondence-readiness": {
+      "completionClass": "read"
+    },
+    "read-correspondence-thread": {
+      "completionClass": "read"
+    },
+    "record-correspondence-adapter-consent": {
+      "completionClass": "write"
+    },
+    "revoke-correspondence-adapter-consent": {
+      "completionClass": "write"
+    },
+    "read-assurance-health": {
+      "completionClass": "read"
+    },
+    "record-assurance-health-evidence": {
+      "completionClass": "write"
+    },
+    "register-action-class-successor": {
+      "completionClass": "write"
+    },
+    "read-action-class-successors": {
+      "completionClass": "read"
+    },
+    "read-action-class-gate": {
+      "completionClass": "read"
+    },
+    "open-complete-set-review": {
+      "completionClass": "write"
+    },
+    "record-complete-set-participant": {
+      "completionClass": "write"
+    },
+    "record-complete-set-finding-set": {
+      "completionClass": "write"
+    },
+    "seal-complete-set-review-round": {
+      "completionClass": "write"
+    },
+    "record-complete-set-adjudication": {
+      "completionClass": "write"
+    },
+    "read-complete-set-review": {
+      "completionClass": "read"
+    },
+    "read-action-context": {
+      "completionClass": "read"
+    },
+    "bind-rule-context-contract": {
+      "completionClass": "write"
+    }
+  }
+}

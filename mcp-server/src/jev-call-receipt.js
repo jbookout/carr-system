@@ -445,7 +445,7 @@ export async function prefetchJevAnswer(args, ask, workClass = "system_work") {
 
 export function jevCallReceiptTools({ withEnvelope, ToolError }) {
   return {
-    "ask-jev": {
+    "ask-jev": { serialization: "idempotency-key",
       write: true,
       // mcp.js asks Jev for tools carrying this flag before it opens the writer
       // transaction, and hands the answer over as client.jevPrefetched.

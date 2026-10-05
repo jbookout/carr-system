@@ -7,7 +7,7 @@ const sentence = value => String(value ?? '').replace(/[\r\n]+/g, ' ').replace(/
 
 export function whatsNewTools({ withEnvelope, executeRegisteredTool, ToolError }) {
   return {
-    'whats-new': {
+    'whats-new': { serialization: "idempotency-key",
       write: true, writerConnection: true, destructiveHint: false,
       description: "Everything changed since the authenticated partner last marked a what's-new answer seen, grouped by deal and newest first. First use covers 24 hours. Reading never moves the watermark. Only mark_seen:true with an idempotency_key acknowledges this response through its high_water; reuse the key after a lost response to recover the same answer. Unavailable sections are explicit and prevent acknowledgement.",
       inputSchema: { type: 'object', additionalProperties: false, properties: {

@@ -106,7 +106,7 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
     return results;
   }
   const tools={
-    "record-deal-invoice": {
+    "record-deal-invoice": { serialization: "idempotency-key",
       write:true,description:"Capture a dated invoice fact from local mail. Exact deal name plus client or property is required for automatic close; uncertain matches remain partner proposals. No email body or sending.",
       inputSchema:{...schema({idempotency_key:{type:"string"},native_ref:{type:"string",minLength:1,maxLength:500},
         from_address:{type:"string",maxLength:320},deal_name:{type:"string",minLength:1,maxLength:500},
@@ -135,7 +135,7 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
           i.prior_phase,i.applied_at,i.applied_by,i.undone_at,i.undone_by,d.version as base_version
           from deal_invoice_email i join deal d on d.id=i.deal_id where i.status in ('applied','undone') order by i.occurred_at desc,i.id`)).rows}),
     },
-    "undo-invoice-close": {
+    "undo-invoice-close": { serialization: "idempotency-key",
       write:true,humanOnly:true,description:"Restore the phase and invoice date before an invoice close. Record the partner who undid it; refuse newer phase or invoice-date work.",
       inputSchema:{...schema({idempotency_key:{type:"string"},invoice_id:{type:"string",format:"uuid"},base_version:{type:"integer"}}),required:["idempotency_key","invoice_id","base_version"]},
       handler:(c,actor,args)=>withEnvelope(c,actor,"undo-invoice-close",args,async()=>{

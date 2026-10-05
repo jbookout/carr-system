@@ -364,7 +364,7 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
         })) };
       },
     },
-    "codex-checkpoint": {
+    "codex-checkpoint": { serialization: "idempotency-key",
       write: true,
       description: "Persist one bounded semantic checkpoint for one server-verified native Codex task. CAS uses expected_version; every accepted snapshot appends a revision. Transcript bodies remain on the native Codex machine.",
       inputSchema: { type: "object", properties: {
@@ -532,7 +532,7 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
       },
     },
 
-    "codex-record-event": {
+    "codex-record-event": { serialization: "idempotency-key",
       write: true,
       description: "Record a separate idempotent native Codex lifecycle/cursor receipt. Events never replace semantic checkpoint meaning and are safe to retry with the same key.",
       inputSchema: { type: "object", properties: { idempotency_key: { type: "string" }, runtime: { type: "string", enum: [RUNTIME] }, native_task_id: { type: "string" }, project_id: { type: "string" }, cwd: { type: "string" }, event_type: { type: "string" }, cursor: { type: "object" }, transcript_ref: { type: "string" } }, required: ["idempotency_key", "runtime", "native_task_id", "project_id", "cwd", "event_type"] },

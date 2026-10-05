@@ -1,3 +1,5 @@
+import { TOOLS, registerTools } from "./tool-registry.js";
+export { TOOLS } from "./tool-registry.js";
 import { withEnvelope, writeEvent, auditIdentity, versionGuard, versionedWrite } from "./versioned-write.js";
 export { auditIdentity, compareVersion, disjointFromIntervening } from "./versioned-write.js";
 import { invoiceTrackerTools } from "./invoice-tracker.js";
@@ -20,7 +22,7 @@ import { docConversationTools } from "./doc-conversation.js";
 import { docSuggestionTools } from "./doc-suggestions.js";
 import { docActivityTools } from "./doc-activity.js";
 import { whatsNewTools } from "./whats-new.js";
-import { MEETING_MODE_WRITE_VERBS, meetingModeTools } from "./meeting-mode.js";
+import { meetingModeTools } from "./meeting-mode.js";
 import { notificationTools } from "./notifications.js";
 import { deliveryCadenceA05Tools } from "./delivery-cadence-a05-tools.js";
 import { sessionIdentityTools } from "./session-identity.js";
@@ -96,7 +98,7 @@ import { assuranceHealthStoreTools } from "./assurance-health-store.v5.js";
 import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store.v5.js";
 import { ruleContextRuntimeTools } from "./rule-context-runtime.v5.js";
 import { systemWorkTools } from "./system-work-census.v5.js";
-import { BOARD_ANSWER_WRITE_VERBS, boardAnswerTools } from "./board-answers.js";
+import { boardAnswerTools } from "./board-answers.js";
 import { scheduleBoardTools } from "./schedule-board.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
@@ -2086,7 +2088,7 @@ function findCatchUpCandidates(found) {
 // ---------- the registry ----------
 // Each: { description, inputSchema, write: bool, humanOnly?: bool, handler(client, actor, args) }
 
-export const TOOLS = {
+const inlineTools = {
 
   // ===== reads (carr_reader connection) =====
 
@@ -2704,7 +2706,7 @@ export const TOOLS = {
     },
   },
 
-  "prepare-conversation": {
+  "prepare-conversation": { completionClass: "write",
     write: false,
     writerConnection: true, // fixed composition includes catch-me-up.
     description: "Prepare for one conversation by resolving a name to exactly one live record, returning its recent catch-up timeline, and—when the target is a person or organization—showing the existing introduction paths to that exact ref. This is a fixed bounded read composition: ambiguous or missing identity stops before timeline/graph reads; deals receive timeline context but are never pretended to be intro-graph people. It performs no model call, retry, write, send, or arbitrary tool dispatch.",
@@ -3058,7 +3060,7 @@ export const TOOLS = {
     },
   },
 
-  "claim-card": {
+  "claim-card": { completionClass: "write",
     write: false,
     description: "The claimable candidate reservoir: who Joe or Dell could turn into a lead today, nearest lease window first. THE GAP THIS CLOSES, and it is the same one read-loop closed for loops: promote-pool and decline-candidate both refuse without base_version and both tell the caller to 'read the row from v_pool / v_claim_card first' — and nothing in the verb layer could perform that read. The only reader was a generated markdown card in the vault, which the doctrine cutoff retired on 2026-08-19; without this verb the two claim verbs would name a surface that no longer exists. Returns pool_id and base_version on every row, so a promote or decline follows directly with no guess and no version_conflict. SAFE COLUMNS ONLY — the view carries no email, phone or address by construction (has_channel says a channel exists; the human reads the number off the lead record after claiming). Ranked, never filtered: rows whose window has already PASSED are shown with a negative days_to_window rather than dropped, because a passed window is still a live conversation and three of them expired unread the last time this list had no reader. `needs_contact_count` is the tail with no channel at all — research, not calls, counted rather than hidden.",
     inputSchema: { type: "object", properties: {
@@ -3546,7 +3548,7 @@ export const TOOLS = {
     }),
   },
 
-  "record-executed-lease": {
+  "record-executed-lease": { serialization: "idempotency-key",
     write: true,
     authorityOnly: true,
     description: "Record the current executed lease/abstract that CARR actually holds for a deal. This is the authenticated first-party renewal authority: expiration_on must be an exact sourced date, evidence_kind/evidence_ref are mandatory, and a replacement needs the current lease version. It never infers a date from a term, listing, comp, NPPES, or web research. Only the deal's current owning partner may write it.",
@@ -4503,7 +4505,7 @@ export const TOOLS = {
   // do_not_contact -> do_not_contact) — there was no way to move a lead FORWARD
   // through its own funnel, or to correct one an import or a stuck drip left
   // behind. update-lead is that writer.
-  "claim-lead": {
+  "claim-lead": { serialization: "idempotency-key",
     write: true, humanOnly: true,
     description: "Claim an unowned New lead for the authenticated human. Preserves stage, checks the current version and exact lifecycle links, and records the ownership change.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -4527,7 +4529,7 @@ export const TOOLS = {
     }),
   },
 
-  "link-lead-client": {
+  "link-lead-client": { serialization: "idempotency-key",
     write: true, humanOnly: true,
     description: "Confirm one lead belongs to an existing client, by exact IDs and an explicit human choice. Records the client pointer without merging parties or creating a client/deal. Refuses suppression, stale versions and an already linked lead.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -4551,7 +4553,7 @@ export const TOOLS = {
     }),
   },
 
-  "update-lead": {
+  "update-lead": { serialization: "idempotency-key",
     write: true,
     description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. do_not_contact is inseparable from suppressed=true, and only a human may clear an existing suppression instruction. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
     inputSchema: { type: "object", properties: {
@@ -5676,7 +5678,7 @@ export const TOOLS = {
     },
   },
 
-  "teach": {
+  "teach": { serialization: "idempotency-key",
     write: true,
     description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('cadence studio is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is retired with an immutable receipt in the same transaction. Superseding an ACTIVE rule requires a human caller and the same authority connection as retire-rule. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
@@ -8578,96 +8580,9 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
 }
 
 
-const TOOL_REGISTRATION_SOURCE = Object.freeze({
-  "inline": "mcp-server/src/tools.js",
-  "deal-room-inline": "mcp-server/src/tools.js",
-  "deploy-gap-inline": "mcp-server/src/tools.js",
-  "doctrine": "mcp-server/src/doctrine.js",
-  "situation-retrieval": "mcp-server/src/situation-retrieval.js",
-  "investigation": "mcp-server/src/investigation.js",
-  "doc-conversation": "mcp-server/src/doc-conversation.js",
-  "doc-activity": "mcp-server/src/doc-activity.js",
-  "meeting-mode": "mcp-server/src/meeting-mode.js",
-  "notifications": "mcp-server/src/notifications.js",
-  "delivery-cadence-a05": "mcp-server/src/delivery-cadence-a05-tools.js",
-  "session-identity": "mcp-server/src/session-identity.js",
-  "dispatch-spine": "mcp-server/src/dispatch-spine.js",
-  "doc-outcome-cards": "mcp-server/src/tools.js",
-  "capability-program": "mcp-server/src/capability-program.js",
-  "work-shape": "mcp-server/src/work-shape.js",
-  "work-request-intake": "mcp-server/src/work-request-intake.js",
-  "lease-term-comparison": "mcp-server/src/lease-term-comparison.js",
-  "partner-room": "mcp-server/src/partner-room.js",
-  "agent-profile": "mcp-server/src/agent-profiles.js",
-  "bot-brief": "mcp-server/src/bot-brief.js",
-  "evidence-activation": "mcp-server/src/evidence-activation.js",
-  "resource-observation": "mcp-server/src/resource-observation.v5.js",
-  "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
-  "lead-automation": "mcp-server/src/lead-automation.js",
-  "invoice-automation": "mcp-server/src/invoice-automation.js",
-  "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
-  "memory": "mcp-server/src/memory.js",
-  "codex-continuity": "mcp-server/src/codex-continuity.js",
-  "claude-continuity": "mcp-server/src/claude-continuity.js",
-  "incident": "mcp-server/src/incident.js",
-  "engineering-runtime": "mcp-server/src/engineering-runtime.js",
-  "work-portfolio": "mcp-server/src/work-portfolio.js",
-  "tour-rights-projection": "mcp-server/src/tour-rights-projection.js",
-  "tour-property-jurisdiction": "mcp-server/src/tour-property-jurisdiction.js",
-  "tour-domain": "mcp-server/src/tour-domain.js",
-  "tour-property-search": "mcp-server/src/tour-property-search.js",
-  "tour-map-promotion": "mcp-server/src/tour-map-promotion.js",
-  "tour-sharing": "mcp-server/src/tour-sharing.js",
-  "tour-artifacts": "mcp-server/src/tour-artifacts.js",
-  "benchmark-acceptance": "mcp-server/src/benchmark-acceptance-store.v5.js",
-  "model-role-store": "mcp-server/src/model-role-store.v5.js",
-  "record-source-authority": "mcp-server/src/record-source-authority-store.v5.js",
-  "cre-lifecycle": "mcp-server/src/cre-lifecycle-store.v5.js",
-  "salesforce-reconciliation-rw02": "mcp-server/src/salesforce-reconciliation-store-rw02.v5.js",
-  "salesforce-read-run-rw02": "mcp-server/src/salesforce-read-run-store-rw02.v5.js",
-  "foundation-assurance": "mcp-server/src/foundation-assurance-minimum-producer.v5.js",
-  "global-boundaries-door": "mcp-server/src/global-boundaries-door.v5.js",
-  "journey-one-clock-door": "mcp-server/src/journey-one-clock-door.v5.js",
-  "governed-correspondence-store": "mcp-server/src/governed-correspondence-store.v5.js",
-  "assurance-health-store": "mcp-server/src/assurance-health-store.v5.js",
-  "action-class-successor-registry": "mcp-server/src/action-class-successor-registry.v5.js",
-  "complete-set-review-a03-store": "mcp-server/src/independent-review-cycle-store.v5.js",
-  "rule-context-runtime": "mcp-server/src/rule-context-runtime.v5.js",
-  "system-work-census": "mcp-server/src/system-work-census.v5.js",
-  "board-answers": "mcp-server/src/board-answers.js",
-  "schedule-board": "mcp-server/src/schedule-board.js",
-  "doc-suggestions": "mcp-server/src/doc-suggestions.js",
-  "whats-new": "mcp-server/src/whats-new.js",
-  "invoice-tracker": "mcp-server/src/invoice-tracker.js",
-});
+registerTools(inlineTools, "mcp-server/src/tools.js");
 
-function bindToolSource(tool, source) {
-  if (!tool || typeof tool !== "object" || !TOOL_REGISTRATION_SOURCE[source])
-    throw new Error(`missing reviewed tool source for ${source}`);
-  Object.defineProperty(tool, "registrySource", {
-    value: TOOL_REGISTRATION_SOURCE[source], enumerable: false, writable: false, configurable: false,
-  });
-  deepFreezeToolContract(tool);
-}
-
-function deepFreezeToolContract(value, seen = new Set()) {
-  if ((!value || (typeof value !== "object" && typeof value !== "function")) || seen.has(value)) return value;
-  seen.add(value);
-  for (const key of Reflect.ownKeys(value)) deepFreezeToolContract(value[key], seen);
-  return Object.freeze(value);
-}
-
-for (const tool of Object.values(TOOLS)) bindToolSource(tool, "inline");
-
-function registerTools(additions, source) {
-  const duplicates = Object.keys(additions).filter(name => Object.hasOwn(TOOLS, name)).sort();
-  if (duplicates.length)
-    throw new Error(`duplicate tool registration from ${source}: ${duplicates.join(",")}`);
-  for (const tool of Object.values(additions)) bindToolSource(tool, source);
-  Object.assign(TOOLS, additions);
-}
-
-registerTools(invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }), "invoice-tracker");
+registerTools(invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }), "mcp-server/src/invoice-tracker.js");
 
 // Deal Room contract. Durable writes use the same envelope and event helper as
 // the rest of this registry; the one explicit exception is the ephemeral lease.
@@ -9355,7 +9270,7 @@ registerTools({
         ref: String(action.rows[0].id), assignee: candidate.assignee_slug };
     }),
   },
-}, "deal-room-inline");
+}, "mcp-server/src/tools.js");
 
 // The deploy-gap pair (2026-08-08, Joe's reconnect complaint). call-verb's
 // dispatch lives in mcp.js callTool (interception, so profile checks apply to
@@ -9646,56 +9561,56 @@ registerTools({
         hint: "call-verb is intercepted in mcp.js callTool; invoke the inner verb directly here" });
     },
   },
-}, "deploy-gap-inline");
+}, "mcp-server/src/tools.js");
 
 // Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
-registerTools(doctrineTools({ withEnvelope, writeEvent, ToolError }), "doctrine");
-registerTools(systemWorkTools(), "system-work-census");
-registerTools(boardAnswerTools({ withEnvelope, writeEvent }), "board-answers");
-registerTools(scheduleBoardTools(), "schedule-board");
+registerTools(doctrineTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/doctrine.js");
+registerTools(systemWorkTools(), "mcp-server/src/system-work-census.v5.js");
+registerTools(boardAnswerTools({ withEnvelope, writeEvent }), "mcp-server/src/board-answers.js");
+registerTools(scheduleBoardTools(), "mcp-server/src/schedule-board.js");
 
 // WR-AI-006: curation proposals are machine-callable; approval and retirement
 // remain human-only inside their handlers and the dispatcher boundary.
-registerTools(situationRetrievalTools({ withEnvelope, writeEvent, ToolError }), "situation-retrieval");
+registerTools(situationRetrievalTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/situation-retrieval.js");
 
 // Bounded investigation control plane (0098): deterministic signals, one
 // reasoning owner, evidence-only worker packets, explicit branch termination.
-registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "investigation");
+registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/investigation.js");
 
 // WR-000112: the Doc conversation store. The append is authority-only because
 // ops.append_doc_conversation_turn is granted to carr_authority alone; the read
 // runs on the writer connection because that is the only one that installs the
 // acting-actor context ops.doc_conversation_facts is handed.
-registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "doc-conversation");
-registerTools(docSuggestionTools({ withEnvelope, writeEvent, ToolError }), "doc-suggestions");
-registerTools(docActivityTools({ ToolError }), "doc-activity");
-registerTools(whatsNewTools({ withEnvelope, executeRegisteredTool, ToolError }), "whats-new");
+registerTools(docConversationTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/doc-conversation.js");
+registerTools(docSuggestionTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/doc-suggestions.js");
+registerTools(docActivityTools({ ToolError }), "mcp-server/src/doc-activity.js");
+registerTools(whatsNewTools({ withEnvelope, executeRegisteredTool, ToolError }), "mcp-server/src/whats-new.js");
 
 // V5-UX-B11: non-recording shared Meeting Mode. The store's definer functions
 // own every transition; an accepted action points at an existing write verb in
 // this registry, looked up at call time, and never runs it in-process.
 registerTools(meetingModeTools({ withEnvelope, writeEvent, ToolError,
-  lookupTool: name => (Object.hasOwn(TOOLS, name) ? TOOLS[name] : null) }), "meeting-mode");
+  lookupTool: name => (Object.hasOwn(TOOLS, name) ? TOOLS[name] : null) }), "mcp-server/src/meeting-mode.js");
 
 // WR-000113: the R03 notification feed and its acknowledgement receipt.
 // acknowledge-notification writes ops.notification_read and nothing else, which
 // is why a session may never report it as having moved a task.
-registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "notifications");
-registerTools(deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError }), "delivery-cadence-a05");
+registerTools(notificationTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/notifications.js");
+registerTools(deliveryCadenceA05Tools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/delivery-cadence-a05-tools.js");
 
 // WR-000117: the session-identity read pair. Both verbs are READS on the writer
 // connection -- ops.session_identity_facts and ops.session_dispatch_history
 // derive the acting actor from a context only the writer path installs -- and
 // neither writes a row anywhere, so neither takes the envelope or the event
 // helper.
-registerTools(sessionIdentityTools({ ToolError }), "session-identity");
+registerTools(sessionIdentityTools({ ToolError }), "mcp-server/src/session-identity.js");
 
 // WR-000119: the dispatch spine write pair. The OPPOSITE declaration to the
 // read pair above -- both of these carry write: true as well as the writer
 // connection, because ops.record_dispatch_link and ops.acknowledge_dispatch
 // insert and 0531 makes them volatile, so a read-only transaction would fail
 // them. Both take the envelope and the event helper for that reason.
-registerTools(dispatchSpineTools({ withEnvelope, writeEvent, ToolError }), "dispatch-spine");
+registerTools(dispatchSpineTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/dispatch-spine.js");
 
 export function docOutcomeCardsProjection(facts, ErrorType = ToolError) {
   const states = new Set(["queued", "active", "waiting", "failed", "unknown", "verified"]);
@@ -9716,31 +9631,31 @@ registerTools({
     inputSchema: { type: "object", additionalProperties: false, properties: { cursor: { type: "string", minLength: 1, maxLength: 1000 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, required: [] },
     handler: async (c, _actor, args) => docOutcomeCardsProjection((await c.query("select ops.read_doc_outcome_cards_successor($1::text,$2::integer) as facts", [args.cursor ?? null, args.limit ?? null])).rows[0]?.facts, ToolError),
   },
-}, "doc-outcome-cards");
+}, "mcp-server/src/tools.js");
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
-registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "capability-program");
+registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/capability-program.js");
 
 // Evidence-backed implementation form, linked to canonical Work Requests.
-registerTools(workShapeTools({ withEnvelope, writeEvent, ToolError }), "work-shape");
+registerTools(workShapeTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/work-shape.js");
 
 // Program 6: sourced additive capture and a safe card only. No lifecycle verbs.
-registerTools(workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }), "work-request-intake");
-registerTools(workPortfolioTools({ withEnvelope, writeEvent, ToolError }), "work-portfolio");
+registerTools(workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/work-request-intake.js");
+registerTools(workPortfolioTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/work-portfolio.js");
 
 // Pure workbook-derived lease economics. No database, model, or write path.
-registerTools(leaseTermComparisonTools({ ToolError }), "lease-term-comparison");
+registerTools(leaseTermComparisonTools({ ToolError }), "mcp-server/src/lease-term-comparison.js");
 
 // The partner room (Idea 78): shared AI-to-AI transcript both Macs poll; raw
 // turns, server-derived attribution, human-watchable. See src/partner-room.js.
-registerTools(partnerRoomTools({ withEnvelope, ToolError }), "partner-room");
-registerTools(agentProfileTools({ withEnvelope, writeEvent, ToolError }), "agent-profile");
-registerTools(botBriefTools({ ToolError, assertNoCallerAuthorityFields }), "bot-brief");
-registerTools(evidenceActivationTools({ withEnvelope, ToolError }), "evidence-activation");
+registerTools(partnerRoomTools({ withEnvelope, ToolError }), "mcp-server/src/partner-room.js");
+registerTools(agentProfileTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/agent-profiles.js");
+registerTools(botBriefTools({ ToolError, assertNoCallerAuthorityFields }), "mcp-server/src/bot-brief.js");
+registerTools(evidenceActivationTools({ withEnvelope, ToolError }), "mcp-server/src/evidence-activation.js");
 // DoctorCRE v5 V5-UX-C02/C06: the resource-metering read contract and the
 // one write door the local, credential-less collector uses. See
 // src/resource-observation.v5.js.
-registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-observation");
+registerTools(resourceObservationTools({ withEnvelope, ToolError }), "mcp-server/src/resource-observation.v5.js");
 // Server-side Jev call log: the Worker calls TypeSafe itself and appends a
 // server-timestamped receipt (migration 0587) before returning the answers, so
 // Jev gates credit only rows the gated model could not forge locally. See
@@ -9748,23 +9663,23 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 const invoices=invoiceAutomation({withEnvelope,writeEvent,ToolError,lockDealField,
   updateDeal:(c,actor,args)=>TOOLS["update-deal"].handler(c,actor,args),
   invoicingMailbox:process.env.CARR_INVOICING_MAILBOX});
-registerTools(invoices.tools,"invoice-automation");
-registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoices }), "lead-automation");
-registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
+registerTools(invoices.tools,"mcp-server/src/invoice-automation.js");
+registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoices }), "mcp-server/src/lead-automation.js");
+registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "mcp-server/src/jev-call-receipt.js");
 // DoctorCRE V5-R02: workflow cutover, caller migration and retirement
 // readiness. Composes accept-workflow / disable-legacy-schedule rather than
 // duplicating their evidence; retire-workflow-cutover-plan is authority-only.
 // See src/workflow-cutover.v5.js.
-registerTools(workflowCutoverTools({ withEnvelope, ToolError }), "workflow-cutover");
+registerTools(workflowCutoverTools({ withEnvelope, ToolError }), "mcp-server/src/workflow-cutover.v5.js");
 // Phase 1 CARR-native learning memory: evidence-backed context with explicit
 // candidate/promotion/correction/forgetting lifecycle. Memory never grants
 // authority; actor and sponsor scope are resolved by the server.
-registerTools(memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "memory");
+registerTools(memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "mcp-server/src/memory.js");
 // Native Codex continuity is a separate, bounded surface.  It stores semantic
 // checkpoint revisions and lifecycle receipts; transcript bodies stay local to
 // the Codex adapter and Claude never reaches these verbs through its config.
-registerTools(codexContinuityTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "codex-continuity");
-registerTools(claudeContinuityTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "claude-continuity");
+registerTools(codexContinuityTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "mcp-server/src/codex-continuity.js");
+registerTools(claudeContinuityTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "mcp-server/src/claude-continuity.js");
 
 // The operational incident ledger gets a front door (2026-08-23 rules-and-verbs
 // council, item 1 from both chairs). ops.incident has been written by two
@@ -9774,56 +9689,56 @@ registerTools(claudeContinuityTools({ withEnvelope, writeEvent, ToolError, asser
 // adjudication carrying partner authority, because 0117 already wrote that
 // boundary into the grants and the verb surface should not be laxer than the
 // grants are. See migrations/0286 for the permission half.
-registerTools(incidentTools({ withEnvelope, writeEvent, ToolError, authorizationClassForActor }), "incident");
+registerTools(incidentTools({ withEnvelope, writeEvent, ToolError, authorizationClassForActor }), "mcp-server/src/incident.js");
 
 // Engineering Passport runtime: typed plan registration, server-derived
 // admission, and read-only closure projection over the canonical job ledger.
-registerTools(engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }), "engineering-runtime");
+registerTools(engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/engineering-runtime.js");
 
 // Tour Operations Slice 2: bounded rights, evidence, assertion, and immutable
 // public-projection seams. Sealing is authority-only; publication is absent.
-registerTools(tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError }), "tour-rights-projection");
+registerTools(tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/tour-rights-projection.js");
 
 // Tour Operations Slice 3: narrow, rights-bound identity assertions,
 // coordinate candidates, and human entrance-verification receipts. No map,
 // route, publication, or promotion seam is exposed here.
-registerTools(tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolError }), "tour-property-jurisdiction");
+registerTools(tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/tour-property-jurisdiction.js");
 
 // Tour Operations Slice 4: immutable Tour route versions and internal-only
 // cheat-sheet revisions. Route acceptance is authority-only; publication is absent.
-registerTools(tourDomainTools({ withEnvelope, writeEvent, ToolError }), "tour-domain");
+registerTools(tourDomainTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/tour-domain.js");
 
 // Tour Operations delivery surfaces: governed property search and cart,
 // confidential sharing, and deterministic PDF request/review records.
-registerTools(tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }), "tour-property-search");
-registerTools(tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }), "tour-map-promotion");
-registerTools(tourSharingTools({ withEnvelope, writeEvent, ToolError }), "tour-sharing");
-registerTools(tourArtifactTools({ withEnvelope, writeEvent, ToolError }), "tour-artifacts");
+registerTools(tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/tour-property-search.js");
+registerTools(tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/tour-map-promotion.js");
+registerTools(tourSharingTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/tour-sharing.js");
+registerTools(tourArtifactTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/tour-artifacts.js");
 registerTools(benchmarkAcceptanceStoreTools({
   withEnvelope, writeEvent, ToolError, authenticatedIdentity,
 }),
-  "benchmark-acceptance");
+  "mcp-server/src/benchmark-acceptance-store.v5.js");
 registerTools(modelRoleStoreTools({ withEnvelope, writeEvent, ToolError }),
-  "model-role-store");
-registerTools(creLifecycleStoreTools({ withEnvelope, ToolError }), "cre-lifecycle");
+  "mcp-server/src/model-role-store.v5.js");
+registerTools(creLifecycleStoreTools({ withEnvelope, ToolError }), "mcp-server/src/cre-lifecycle-store.v5.js");
 registerTools(salesforceReconciliationStoreTools({ withEnvelope, ToolError }),
-  "salesforce-reconciliation-rw02");
-registerTools(salesforceReadRunStoreTools({ withEnvelope, ToolError }), "salesforce-read-run-rw02");
+  "mcp-server/src/salesforce-reconciliation-store-rw02.v5.js");
+registerTools(salesforceReadRunStoreTools({ withEnvelope, ToolError }), "mcp-server/src/salesforce-read-run-store-rw02.v5.js");
 registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
-  "record-source-authority");
+  "mcp-server/src/record-source-authority-store.v5.js");
 registerTools(foundationAssuranceMinimumTools({
   withEnvelope, ToolError, authenticatedIdentity,
-}), "foundation-assurance");
+}), "mcp-server/src/foundation-assurance-minimum-producer.v5.js");
 // V5-S01: read-only projection of the settled global boundaries and the
 // dispatch door's mode and shadow counters. No database access.
-registerTools(globalBoundariesDoorTools({ ToolError }), "global-boundaries-door");
+registerTools(globalBoundariesDoorTools({ ToolError }), "mcp-server/src/global-boundaries-door.v5.js");
 // DoctorCRE V5-M01: the live door to the Journey 1 clock runtime. The read verb
 // derives clock_started from the record; the advance verb takes only an
 // idempotency key and is registered WITHOUT an installation resolver, so it
 // refuses journey_one_clock_installation_unavailable before any query here. No
 // Worker can start, advance or pause the Journey 1 clock through it until a
 // verifier for the composed projection is installed by trusted server code.
-registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-one-clock-door");
+registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "mcp-server/src/journey-one-clock-door.v5.js");
 // DoctorCRE V5-J103: the governed correspondence store. Two reads
 // (correspondence-readiness, read-correspondence-thread) and the humanOnly
 // consent pair, each partner only for their own carr.us mailbox. There is no
@@ -9831,25 +9746,25 @@ registerTools(journeyOneClockDoorTools({ withEnvelope, ToolError }), "journey-on
 // answer unavailable until the F10 local-store adapter lands with a reviewed
 // grant for the read-receipt writer.
 registerTools(governedCorrespondenceStoreTools({ withEnvelope, writeEvent, ToolError }),
-  "governed-correspondence-store");
-registerTools(assuranceHealthStoreTools({ withEnvelope, ToolError }), "assurance-health-store");
+  "mcp-server/src/governed-correspondence-store.v5.js");
+registerTools(assuranceHealthStoreTools({ withEnvelope, ToolError }), "mcp-server/src/assurance-health-store.v5.js");
 // DoctorCRE V5-D01: inactive action-specific autonomy successors. Three verbs
 // over migration 0708's append-only registry -- register-, read- and the
 // deterministic read-action-class-gate, which as shipped always denies (no
 // activation door exists). Registration grants no authority and no verb here
 // can ever produce a row this gate reads as allowed.
 registerTools(actionClassSuccessorRegistryTools({ withEnvelope, writeEvent, ToolError }),
-  "action-class-successor-registry");
+  "mcp-server/src/action-class-successor-registry.v5.js");
 // DoctorCRE V5-A03: append-only independent complete-set review. Every
 // participant registers only its authenticated actor/session duty; all eleven
 // dimensions precede one batch repair; regression checks cannot shrink; and a
 // stronger adjudicator is the only transition after two unresolved rounds.
 registerTools(completeSetReviewA03StoreTools({ withEnvelope, writeEvent, ToolError }),
-  "complete-set-review-a03-store");
+  "mcp-server/src/independent-review-cycle-store.v5.js");
 // DoctorCRE V5-F05: authenticated, actor-scoped rule-universe read plus the
 // Joe-authority typed-contract binder. The read uses the writer connection only
 // to receive server-established actor/sponsor transaction settings; its tool
 // contract remains read-only and the SQL function is stable.
-registerTools(ruleContextRuntimeTools({ withEnvelope, ToolError }), "rule-context-runtime");
+registerTools(ruleContextRuntimeTools({ withEnvelope, ToolError }), "mcp-server/src/rule-context-runtime.v5.js");
 
 Object.freeze(TOOLS);
