@@ -8,6 +8,7 @@ import unittest
 
 SCRIPT = Path(__file__).with_name("writing-lint.py")
 spec = importlib.util.spec_from_file_location("writing_lint", SCRIPT)
+assert spec is not None and spec.loader is not None
 writing_lint = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(writing_lint)
 
