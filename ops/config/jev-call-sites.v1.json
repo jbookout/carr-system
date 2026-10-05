@@ -6,7 +6,6 @@
     "ops/typesafe_client.py": "shared_admission",
     "mcp-server/src/jev-call-receipt.js": "worker_reservation_proof",
     "mcp-server/src/dealroom-web.js": "worker_reservation_proof",
-    "mcp-server/src/program6-routine-controller.js": "worker_reservation_proof",
     "installed:out/orch/jevrv/jev_diff_review.py": "worker_reservation_proof"
   },
   "installed_launcher_roots": ["out/orch", "~/.codex/skills", "~/.claude/skills", "~/.agents/skills"],
