@@ -2218,7 +2218,7 @@ class AppLane(Base):
         self.assertEqual(runner.calls[build_index][1], ["npm", "run", "build"])
         self.assertEqual(runner.envs["app-build"]["DOCTORCRE_SOURCE_COMMIT"], sha)
         self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["app-build"])
-        self.assertEqual(runner.calls[build_index][2], runner.calls[build_index + 1][2])
+        self.assertEqual(runner.cwds["app-build"], runner.cwds["app-release"])
         self.assertEqual(self.fx.records()[-1]["status"], "shipped")
         # The slice marker follows Worker releases only: the app lane records
         # no ops.release row for membership to attach to.
