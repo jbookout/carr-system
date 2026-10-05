@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""core-rule-ids-check-selftest.py — the PAIRED suite for
-ops/core-rule-ids-check.py (WR-000019 slice S11, boot diet).
+"""sync-core-rule-ids-selftest.py — the parity suite for
+ops/sync-core-rule-ids.py --check (WR-000019 slice S11, boot diet).
 
 Builds its own synthetic triage file and a synthetic generated-JS file (the
 established split: this measures the CHECK, never the real repository's
@@ -134,11 +134,8 @@ def test_missing_out_file_is_caught():
 
 def test_real_repository_pair_is_currently_in_sync():
     """The one assertion that actually matters day to day: the real checked-in
-    pair passes right now. ops/core-rule-ids-check.py (run bare, no args) is
-    what ops/ci.sh's inventory loop actually invokes against this repo."""
-    module = _load_module(
-        "core_rule_ids_check", os.path.join(HERE, "core-rule-ids-check.py"))
-    rc = module.main([])
+    pair passes right now. ops/ci.sh invokes the generator with --check."""
+    rc = sync_core_rule_ids.main(["--check"])
     check("the real ops/config/rule-triage.v1.json and "
           "mcp-server/src/core-rule-ids.js are in sync right now", rc == 0)
 
@@ -152,5 +149,5 @@ if __name__ == "__main__":
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURE(S): {FAILURES}")
         sys.exit(1)
-    print("\nOK: core-rule-ids-check selftest passed")
+    print("\nOK: sync-core-rule-ids selftest passed")
     sys.exit(0)
