@@ -44,8 +44,8 @@ for name in ('deslop', 'control-ui', 'control-cli', 'create-skill'):
         raise SystemExit(f'Missing local skill dependency: {name}')
 PY
 
-marketplaces=$(claude plugin marketplace list --json)
-marketplace_state=$(printf '%s\n' "$marketplaces" | python3 -c '
+read_marketplace_state() {
+claude plugin marketplace list --json | python3 -c '
 import json, subprocess, sys
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
@@ -71,7 +71,10 @@ else:
         print("rebind")
     else:
         raise SystemExit("Existing carr-local marketplace has no source path; preserved.")
-' "$repo_root")
+' "$repo_root"
+}
+
+marketplace_state=$(read_marketplace_state)
 
 link_skills() {
 python3 - "$plugin_root/skills" "$codex_skills" "$1" "$common_dir" <<'PY'
@@ -142,6 +145,11 @@ else
   printf 'Claude marketplace already points to %s\n' "$repo_root"
 fi
 claude plugin install pstack@carr-local --scope user
+
+if [[ "$(read_marketplace_state)" != present ]]; then
+  printf 'Claude marketplace readback: source is not canonical main; installation incomplete.\n' >&2
+  exit 1
+fi
 
 installed_plugin=$(claude plugin list --json | python3 -c '
 import json, sys

@@ -41,7 +41,7 @@ class PortContractTests(unittest.TestCase):
         agents = (REPO / "AGENTS.md").read_text()
         self.assertNotIn("Rigorous engineering work uses", claude)
         self.assertEqual(agents.count("Rigorous engineering work uses"), 1)
-        steps = claude.split("1. Run `./bin/migrate-dell.sh", 1)[1].split("## PR design and debt", 1)[0]
+        steps = json.loads((REPO / "ops/config/task-boot/dell-migration.json").read_text())["instructions"]
         self.assertLessEqual(max(map(len, steps.splitlines())), 90)
 
     def test_merge_override_routes_both_playbooks_to_the_queue(self):
@@ -128,7 +128,9 @@ old = Path(os.environ["PSTACK_OLD"])
 with open(os.environ["PSTACK_EFFECT_LOG"], "a") as log:
     log.write(" ".join(sys.argv[1:]) + "\\n")
 if sys.argv[1:] == ["plugin", "marketplace", "list", "--json"]:
-    print(json.dumps([{"name":"carr-local", "source":{"path":str(old)}}]))
+    added = "plugin marketplace add " + str(root.resolve()) in Path(os.environ["PSTACK_EFFECT_LOG"]).read_text()
+    source = root if added and not os.environ.get("PSTACK_STALE_MARKETPLACE") else old
+    print(json.dumps([{"name":"carr-local", "source":{"path":str(source)}}]))
 elif sys.argv[1:] == ["plugin", "list", "--json"]:
     print(json.dumps([{"id":"pstack@carr-local", "scope":"user", "enabled":True,
                       "installPath":str(root / "plugins/pstack")}]))
@@ -147,6 +149,15 @@ elif sys.argv[1:] == ["plugin", "list", "--json"]:
             log = Path(tmp) / "client-effects"
             env.update(PATH=str(stubs) + os.pathsep + env["PATH"], CODEX_HOME=str(codex),
                        PSTACK_CANONICAL=str(root), PSTACK_OLD=str(old), PSTACK_EFFECT_LOG=str(log))
+            stale = subprocess.run(["bash", str(root / "plugins/pstack/scripts/install.sh")],
+                                   cwd=root, env={**env, "PSTACK_STALE_MARKETPLACE": "1"},
+                                   capture_output=True, text=True)
+            self.assertNotEqual(stale.returncode, 0, "installer accepted a feature-worktree marketplace after rebind")
+            self.assertIn("marketplace readback", stale.stderr)
+            self.assertNotIn("Claude marketplace and Codex skills use canonical main", stale.stdout)
+            self.assertEqual((skills / "teach").resolve(), (old / "plugins/pstack/skills/teach").resolve())
+            self.assertEqual((skills / "correct").resolve(), unrelated.resolve())
+            self.assertFalse((skills / "pstack-correct").exists())
             result = subprocess.run(["bash", str(root / "plugins/pstack/scripts/install.sh")],
                                     cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
