@@ -130,6 +130,10 @@
       "description": "Which model and which effort level a piece of work runs on.",
       "globs": [
         "ops/config/model-routes.v1.json",
+        "ops/config/model-fit.v1.json",
+        "lib/model_router.py",
+        "ops/model-router.py",
+        "ops/model-router-nightly.py",
         "ops/config/model-floors.json",
         "ops/config/engineering-codex-desk.v1.json",
         "ops/config/codex-permissions.toml",
