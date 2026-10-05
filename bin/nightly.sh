@@ -82,6 +82,7 @@ run_canary() {
 
 if [ "${1:-}" = "--preflight" ]; then
   required=(
+    ops/seat-health.py ops/seat_health.py
     ops/vault-drift-watch.py bin/schema-snapshot.sh ops/p1-environment-gate.py
     ops/p1-rebuild-gate.py ops/p1-integration-gate.py pipelines/cadence_engine.py
     pipelines/availability_matcher.py ops/fetch-allowlist.py
@@ -762,6 +763,8 @@ tombstone "environment integration proof" \
 # housekeeping step that reddens the chain is a check people learn to skip.
 step "staging-observed prune (temp orphans + idle sessions)" \
     ./.venv/bin/python ops/staging-observed-prune.py
+
+step "daily AI seat health" ./.venv/bin/python ops/seat-health.py
 
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
