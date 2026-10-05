@@ -71,7 +71,19 @@ test('Feature switch record lifecycle on disposable PostgreSQL', { skip: !bin &&
       await c.query(schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))[0]);
     }
     await c.query('alter table tool_call add primary key(idempotency_key)');
+    // This fixture tests registration with the existing guard, whose behavior
+    // is covered by the canonical reference-monitor database acceptance gate.
+    await c.query(`create schema ops;
+      create function ops.scac_reference_monitor_guard() returns trigger
+      language plpgsql as $$ begin return new; end $$;`);
     await c.query(readFileSync(path.join(root,'migrations/0847_feature_switches.sql'),'utf8'));
+    const guards = (await c.query(`select tgname,tgtype,tgenabled from pg_trigger
+      where tgrelid='public.feature_switch'::regclass
+      and tgfoid='ops.scac_reference_monitor_guard()'::regprocedure order by tgname`)).rows;
+    assert.deepEqual(guards.map(row=>[row.tgname,row.tgtype,row.tgenabled]),[
+      ['scac_reference_monitor_guard_row',31,'O'],
+      ['scac_reference_monitor_guard_truncate',34,'O'],
+    ],'switch writes must register row and truncate guards with the existing reference monitor');
     await c.query('grant select,insert on event,tool_call to carr_writer');
     await c.query('grant select on actor to carr_writer');
     await c.query("insert into actor(id,slug,display_name,kind) values($1,'joe','Synthetic Joe','human')",[actor.id]);

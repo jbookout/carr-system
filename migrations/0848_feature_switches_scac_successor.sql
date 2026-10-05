@@ -4,7 +4,7 @@ declare v ops.scac_mutation_registry_version%rowtype; registration jsonb;
 begin
   if not exists(select 1 from public.schema_migrations where filename='0846_leads_scac_successor.sql' and sha256='39c22acce1c8d94d693f0b6f858f8a6d68c20f3f9edb8314832a0a0e35aa5a78') then
     raise exception 'Feature switches v113 requires exact applied 0846'; end if;
-  if not exists(select 1 from public.schema_migrations where filename='0847_feature_switches.sql' and sha256='7e6b04fed3e7529752b40b16d360655d3d058d66f2c9d545c05147c54549b472') then
+  if not exists(select 1 from public.schema_migrations where filename='0847_feature_switches.sql' and sha256='5bfc4ae1922f1a0370f8ac3453237fa9026617439bd4702c4d4f132c1801cb1f') then
     raise exception 'Feature switches v113 requires exact applied 0847'; end if;
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v112';
   if v.registry_digest is distinct from 'sha256:7460d50a2441dec886f1c8c41cdda2b5ed3ba8e40f6dce9c94703ff2f0c68ef1' or v.entry_count<>2703

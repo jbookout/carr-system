@@ -17,6 +17,10 @@ create table public.feature_switch (
 );
 grant select on public.feature_switch to carr_reader,carr_writer;
 grant insert,update on public.feature_switch to carr_writer;
+create trigger scac_reference_monitor_guard_row before insert or update or delete
+on public.feature_switch for each row execute function ops.scac_reference_monitor_guard();
+create trigger scac_reference_monitor_guard_truncate before truncate
+on public.feature_switch for each statement execute function ops.scac_reference_monitor_guard();
 
 -- The first consumer ships hidden; activation is a later audited record act.
 insert into public.feature_switch
