@@ -96,6 +96,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from conduct_patterns import (  # noqa: E402
     PROTECTED, HUMAN_WANTS_CHOICE, HUMAN_WANTS_COMMAND, FENCE, BARE_FENCE_CMD,
     INLINE_CMD, HANDOFF_PROSE, denied_commands, handoff_was_denied,
+    handoff_needs_review, HANDOFF_REVIEW_MESSAGE,
 )
 
 # ── (1) FACT CAPTURE — only Joe was in the room. Research cannot reach it. ────
@@ -366,41 +367,21 @@ ATTEMPT_FIRST_REASON = (
     "yourself you should do that before you ever ask me.\"")
 
 
-def _jev_hands_off():
-    """ops/jev_handoff.hands_off, or None when it cannot load (fail open to
-    the keyword patterns)."""
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "jev_handoff", os.path.join(REPO, "ops", "jev_handoff.py"))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.hands_off
-    except Exception:
-        return None
-
-
-def hands_off_unattempted(blob, human_last, denied, jev=None):
+def hands_off_unattempted(blob, human_last, denied):
     """Return the finding name when the question hands Joe an untried command,
-    else None. Keyword patterns first; Jev reads the prose they miss."""
+    else None; unresolved prose action cues return handoff_review (nonblocking)."""
     if not blob.strip():
         return None
     if human_last and HUMAN_WANTS_COMMAND.search(human_last):
         return None
     if denied and handoff_was_denied(blob, denied):
         return None
-    keyword = None
     if FENCE.search(blob) or BARE_FENCE_CMD.search(blob) or INLINE_CMD.search(blob):
-        keyword = "command"
-    else:
-        for name, pat in HANDOFF_PROSE:
-            if pat.search(blob):
-                keyword = name
-                break
-    if jev is not None:
-        if jev(blob, surface="ask", existing_decision=keyword is not None) and not keyword:
-            return "jev"
-    return keyword
+        return "command"
+    for name, pat in HANDOFF_PROSE:
+        if pat.search(blob):
+            return name
+    return "handoff_review" if handoff_needs_review(blob, human_last, denied) else None
 
 
 def read_turn(path, limit=400):
@@ -463,8 +444,14 @@ def main():
         if is_ask:
             blob = question_text(ti)
             finding = hands_off_unattempted(
-                blob, human_last, denied_commands(recs, start), jev=None if payload.get("session_id") == "selftest" else _jev_hands_off())
-            if finding:
+                blob, human_last, denied_commands(recs, start))
+            if finding == "handoff_review":
+                audit({"ts": now(), "hook": "escalation-gate", "classes": ["handoff_review"],
+                       "patterns": ["needs_review"], "session": payload.get("session_id")})
+                print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE,
+                    "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                           "additionalContext": HANDOFF_REVIEW_MESSAGE}}))
+            elif finding:
                 audit({
                     "ts": now(),
                     "hook": "escalation-gate",
