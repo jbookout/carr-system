@@ -1578,6 +1578,21 @@ def launchd_path_refusal(body):
                                  capture_output=True, text=True, env=_git_env(), timeout=15)
             if top.returncode:
                 if top.returncode == 128 and top.stderr.strip() == "fatal: not a git repository (or any of the parent directories): .git":
+                    # Git uses this error for corrupt repositories too. Only
+                    # accept it when no ancestor declares repository metadata.
+                    ancestor = directory
+                    while True:
+                        metadata = os.path.join(ancestor, ".git")
+                        try:
+                            os.lstat(metadata)
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            return f"cannot verify repository identity for {path}: Git metadata at {metadata}"
+                        parent = os.path.dirname(ancestor)
+                        if parent == ancestor:
+                            break
+                        ancestor = parent
                     continue
                 return f"cannot verify repository identity for {path}: {top.stderr.strip()}"
             checkout = top.stdout.strip()

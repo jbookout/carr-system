@@ -122,6 +122,24 @@ class LaunchdMainPathTests(unittest.TestCase):
         (broken / ".git").write_text(f"gitdir: {self.root / 'unavailable'}\n")
         self.assert_runtime_refused({"ProgramArguments": [str(broken / "runner.sh")]})
 
+    def test_corrupt_head_metadata_is_refused(self):
+        corrupt = self.root / "corrupt"
+        self.git("init", "-b", "feature", str(corrupt))
+        script = corrupt / "ops/jobs/runner.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\n")
+        head = corrupt / ".git/HEAD"
+        original = head.read_bytes()
+        head.write_text("invalid HEAD metadata\n")
+        discovery = subprocess.run(
+            ["git", "-C", str(script.parent), "rev-parse", "--show-toplevel"],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(discovery.returncode, 128)
+        self.assertIn("not a git repository", discovery.stderr)
+        self.assert_runtime_refused({"ProgramArguments": [str(script)]})
+        head.write_bytes(original)
+        self.assert_runtime_refused({"ProgramArguments": [str(script)]})
+
     def test_git_ownership_error_is_refused(self):
         denied = subprocess.CompletedProcess([], 128, "", "fatal: detected dubious ownership in repository")
         with patch.object(installer.subprocess, "run", return_value=denied):
