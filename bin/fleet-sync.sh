@@ -20,7 +20,10 @@
 # WHAT IT REFUSES TO DO, which is most of its design:
 #   - It NEVER discards local work. A dirty tracked tree exits 78 (skip) with
 #     the paths named. Dell's machine deliberately carries two uncommitted edits
-#     from his migration; a blind fast-forward would have destroyed them.
+#     from his migration; a blind fast-forward would have destroyed them. The
+#     one exception is residue whose exact bytes origin/main already commits
+#     (tools/fleet_sync_safety.py proves it per path): restoring it loses
+#     nothing, and on 2026-10-04 leaving it stalled this checkout 16 commits.
 #   - It NEVER merges, rebases, resets or force-anythings. Fast-forward only.
 #     If the branches have diverged it skips and says so — a diverged checkout
 #     is a human question, not a job's decision.
@@ -135,16 +138,18 @@ if [ "$canonical_skip" -eq 0 ]; then
   if [ "$local_sha" = "$remote_sha" ]; then
     print -r -- "fleet-sync: checkout already current at ${local_sha:0:8}"
   else
-    # Tracked changes only. Untracked scratch is a session's business, not this
-    # job's, and refusing on it would mean this never runs on a working machine.
-    if ! dirt_reason="$("$PY" "$REPO/tools/fleet_sync_safety.py" "$REPO" origin/main)"; then
-      print -r -- "fleet-sync: SKIP — local changes present, refusing to fast-forward over them:"
-      print -r -- "    $dirt_reason"
-      canonical_status=$EX_CONFIG
-      canonical_skip=1
-    elif ! git merge-base --is-ancestor HEAD origin/main; then
+    if ! git merge-base --is-ancestor HEAD origin/main; then
       # Fast-forward only: HEAD must already be an ancestor of origin/main.
       print -r -- "fleet-sync: SKIP — main has diverged from origin/main; a human decides this one"
+      canonical_status=$EX_CONFIG
+      canonical_skip=1
+    # Tracked changes only. Untracked scratch is a session's business, not this
+    # job's, and refusing on it would mean this never runs on a working machine.
+    # An eligible verdict has already restored residue whose bytes origin/main
+    # commits, so the fast-forward below cannot trip over it.
+    elif ! dirt_reason="$("$PY" "$REPO/tools/fleet_sync_safety.py" "$REPO" origin/main)"; then
+      print -r -- "fleet-sync: SKIP — local changes present, refusing to fast-forward over them:"
+      print -r -- "    $dirt_reason"
       canonical_status=$EX_CONFIG
       canonical_skip=1
     elif ! git merge --ff-only origin/main >/dev/null 2>&1; then
@@ -152,6 +157,7 @@ if [ "$canonical_skip" -eq 0 ]; then
       canonical_status=1
       canonical_skip=1
     else
+      [[ "$dirt_reason" = *"restored residue"* ]] && print -r -- "fleet-sync: $dirt_reason"
       print -r -- "fleet-sync: fast-forwarded ${local_sha:0:8} -> ${remote_sha:0:8}"
     fi
   fi

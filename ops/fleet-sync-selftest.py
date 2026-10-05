@@ -19,7 +19,8 @@ WHAT THE JOB MUST DO, one assertion per line of that:
   2. REFUSE, loudly and without touching anything, when the tree has local
      changes. Dell's machine deliberately carries two uncommitted edits from his
      migration; a blind fast-forward would have destroyed them. This is the most
-     important case in the file.
+     important case in the file. Unstaged residue whose exact bytes origin/main
+     already commits is the one exception: it is restored, then fast-forwarded.
   3. REFUSE when the checkout is a worktree or is not on main. Worktree-per-
      session means most sessions run elsewhere, and syncing from there would
      move a branch somebody is mid-edit on.
@@ -273,6 +274,76 @@ def test_dirty_tree_refuses():
         assert "uncommitted local work" in open(os.path.join(b, "f.txt")).read(), \
             "LOCAL WORK WAS DESTROYED — the one thing this job must never do"
     print("PASS  dirty tree refuses, names the file, destroys nothing")
+
+
+def push_f(tmp, line):
+    """Origin's next f.txt commit; returns the bytes it committed."""
+    a = os.path.join(tmp, "A")
+    open(os.path.join(a, "f.txt"), "a").write(line)
+    git(a, "commit", "-qam", line.strip())
+    git(a, "push", "-q", "origin", "main")
+    return open(os.path.join(a, "f.txt")).read()
+
+
+def test_landed_residue_fast_forwards():
+    """The 2026-10-04 stall: the canonical tree held bytes a merged PR shipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        open(os.path.join(b, "f.txt"), "w").write("base\nnewer\n")
+        r = run_sync(b)
+        assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert "landed upstream: f.txt" in r.stdout, r.stdout
+        assert "fast-forwarded" in r.stdout, r.stdout
+        assert behind(b) == 0
+        assert git(b, "status", "--porcelain", "--untracked-files=no") == ""
+    print("PASS  residue matching origin's tip is restored, then fast-forwarded")
+
+
+def test_intermediate_landed_residue_fast_forwards():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        newest = push_f(tmp, "newest\n")
+        open(os.path.join(b, "f.txt"), "w").write("base\nnewer\n")
+        r = run_sync(b)
+        assert r.returncode == 0, f"{r.returncode}: {r.stdout}{r.stderr}"
+        assert behind(b) == 0
+        assert open(os.path.join(b, "f.txt")).read() == newest, \
+            "the fast-forward must land origin's tip, not the residue"
+    print("PASS  residue matching an intermediate upstream commit is restored")
+
+
+def test_landed_residue_beside_real_work_refuses():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        a = os.path.join(tmp, "A")
+        open(os.path.join(a, "g.txt"), "w").write("g\n")
+        git(a, "add", "g.txt")
+        git(a, "commit", "-qm", "g")
+        git(a, "push", "-q", "origin", "main")
+        git(b, "pull", "-q", "--ff-only", "origin", "main")
+        landed = push_f(tmp, "later\n")
+        open(os.path.join(b, "f.txt"), "w").write(landed)
+        open(os.path.join(b, "g.txt"), "a").write("uncommitted local work\n")
+        r = run_sync(b)
+        assert r.returncode == 78, f"expected skip 78, got {r.returncode}: {r.stdout}{r.stderr}"
+        assert "actionable local changes: g.txt;" in r.stdout, r.stdout
+        assert behind(b) == 1
+        assert open(os.path.join(b, "f.txt")).read() == landed, \
+            "a refused run must leave even landed residue untouched"
+        assert "uncommitted local work" in open(os.path.join(b, "g.txt")).read()
+    print("PASS  landed residue beside real work refuses and touches neither")
+
+
+def test_staged_landed_residue_refuses():
+    with tempfile.TemporaryDirectory() as tmp:
+        b = build(tmp)
+        open(os.path.join(b, "f.txt"), "w").write("base\nnewer\n")
+        git(b, "add", "f.txt")
+        r = run_sync(b)
+        assert r.returncode == 78, f"expected skip 78, got {r.returncode}: {r.stdout}{r.stderr}"
+        assert "actionable local changes: f.txt;" in r.stdout, r.stdout
+        assert behind(b) == 1
+    print("PASS  staged residue stays someone's work in progress")
 
 
 def test_clean_tree_fast_forwards():
@@ -714,6 +785,10 @@ def main():
         return 1
     test_dirty_tree_refuses()
     test_clean_tree_fast_forwards()
+    test_landed_residue_fast_forwards()
+    test_intermediate_landed_residue_fast_forwards()
+    test_landed_residue_beside_real_work_refuses()
+    test_staged_landed_residue_refuses()
     test_already_current_is_a_noop()
     test_non_fleet_xpc_identity_stays_external()
     test_direct_handoff_injection_fails_closed()
@@ -744,7 +819,7 @@ def main():
     test_exact_tree_refuses_rename_old_path_resurrection()
     test_exact_tree_accepts_canonical_rename()
     test_exact_tree_accepts_canonical_new_file_patch()
-    print("32/32 fleet-sync cases passed")
+    print("36/36 fleet-sync cases passed")
     return 0
 
 

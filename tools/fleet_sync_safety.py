@@ -117,14 +117,65 @@ def submodule_tree_is_exact_patch(repo: str) -> tuple[bool, str]:
         return False, "tracked Quill tree differs from recorded HEAD plus canonical patches"
 
 
-def eligible_for_fast_forward(repo: str, incoming: str) -> tuple[bool, str]:
+def _landed_blob(repo: str, incoming: str, path: str) -> str | None:
+    """The working file's blob id when HEAD..incoming already commits those bytes.
+
+    Only a plain unstaged modification of a regular file qualifies: the index
+    must still equal HEAD, so restoring the path discards nothing but a
+    byte-identical copy of content the incoming range preserves in history.
+    """
+    full = os.path.join(repo, path)
+    if os.path.islink(full) or not os.path.isfile(full):
+        return None
+    if _git(repo, "diff", "--cached", "--quiet", "HEAD", "--", path).returncode:
+        return None
+    live = _git(repo, "hash-object", "--", path)
+    commits = _git(repo, "rev-list", f"HEAD..{incoming}", "--", path)
+    if live.returncode or commits.returncode:
+        return None
+    blob = live.stdout.strip()
+    for commit in commits.stdout.split():
+        if _git(repo, "rev-parse", "--verify", "--quiet", f"{commit}:{path}").stdout.strip() == blob:
+            return blob
+    return None
+
+
+def _landed_residue(repo: str, incoming: str, paths: list[str]) -> dict[str, str]:
+    """Map each dirty path whose bytes already landed upstream to its blob id.
+
+    A session that edits the canonical checkout and then ships the same bytes
+    through a PR leaves the edit behind as dirt.  It is nobody's work in
+    flight, yet on 2026-10-04 it blocked every fast-forward and left the
+    release pipeline running controller code sixteen commits stale.
+    """
+    landed = {}
+    for path in paths:
+        blob = _landed_blob(repo, incoming, path)
+        if blob:
+            landed[path] = blob
+    return landed
+
+
+def _restore_landed(repo: str, incoming: str, landed: dict[str, str]) -> tuple[bool, str]:
+    """Return proven residue to HEAD, re-proving each path immediately before."""
+    for path, blob in landed.items():
+        if _landed_blob(repo, incoming, path) != blob:
+            return False, f"{path} changed after it was proven landed upstream"
+        if _git(repo, "checkout", "HEAD", "--", path).returncode:
+            return False, f"could not restore landed residue {path}"
+    return True, "restored residue already committed upstream: " + ", ".join(landed)
+
+
+def eligible_for_fast_forward(repo: str,
+                              incoming: str) -> tuple[bool, str, dict[str, str]]:
     """Return whether a checkout may fast-forward without discarding work.
 
-    The sole permitted tracked state is the exact Quill patch dirt classified by
-    ``health_submodule``.  Even that state is safe only when the incoming range
-    changes neither the recorded Quill gitlink, the patch source that explains
-    the dirt, nor the repository's submodule configuration.  Every uncertainty
-    is a refusal.
+    Two tracked states are permitted.  Residue whose exact bytes the incoming
+    range already commits is returned third, for ``_restore_landed``.  The exact
+    Quill patch dirt classified by ``health_submodule`` is safe only when the
+    incoming range changes neither the recorded Quill gitlink, the patch source
+    that explains the dirt, nor the repository's submodule configuration.
+    Every uncertainty is a refusal.
     """
     # Fence identity inputs even for a currently clean checkout.  A changed
     # gitlink, patch source, or .gitmodules entry needs a reviewed submodule
@@ -134,37 +185,47 @@ def eligible_for_fast_forward(repo: str, incoming: str) -> tuple[bool, str]:
                    QUILL_PATCHES, SUBMODULE_CONFIG)
     if changed.returncode == 1:
         return (False,
-                "incoming update changes Quill gitlink, tracked patches, or .gitmodules")
+                "incoming update changes Quill gitlink, tracked patches, or .gitmodules", {})
     if changed.returncode != 0:
-        return False, "could not compare incoming Quill identity inputs"
+        return False, "could not compare incoming Quill identity inputs", {}
 
     status = _git(repo, "status", "--porcelain", "--untracked-files=no")
     if status.returncode:
-        return False, "could not read tracked checkout status"
+        return False, "could not read tracked checkout status", {}
     rows = status.stdout.splitlines()
     if not rows:
-        return True, "no tracked local changes"
+        return True, "no tracked local changes", {}
 
     buckets = classify_loose_status(repo, rows)
-    if buckets["actionable_tracked"]:
+    landed = _landed_residue(repo, incoming, buckets["actionable_tracked"])
+    actionable = [path for path in buckets["actionable_tracked"] if path not in landed]
+    if actionable:
         return False, "actionable local changes: " + ", ".join(
-            buckets["actionable_tracked"]) + "; expected patched submodules: " + ", ".join(
-                buckets["expected_patched_submodules"])
+            actionable) + "; expected patched submodules: " + ", ".join(
+                buckets["expected_patched_submodules"]), {}
+    landed_note = "; landed upstream: " + ", ".join(landed) if landed else ""
     expected = buckets["expected_patched_submodules"]
+    if not expected:
+        return True, "only residue already committed upstream" + landed_note, landed
     if expected != [QUILL]:
-        return False, "unverifiable tracked submodule state: " + ", ".join(expected)
+        return False, "unverifiable tracked submodule state: " + ", ".join(expected), {}
 
     exact, exact_reason = submodule_tree_is_exact_patch(repo)
     if not exact:
-        return False, exact_reason
-    return True, exact_reason
+        return False, exact_reason, {}
+    return True, exact_reason + landed_note, landed
 
 
 def main() -> int:
+    """Print the verdict; an eligible checkout also has its landed residue restored."""
     if len(sys.argv) != 3:
         print("usage: fleet_sync_safety.py REPO INCOMING", file=sys.stderr)
         return 2
-    allowed, reason = eligible_for_fast_forward(os.path.abspath(sys.argv[1]), sys.argv[2])
+    repo, incoming = os.path.abspath(sys.argv[1]), sys.argv[2]
+    allowed, reason, landed = eligible_for_fast_forward(repo, incoming)
+    if allowed and landed:
+        allowed, restored = _restore_landed(repo, incoming, landed)
+        reason = f"{reason}; {restored}"
     print(reason)
     return 0 if allowed else 78
 
