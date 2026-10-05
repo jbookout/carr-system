@@ -231,15 +231,18 @@ def historical_dependency(root: Path, rel: str, expected: str) -> bytes:
 
 
 def mirror(receipt: dict, dest: Path) -> None:
-    """Copy every file the receipt's evidence binds, plus the registry, into dest."""
+    """Copy the receipt's bound bytes, including pending and historical evidence."""
+    ev = receipt['evidence']
+    hashes = {**ev['source'], **ev['dependencies'],
+              ev['expectations']['path']: ev['expectations']['sha256'],
+              **{c['path']: c['sha256'] for c in ev['cohorts'].values()}}
     for rel in evidence_paths(receipt) | {"evals/surfaces.json"}:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / rel, dest / rel)
-        # The real receipt is immutable historical evidence. Mirror its bound
-        # revision when the current source has changed; never bless new bytes.
-        expected = receipt.get("evidence", {}).get("dependencies", {}).get(rel)
-        if expected and sha_file(dest/rel) != expected:
-            (dest / rel).write_bytes(historical_dependency(ROOT, rel, expected))
+        data = (ROOT / rel).read_bytes()
+        expected = hashes.get(rel)
+        if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+            data = historical_dependency(ROOT, rel, expected)
+        (dest / rel).write_bytes(data)
     if not (dest / ".git").exists():
         env = fixture_env()
         subprocess.run(["git", "init", "-q", str(dest)], env=env, check=True, capture_output=True)
@@ -936,6 +939,47 @@ Path(a.trace_reads).write_text(json.dumps(['input.txt']))
             self.assertEqual(fourth["baseline"]["rows"], [{"value": 22}])
 
 
+class ReceiptMirrorTests(unittest.TestCase):
+    def test_pending_receipt_and_historical_receipt_bind_their_own_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'repo'
+            root.mkdir()
+            env = fixture_env()
+            def git(*args):
+                return subprocess.run(['git', *args], cwd=root, env=env,
+                                      check=True, capture_output=True).stdout
+            git('init', '-q')
+            git('config', 'user.name', 'selftest')
+            git('config', 'user.email', 'selftest@example.invalid')
+            source = root / 'input.txt'
+            source.write_text('committed source')
+            (root / 'evals').mkdir()
+            (root / 'evals/surfaces.json').write_text('{}')
+            receipt_path = root / RD / 'receipt.json'
+            receipt_path.parent.mkdir(parents=True)
+            receipt_path.write_text('{}')
+            git('add', 'input.txt', 'evals/surfaces.json', f'{RD}/receipt.json')
+            git('commit', '-qm', 'fixture receipt')
+            historical = {'evidence': {'source': {'input.txt': sha_file(source)},
+                'dependencies': {}, 'expectations': {'path': 'input.txt', 'sha256': sha_file(source)},
+                'cohorts': {}}}
+            source.write_text('pending source')
+            pending = copy.deepcopy(historical)
+            pending['evidence']['source']['input.txt'] = sha_file(source)
+            pending['evidence']['expectations']['sha256'] = sha_file(source)
+            with patch.dict(globals(), ROOT=root):
+                for receipt, expected in ((pending, 'pending source'), (historical, 'committed source')):
+                    dest = Path(tmp) / expected
+                    (dest / RD).mkdir(parents=True)
+                    mirror(receipt, dest)
+                    self.assertEqual((dest / 'input.txt').read_text(), expected)
+                broken = copy.deepcopy(pending)
+                broken['evidence']['source']['input.txt'] = '0' * 64
+                broken['evidence']['expectations']['sha256'] = '0' * 64
+                with self.assertRaisesRegex(AssertionError, 'input.txt'):
+                    mirror(broken, Path(tmp) / 'missing')
+
+
 class MirrorBindings(unittest.TestCase):
     def test_receipt_update_does_not_replace_digest_bound_source(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -952,7 +996,8 @@ class MirrorBindings(unittest.TestCase):
             bound = b"value = 1\n"
             receipt = {"evidence": {"source": {}, "dependencies": {
                 rel: hashlib.sha256(bound).hexdigest()},
-                "expectations": {"path": RD + "/expectations.json"}, "cohorts": {}}}
+                "expectations": {"path": RD + "/expectations.json",
+                    "sha256": hashlib.sha256(b"{}").hexdigest()}, "cohorts": {}}}
             for path, body in ((rel, bound), (RD + "/receipt.json", json.dumps(receipt).encode()),
                                (RD + "/expectations.json", b"{}"), ("evals/surfaces.json", b"{}")):
                 target = root / path
@@ -1001,7 +1046,13 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
 
     def test_checked_in_receipt_passes_against_its_own_evidence(self):
         self.assertEqual(self.r["schema_version"], 2)
-        self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", self.root), [])
+        self.assertEqual(self.errors(), [])
+
+    def test_current_dependency_cannot_replace_historical_evidence(self):
+        path = self.root / "ops/typesafe_client.py"
+        path.write_bytes(path.read_bytes() + b"\n# changed dependency\n")
+        self.assertTrue(any("ops/typesafe_client.py" in error and "sha256" in error
+                            for error in self.errors()))
 
     def test_repeated_validation_reuses_immutable_baseline_across_roots(self):
         # One baseline snapshot per commit/harness, even for separate fixtures.
