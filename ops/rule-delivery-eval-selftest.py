@@ -24,7 +24,7 @@ WHAT IS PROVEN:
      rows, the drift observer, boot layer zero) run on the committed fixture
      against this checkout's real config and return only known rule ids.
   7. The Jev-backed adapters (the UserPromptSubmit judgment in
-     ops/rule_trigger_delivery.py and the legacy ops/jev_rule_select.py) run
+     ops/rule_trigger_delivery.py) run
      end to end against a FAKE client: the rule the fake says binds is
      delivered, every request carries the harness's calls-log sink, and no
      production log, cache or audit file in this checkout's out/ is created or
@@ -332,7 +332,7 @@ def test_jev_adapters(ev, meta):
                                  client_factory=lambda calls_log: ev.JevProxy(fake, calls_log),
                                  calls_log=sink)
     wanted = [a for a in adapters if a["name"] in ("prompt_full",)]
-    check("both Jev-backed adapters are built in live mode", len(wanted) == 1,
+    check("the single Jev-backed adapter is built in live mode", len(wanted) == 1,
           [a["name"] for a in adapters])
     case = {"id": "fake-1", "stratum": "engineering", "tool_calls": [], "gold": [target],
             "prompt": "hello, a quick question before we start"}

@@ -23,8 +23,6 @@ adapter calls the production selection function itself:
                     (lib/rule_delivery_preuse.semantic_delivery);
   prompt_full       the same call with the budgeted Jev judgment live — what
                     the UserPromptSubmit hook actually delivers;
-  jev_rule_select   ops/jev_rule_select.select at its floor (the legacy
-                    two-stage selector; still the Flash path);
   jit_pretooluse    hooks/rule-pack-preuse-reselection.py's own
                     matched_triggers()/_matches() on each tool call;
   layered_triggers  the same hook's route rail: routed_rule_ids() over
@@ -224,7 +222,7 @@ def universes(meta, names, *, boot_ids=None):
              "drift_shadow": pack, "drift_if_acting": pack, "boot_layer0": layer0,
              "boot_always_on": set(boot_ids or ()),
              "layered_triggers": everything,
-             "jev_rule_select": everything, "system_moment": everything,
+             "system_moment": everything,
              "system_moment_packlayer": pack,
              "system_moment_plus_drift": everything, "system_scoped_boot": everything,
              # The doctrine search door delivers doctrine only; it owes no rule.
@@ -267,12 +265,7 @@ def _quiet_rule_trigger_delivery(repo, tag):
     original = rtd._sibling
 
     def sibling(name):
-        module = original(name)
-        if name == "jev_rule_select":
-            inner = module._sibling
-            module._sibling = (lambda n: _quiet_judge(repo, tag) if n == "jev_judge"
-                               else inner(n))
-        return module
+        return _quiet_judge(repo, tag) if name == "jev_judge" else original(name)
     rtd._sibling = sibling
     return rtd
 
@@ -334,7 +327,7 @@ def doctrine_search_refs(repo, prompt, limit=10):
 def build_adapters(repo, *, jev="off", client_factory=None, calls_log=os.devnull,
                    doctrine_search=False):
     """Adapters for every path. `jev` is "off" (deterministic paths only) or
-    "live" (adds prompt_full and jev_rule_select). `client_factory(calls_log)`
+    "live" (adds prompt_full). `client_factory(calls_log)`
     returns the Jev client; default is JevProxy over ops/typesafe_client."""
     import sys
     repo = str(repo)
@@ -777,7 +770,7 @@ def _pct(value):
 def render_markdown(report, statements=None, *, top=10, paths=None):
     statements = statements or {}
     order = paths or [p for p in SYSTEM_ROWS + ("prompt_full",
-                                  "prompt_compiled", "jev_rule_select", "jit_pretooluse",
+                                  "prompt_compiled", "jit_pretooluse",
                                   "layered_triggers", "drift_shadow", "drift_if_acting",
                                   "boot_always_on", "boot_layer0",
                                   "doctrine_search")

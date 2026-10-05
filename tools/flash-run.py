@@ -472,17 +472,32 @@ RULE_SITUATION = ("A local coding model (Flash) is about to write code for ONE s
                   "applies the patch). It only reads, edits and runs tests. The task: ")
 
 
-def pick_rules(task, selector=None):
-    """Jev's pick of the taught rules that bind to this one task: (rules, error_note).
+def pick_rules(task, situation=RULE_SITUATION, **judge):
+    """Return authoritative rules and a visible note for pending semantic advice.
 
-    Fails open: a Jev outage or a partially judged roster costs the attempt its rules,
-    never the attempt itself, and the note lands in the run log so the gap is visible."""
+    Flash has no boot load or enforcing hooks, so the selector considers the whole
+    active corpus. Injected judgment arguments use the same bounded batch interface.
+    """
     try:
-        selector = selector or _lib("jev_rule_select")
-        rules = selector.advise(RULE_SITUATION + task)
-        return list(rules)[:MAX_TASK_RULES], None
+        selector = _lib("rule_trigger_delivery")
+        corpus = selector.load_rules()
+        picked, report = selector.judge_budgeted(situation + task, corpus, [], **judge)
     except Exception as exc:
         return [], f"{type(exc).__name__}: {exc}"[:300]
+    by_id = {rule["id"]: rule for rule in corpus}
+    rules = [{**by_id[row["id"]], **row}
+             for row in sorted(picked.values(), key=lambda r: (-r["probability"], r["id"]))]
+    gaps = [f"{key}={report[key]}" for key, healthy in
+            (("rank_status", ("ok", "not_needed", "deterministic_shortlist")),
+             ("bind_status", ("judged", "none")))
+            if report.get(key) not in healthy]
+    if report.get("deadline_hit"):
+        gaps.append(f"deadline hit, unjudged={report.get('unjudged', [])}")
+    if report.get("review_required"):
+        candidates = ", ".join(sorted(report.get("advisory_candidates") or {}))
+        gaps.append(f"review required for rule suggestions: {candidates}")
+    note = ("rule judgment degraded: " + "; ".join(gaps))[:300] if gaps else None
+    return rules[:MAX_TASK_RULES], note
 
 
 def rules_block(rules):

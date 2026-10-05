@@ -14,7 +14,7 @@ JUDGMENT_CACHE = os.path.join(OUT, "rule-prompt-judgments.json")
 LOG_PATH = os.path.join(OUT, "rule-trigger-delivery.jsonl")
 
 # A message that surfaces twenty rules has surfaced none; same cap and reason
-# as ops/jev_rule_select.MAX_SURFACED.
+# for readable delivery.
 MAX_SURFACED = 5
 # A rule already delivered to this session is in its context; sending the same
 # statement again on every message is what the dedupe prevents. Two hours
@@ -60,6 +60,34 @@ def _sibling(name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+CORPUS = os.path.join(REPO, "ops/config/rule-selection-corpus.v1.json")
+TRIAGE = os.path.join(REPO, "ops/config/rule-triage.v1.json")
+
+
+def load_rules(path=TRIAGE):
+    """Every active rule as {id, gist, context}. The corpus, not a selection."""
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    rows = data if isinstance(data, list) else next(
+        (value for value in data.values()
+         if isinstance(value, list) and value and isinstance(value[0], dict)), [])
+    # Prefer full rule statements. Triage titles remain the fallback when the
+    # corpus snapshot is unavailable; filing metadata alone is not the rule.
+    statements = {}
+    try:
+        with open(CORPUS, "r", encoding="utf-8") as handle:
+            for row in json.load(handle).get("rules", []):
+                if row.get("id") and (row.get("statement") or "").strip():
+                    statements[row["id"]] = row["statement"]
+    except (OSError, ValueError):
+        statements = {}
+    return [{"id": row["id"],
+             "gist": row.get("title_gist", ""),
+             "statement": statements.get(row["id"], ""),
+             "context": (row.get("reason") or "")[:600]}
+            for row in rows if row.get("id")]
 
 
 def prompt_rows(path=TRIGGERS_PATH):
@@ -275,8 +303,7 @@ def advise(situation, *, session_id=None, now=None, triggers_path=TRIGGERS_PATH,
     rules = rtc.pack_rules() if rules is None else rules
     by_id = {rule["id"]: rule for rule in rules}
     entries = (compiled or {}).get("rules") or {}
-    # With no compiled file there is nothing to be stale against: every rule
-    # is simply unmatched and the ranking call picks what to judge.
+    # With no compiled file, every rule enters the deterministic shortlist.
     stale = set(rtc.stale_or_missing(compiled, rules)) if compiled is not None else set()
 
     selected = {}

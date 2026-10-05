@@ -44,7 +44,6 @@ def load(name, path, *, replace=None):
 RTC_PATH = REPO / "ops" / "rule_trigger_compile.py"
 RTD_PATH = REPO / "ops" / "rule_trigger_delivery.py"
 TSC_PATH = REPO / "ops" / "typesafe_client.py"
-BUILD_PATH = REPO / "ops" / "jev_build_advisory.py"
 rtc = load("rule_trigger_compile_t", RTC_PATH)
 rtd = load("rule_trigger_delivery_t", RTD_PATH)
 
@@ -96,7 +95,6 @@ def table_for(doc, tmp, extra=()):
     Path(path).write_text(json.dumps({"schema": "rule-jit-triggers/v1", "triggers": rows}),
                           encoding="utf-8")
     return path
-
 
 
 # Fillers make the roster bigger than the binding capacity, so the ranking

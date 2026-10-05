@@ -307,7 +307,7 @@ class BlockingReviewTests(unittest.TestCase):
     def test_unknown_error_text_cannot_turn_measured_usage_into_free_usage(self):
         for error in ("holdout_disabled", "post_holdout_timeout", "network_timeout"):
             with self.subTest(error=error):
-                self.assertEqual(jvr._call_fields(call("review", error=error))["billing"], "measured")
+                self.assertEqual(jvr._fields(call("review", error=error))["billing"], "measured")
 
     def test_cache_receipts_and_observations_do_not_double_count_cost_cache_hits(self):
         report = jvr.build_report(sources(calls=[call("jev_judge", cache_hit=True)],
@@ -370,8 +370,8 @@ class BlockingReviewTests(unittest.TestCase):
         for row in cases:
             with self.subTest(row=row):
                 self.assertEqual(jvr._judge_fields(row)["billing"], "not_billed")
-                self.assertEqual(jvr._call_fields(row)["billing"], "not_billed")
-        self.assertEqual(jvr._call_fields(call("x", error="holdout", holdout=True))["billing"], "not_billed")
+                self.assertEqual(jvr._fields(row)["billing"], "not_billed")
+        self.assertEqual(jvr._fields(call("x", error="holdout", holdout=True))["billing"], "not_billed")
         report = jvr.build_report(sources(calls=[call("x", input_tokens=None,
                                  output_tokens=None, error="timeout", usage=None)]), START, END)
         self.assertEqual(report["totals"]["billing_unknown"], 1)
