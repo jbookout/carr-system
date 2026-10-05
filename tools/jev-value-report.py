@@ -290,7 +290,8 @@ def positive_attribution(commit):
     the claim's sentence denies it, and so does a denial of the claimed
     defect noun anywhere in subject or body ("found no bug"). Negating a
     different noun ("no regression" after a fixed bug) is validation prose and
-    keeps the claim. Messages denying or deferring a fix remain excluded. This
+    keeps the claim. Earlier non-detection also keeps a later positive claim.
+    Messages denying or deferring a fix remain excluded. This
     is commit-attributed evidence, not an independently verified causal outcome.
     """
     message = "\n".join(str(commit.get(k) or "") for k in ("subject", "body"))
@@ -310,7 +311,7 @@ def positive_attribution(commit):
             noun, quote = fixed.group(1), attribution.strip()
         else:
             continue
-        if not re.search(rf"\b{_denial(re.escape(noun))}\b", message, re.I):
+        if not _denies_defect(message, noun):
             return quote
     return None
 
@@ -323,6 +324,18 @@ def _denial(nouns):
     return (rf"(?:no\s+(?:{nouns})s?\b(?!\s+(?:remain|left|anymore|any\s+more))"
             rf"|not\s+(?:(?:a|an)\s+)?(?:{nouns})s?"
             rf"|did\s+not\s+(?:find|identify|confirm)\s+(?:(?:a|an|any)\s+)?(?:{nouns})s?)")
+
+
+def _denies_defect(message, noun):
+    for sentence in re.split(r"[.;\n]", message):
+        for denial in re.finditer(rf"\b{_denial(re.escape(noun))}\b", sentence, re.I):
+            # Earlier non-detection explains how a later review found the bug.
+            if (re.match(r"did\s+not\b", denial.group(0), re.I)
+                    and re.search(r"\b(?:earlier|previously|before\s+(?:this|the)\s+review)\b",
+                                  sentence, re.I)):
+                continue
+            return True
+    return False
 
 
 def build_report(sources, start, end):

@@ -227,6 +227,9 @@ def review_decision(changes, *, base, head, policy_revision, diff_digest, doc=No
 
 
 def _strict_json(text):
+    if isinstance(text, bytes):
+        text = text.decode("utf-8")
+
     def nonfinite(_):
         raise ValueError("nonfinite JSON")
 

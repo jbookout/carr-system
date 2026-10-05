@@ -151,8 +151,22 @@ class CostTests(unittest.TestCase):
 
 
 class ValueTests(unittest.TestCase):
+    def test_earlier_non_detection_preserves_explicit_positive_attribution(self):
+        for statement in ("Our tests did not find any bug before this review.",
+                          "Earlier tests did not identify a bug.",
+                          "Investigation previously did not confirm any bug."):
+            with self.subTest(statement=statement):
+                commit = {"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                          "subject": "Fix bug Jev found", "body": statement}
+                self.assertIsNotNone(jvr.positive_attribution(commit))
+                report = jvr.build_report(sources(commits=[commit]), START, END)
+                self.assertEqual(report["totals"]["outcomes_verified"], 1)
+
     def test_negative_investigation_and_coincident_verdict_do_not_earn_credit(self):
-        for denial in ("No bug found", "Investigation did not find a bug"):
+        for denial in ("No bug found", "Investigation did not find a bug",
+                       "Investigation did not identify any bug",
+                       "Before merging, investigation did not confirm any bug.",
+                       "Our earlier tests did not find any bug. Investigation did not confirm a bug."):
             with self.subTest(denial=denial):
                 report = jvr.build_report(sources(
                     judge=[judge("build_advisory", receipt_id="coincident")],

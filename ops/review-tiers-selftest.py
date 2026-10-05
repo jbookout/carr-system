@@ -19,8 +19,7 @@ partition's noise filter. This suite holds three properties.
   3. NON-BLOCKING TIER 3. Joe ruled code-owner review advisory on every path
      (decision 8daefaba): .github/CODEOWNERS names no owner.
 
-No network, no credential, no database, no git fixture (it only lists the
-live checkout's tracked files).
+No network, no credential, no database. CLI cases use disposable Git fixtures.
 """
 import importlib.util
 import json
@@ -28,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -309,6 +309,44 @@ class LensFaultTests(unittest.TestCase):
 
 
 class MapContentTests(unittest.TestCase):
+    def test_cli_rejects_encodings_the_runtime_cannot_load(self):
+        path = "ops/config/jev-cost-guard.v1.json"
+        before = json.loads((REPO / path).read_text())
+        before["daily_paid_call_cap"] = 1500
+        after = dict(before, daily_paid_call_cap=3000)
+        for encoding in ("utf-8", "utf-8-sig", "utf-16"):
+            for invalid_side in ("base", "head"):
+                with self.subTest(encoding=encoding, side=invalid_side), tempfile.TemporaryDirectory() as tmp:
+                    repo = Path(tmp)
+                    (repo / "lib").mkdir()
+                    (repo / "lib/review_tiers.py").write_bytes((REPO / "lib/review_tiers.py").read_bytes())
+                    (repo / path).parent.mkdir(parents=True)
+                    policy = "ops/config/review-tiers.v1.json"
+                    (repo / policy).write_bytes((REPO / policy).read_bytes())
+                    env = scrubbed_env()
+                    def git(*args):
+                        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args],
+                            cwd=repo, env=env, check=True, capture_output=True, text=True).stdout.strip()
+                    git("init", "-q")
+                    git("config", "user.name", "Fixture")
+                    git("config", "user.email", "fixture@example.invalid")
+                    revisions = []
+                    for side, content in (("base", before), ("head", after)):
+                        (repo / path).write_bytes(json.dumps(content).encode(
+                            encoding if side == invalid_side else "utf-8"))
+                        git("add", path, policy, "lib/review_tiers.py")
+                        message = repo / "message"
+                        message.write_text(side)
+                        git("commit", "-q", "-F", str(message))
+                        revisions.append(git("rev-parse", "HEAD"))
+                    result = subprocess.run([sys.executable, str(repo / "lib/review_tiers.py"),
+                        "--base", revisions[0], "--head", revisions[1],
+                        "--policy-revision", revisions[0]], cwd=repo, env=env,
+                        check=True, capture_output=True, text=True)
+                    decision = json.loads(result.stdout)
+                    self.assertEqual(decision["lane"], "tunable_scalar" if encoding == "utf-8" else "review")
+                    self.assertEqual(decision["tier"], 1 if encoding == "utf-8" else 3)
+
     def test_budget_only_change_uses_bounded_lane_with_revision_evidence(self):
         before = json.loads((REPO / "ops/config/jev-cost-guard.v1.json").read_text())
         before["daily_paid_call_cap"] = 1500
