@@ -12,6 +12,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def setUpModule():
+    # ci.sh exports the offline flags so fixtures never pay. This suite drives
+    # injected fake Workers instead, so it clears them and fails any escape.
+    env = patch.dict(os.environ)
+    env.start()
+    unittest.addModuleCleanup(env.stop)
+    for name in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER"):
+        os.environ.pop(name, None)
+    real_run = subprocess.run
+
+    def guard_run(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and any(str(a).endswith("local-verb.mjs") for a in argv):
+            raise AssertionError("fixture reached real local-verb")
+        return real_run(argv, *args, **kwargs)
+    guard = patch.object(subprocess, "run", guard_run)
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
+
+
 def worker_runner(client, answer, seen):
     """Fake the authenticated Worker, including its zero-spend probe."""
     def run(argv, **options):

@@ -520,16 +520,32 @@ class Via:
                               calls_log=os.devnull, **kwargs)
 
 
+OFFLINE_FLAGS = ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER")
+
+
 def _on_clock(fn):
-    """Run fn(clock, tsc_m) with the client's time module on a fake clock."""
+    """Run fn(clock, tsc_m) with the client's time module on a fake clock.
+
+    ci.sh exports the offline flags, which refuse before any runner. These
+    properties inject a fake Worker runner, so the flags are cleared for the
+    call and any escape to the real local-verb script fails the property."""
     tsc_m, clock = EXTRA["tsc"], FakeClock()
-    real = tsc_m.time
+    real, real_run = tsc_m.time, subprocess.run
+    saved = {name: os.environ.pop(name) for name in OFFLINE_FLAGS if name in os.environ}
+
+    def guard_run(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and any(str(a).endswith("local-verb.mjs") for a in argv):
+            raise AssertionError("fixture reached real local-verb")
+        return real_run(argv, *args, **kwargs)
     tsc_m.time = SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep,
                                  time=clock.monotonic)
+    subprocess.run = guard_run
     try:
         return fn(clock, tsc_m)
     finally:
         tsc_m.time = real
+        subprocess.run = real_run
+        os.environ.update(saved)
 
 
 def _in_time(transport, deadline):
