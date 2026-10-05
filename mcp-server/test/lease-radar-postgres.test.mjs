@@ -1,3 +1,4 @@
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,mkdtempSync,existsSync,mkdirSync,renameSync} from 'node:fs';
@@ -12,6 +13,7 @@ const available=bin && existsSync(path.join(bin,'postgres'));
 const id=n=>`aa000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 test('real PostgreSQL projection covers horizon, missing dates, tombstones, holds and reader-only view grant',{skip:!available && 'PostgreSQL binaries unavailable'},async()=>{
   const dir=mkdtempSync('/tmp/lease-radar-');let c,running=false;
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try{
     execFileSync(path.join(bin,'initdb'),['-D',dir,'-U','fixture','--auth=trust','--no-locale'],{stdio:'pipe'});
     execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'],{stdio:'pipe'});running=true;
@@ -66,11 +68,20 @@ test('real PostgreSQL projection covers horizon, missing dates, tombstones, hold
       assert.equal(released.touch_id,id(71),`hold at offset ${offset} is released`);
       assert.equal(released.touch_eligible,true);
     }
-  }finally{await c?.end();if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{stdio:'pipe'});mkdirSync('/tmp/_to_delete',{recursive:true});renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));}
+  } finally {
+    try {
+      try { await c?.end(); } finally {
+        if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{stdio:'pipe'});
+        mkdirSync('/tmp/_to_delete',{recursive:true});
+        renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
+      }
+    } finally { await releaseBudget(); }
+  }
 });
 
 test('database horizon changes both reported coverage and membership, including an empty ledger',{skip:!available && 'PostgreSQL binaries unavailable'},async()=>{
   const dir=mkdtempSync('/tmp/lease-radar-policy-');let c,running=false;
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try{
     execFileSync(path.join(bin,'initdb'),['-D',dir,'-U','fixture','--auth=trust','--no-locale'],{stdio:'pipe'});
     execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'],{stdio:'pipe'});running=true;
@@ -104,5 +115,13 @@ test('database horizon changes both reported coverage and membership, including 
     const empty=await read();
     assert.deepEqual(empty.window,expected,'empty ledger still reports database coverage');
     assert.deepEqual(empty.leases,[]);
-  }finally{await c?.end();if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{stdio:'pipe'});mkdirSync('/tmp/_to_delete',{recursive:true});renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));}
+  } finally {
+    try {
+      try { await c?.end(); } finally {
+        if(running)execFileSync(path.join(bin,'pg_ctl'),['-D',dir,'-m','fast','-w','stop'],{stdio:'pipe'});
+        mkdirSync('/tmp/_to_delete',{recursive:true});
+        renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
+      }
+    } finally { await releaseBudget(); }
+  }
 });

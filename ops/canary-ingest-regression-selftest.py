@@ -16,7 +16,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -203,6 +203,29 @@ class Regressions(unittest.TestCase):
         with patch.object(socket, 'create_connection', reset_on_third):
             self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
 
+    def test_5_all_connect_rejections_cannot_pass_vacuously(self):
+        with patch.object(socket, 'create_connection', side_effect=ConnectionResetError('all rejected')):
+            with self.assertRaises(ConnectionResetError):
+                self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+
+    def test_5_connection_rejected_before_send_is_closed_and_workers_recover(self):
+        connect = socket.create_connection
+        rejected = Mock()
+        rejected.sendall.side_effect = BrokenPipeError('worker limit rejected connection')
+        rejected.recv.return_value = b''
+        calls = 0
+
+        def connect_or_reject(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                return rejected
+            return connect(*args, **kwargs)
+
+        with patch.object(socket, 'create_connection', side_effect=connect_or_reject):
+            self.test_5_abandoned_headers_and_bodies_release_bounded_workers()
+        rejected.close.assert_called_once()
+
     def test_5_abandoned_headers_and_bodies_release_bounded_workers(self):
         with serving(self.ledger, read_timeout=0.2, max_workers=2) as server:
             stalled = []
@@ -238,7 +261,7 @@ class Regressions(unittest.TestCase):
                     # send, or recv; all three prove the same server boundary.
                     for _ in range(6):
                         try:
-                            with socket.create_connection(server.server_address, timeout=2) as sock:
+                            with contextlib.closing(socket.create_connection(server.server_address, timeout=2)) as sock:
                                 sock.sendall(b'POST /ingest HTTP/1.0\r\n')
                                 assert_closed(sock)
                         except (ConnectionResetError, BrokenPipeError):
