@@ -1369,8 +1369,10 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
           {"ran": ran, "order": classes})
 
 
-def test_hosted_migration_budget_covers_observed_acceptance_runtime():
-    """PR1121's strict migration job was killed at 20 minutes, while its
+def test_hosted_class_budgets_cover_observed_runtimes():
+    """Each class group's job budget covers its measured runtime.
+
+    PR1121's strict migration job was killed at 20 minutes, while its
     separate exact-head DB acceptance succeeded after 23m51s. Allow at least
     30 minutes including setup, without relaxing the other groups' budgets.
     Both workflows run the canonical migration class; its budget must also
@@ -1381,16 +1383,30 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     On 2026-10-04 it routinely took 22-24 minutes, and six branches
     (PR 1470's run 37182226032 among them) were cancelled at a 25-minute cap
     after every check had passed. It needs the same headroom.
+
+    The gates group grew from 12-13 minutes on 2026-10-01 to 19-20 minutes on
+    2026-10-05 as selftests accumulated; passing runs finished at 1150-1190s
+    of a 1200s cap and PR 1531's run 37292870635 was cancelled at it. Gates
+    gets the same bounded headroom; the combined small-class group (about six
+    minutes) keeps 20.
     """
     job = _hosted_workflow()["jobs"]["classes"]
     groups = job["strategy"]["matrix"]["classes"]
     budgets = re.fullmatch(
-        r"\$\{\{ matrix\.classes == 'migration' && (\d+) \|\| (\d+) \}\}",
+        r"\$\{\{ fromJSON\('(\{[^']*\})'\)\[matrix\.classes\] \|\| (\d+) \}\}",
         str(job["timeout-minutes"]))
-    check("class jobs select a bounded migration-specific budget", budgets is not None)
+    check("class jobs select their budget from one per-group table", budgets is not None,
+          job["timeout-minutes"])
     if budgets is None:
         return
-    migration_budget, other_budget = map(int, budgets.groups())
+    table = json.loads(budgets.group(1))
+    other_budget = int(budgets.group(2))
+    check("every budgeted group is a real matrix group", set(table) <= set(groups),
+          {"table": table, "groups": groups})
+    migration_budget = table.get("migration", other_budget)
+    gates_budget = table.get("gates", other_budget)
+    check("gates job has bounded headroom over its observed 20-minute run",
+          gates_budget in range(30, 36), gates_budget)
     database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
     database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
     check("database acceptance declares a finite job budget",
@@ -1404,9 +1420,10 @@ def test_hosted_migration_budget_covers_observed_acceptance_runtime():
     migration = [migration_budget for group in groups if group == "migration"]
     check("migration job has bounded headroom over the observed 24-minute run",
           len(migration) == 1 and migration[0] in bounded_headroom, migration)
-    other = [other_budget for group in groups if group != "migration"]
-    check("other class groups retain their 20-minute budgets",
-          len(other) == 2 and all(budget == 20 for budget in other), other)
+    other = [table.get(group, other_budget) for group in groups
+             if group not in ("migration", "gates")]
+    check("the remaining class group retains its 20-minute budget",
+          len(other) == 1 and all(budget == 20 for budget in other), other)
 
 
 def test_hosted_zsh_setup_does_not_refresh_working_indexes():
@@ -1497,7 +1514,7 @@ def main():
                test_push_floor_distinguishes_imported_main_paths_from_branch_changes,
                test_strict_still_owns_the_gates_class,
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
-               test_hosted_migration_budget_covers_observed_acceptance_runtime,
+               test_hosted_class_budgets_cover_observed_runtimes,
                test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()

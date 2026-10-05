@@ -124,11 +124,14 @@ jobs:
           - "pushfloor unit types contract secret dependency binding artifact freshness"
           - "gates"
           - "migration"
-    # Both PR 1121 and PR 1406 exhausted a 20-minute migration job while
-    # their separate database acceptance passed. Preserve measured headroom
-    # and cover that lane's declared budget without extending other groups.
+    # One budget per group, sized from its measured runtime. Both PR 1121 and
+    # PR 1406 exhausted a 20-minute migration job while their separate
+    # database acceptance passed; migration covers that lane's declared
+    # budget. Gates grew from 12-13 minutes (2026-10-01) to 19-20 (2026-10-05)
+    # and PR 1531's run 37292870635 was cancelled at the 20-minute cap.
+    # The small-class group runs about six minutes and keeps 20.
     # zsh setup retains its own short deadline below.
-    timeout-minutes: ${{ matrix.classes == 'migration' && 35 || 20 }}
+    timeout-minutes: ${{ fromJSON('{"migration":35,"gates":30}')[matrix.classes] || 20 }}
 
     services:
       # The migration class needs a database to apply 130 forward migrations to.
