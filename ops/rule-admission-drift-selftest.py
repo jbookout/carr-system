@@ -71,6 +71,28 @@ def main() -> int:
           all(k in audit.render(clean) for k in
               ("total=", "admitted=", "needs_revision=", "missing=", "incomplete=")))
 
+    class PreflightCursor:
+        def execute(self, sql, params=()):
+            self.sql, self.params = sql, params
+            if not sql.lstrip().lower().startswith("select"):
+                raise AssertionError("preflight attempted a write")
+
+        def fetchone(self):
+            if "pg_get_functiondef" in self.sql:
+                return ("CREATE FUNCTION ops.bind_rule_delivery() -- projection.delivery object",)
+            return ({"rule_id": "22222222-2222-4222-8222-222222222222",
+                     "state": "admitted", "rule_status": "proposed",
+                     "projection": {"delivery": {"load_layer": "layer0", "packs": [], "why": "always"}}},)
+
+    evidence = audit.preflight(PreflightCursor(), "22222222-2222-4222-8222-222222222222")
+    check("lifecycle preflight locates live delivery contract and prepared admission",
+          "projection.delivery" in evidence["delivery_contract"]["definition"]
+          and evidence["prepared_admission"]["projection"]["delivery"]["load_layer"] == "layer0"
+          and evidence["status"] == "proposed"
+          and len(evidence["source_revision"]) == 40
+          and evidence["entrypoint"] == "ops/rule-admission-audit.py --preflight"
+          and "ops/ci.sh --strict" in evidence["check_policy"])
+
     print(f"\nrule-admission-drift-selftest: {len(ran)-len(failures)}/{len(ran)} passed")
     return 1 if failures else 0
 

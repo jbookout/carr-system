@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import types
+import contextlib
+import io
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(REPO)
@@ -69,6 +71,8 @@ def make_tree(tmp, *, claude_md_bytes, instr_chars, rail_chars,
     claude_md = os.path.join(tmp, "CLAUDE.md")
     with open(claude_md, "w") as fh:
         fh.write("x" * claude_md_bytes)
+    with open(os.path.join(tmp, "AGENTS.md"), "w") as fh:
+        fh.write("# Native boot\nsmall\n")
 
     mcp_js = os.path.join(tmp, "mcp.js")
     with open(mcp_js, "w") as fh:
@@ -80,7 +84,7 @@ def make_tree(tmp, *, claude_md_bytes, instr_chars, rail_chars,
     fixture = os.path.join(tmp, "core-fixture.json")
     with open(fixture, "w") as fh:
         json.dump({
-            "current_full_recitation_bytes": current_recitation_bytes,
+            "delivered_summary_bytes": current_recitation_bytes,
             "pack_index_bytes": pack_index_bytes,
         }, fh)
 
@@ -164,8 +168,9 @@ def test_main_exit_code_reflects_overage():
             total_budget_tokens=1000,
             sub_budgets_tokens={"claude_md": 500, "connector_instructions": 500,
                                  "core_payload": 500})
-        orig = (boot_budget_check.CLAUDE_MD_PATH, boot_budget_check.MCP_JS_PATH,
+        orig = (boot_budget_check.AGENTS_MD_PATH, boot_budget_check.CLAUDE_MD_PATH, boot_budget_check.MCP_JS_PATH,
                 boot_budget_check.CORE_FIXTURE_PATH, boot_budget_check.BUDGET_PATH)
+        boot_budget_check.AGENTS_MD_PATH = os.path.join(tmp, "AGENTS.md")
         boot_budget_check.CLAUDE_MD_PATH = claude_md
         boot_budget_check.MCP_JS_PATH = mcp_js
         boot_budget_check.CORE_FIXTURE_PATH = fixture
@@ -173,7 +178,7 @@ def test_main_exit_code_reflects_overage():
         try:
             rc = boot_budget_check.main([])
         finally:
-            (boot_budget_check.CLAUDE_MD_PATH, boot_budget_check.MCP_JS_PATH,
+            (boot_budget_check.AGENTS_MD_PATH, boot_budget_check.CLAUDE_MD_PATH, boot_budget_check.MCP_JS_PATH,
              boot_budget_check.CORE_FIXTURE_PATH, boot_budget_check.BUDGET_PATH) = orig
         check("main() exits nonzero on a synthetic overage", rc == 1)
 
@@ -184,6 +189,7 @@ def test_main_exit_code_reflects_overage():
             total_budget_tokens=1000,
             sub_budgets_tokens={"claude_md": 500, "connector_instructions": 500,
                                  "core_payload": 500})
+        boot_budget_check.AGENTS_MD_PATH = os.path.join(tmp, "AGENTS.md")
         boot_budget_check.CLAUDE_MD_PATH = claude_md2
         boot_budget_check.MCP_JS_PATH = mcp_js2
         boot_budget_check.CORE_FIXTURE_PATH = fixture2
@@ -191,7 +197,7 @@ def test_main_exit_code_reflects_overage():
         try:
             rc2 = boot_budget_check.main([])
         finally:
-            (boot_budget_check.CLAUDE_MD_PATH, boot_budget_check.MCP_JS_PATH,
+            (boot_budget_check.AGENTS_MD_PATH, boot_budget_check.CLAUDE_MD_PATH, boot_budget_check.MCP_JS_PATH,
              boot_budget_check.CORE_FIXTURE_PATH, boot_budget_check.BUDGET_PATH) = orig
         check("main() exits zero when every surface is within budget", rc2 == 0)
     finally:
@@ -267,6 +273,32 @@ console.log(JSON.stringify(sizes));
               os.path.join(REPO, "mcp-server", "src", "mcp.js")) == max(sizes))
 
 
+def test_native_agents_growth_and_section_diagnostics():
+    with tempfile.TemporaryDirectory(prefix="boot-budget-native-") as tmp:
+        claude, mcp, fixture, budget = make_tree(
+            tmp, claude_md_bytes=35, instr_chars=10, rail_chars=0,
+            current_recitation_bytes=35, pack_index_bytes=0,
+            total_budget_tokens=1000, sub_budgets_tokens={"agents_md": 500})
+        agents = os.path.join(tmp, "AGENTS.md")
+        with open(agents, "w") as fh:
+            fh.write("# Boot\nsmall\n## Enlarged assignment\n" + "x" * 50000)
+        originals = {key: getattr(boot_budget_check, key, None) for key in
+                     ("CLAUDE_MD_PATH", "AGENTS_MD_PATH", "MCP_JS_PATH",
+                      "CORE_FIXTURE_PATH", "BUDGET_PATH")}
+        for key, path in zip(originals, (claude, agents, mcp, fixture, budget)):
+            setattr(boot_budget_check, key, path)
+        try:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = boot_budget_check.main([])
+            check("enlarged native AGENTS fails with its contributing section",
+                  rc == 1 and "agents_md" in output.getvalue()
+                  and "Enlarged assignment" in output.getvalue())
+        finally:
+            for key, value in originals.items():
+                setattr(boot_budget_check, key, value)
+
+
 if __name__ == "__main__":
     test_passes_under_budget()
     test_synthetic_overage_fails_and_names_consolidation()
@@ -274,6 +306,7 @@ if __name__ == "__main__":
     test_extractor_is_honest_about_the_real_instructions_block()
     test_doc_branch_measures_the_larger_served_instruction_string()
     test_real_measurement_matches_served_full_and_doc_instructions()
+    test_native_agents_growth_and_section_diagnostics()
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURE(S): {FAILURES}")
         sys.exit(1)
