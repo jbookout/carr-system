@@ -329,6 +329,11 @@ class RejectionReconciliation(Base):
         self.pipe = self.fx.pipeline(self.runner, github=self.gh)
         self.pipe.now = lambda: self.clock
 
+    def wire_live(self):
+        live = {"sha": self.fx.base}
+        self.runner.live = live
+        self.pipe.http = lambda _url: {"git_sha": {"value": live["sha"]}}
+
     def test_unchanged_review_rejection_executes_once_across_restart(self):
         with mock.patch.object(self.pipe, "release_worker", wraps=self.pipe.release_worker) as release:
             self.pipe.tick(["worker"])
@@ -438,6 +443,44 @@ class RejectionReconciliation(Base):
         rejection = self.fx.state()["worker"]["rejection"]
         self.assertEqual(rejection["repair"]["owner"], "tools/staging-project-replacement.py")
         self.assertIn("staging_ledger_digest", rejection)
+
+    def test_pre_rejection_staging_failure_acquires_a_baseline_then_recovers(self):
+        self.gh.approve_all = True
+        self.wire_live()
+        # The exact lane shape a staging failure persisted before rejections existed.
+        self.pipe.store.save({"worker": {"failed_sha": self.sha, "failed_step": "staging-prepare",
+                                         "failed_at": "2026-10-01T00:00:00+00:00"}})
+        ledger = {"candidate": "fixture", "ledger": "before"}
+        self.pipe.staging_ledger = lambda: dict(ledger)
+        self.pipe.tick(["worker"])
+        lane = self.fx.state()["worker"]
+        self.assertEqual(lane["failed_sha"], self.sha)
+        self.assertIn("staging_ledger_digest", lane["rejection"])
+        self.assertGreater(lane["rejection"]["recheck_after"], self.clock)
+        self.assertEqual(self.runner.calls, [])  # a first observation is a baseline, never recovery
+        self.clock += self.pipe.REJECTION_RECHECK_SECONDS
+        ledger["ledger"] = "reconciled"
+        self.pipe.tick(["worker"])
+        self.assertEqual(self.runner.names().count("staging-prepare"), 1)
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], self.sha)
+
+    def test_staging_recovery_reconciles_the_failed_target_behind_a_pending_head(self):
+        self.gh.approve_all = True
+        self.wire_live()
+        self.runner.fail_at = "staging-prepare"
+        ledger = {"candidate": "fixture", "ledger": "before"}
+        self.pipe.staging_ledger = lambda: dict(ledger)
+        self.assertEqual(self.pipe.tick(["worker"]), 1)
+        newer = self.fx.commit({"mcp-server/src/b.js": "2"})
+        self.gh.canary = {self.sha: ("completed", "success"), newer: ("in_progress", None)}
+        self.clock += self.pipe.REJECTION_RECHECK_SECONDS
+        ledger["ledger"] = "reconciled"
+        self.runner.fail_at = None
+        self.pipe.tick(["worker"])
+        self.assertEqual(self.runner.names().count("staging-prepare"), 2)
+        lane = self.fx.state()["worker"]
+        self.assertIsNone(lane["failed_sha"])
+        self.assertEqual(lane["last_released_sha"], self.sha)  # the canary target, never the pending head
 
     def test_staging_observation_failures_never_wake_a_failed_release(self):
         self.gh.approve_all = True
@@ -2635,6 +2678,27 @@ class ClearFailedRetirement(Base):
         self.assertEqual(len(self.store.records()), 1)
         self.assert_retry_available()
 
+    def test_torn_receipt_append_never_clears_without_a_readable_receipt(self):
+        path = self.store.records_path
+        def torn(row):
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write('{"lane": "worker", "status": "failure_cle')
+            raise OSError("interrupted mid-append")
+        with mock.patch.object(self.store, "record", side_effect=torn):
+            with self.assertRaises(OSError):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+        self.clear()
+        receipts = [r for r in self.store.records() if r.get("status") == "failure_cleared"]
+        self.assertEqual(len(receipts), 1)
+        self.assert_retry_available()
+
+    def test_unreadable_receipt_never_clears_failure(self):
+        with mock.patch.object(self.store, "record", return_value=None):
+            with self.assertRaisesRegex(SystemExit, "receipt"):
+                self.clear()
+        self.assertEqual(self.store.load()["worker"]["failed_sha"], self.sha)
+
     def test_registration_result_fault_matrix_preserves_failure_and_evidence(self):
         original = rp.subprocess.run
         for rc, output in [(0, ""), (0, "worktree partial\0\0"),
@@ -3542,6 +3606,41 @@ class SchemaSnapshotGhRunner(FakeRunner):
         return res
 
 
+class RealGitRunner(FakeRunner):
+    """Runs git steps for real; migrate-apply regenerates the worktree's
+    db/schema.sql the way bin/migrate-prod.sh does."""
+
+    def __init__(self, schema: str, **kw):
+        super().__init__(**kw)
+        self.schema = schema
+
+    def run(self, argv, *, cwd, log, env, timeout=3600):
+        if argv[0] != "git":
+            res = super().run(argv, cwd=cwd, log=log, env=env, timeout=timeout)
+            if log.stem.endswith("migrate-apply"):
+                (Path(cwd) / "db/schema.sql").write_text(self.schema)
+            return res
+        self.calls.append((log.stem.split("-", 1)[1], list(argv)))
+        proc = subprocess.run(argv, cwd=str(cwd), env=env, capture_output=True, text=True)
+        return rp.Result(proc.returncode, proc.stdout + proc.stderr)
+
+
+class SchemaFollowupBase(Base):
+    def test_schema_followup_branches_from_observed_main_not_the_stale_shared_ref(self):
+        stale = self.fx.commit({"db/schema.sql": "create table a(id int);\n"})
+        head = self.fx.commit({"db/schema.sql": "create table a (id int);\n", "mcp-server/src/a.js": "1"})
+        git(self.fx.repo, "update-ref", "refs/remotes/origin/main", stale)
+        live = {"sha": self.fx.base}
+        runner = RealGitRunner("create table a(id int);\n", pending=1, live=live)
+        pipe = self.fx.pipeline(runner, live=live)
+        self.assertEqual(pipe.tick(["worker"]), 0)
+        self.assertIn("schema-commit", runner.names())
+        branch = f"{rp.SCHEMA_SNAPSHOT_PREFIX}{head[:8]}"
+        self.assertEqual(git(self.fx.repo, "rev-parse", f"{branch}^"), head)
+        self.assertEqual(git(self.fx.repo, "rev-parse", "origin/main"), stale)  # shared ref untouched
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], head)
+
+
 class SchemaSnapshotSupersede(Base):
     """Every production release that applied migrations opens a cumulative
     `release/schema-snapshot-*` PR. Nothing merges them automatically, so the
@@ -3560,7 +3659,7 @@ class SchemaSnapshotSupersede(Base):
         (wt / "db").mkdir(parents=True)
         (wt / "db" / "schema.sql").write_text("-- snapshot\n")
         (pipe.store.root / "worktrees" / f"schema-{self.SHA[:12]}" / "db").mkdir(parents=True)
-        return pipe, pipe.schema_followup(wt, self.SHA)
+        return pipe, pipe.schema_followup(wt, self.SHA, self.SHA)
 
     def test_older_snapshots_close_new_stays_open_others_untouched(self):
         runner = SchemaSnapshotGhRunner({**self.OLDER, **self.OTHER}, self.NEW)
@@ -3629,7 +3728,7 @@ class SchemaSnapshotSupersede(Base):
                 (wt / "db" / "schema.sql").write_text("-- snapshot\n")
                 fwt = pipe.store.root / "worktrees" / f"schema-{self.SHA[:12]}"
                 (fwt / "db").mkdir(parents=True, exist_ok=True)
-                pipe.schema_followup(wt, self.SHA)   # must not raise
+                pipe.schema_followup(wt, self.SHA, self.SHA)   # must not raise
                 self.assertEqual(pipe.schema_superseded_closed, [])
                 self.assertNotIn("gh-pr-close", runner.names())
                 self.assertEqual(set(runner.open_prs), set(self.OLDER) | {self.NEW})

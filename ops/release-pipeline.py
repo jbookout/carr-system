@@ -452,8 +452,14 @@ class Store:
     def record(self, row: dict) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         row = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **row}
-        with open(self.records_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
+        with open(self.records_path, "a+b") as fh:
+            # An interrupted append leaves an unterminated tail. Terminate it so
+            # it stays its own unreadable line and never swallows this row.
+            if fh.seek(0, os.SEEK_END):
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    fh.write(b"\n")
+            fh.write((json.dumps(row, sort_keys=True) + "\n").encode("utf-8"))
             fh.flush(); os.fsync(fh.fileno())
 
     def records(self) -> list[dict]:
@@ -801,6 +807,7 @@ class Pipeline:
         self.do_migration: dict | None = None   # a Durable Object migration the upload step applied
         self.mutated = False   # set when the first worktree is created; nothing before it writes
         self.schema_superseded_closed: list[int] = []   # older snapshot PRs closed this run
+        self.observed_main = ""   # the exact main SHA this lane fetched; origin/main may be stale
 
     # -- plumbing ---------------------------------------------------------
     def _call_verb(self, verb: str, args: dict) -> tuple[bool, Any]:
@@ -1698,10 +1705,19 @@ class Pipeline:
         return {"candidate": {key: getattr(candidate, key) for key in
                 ("project_id", "branch_id", "endpoint_id", "endpoint_host")}, "ledger": ledger}
 
-    def reconcile_staging_failure(self, state: dict, lane: str, sha: str, repo_dir: Path) -> None:
-        rejection = state[lane].get("rejection") or {}
-        if state[lane].get("failed_sha") != sha or state[lane].get("failed_step") != "staging-prepare":
+    def reconcile_staging_failure(self, state: dict, lane: str, base: str, repo_dir: Path) -> None:
+        """Reconcile the exact failed release target, which may sit behind main
+        HEAD (an older green canary). Target selection and every release guard
+        still run after a recovery clears it."""
+        sha = state[lane].get("failed_sha")
+        if not sha or state[lane].get("failed_step") != "staging-prepare":
             return
+        rejection = state[lane].get("rejection")
+        if rejection is None:
+            # A failure persisted before rejections existed: adopt one now so the
+            # first observation below is kept as the baseline, never as recovery.
+            rejection = self.remember_rejection(state, lane, base, sha, "staging-prepare")
+            rejection["recheck_after"] = 0
         if self.now() < rejection.get("recheck_after", 0):
             return
         rejection["recheck_after"] = self.now() + self.REJECTION_RECHECK_SECONDS
@@ -1759,7 +1775,7 @@ class Pipeline:
         state = self.store.load()
         lane_state = state.setdefault(lane, {})
         sha = base = ""
-        candidate = ""
+        self.observed_main = ""
         try:
             repo_dir = lane_repo_dir(self.cfg, lane, self.repo)
             # Read and fetch an immutable main object, without writing any
@@ -1769,7 +1785,7 @@ class Pipeline:
                 raise Blocked("github_unreadable", "remote main has no exact SHA acknowledgement")
             sha = remote[0]
             self.git("fetch", "--quiet", "origin", sha, cwd=repo_dir)
-            candidate = sha
+            self.observed_main = sha
             base = self.last_released(state, lane, lane_cfg)
             if sha == base:
                 self.out(f"release-pipeline[{lane}]: main {sha[:12]} is already released")
@@ -1777,7 +1793,7 @@ class Pipeline:
             if not self.dry_run and self.rejection_waits(lane_state, lane, base, sha):
                 return 0
             if not self.dry_run:
-                self.reconcile_staging_failure(state, lane, sha, repo_dir)
+                self.reconcile_staging_failure(state, lane, base, repo_dir)
                 lane_state = state.setdefault(lane, {})
             if sha == lane_state.get("failed_sha"):
                 self.out(f"release-pipeline[{lane}]: {sha[:12]} failed at "
@@ -1842,7 +1858,7 @@ class Pipeline:
                 # production migration): this is no longer a clean hold.
                 return self.fail(lane, state, sha, base, f"blocked:{b.reason}", 1, "-", b.detail)
             self.remove_worktrees()
-            rejection = self.remember_rejection(state, lane, base, candidate, b.reason)
+            rejection = self.remember_rejection(state, lane, base, self.observed_main, b.reason)
             row: dict[str, Any] = {"lane": lane, "sha": sha, "from_sha": base, "status": "blocked",
                    "reason": b.reason, "detail": b.detail, "run_id": self.run_id,
                    "rejection_fingerprint": rejection["fingerprint"], "repair": rejection["repair"]}
@@ -2165,11 +2181,11 @@ class Pipeline:
         # 9. the schema snapshot goes back to main through its own PR
         schema_pr = None
         if self.dry_run:
-            self.out("  [dry-run] when migrate-apply ran and db/schema.sql changed: branch from origin/main, "
+            self.out("  [dry-run] when migrate-apply ran and db/schema.sql changed: branch from the fetched main SHA, "
                      "commit db/schema.sql, push, gh pr create, then gh pr close every older open "
                      "release/schema-snapshot-* PR as superseded (close only, never merge)")
         elif pending and self.git("status", "--porcelain", "db/schema.sql", cwd=wt):
-            schema_pr = self.schema_followup(wt, sha)
+            schema_pr = self.schema_followup(wt, sha, self.observed_main)
         if not self.dry_run:
             self.remove_worktrees()
         return {"release_key": key, "provider_version_id": version, "migrations_applied": pending,
@@ -2192,11 +2208,15 @@ class Pipeline:
             return False
         raise StepFailed("release-key", res.rc, str(self.run_dir / "release-key.log"))
 
-    def schema_followup(self, wt: Path, sha: str) -> str:
+    def schema_followup(self, wt: Path, sha: str, main_sha: str) -> str:
+        """Branch from `main_sha`, the main object run_lane fetched by SHA. The
+        fetch never advances origin/main, so that ref can be stale."""
+        if not SHA_RE.fullmatch(main_sha):
+            raise StepFailed("schema-worktree", 1, "", "no observed main SHA to branch the schema snapshot from")
         branch = f"{SCHEMA_SNAPSHOT_PREFIX}{sha[:8]}"
         fwt = self.store.root / "worktrees" / f"schema-{sha[:12]}"
         self.step("schema-worktree", ["git", "-C", str(self.repo), "worktree", "add", "-b", branch, str(fwt),
-                                      "origin/main"], self.repo)
+                                      main_sha], self.repo)
         shutil.copyfile(wt / "db/schema.sql", fwt / "db/schema.sql")
         self.step("schema-commit", ["git", "commit", "-m",
                                     f"Refresh db/schema.sql after the scripted release of {sha[:12]}\n\n"
@@ -2770,10 +2790,16 @@ def _clear_failed_locked(store: Store, lane: str, sha: str, reason: str, *, repo
     store.save(state)
     previous = {k: lane_state.get(k) for k in ("failed_sha", "failed_step", "failed_at")}
     receipt_id = retirement.setdefault("id", uuid.uuid4().hex)
-    if not any(row.get("retirement_id") == receipt_id for row in store.records()):
+
+    def receipted() -> bool:
+        return any(row.get("retirement_id") == receipt_id and row.get("status") == "failure_cleared"
+                   and row.get("lane") == lane and row.get("sha") == sha for row in store.records())
+    if not receipted():
         store.record({"lane": lane, "sha": sha, "status": "failure_cleared", "reason": reason,
             "retirement_id": receipt_id, **{"cleared_" + k: v for k, v in previous.items()},
             **({"cleared_worktree": str(moved)} if moved else {})})
+    if not receipted():  # only a durable, readable receipt authorizes clearing
+        raise SystemExit(f"release-pipeline[{lane}]: clearance receipt unreadable; failure NOT cleared")
     lane_state.update({"failed_sha": None, "failed_step": None, "failed_at": None})
     for field in ("failed_worktree_retirement", "failed_worktree", "rejection"):
         lane_state.pop(field, None)
