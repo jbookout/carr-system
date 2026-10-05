@@ -118,16 +118,15 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
   const schema = properties => ({ type: "object", additionalProperties: false, properties });
   async function snapshot(c, lock = false) {
     const now = (await c.query("select now() as now")).rows[0].now;
-    const leads = (await c.query(LEADS_SQL + (lock ? " for update of l,p" : ""))).rows;
+    const leads = (await c.query(LEADS_SQL + (lock ? " for update of l for share of p" : ""))).rows;
     const activities = (await c.query(ACTIVITIES_SQL)).rows;
     const drafts = (await c.query(DRAFTS_SQL)).rows;
     return { now, leads, activities, drafts };
   }
   async function apply(c, actor, args) {
-    // Invoice membership locks precede party rows, matching client intake.
-    const invoice_closes = await invoices.apply(c, actor, args);
     // Lock the live rows before observing evidence; a competing human edit must
-    // be seen here, not overwritten by a planner's stale snapshot.
+    // be seen here, not overwritten by a planner's stale snapshot. Party facts
+    // are read-only: SHARE protects them without blocking intake's FK checks.
     const s = await snapshot(c, true);
     const moves = [];
     for (const move of planLeadMoves(s.leads, s.activities, s.drafts, s.now)) {
@@ -164,7 +163,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
       where l.stage='qualified' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active'
         and not exists(select 1 from activity a where a.lead_id=l.id and a.kind='email_out')
         and not exists(select 1 from lead_contact_draft d where d.lead_id=l.id)
-      order by l.id for update of l,p`)).rows;
+      order by l.id for update of l for share of p`)).rows;
     let draftsPrepared = 0;
     for (const l of qualified) {
       const timezone = args.time_zone || "America/Chicago";
@@ -177,6 +176,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
         schedule,timezone,actor.id]);
       draftsPrepared += prepared.rowCount;
     }
+    const invoice_closes = await invoices.apply(c, actor, args);
     return { ok: true, contract: LEAD_AUTOMATION_CONTRACT, moves, invoice_closes, drafts_prepared: draftsPrepared, sent: false };
   }
   return {
@@ -252,7 +252,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
         if (!canExercisePartnerAuthority(actor)) fail("human_approval_required");
         const d = (await c.query(`select d.* from lead_contact_draft d join lead l on l.id=d.lead_id
           join party p on p.id=l.party_id where d.id=$1 and d.party_id=l.party_id
-          and l.stage='qualified' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,p,d`, [args.draft_id])).rows[0];
+          and l.stage='qualified' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,d for share of p`, [args.draft_id])).rows[0];
         if (!d || d.approved_at) fail("draft_not_pending");
         await c.query("update lead_contact_draft set approved_at=now(),approved_by=$2 where id=$1",[d.id,actor.id]);
         await writeEvent(c,actor,"approve-lead-draft","lead",d.lead_id,{ new: { draft_id: d.id, approved: true, sent: false } });
@@ -266,7 +266,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
         if (!canExercisePartnerAuthority(actor)) fail("human_approval_required");
         const m = (await c.query(`select m.*,l.version,l.stage from lead_stage_move m
           join lead l on l.id=m.lead_id join party p on p.id=l.party_id
-          where m.id=$1 and m.status='proposed' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,p,m`,[args.move_id])).rows[0];
+          where m.id=$1 and m.status='proposed' and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' for update of l,m for share of p`,[args.move_id])).rows[0];
         if (!m || m.version !== args.base_version || m.stage !== m.from_stage) fail("stale_lead_proposal");
         await c.query("update lead set stage=$1,updated_by=$2 where id=$3",[m.to_stage,actor.id,m.lead_id]);
         await c.query("update lead_stage_move set status='applied',approved_by=$2,approved_at=now() where id=$1",[m.id,actor.id]);

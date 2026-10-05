@@ -78,7 +78,7 @@ export function invoiceAutomation({withEnvelope,writeEvent,ToolError,updateDeal,
     // invoice/deal rows. No new phase lock is acquired under a table lock.
     await c.query("lock table client,deal,premises,premises_space in share mode");
     await c.query(`select p.id from party p where exists(select 1 from client cl where cl.party_id=p.id)
-      order by p.id for update of p`);
+      order by p.id for share of p`);
     await c.query(`select s.id from space s where exists(select 1 from premises_space ps where ps.space_id=s.id)
       order by s.id for share of s`);
     await c.query(`select b.id from building b where exists(select 1 from space s join premises_space ps on ps.space_id=s.id where s.building_id=b.id)

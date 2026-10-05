@@ -154,7 +154,7 @@ test('PR1550 2: every archive stage writer requires partner authority, notes sta
   assert.equal((await f.o.query('select stage from lead where id=$1',[l.id])).rows[0].stage,'archived');
   assert.equal((await f.call(f.o,'new-lead',{party_id:f.party,stage:'archived'})).ok,true);
 });
-test('PR1550 3: client intake and empty invoice job obey one table-before-party lock order',async t=>{
+test('PR1550 3: client intake and empty invoice job avoid a foreign-key lock cycle',async t=>{
   const f=await fixture(t),l=await leadFixture(f),reached=deferred(),resume=deferred();
   const query=f.a.query.bind(f.a);let paused=false;
   f.a.query=async(sql,...args)=>{
@@ -166,8 +166,8 @@ test('PR1550 3: client intake and empty invoice job obey one table-before-party 
   let intakeFinished=false;
   const intake=f.call(f.b,'new-client',{party_id:f.party,status:'active_deal',acquisition_source:'Synthetic',research_evidence:research(['practice_name','address','phone','specialty','practitioners','hours'])}).then(async r=>{await f.b.query('commit');intakeFinished=true;return r;},async e=>{await f.b.query('rollback');intakeFinished=true;throw e;});
   intake.catch(()=>{});
-  // Intake takes the client table before its party foreign-key read. The old
-  // job has already locked this party and forms a cycle when resumed.
+  // Intake takes the client table before its party foreign-key read. SHARE
+  // locks on party facts must allow that read to finish before the job resumes.
   const deadline=Date.now()+3000;
   while(!intakeFinished&&Date.now()<deadline){
     const locked=(await f.o.query("select exists(select 1 from pg_locks where pid=$1 and relation='client'::regclass and mode='RowExclusiveLock' and granted) held",[f.b.processID])).rows[0].held;
@@ -177,6 +177,36 @@ test('PR1550 3: client intake and empty invoice job obey one table-before-party 
   resume.resolve();
   const results=await Promise.allSettled([work,intake]);
   assert.deepEqual(results.map(r=>r.status),['fulfilled','fulfilled'],results.map(r=>String(r.reason)).join('\n'));
+});
+for(const approval of ['move','draft'])test('PR1550 3: empty invoice job and lead '+approval+' approval complete without a lock cycle',async t=>{
+  const f=await fixture(t),l=await leadFixture(f,approval==='draft'?'qualified':'new');
+  let verb,args;
+  if(approval==='move') {
+    const activity=randomUUID(),move=randomUUID();
+    await f.o.query("insert into activity(id,occurred_at,actor_id,kind,summary,lead_id,source)values($1,now(),$2,'email_in','Synthetic archive approval',$3,'local_mail')",[activity,f.actor.id,l.id]);
+    await f.o.query("insert into lead_stage_move(id,lead_id,from_stage,to_stage,activity_id,evidence_ref,strength,status,created_by,reason)values($1,$2,'new','archived',$3,'local-mail:archive','weak','proposed',$4,'Retired')",[move,l.id,activity,f.actor.id]);
+    verb='approve-lead-move';
+    args={move_id:move,base_version:(await f.o.query('select version from lead where id=$1',[l.id])).rows[0].version};
+  } else {
+    await f.run();
+    verb='approve-lead-draft';
+    args={draft_id:(await f.o.query('select id from lead_contact_draft where lead_id=$1',[l.id])).rows[0].id};
+  }
+  const pause=f.pause(sql=>sql.startsWith('select p.id from party p where exists'));
+  const work=f.run();work.catch(()=>{});await pause.reached;
+  await f.b.query('begin');
+  let finished=false;
+  const approve=executeRegisteredTool(f.b,f.actor,verb,{idempotency_key:randomUUID(),...args})
+    .then(async result=>{await f.b.query('commit');return result;},async error=>{await f.b.query('rollback');throw error;})
+    .finally(()=>{finished=true;});
+  approve.catch(()=>{});
+  let waited;
+  try {waited=await blocked(f,()=>finished);}finally{pause.resume();}
+  const results=await Promise.allSettled([work,approve]);
+  assert.equal(waited,true,'approval must wait for the job transaction');
+  assert.deepEqual(results.map(r=>r.status),['fulfilled','fulfilled'],results.map(r=>String(r.reason)).join('\n'));
+  if(approval==='move')assert.equal((await f.o.query('select stage from lead where id=$1',[l.id])).rows[0].stage,'archived');
+  else assert.equal((await f.o.query('select approved_by from lead_contact_draft where id=$1',[args.draft_id])).rows[0].approved_by,f.actor.id);
 });
 for(const table of ['deal','deal_invoice_email'])for(const action of ['apply','undo'])test('PR1550 5: '+action+' refuses zero-row '+table+' effect and rolls back history',async t=>{
   const f=await fixture(t),i=await f.capture();

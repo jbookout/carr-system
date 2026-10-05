@@ -44,6 +44,7 @@ def main():
                             f"-k {socket} -c listen_addresses=''", "-w", "start"],
                            check=True, capture_output=True, env=env, timeout=20)
             with psycopg.connect(host=str(socket), user="fixture", dbname="postgres", autocommit=True) as conn:
+                assert conn.execute("show server_encoding").fetchone() == ('UTF8',)
                 conn.execute("create schema ops")
                 for name in ("rule_delivery_activation_target", "rule_delivery_policy"):
                     conn.execute(re.search(rf"CREATE TABLE ops\.{name}\b.*?;", schema, re.S)[0])

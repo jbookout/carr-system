@@ -44,12 +44,16 @@ def main_snapshot(repo: Path, base: str) -> dict[str, bytes]:
             if (p.startswith('migrations/') and p.endswith('.sql')) or REGISTRY.fullmatch(p) or p=='mcp-server/src/scac-mutation-registry.generated.js'}
 
 
-def require_current_base(repo: Path, base: str) -> None:
+def require_current_base(repo: Path, base: str, *, pending_merge: bool = False) -> None:
     if not SHA.fullmatch(base) or git(repo, "rev-parse", "origin/main").decode().strip() != base:
         raise MigrationNumberError("integration base differs from current origin/main")
     result = subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], cwd=repo, env=scrubbed_env(), capture_output=True, timeout=60)
     if result.returncode:
-        raise MigrationNumberError('integrate current main before generation or proof')
+        if not pending_merge or git(repo, 'rev-parse', 'MERGE_HEAD').decode().strip() != base:
+            raise MigrationNumberError('integrate current main before generation or proof')
+        for path, content in main_snapshot(repo, base).items():
+            if not (repo/path).is_file() or (repo/path).read_bytes() != content:
+                raise MigrationNumberError(f'applied artifact missing or edited during merge: {path}')
 
 
 def allocation_plan(repo: Path, base: str, pending: list[str]) -> dict:
@@ -100,7 +104,7 @@ def validate_candidate(repo: Path, base: str) -> dict:
 
 def check_generated_write(repo: Path, target: Path, content: bytes, base: str) -> None:
     """Guard the actual generator sink, preserving byte-exact historical rebuilds."""
-    require_current_base(repo, base)
+    require_current_base(repo, base, pending_merge=True)
     relative = target.resolve().relative_to(repo.resolve()).as_posix()
     main = git(repo,'ls-tree','-r','--name-only',base,'--','migrations','mcp-server/src').decode().splitlines()
     if relative in main:
@@ -157,14 +161,14 @@ def write_generated_artifact(repo: Path, target: Path, content: bytes) -> None:
         if target.exists():
             if target.read_bytes() != content:
                 raise MigrationNumberError('existing artifact differs; allocate a fresh successor')
-            require_current_base(repo, base)
+            require_current_base(repo, base, pending_merge=True)
             return
         fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=f'.{target.name}.')
         try:
             with os.fdopen(fd, 'wb') as out:
                 out.write(content); out.flush(); os.fsync(out.fileno())
             os.chmod(temporary, 0o644)
-            require_current_base(repo, base)
+            require_current_base(repo, base, pending_merge=True)
             if git(repo, 'rev-parse', 'HEAD').decode().strip() != head:
                 raise MigrationNumberError('HEAD moved during artifact publication')
             try:
@@ -174,7 +178,7 @@ def write_generated_artifact(repo: Path, target: Path, content: bytes) -> None:
             # A racing main update can invalidate a newly created candidate,
             # but can never make this sink overwrite a promoted seal. Refuse
             # success and leave the candidate visible for source reconciliation.
-            require_current_base(repo, base)
+            require_current_base(repo, base, pending_merge=True)
             if git(repo, 'rev-parse', 'HEAD').decode().strip() != head:
                 raise MigrationNumberError('HEAD moved during artifact publication')
         finally:

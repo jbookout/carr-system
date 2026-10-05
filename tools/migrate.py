@@ -507,6 +507,10 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0843_automation_reason_undo_archive_invoice.sql",
         "0844_automation_undo_scac_successor.sql",
     ),
+    (
+        "0845_lead_archived_stage.sql",
+        "0846_leads_scac_successor.sql",
+    ),
 )
 
 STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
@@ -657,6 +661,10 @@ STRICT_ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
     (
         "0843_automation_reason_undo_archive_invoice.sql",
         "0844_automation_undo_scac_successor.sql",
+    ),
+    (
+        "0845_lead_archived_stage.sql",
+        "0846_leads_scac_successor.sql",
     ),
 )
 

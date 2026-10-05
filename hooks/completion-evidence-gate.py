@@ -165,6 +165,8 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "undo-invoice-close",
+    "undo-lead-move",
     "advance-leads",  # evidence-driven stages and approval-only drafts
     "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
     "acknowledge-board-answer",  # durable Received receipt for a board answer
@@ -186,8 +188,6 @@ WRITE_ACTION_EXACT = {
     "claude-record-event",   # append-only Claude lifecycle receipt
     "codex-checkpoint",      # durable semantic checkpoint write
     "codex-record-event",    # append-only native lifecycle receipt
-    "undo-lead-move",        # restores a stage and appends the partner's audit entry
-    "undo-invoice-close",    # restores deal phase/date and appends an audit entry
     "adjudicate-incident",   # partner judgment on an operational incident — severity, owner,
                               # duplicate-of. Same reasoning as its investigation sibling below:
                               # "adjudicate" stays an exact entry rather than becoming a prefix,
