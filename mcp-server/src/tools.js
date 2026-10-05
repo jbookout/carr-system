@@ -361,32 +361,28 @@ async function withEnvelope(client, actor, verb, args, fn) {
 
 // SQL owns the atomic approval. Preserve its typed refusal across the MCP
 // seam, including legacy P0001 guards that predate structured error detail.
-async function withRuleEnvelope(client, actor, verb, args, fn) {
-  try {
-    return await withEnvelope(client, actor, verb, args, fn);
-  } catch (error) {
-    if (error instanceof ToolError) {
-      error.payload.message ||= error.payload.hint || error.payload.error.replaceAll('_', ' ');
-      throw error;
-    }
-    if (error?.code === 'P0001') {
-      let detail = {};
-      try { detail = JSON.parse(error.detail || '{}'); } catch { /* legacy guard */ }
-      throw new ToolError({
-        error: typeof detail.error === 'string' && detail.error.startsWith('rule_')
-          ? detail.error : verb === 'approve-rule' ? 'rule_approval_refused' : 'rule_admission_refused',
-        message: redact(error.message),
-        ...(typeof detail.control === 'string' ? { control: detail.control } : {}),
-        ...(typeof detail.pack === 'string' ? { pack: detail.pack } : {}),
-      });
-    }
-    const refusal = pgConstraintError(error);
-    if (refusal) {
-      refusal.payload.message ||= refusal.payload.hint;
-      throw refusal;
-    }
-    throw error;
+function ruleRefusal(error, verb) {
+  if (error instanceof ToolError) {
+    error.payload.message ||= error.payload.hint || error.payload.error.replaceAll('_', ' ');
+    return error;
   }
+  if (error?.code === 'P0001') {
+    let detail = {};
+    try { detail = JSON.parse(error.detail || '{}'); } catch { /* legacy guard */ }
+    return new ToolError({
+      error: typeof detail.error === 'string' && detail.error.startsWith('rule_')
+        ? detail.error : verb === 'approve-rule' ? 'rule_approval_refused' : 'rule_admission_refused',
+      message: redact(error.message),
+      ...(typeof detail.control === 'string' ? { control: detail.control } : {}),
+      ...(typeof detail.pack === 'string' ? { pack: detail.pack } : {}),
+    });
+  }
+  const refusal = pgConstraintError(error);
+  if (refusal) {
+    refusal.payload.message ||= refusal.payload.hint || refusal.payload.error.replaceAll('_', ' ');
+    return refusal;
+  }
+  return error;
 }
 
 async function writeEvent(client, actor, verb, subjectType, subjectId, fields = {}) {
@@ -5972,7 +5968,7 @@ export const TOOLS = {
     }, required: ["idempotency_key","rule_id","enforcement_class","binding_moment",
                   "applicability","projection","reachability","input_contract",
                   "fixture_refs","enforcement_points","reason"] },
-    handler: async (c, actor, args) => withRuleEnvelope(c, actor, "admit-rule", args, async () => {
+    handler: async (c, actor, args) => withEnvelope(c, actor, "admit-rule", args, async () => {
       await c.query("select ops.validate_rule_delivery($1::jsonb)", [JSON.stringify(args.projection)]);
       args.rule_id = await resolveRuleId(c, args.rule_id);
       const rule = await c.query("select status,statement from rule where id=$1", [args.rule_id]);
@@ -6073,7 +6069,7 @@ export const TOOLS = {
       control_keys: { type: "array", items: { type: "string" }, description: "Compiler-selected registered controls. Unknown or unverified controls refuse approval; callers cannot supply implementation or test evidence." },
       reason: { type: "string" },
     }, required: ["idempotency_key","rule_id","reason"] },
-    handler: async (c, actor, args) => withRuleEnvelope(c, actor, "approve-rule", args, async () => {
+    handler: async (c, actor, args) => withEnvelope(c, actor, "approve-rule", args, async () => {
       args.rule_id = await resolveRuleId(c, args.rule_id);
       const approved = await c.query(
         "select ops.approve_rule($1,$2,$3,$4,$5) as result",
@@ -8576,6 +8572,15 @@ export async function assertRegisteredToolInput(name, tool, args = {}) {
 }
 
 export async function executeRegisteredTool(client, actor, name, args = {}) {
+  try {
+    return await executeToolWithGates(client, actor, name, args);
+  } catch (error) {
+    // Include schema and authority refusals that occur before the handler.
+    throw name === 'approve-rule' || name === 'admit-rule' ? ruleRefusal(error, name) : error;
+  }
+}
+
+async function executeToolWithGates(client, actor, name, args) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);

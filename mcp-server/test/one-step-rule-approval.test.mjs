@@ -56,6 +56,15 @@ test('approve-rule translates SQL refusals into ToolError with a readable reason
   }), e => e instanceof ToolError && e.payload.error === 'rule_control_not_installed' && /fixture-control-to-build/.test(e.payload.message));
 });
 
+for (const verb of ['approve-rule', 'admit-rule']) {
+  test(`${verb} input refusal has a readable ToolError before database access`, async () => {
+    const c = { query: async () => assert.fail('invalid input reached the database') };
+    await assert.rejects(() => executeRegisteredTool(c, { id: randomUUID(), slug: 'joe', human: true }, verb, {}),
+      e => e instanceof ToolError && e.payload.error === 'missing_required' &&
+        typeof e.payload.message === 'string' && /rule_id/.test(e.payload.message));
+  });
+}
+
 for (const [name, extra, layer, packs] of [
   ['core', {}, 'layer0', []],
   ['jit with scope pack', { enforcement_home: 'jit', scope: { packs: ['engineering-git'] } }, 'pack', ['engineering-git']],
