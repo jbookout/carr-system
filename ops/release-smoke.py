@@ -74,7 +74,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 _prod = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _prod   # its dataclass resolves its own module by name
 _SPEC.loader.exec_module(_prod)
-Reply = _prod.Reply
+Reply: Any = _prod.Reply
 read = _prod.read
 
 DEFAULT_API = "https://api.doctorcre.com"
@@ -107,7 +107,7 @@ def _shape(value: Any) -> Any:
     return type(value).__name__
 
 
-def _json(reply: Reply) -> Any:
+def _json(reply: Any) -> Any:
     try:
         return json.loads(reply.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -147,7 +147,7 @@ def _sign_in_gate(ctx: dict) -> tuple[list[str], dict]:
         if reply.status not in (301, 302, 303, 307, 308):
             failures.append(f"{page} answered HTTP {reply.status}, expected a sign-in redirect")
         elif (target.scheme, target.hostname, target.path, return_to) != (
-                "https", expected.hostname, "/auth/login", page):
+                expected.scheme, expected.hostname, "/auth/login", page):
             failures.append(f"{page} redirected to {location!r}, expected its own /auth/login?return_to={page}")
     status = ctx["http"](ctx["app"] + "/status")
     pages["/status"] = {"status": status.status, "content_type": status.headers.get("Content-Type", "")}
@@ -200,7 +200,7 @@ CHECKS: dict[str, Callable[[dict], tuple[list[str], dict]]] = {
 
 
 def run_smoke(*, lane: str, sha: str, phase: str, api: str, app: str,
-              http: Callable[..., Reply], mcp: Callable[[str, dict], tuple[bool, Any]],
+              http: Callable[..., Any], mcp: Callable[[str, dict], tuple[bool, Any]],
               expected_verbs: list[str] | None, browser: Callable[[], dict] | None,
               only: list[str] | None = None, expected_verbs_error: str | None = None) -> dict:
     ctx = {"lane": lane, "sha": sha, "phase": phase, "api": api.rstrip("/"), "app": app.rstrip("/"),
@@ -348,8 +348,9 @@ def browser_runner(app_dir: Path, out: Path, app_url: str) -> Callable[[], dict]
     return run
 
 
-def main(argv: list[str] | None = None, *, http: Callable[..., Reply] = read,
-         mcp_factory: Callable[[str, str], Callable[[str, dict], tuple[bool, Any]]] = McpProbe) -> int:
+def main(argv: list[str] | None = None, *, http: Callable[..., Any] = read,
+         mcp_factory: Callable[[str, str], Callable[[str, dict], tuple[bool, Any]]] = McpProbe,
+         out_line: Callable[[str], None] = print) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--lane", choices=("worker", "app"), required=True)
     parser.add_argument("--sha", required=True)
@@ -391,8 +392,8 @@ def main(argv: list[str] | None = None, *, http: Callable[..., Reply] = read,
         for row in summary["probes"]:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
     for row in summary["probes"]:
-        print(f"release-smoke: {row['status'].upper():4} {row['id']} {row['ms']}ms {row['detail']}".rstrip())
-    print(f"release-smoke: {'OK' if summary['ok'] else 'FAILED ' + ','.join(summary['failed'])} -> {out / 'summary.json'}")
+        out_line(f"release-smoke: {row['status'].upper():4} {row['id']} {row['ms']}ms {row['detail']}".rstrip())
+    out_line(f"release-smoke: {'OK' if summary['ok'] else 'FAILED ' + ','.join(summary['failed'])} -> {out / 'summary.json'}")
     return 0 if summary["ok"] else 1
 
 

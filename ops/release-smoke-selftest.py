@@ -52,7 +52,7 @@ class FakeProduction:
         self.requests: list[str] = []
         self.calls: list[tuple[str, dict]] = []
 
-    def http(self, url: str, timeout: int = 15) -> "rs.Reply":
+    def http(self, url: str, timeout: int = 15):
         self.requests.append(url)
         if url == f"{API}/release":
             return rs.Reply(200, {}, json.dumps({"ok": True, "git_sha": {"value": self.worker_sha},
@@ -257,7 +257,7 @@ class Cli(unittest.TestCase):
         out = self.tmp / "out"
         rc = rs.main(["--lane", "worker", "--sha", SHA, "--phase", "post", "--out", str(out),
                       "--credential-dir", str(self.cred), *extra],
-                     http=prod.http, mcp_factory=lambda api, token: prod.mcp)
+                     http=prod.http, mcp_factory=lambda api, token: prod.mcp, out_line=lambda _s: None)
         return rc, out
 
     def test_writes_the_summary_and_one_line_per_journey(self):
