@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "costs"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|costs")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -195,6 +195,12 @@ if CANONICAL_SECTION == "jev-spend":
         sys.exit(1)
     print(_spend_line)
     sys.exit(_spend_module.nightly_exit_status(_spend_line))
+
+if CANONICAL_SECTION == "costs":
+    import system_costs
+    _cost_snapshot = system_costs.load_snapshot(CANONICAL_FIXTURE or os.path.join(REPO_ROOT, 'out/system-costs.json'))
+    print(system_costs.health_row(_cost_snapshot, 'nightly collector owns reconciliation'))
+    sys.exit(0 if _cost_snapshot['state'] == 'ready' and not _cost_snapshot['alerts'] else 1)
 
 # ── scheduler register (added 2026-08-02) ────────────────────────────────────
 # A TASK THAT HAS NEVER REACHED ITS FIRST WINDOW LOOKS EXACTLY LIKE A TASK THAT IS
@@ -1331,6 +1337,13 @@ def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION == "all":
+        import system_costs
+        _cost_snapshot = system_costs.load_snapshot(os.path.join(REPO_ROOT, 'out/system-costs.json'))
+        _cost_line = system_costs.health_row(_cost_snapshot, 'nightly collector owns reconciliation')
+        print("  " + _cost_line)
+        if _cost_snapshot['state'] != 'ready' or _cost_snapshot['alerts']:
+            rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable')
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)

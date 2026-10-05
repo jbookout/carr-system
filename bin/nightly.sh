@@ -1112,6 +1112,9 @@ step "credential health (reports, never rotates; loops on a finding)" \
 step "Jev daily spend alarm" \
      ./.venv/bin/python tools/health-check.py --section jev-spend
 
+step "Monthly system cost view and spike loops" \
+     ./run.sh costs --publish --alerts
+
 # Authentication readback only; no model work and no interactive login.
 step "Grok authentication health" \
      ./.venv/bin/python tools/health-check.py --section grok-session

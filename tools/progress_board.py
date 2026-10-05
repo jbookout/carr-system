@@ -1933,9 +1933,22 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+@functools.cache
+def cost_snapshot_reader() -> Callable:
+    """Use the collector's validation contract without importing a provider client."""
+    path = Path(__file__).resolve().with_name("system_costs.py")
+    spec = importlib.util.spec_from_file_location("carr_system_costs", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("system cost snapshot reader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.load_snapshot
+
+
 def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
-    """The versioned data contract the app page renders. Deterministic for a
-    given state. Full diagnostics stay local; the app receives bounded cards."""
+    """The versioned data contract the app page renders, including fresh local
+    cost evidence. Full diagnostics stay local; the app receives bounded cards."""
     tasks = {}
     all_tasks = state.get("tasks") or {}
     for task_id, task in all_tasks.items():
@@ -1973,6 +1986,7 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         # When GitHub facts were last checked and verified, and what failed:
         # a card kept from before an outage is never shown as fresh.
         "github_sync": state.get("github_sync"),
+        "costs": cost_snapshot_reader()(REPO_ROOT / "out" / "system-costs.json", now=now_utc()),
         "omitted": {"live": 0, "merged": 0, "history": 0},
         "updated_at": state.get("updated_at"),
     })
