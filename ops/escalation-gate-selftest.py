@@ -77,6 +77,19 @@ APPROVAL_CASES = [
     ("edit-method-with-plan-suffix", "work the queue",
      "Do you approve editing the schema plan?",
      ["Approve", "Do not approve"], True),
+    # Any -ing method word, listed or not, is a method rather than a name.
+    *[(f"{verb}-method-with-plan-suffix", "work the queue",
+       f"Do you approve {verb} {rest}?", ["Approve", "Do not approve"], True)
+      for verb, rest in [
+          ("altering", "nullable columns schema plan"),
+          ("backfilling", "nullable columns schema plan"),
+          ("truncating", "the log tables plan"),
+          ("seeding", "fixture tables plan"),
+          ("patching", "the exporter script plan"),
+          ("rewriting", "the migration plan"),
+          ("deploying", "the worker build"),
+          ("disabling", "nightly job plan"),
+          ("moving", "export folders plan")]],
     ("plan-scope-choice", "work the queue",
      "Do you approve the schema-repair plan for nullable or sentinel columns?",
      ["Approve", "Do not approve"], True),

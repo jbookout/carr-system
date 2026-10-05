@@ -152,15 +152,14 @@ APPROVAL_REQUEST = re.compile(
     r"^(?:joe[, :]\s*)?(?:(?:do|would|will|can) you|should (?:you|joe)) "
     r"(?:not )?approve\s+|^(?:approve|do not approve|don't approve)\s+", re.I)
 # A name is a noun phrase, not a question, a method or an unnamed action.
-# Apply the same grammar inside quotes and to scope qualifiers.
+# Apply the same grammar inside quotes and to scope qualifiers. Every -ing
+# word is a method except the listed nouns; base-form verbs are enumerated.
+ING_NOUNS = r"onboarding"
 NAME_START = (
     r"(?!(?:the|a|an|proposed|new|this|that|it|them|these|those|"
-    r"use|using|choose|choosing|pick|picking|select|selecting|"
-    r"run|running|schedule|scheduling|build|building|add|adding|insert|inserting|"
-    r"create|creating|configure|configuring|edit|editing|change|changing|"
-    r"remove|removing|replace|replacing|modify|modifying|refactor|refactoring|"
-    r"migrate|migrating|install|installing|rename|renaming|delete|deleting|"
-    r"drop|dropping|update|updating|implement|implementing)\b)"
+    r"use|choose|pick|select|run|schedule|build|add|insert|create|configure|"
+    r"edit|change|remove|replace|modify|refactor|migrate|install|rename|"
+    r"delete|drop|update|implement|(?!(?:" + ING_NOUNS + r")\b)\w+ing)\b)"
 )
 NAME_WORD = r"(?!(?:for|in|with|at|by|on|to|as)\b)[\w-]+"
 NAME_PHRASE = NAME_START + NAME_WORD + r"(?:\s+" + NAME_WORD + r"){0,7}"
