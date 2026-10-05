@@ -1,4 +1,4 @@
--- 0825_retire_stale_claim_control.sql
+-- 0836_retire_stale_claim_control.sql
 -- THE STALE-CLAIM STOP GATE LEAVES THE ENFORCEMENT CATALOG WITH ITS SOURCE.
 --
 -- WHY THIS EXISTS. The change carrying this migration deletes
@@ -31,7 +31,7 @@ declare
 begin
   if not exists (select 1 from ops.enforcement_control_catalog
                   where control_key = 'stale_claim') then
-    raise notice '0825: stale_claim is already absent from the catalog; nothing to retire';
+    raise notice '0836: stale_claim is already absent from the catalog; nothing to retire';
     return;
   end if;
 
@@ -39,7 +39,7 @@ begin
     from ops.rule_control_binding
    where control_key = 'stale_claim';
   if bound > 0 then
-    raise exception '0825 REFUSED: stale_claim still has % rule binding(s); '
+    raise exception '0836 REFUSED: stale_claim still has % rule binding(s); '
                     'it is enforcing something and must not be retired', bound;
   end if;
 
@@ -48,7 +48,7 @@ begin
     join rule r on r.id = ar.rule_id and r.status = 'active'
    where 'stale_claim' = any(ar.requested_control_keys);
   if claimed > 0 then
-    raise exception '0825 REFUSED: stale_claim backs % active approved rule(s)', claimed;
+    raise exception '0836 REFUSED: stale_claim backs % active approved rule(s)', claimed;
   end if;
 
   delete from ops.enforcement_control_catalog where control_key = 'stale_claim';
@@ -58,13 +58,13 @@ do $$
 begin
   if exists (select 1 from ops.enforcement_control_catalog
               where control_key = 'stale_claim') then
-    raise exception '0825 FAILED: stale_claim is still in the catalog after the delete';
+    raise exception '0836 FAILED: stale_claim is still in the catalog after the delete';
   end if;
 
   -- The rule's surviving control must be untouched, or this retired the wrong
   -- row and the parity gate would have agreed with it.
   if not exists (select 1 from ops.enforcement_control_catalog
                   where control_key = 'drift_claim') then
-    raise exception '0825 FAILED: drift_claim is gone — d5dcfe26 lost its primary control';
+    raise exception '0836 FAILED: drift_claim is gone — d5dcfe26 lost its primary control';
   end if;
 end $$;
