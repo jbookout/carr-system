@@ -11,9 +11,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('capture_probe', Path(__file__).with_name('capture-verb-reachability.py'))
+assert spec is not None and spec.loader is not None
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
-seen = []
+seen: list[str] = []
 
 class Cursor:
     def __enter__(self): return self
