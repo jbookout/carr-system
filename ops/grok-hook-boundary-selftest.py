@@ -27,7 +27,7 @@ def load(path):
 
 class GrokHookBoundaryTests(unittest.TestCase):
     def test_context_wrapper_reaches_protected_probe_without_process_readback(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        meter = load(ROOT / 'lib/hook_execution.py')
         from hooks import grok_invocation as boundary
         probe = boundary.bounded_grok_read_only
         with mock.patch.dict(os.environ, {}, clear=True), \
@@ -94,6 +94,8 @@ class GrokHookBoundaryTests(unittest.TestCase):
                 self.assertNotEqual(integrity.current()[helper.name], before)
             # Drive the strict checker itself on a copied fixture. No mutation
             # of this checkout, live wiring, or provider state is needed.
+            (root / "lib").mkdir()
+            shutil.copy(ROOT / "lib/hook_runtime.py", root / "lib/hook_runtime.py")
             shutil.copy(ROOT / 'hooks/gate-integrity.py', hooks)
             config = root / 'ops/config'
             config.mkdir(parents=True)
@@ -220,7 +222,7 @@ int main(int argc, char **argv) {
                 self.assertEqual(env.get('CARR_GROK_RUN_READ_ONLY'), None if writable else '1')
 
     def test_context_hooks_skip_before_reading_payload_or_running_target(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        meter = load(ROOT / 'lib/hook_execution.py')
         for target in ('gate-integrity.py', 'rule-boot-gate.py', 'context-handoff-gate.py',
                        'session-presence-hook.py', 'rule-pack-preuse-reselection.py',
                        'rule-pack-drift-gate.py', 'chat-lint-carryover.py'):
@@ -244,7 +246,7 @@ int main(int argc, char **argv) {
                 effect.assert_not_called()
 
     def test_effect_guard_runs_and_context_hooks_run_without_exemption(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        meter = load(ROOT / 'lib/hook_execution.py')
         for target, bounded in (('guard-unattended.py', True),
                                 ('rule-boot-gate.py', False)):
             with self.subTest(target=target), mock.patch.object(sys, 'argv',

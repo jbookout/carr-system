@@ -25,6 +25,8 @@ import os
 import secrets
 import stat
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run, Event
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -2340,14 +2342,14 @@ def refuse_stop_on_control_error(event: str, task_key: str, reason: str,
     announce(f"Claude context lifecycle control warning ({reason}); native Claude behavior continues.")
 
 
-def hook_main() -> int:
+@decision(failure="raise")
+def decide(payload):
     wired_event = os.environ.get("CARR_CONTEXT_HOOK_EVENT")
     event = wired_event or "Stop"
     task_key = os.environ.get("CARR_CONTEXT_TASK_KEY", "claude:unknown")
     owner_id = "unknown"
     manifest: dict[str, Any] | None = None
     try:
-        payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise LifecycleError(
                 "LIFECYCLE_INVALID", "hook payload is not an object")
@@ -3621,6 +3623,20 @@ def cli_main(argv: list[str]) -> int:
         print(canonical({"action": "REFUSE", "reason": exc.reason,
                          "detail": exc.detail}).decode("utf-8"))
         return 2
+
+
+def _parse_error(exc):
+    event = os.environ.get("CARR_CONTEXT_HOOK_EVENT") or "Stop"
+    task_key = os.environ.get("CARR_CONTEXT_TASK_KEY", "claude:unknown")
+    audit({"session": "unknown", "event": event,
+           "action": "ANNOUNCE" if event == "Stop" else "NOOP",
+           "reason": "LIFECYCLE_INVALID", "detail": str(exc)[:500]}, None)
+    refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID")
+    return 0
+
+
+def hook_main():
+    return run(decide, parse_error=_parse_error)
 
 
 def main() -> int:

@@ -497,11 +497,12 @@ def _quiet_unavailable(results, session):
     return ([notice] if notice else []) + lines
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+@decision(failure="raise")
+def decide(payload):
     if not isinstance(payload, dict) or MODE == "off" or payload.get("session_id") == "selftest":
         return 0
     # The registry/client owns each site's policy, including mixed policies.
@@ -537,6 +538,10 @@ def main():
     else:
         print(json.dumps({"systemMessage": text}))
     return 0
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":

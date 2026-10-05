@@ -70,12 +70,17 @@ def emit(decision, text, event="PreToolUse"):
     print(json.dumps({"hookSpecificOutput": out}))
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        log(f"ALLOW(parse-error) {exc}")
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    log(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+@decision(failure="raise")
+def decide(payload):
     if not isinstance(payload, dict):
         return 0
     event = payload.get("hook_event_name") or "PreToolUse"
@@ -92,6 +97,10 @@ def main():
     except Exception as exc:
         log(f"ALLOW(internal-error) {exc}")
     return 0
+
+
+def main():
+    return run(decide, parse_error=_parse_error)
 
 
 if __name__ == "__main__":

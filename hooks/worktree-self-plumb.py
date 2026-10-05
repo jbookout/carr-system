@@ -111,6 +111,8 @@ import json
 import os
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run, Event
 import time
 
 # __file__ resolves through the absolute canonical path this hook is always
@@ -535,27 +537,8 @@ def maybe_spawn_reaper(canon, current_wt):
     return cands
 
 
-def main():
-    sys.path.insert(0, REPO)
-    if os.environ.get("CARR_GROK_RUN_READ_ONLY") == "1":
-        try:
-            from hooks.grok_invocation import bounded_grok_read_only
-            if bounded_grok_read_only():
-                return 0
-        except ImportError:
-            pass  # an unavailable optional probe retains ordinary processing
-    if "--reap" in sys.argv[1:]:
-        # Detached child (or a hand/selftest run) — no SessionStart payload.
-        try:
-            return reap_main(sys.argv[1:])
-        except Exception:
-            return 0                         # fail-soft, like the hook itself
-
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        payload = {}
-
+@decision(failure="raise")
+def decide(payload):
     try:
         cwd = resolve_cwd(payload)
         if not cwd or not os.path.isdir(cwd):
@@ -612,6 +595,23 @@ def main():
     except Exception:
         pass  # fail-soft: this must never block or fail a session
     return 0
+
+
+def main():
+    sys.path.insert(0, REPO)
+    if os.environ.get("CARR_GROK_RUN_READ_ONLY") == "1":
+        try:
+            from hooks.grok_invocation import bounded_grok_read_only
+            if bounded_grok_read_only():
+                return 0
+        except ImportError:
+            pass  # an unavailable optional probe retains ordinary processing
+    if "--reap" in sys.argv[1:]:
+        try:
+            return reap_main(sys.argv[1:])
+        except Exception:
+            return 0
+    return run(decide, invalid_event={})
 
 
 if __name__ == "__main__":

@@ -739,14 +739,14 @@ _METER: Any = None
 
 
 def meter_module() -> Any:
-    """hooks/hook-meter-run.py, loaded once for its classification functions."""
+    """The execution runtime, loaded once for its classification functions."""
     global _METER
     if _METER is None:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            "gate_replay_hook_meter_run", REPO / "hooks" / "hook-meter-run.py")
+            "gate_replay_hook_execution", REPO / "lib" / "hook_execution.py")
         if spec is None or spec.loader is None:
-            raise ImportError("cannot load hooks/hook-meter-run.py")
+            raise ImportError("cannot load lib/hook_execution.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         _METER = module

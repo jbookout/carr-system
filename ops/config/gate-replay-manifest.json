@@ -894,6 +894,8 @@
     "lib/rule_delivery_shadow.py",
     "lib/rule_routes.py",
     "lib/scheduled_run.py",
-    "lib/transcript_read.py"
+    "lib/transcript_read.py",
+    "lib/hook_runtime.py",
+    "lib/hook_execution.py"
   ]
 }

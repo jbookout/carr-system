@@ -583,6 +583,7 @@ def mini_repo(root: Path, behaviour: str, extra: str = "") -> Path:
         shutil.rmtree(repo)
     (repo / "hooks").mkdir(parents=True)
     (repo / "lib").mkdir()
+    shutil.copy2(REPO / "lib/hook_execution.py", repo / "lib/hook_execution.py")
     for name in ("hook-meter-run.py", "hook_meter.py"):
         shutil.copy2(REPO / "hooks" / name, repo / "hooks" / name)
     (repo / "hooks" / "mini_helper.py").write_text("VALUE = 1\n")
@@ -615,7 +616,7 @@ def mini_manifest(fixture_dir: Path) -> Dict[str, Any]:
             "hook-meter-run.py": {"role": "wrapper"},
             "hook_meter.py": {"role": "helper"},
         },
-        "lib_helpers": [],
+        "lib_helpers": ["lib/hook_execution.py"],
     }
 
 
