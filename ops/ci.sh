@@ -1063,18 +1063,18 @@ check_pushfloor() {
       [ -f "$f" ] && existing_py="$existing_py $f"
     done
     if [ -n "$existing_py" ]; then
-      local MYPY="$REPO/.venv/bin/mypy"
-      [ -x "$MYPY" ] || MYPY="$(command -v mypy 2>/dev/null || true)"
-      if [ -n "$MYPY" ] && [ -x "$MYPY" ]; then
-        ran="$ran types"
-        # shellcheck disable=SC2086
-        run_quiet "$LOGDIR/pushfloor-types.log" "$MYPY" $existing_py \
-          || { tail -20 "$LOGDIR/pushfloor-types.log" >&2
-               floor_fail types \
-                 "mypy on the files this push changes. Fix them, or iterate with: .venv/bin/mypy$existing_py"; }
-      else
+      local type_rc=0
+      # shellcheck disable=SC2086
+      run_quiet "$LOGDIR/pushfloor-types.log" ./bin/type-check.sh --files $existing_py || type_rc=$?
+      if [ "$type_rc" -eq 78 ]; then
         incomplete
         printf '        \033[33mnot run\033[0m  types — mypy absent; the hosted types class still covers this\n' >&2
+      else
+        ran="$ran types"
+        if [ "$type_rc" -ne 0 ]; then
+          tail -20 "$LOGDIR/pushfloor-types.log" >&2
+          floor_fail types "mypy on this push's changed files. Iterate with: ./bin/type-check.sh --files$existing_py"
+        fi
       fi
     fi
   fi
