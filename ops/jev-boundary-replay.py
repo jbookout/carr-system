@@ -27,7 +27,6 @@ def load(name):
 
 watch = load("jev_session_watch")
 done = load("jev_done_checks")
-advisory = load("jev_build_advisory")
 
 
 class Client:
@@ -107,24 +106,10 @@ def evaluate_case(case, *, old, temp_dir):
     client = Client(case.get("answers") or {}, old=old)
     judge = Judge(client)
     results = []
-    if family == "intake":
-        if old:
-            # Pre-change seven guidance and six facet questions were always
-            # asked on a human prompt; the 0.5 facet threshold made obligations.
-            client.answers = {facet: 0.9 for facet in advisory.FACETS}
-            result = advisory.advise(case["prompt"], client=client)
-            if any(p >= 0.5 for p in result["facets"].values()):
-                results.append({"check": "prompt", "verdict": "obligation"})
-        else:
-            result = advisory.deferred()
-            assert result["effect"] == "no_prompt_obligation"
-    elif family == "tool":
+    if family == "tool":
         tool, inp, output = case["tool"], case["input"], case["output"]
         code = case.get("exit_code")
         if old:
-            if tool in {"Read", "WebFetch", "WebSearch", "Bash", "Grep"}:
-                results.append(watch.screen_tool_output(tool, output, "task",
-                               client=client))
             if tool == "Bash" and code not in (None, 0):
                 results.append(watch.triage_failure(str(inp.get("command") or ""), output,
                                                     code, client=client))
@@ -173,6 +158,8 @@ def labeled_replay(*, verify_sources=True):
     hashes = log_row_hashes(fixture["source_logs"]) if verify_sources else None
     rows = []
     for case in fixture["cases"]:
+        if case["family"] == "intake":
+            continue
         if hashes is not None:
             assert (case["source_log"], case["source_row_sha256"]) in hashes, case["id"]
         with tempfile.TemporaryDirectory() as tmp:
