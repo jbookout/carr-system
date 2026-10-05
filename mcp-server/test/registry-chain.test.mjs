@@ -17,10 +17,21 @@ test('append owns the successor seal, runtime projection and atomic migration pa
   assert.equal(result.current.source_count, 1);
   assert.equal(result.current.entry_count, 6);
   assert.deepEqual(result.current.atomic_pair, ['0900_example.sql', '0901_example_scac_successor.sql']);
-  assert.match(result.sql, /scac_mutation_registry_v113_seal_available/);
+  assert.match(result.sql, new RegExp(`scac_mutation_registry_v${current.number + 1}_seal_available`));
   assert.match(result.sql, /Successor dependency drifted: 0900_example.sql/);
   assert.match(result.runtime, /mcp-tool:example/);
   assert.match(result.runtime, new RegExp(result.current.digest.slice(7)));
   assert.deepEqual(result.chain.versions.slice(0, -1), before.versions);
   assert.deepEqual(before, registryChain, 'append does not mutate historical pins');
+});
+
+test('append handles the complete source set through the same interface', async () => {
+  const {historicalRows} = await import('../../ops/registry-history.mjs');
+  const current = registryChain.versions.at(-1);
+  const rows = historicalRows(current.number);
+  const result = appendSuccessor({rows, domainMigration:{filename:'0900_complete.sql',sql:'select 1;'},
+    catalog:current.catalog, entrySetDigest:current.entry_set_digest});
+  assert.ok(result.sql.length > 1024*1024, 'exercise the complete SQL seed across the compiler adapter');
+  assert.equal(result.current.source_count, rows.length);
+  assert.equal(result.fixture.patches.at(-1).expected_count, rows.length);
 });

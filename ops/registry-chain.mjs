@@ -55,7 +55,7 @@ export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest
     dependencies: [{ filename: basename(predecessor.migration), sql: template }, ...domains] };
   const sql = execFileSync('python3', ['-c',
     'import json,sys; from successor_generation import render_sql; r=json.load(sys.stdin); print(render_sql(r["template"],r["predecessor"],r["rows"],r["baseline"],r["entry_set"],r["dependencies"]),end="")'],
-    { cwd: fileURLToPath(new URL('./', import.meta.url)), input: JSON.stringify(request), encoding: 'utf8' });
+    { cwd: fileURLToPath(new URL('./', import.meta.url)), input: JSON.stringify(request), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   current.migration_sha256 = digest(sql);
   const fixture = JSON.parse(readFileSync(new URL('./config/scac-registry-source-inventory-fixtures.v1.json', import.meta.url), 'utf8'));
   const previous = new Map(fixture.base.rows.map(row => [row.ingress_key, row]));
@@ -74,7 +74,7 @@ export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest
     expected_count: rows.length, expected_sha256: createHash('sha256').update(JSON.stringify(rows)).digest('hex') });
   const seals = Object.fromEntries(chain.versions.filter(row => row.entry_set_digest).map(row => [row.version, row.entry_set_digest]));
   seals[version] = entrySetDigest;
-  return { current, runtime, sql, fixture, seals, selector: runtime, chain: { ...chain, versions: [...chain.versions, current],
+  return { current, runtime, sql, fixture, seals, chain: { ...chain, versions: [...chain.versions, current],
     atomic_groups: [...chain.atomic_groups, current.atomic_pair], strict_atomic_groups: [...chain.strict_atomic_groups, current.atomic_pair] } };
 }
 
@@ -107,4 +107,3 @@ export function renderRuntimeProjection(rows, {
     `export const SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING = false;\n` +
     `export const SCAC_MUTATION_OPERATIONS = Object.freeze(${JSON.stringify(projection, null, 2)});\n`;
 }
-

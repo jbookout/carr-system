@@ -53,9 +53,46 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual((plan['registry_predecessor'],plan['registry_successor']),(97,98))
         self.assertEqual(plan['predecessor_sha256'],pin['artifact_sha256'])
         self.assertEqual(integration.validate_candidate(self.repo,base)['registry_predecessor'],97)
-        integration.check_generated_write(self.repo,self.repo/current, f'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v98";\n'.encode(),base)
+        successor = b'export const SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v98";\n'
+        target = self.repo/current
+        original = target.read_bytes()
+        with self.assertRaises(MigrationNumberError):
+            integration.write_generated_artifact(self.repo,target,original+b'// resealed\n')
+        with self.assertRaises(MigrationNumberError):
+            integration.write_generated_artifact(self.repo,target,successor.replace(b'v98',b'v99'))
+        target.write_bytes(original+b'// foreign edit\n')
+        with self.assertRaises(MigrationNumberError):
+            integration.write_generated_artifact(self.repo,target,successor)
+        self.assertEqual(target.read_bytes(),original+b'// foreign edit\n')
+        target.write_bytes(original)
+        integration.write_generated_artifact(self.repo,target,successor)
+        self.assertEqual(target.read_bytes(),successor)
+        inode = target.stat().st_ino
+        integration.write_generated_artifact(self.repo,target,successor)
+        self.assertEqual(target.stat().st_ino,inode)
+        self.assertEqual(integration.main_registry_pins(self.repo,base),[pin])
         with self.assertRaises(MigrationNumberError):
             integration.check_generated_write(self.repo,self.repo/current,b'edited',base)
+
+    def test_archived_history_validates_against_a_main_without_the_manifest(self):
+        import hashlib
+        current = 'mcp-server/src/scac-mutation-registry.current.generated.js'
+        old = self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js'
+        original = old.read_bytes()
+        self.write(current, original.decode())
+        (self.repo/'ops/config').mkdir(parents=True)
+        pin = {'number':97,'version':'scac-mutation-registry.v97',
+               'artifact_sha256':hashlib.sha256(original).hexdigest()}
+        self.write('ops/config/scac-registry-chain.json',json.dumps({'schema':'scac-registry-chain.v1','versions':[pin]}))
+        old.rename(self.root/'archived-v97')
+        self.g('add','ops/config/scac-registry-chain.json'); self.commit()
+        result = integration.validate_candidate(self.repo,self.base)
+        self.assertEqual(result['registry_predecessor'],97)
+        pin['artifact_sha256'] = '0'*64
+        self.write('ops/config/scac-registry-chain.json',json.dumps({'schema':'scac-registry-chain.v1','versions':[pin]}))
+        self.g('add','ops/config/scac-registry-chain.json'); self.commit()
+        with self.assertRaisesRegex(MigrationNumberError,'history pin'):
+            integration.validate_candidate(self.repo,self.base)
 
     def test_generation_accepts_exact_pending_main_merge_but_proof_requires_commit(self):
         self.g('checkout', '-qb', 'feature')
@@ -116,6 +153,15 @@ class CandidateTests(unittest.TestCase):
         result=self.sink(json.dumps(str(export)),'historical bytes')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(export.read_text(),'historical bytes')
+    def test_python_cli_accepts_absolute_artifact_paths_through_filesystem_aliases(self):
+        self.install_sink()
+        target = self.repo/'migrations/0749_pending.sql'
+        result = subprocess.run(['python3',str(self.repo/'tools/integration_candidate.py'),
+                                 '--write',str(target)],input=b'select 2;\n',cwd=self.repo,
+                                env=self.env,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(target.read_bytes(),b'select 2;\n')
+
     def test_file_url_targets_keep_the_filesystem_writer_contract(self):
         self.install_sink()
         target=self.repo/'mcp-server/src/scac-mutation-registry.v97.generated.js'

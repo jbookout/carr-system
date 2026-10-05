@@ -5934,5 +5934,13 @@
       "0845_lead_archived_stage.sql",
       "0846_leads_scac_successor.sql"
     ]
+  ],
+  "inactive_atomic_groups": [
+    {
+      "group": [
+        "0757_progress_directory_scac_successor.sql"
+      ],
+      "reason": "Existing runner pin predates renumbering to 0763; no migration has this filename. Retained to preserve runner output."
+    }
   ]
 }

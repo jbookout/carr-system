@@ -115,6 +115,9 @@ def validate_candidate(repo: Path, base: str) -> dict:
         main_versions = [row['number'] for row in validate_registry_history(repo, base) if row['number'] != 1]
     for p, content in main.items():
         if p.startswith('mcp-server/src/'):
+            if manifest:
+                # validate_registry_history already preserves these Git byte pins.
+                continue
             match = REGISTRY.fullmatch(p)
             if match: main_versions.append(int(match.group(1)))
             if not (repo/p).is_file() or (repo/p).read_bytes() != content:
@@ -195,24 +198,29 @@ def _exclusive(lock_path: Path):
 
 
 def write_generated_artifact(repo: Path, target: Path, content: bytes) -> None:
-    """Publish immutable source bytes without ever replacing a destination.
+    """Publish a successor under the shared Git-root generation lock.
 
-    The shared Git-root lock serializes cooperating writers. A create-only
-    hard-link publication also preserves a seal promoted by a noncooperating
-    writer at the final filesystem seam. Existing byte-exact outputs need no
-    write; different bytes require a new allocated successor.
+    Historical artifacts stay create-only. The current projection can advance
+    from its pinned predecessor; byte-exact retries leave its inode unchanged.
     """
+    repo, target = repo.resolve(), target.resolve()
     with _exclusive(_ownership_path(repo)) as acquired:
         if not acquired:
             raise MigrationNumberError('integration generation already owned')
         base = git(repo, 'rev-parse', 'origin/main').decode().strip()
         head = git(repo, 'rev-parse', 'HEAD').decode().strip()
         check_generated_write(repo, target, content, base)
-        if target.exists():
-            if target.read_bytes() != content:
-                raise MigrationNumberError('existing artifact differs; allocate a fresh successor')
+        previous = target.read_bytes() if target.exists() else None
+        replacing_current = target.relative_to(repo).as_posix() == CURRENT_PATH and previous is not None
+        if previous == content:
             require_current_base(repo, base, pending_merge=True)
             return
+        if previous is not None:
+            if not replacing_current:
+                raise MigrationNumberError('existing artifact differs; allocate a fresh successor')
+            pin = max(main_registry_pins(repo, base), key=lambda row: row['number'])
+            if hashlib.sha256(previous).hexdigest() != pin['artifact_sha256']:
+                raise MigrationNumberError('current predecessor differs from its sealed pin')
         fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=f'.{target.name}.')
         try:
             with os.fdopen(fd, 'wb') as out:
@@ -221,10 +229,15 @@ def write_generated_artifact(repo: Path, target: Path, content: bytes) -> None:
             require_current_base(repo, base, pending_merge=True)
             if git(repo, 'rev-parse', 'HEAD').decode().strip() != head:
                 raise MigrationNumberError('HEAD moved during artifact publication')
-            try:
-                os.link(temporary, target)
-            except FileExistsError:
-                raise MigrationNumberError('artifact appeared during publication; refresh main and allocate again') from None
+            if replacing_current:
+                if target.read_bytes() != previous:
+                    raise MigrationNumberError('current predecessor changed during publication')
+                os.replace(temporary, target)
+            else:
+                try:
+                    os.link(temporary, target)
+                except FileExistsError:
+                    raise MigrationNumberError('artifact appeared during publication; refresh main and allocate again') from None
             # A racing main update can invalidate a newly created candidate,
             # but can never make this sink overwrite a promoted seal. Refuse
             # success and leave the candidate visible for source reconciliation.

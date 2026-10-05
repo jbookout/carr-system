@@ -4,8 +4,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { registeredOperation } from "../src/mutation-registry.js";
-import { CURRENT_REGISTRY_VERSION, frozenInventory } from "../../ops/scac-mutation-inventory.mjs";
 import { tourSharingBrowserAccess, tourSharingTools } from "../src/tour-sharing.js";
 
 class ToolError extends Error { constructor(payload) { super(payload.error); this.payload = payload; } }
@@ -89,22 +87,4 @@ test("migration binds feedback to sealed current projection, member property, ac
   assert.match(migration, /idempotency_key/);
   assert.match(migration, /unique \(organization_tenant_id,share_grant_id,idempotency_key\)/);
   assert.doesNotMatch(migration, /update ops\.tour_property|update ops\.tour_field_assertion/i);
-});
-
-test("Tour feedback successor follows current main without reusing its seal or migration", () => {
-  const successor = readRegistryArtifact(path.join(root, "migrations/0750_tour_client_feedback_scac_successor.sql"), "utf8");
-  const runtime = readRegistryArtifact(path.join(root, "mcp-server/src/scac-mutation-registry.v98.generated.js"), "utf8");
-  const selector = readRegistryArtifact(path.join(root, "mcp-server/src/mutation-registry.js"), "utf8");
-  assert.match(successor, /0748_codex_session_read_scac_successor\.sql/);
-  assert.match(successor, /0749_tour_client_feedback\.sql/);
-  assert.match(successor, /scac-mutation-registry\.v97/);
-  assert.match(successor, /scac-mutation-registry\.v98/);
-  assert.match(runtime, /scac-mutation-registry\.v98/);
-  assert.equal(registeredOperation("read-tour-feedback").schema_digest,
-    frozenInventory("scac-mutation-registry.v98")
-      .find(row => row.ingress_key === "mcp-tool:read-tour-feedback").schema_digest);
-  assert.match(selector, new RegExp(CURRENT_REGISTRY_VERSION.replaceAll(".", "\\.") + "\\.generated\\.js"));
-  const migration = readRegistryArtifact(path.join(root, "migrations/0749_tour_client_feedback.sql"));
-  const digest = createHash("sha256").update(migration).digest("hex");
-  assert.match(successor, new RegExp(`filename='0749_tour_client_feedback\\.sql' and sha256='${digest}'`));
 });

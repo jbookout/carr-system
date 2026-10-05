@@ -37,13 +37,22 @@ def replace_once(text, before, after):
     return text.replace(before, after)
 
 
+def jsonb_key_order(value):
+    """Match PostgreSQL jsonb's length-then-byte key order for catalog readback."""
+    if isinstance(value, dict):
+        return {key: jsonb_key_order(value[key]) for key in sorted(value, key=lambda key: (len(key.encode()), key.encode()))}
+    if isinstance(value, list):
+        return [jsonb_key_order(item) for item in value]
+    return value
+
+
 def render_sql(template, predecessor, rows, baseline, entry_set, dependencies):
     """Extend history while replacing only the current, generated frontier."""
     previous = predecessor["number"]
     current = previous + 1
     old_version = f"scac-mutation-registry.v{previous}"
     new_version = f"scac-mutation-registry.v{current}"
-    old_catalog = json.dumps(predecessor["catalog"], separators=(",", ":"))
+    old_catalog = json.dumps(jsonb_key_order(predecessor["catalog"]), separators=(",", ":"))
     new_catalog = json.dumps(baseline, separators=(",", ":"))
     new_digest = digest({"schema_version": new_version, "rows": rows, "db_catalog_baseline": baseline})
     count = len(rows) + sum(baseline[key]["count"] for key in ("secdef_execute", "relation_dml", "column_dml"))
@@ -229,7 +238,6 @@ const p=JSON.parse(readFileSync(process.argv[1],'utf8'));
 const result=appendSuccessor(p);
 if(createHash('sha256').update(result.sql).digest('hex')!==p.expectedSqlDigest) throw new Error('chain SQL differs from disposable readback');
 await writeIntegratedArtifact('mcp-server/src/scac-mutation-registry.current.generated.js',result.runtime);
-writeFileSync('mcp-server/src/scac-mutation-registry.current.generated.js',result.selector);
 writeFileSync('ops/config/scac-registry-chain.json',JSON.stringify(result.chain,null,2)+'\\n');
 writeFileSync('ops/config/scac-registry-source-inventory-fixtures.v1.json',JSON.stringify(result.fixture,null,2)+'\\n');
 writeFileSync('ops/config/scac-registry-full-entry-set-seals.json',JSON.stringify(result.seals,null,2)+'\\n');
