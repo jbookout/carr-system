@@ -54,9 +54,11 @@ TWO LANES, one tick:
               marker can never delay the next tick. It never fails, blocks or
               retries the release it follows.
   app     the DoctorCRE app (its own repository). Released when its origin/main
-          moves by anything other than docs/tests: `npm ci` and
-          `npm run release:production` from a clean detached origin/main
-          checkout, then /app-release reads the SHA back.
+          moves by anything other than docs/tests: `npm ci`, the
+          credential-free `node scripts/prepare-release.mjs`, then
+          `node scripts/release-production.mjs` (the only step holding the
+          deploy credential) from a clean detached origin/main checkout, then
+          /app-release reads the SHA back.
 
 BATCHING. Each lane releases the LATEST main SHA, never each merge separately.
 The last released SHA per lane lives in out/release-pipeline/state.json; when it
@@ -2139,7 +2141,10 @@ class Pipeline:
         wt = self.store.release_worktree("app", sha)
         self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)
-        self.step("app-release", ["npm", "run", "release:production"], wt, timeout=3600,
+        # Keep package hooks/tests outside the deploy environment. Invoke the
+        # publisher directly so npm pre/post-release hooks cannot inherit it.
+        self.step("app-build", ["node", "scripts/prepare-release.mjs"], wt, timeout=3600)
+        self.step("app-release", ["node", "scripts/release-production.mjs"], wt, timeout=900,
                   env=self.deploy_env())
         if self.dry_run:
             self.out(f"  [dry-run] GET {lane_cfg['live_release_url']} and require source_commit == {sha}")
