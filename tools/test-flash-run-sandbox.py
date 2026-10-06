@@ -9,6 +9,7 @@ skipped in code, never disabled through the environment. The timeout case needs 
 from __future__ import annotations
 
 import importlib.util
+import argparse
 from contextlib import ExitStack
 import os
 import shutil
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import time
 from unittest import SkipTest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("flash_run", os.path.join(HERE, "flash-run.py"))
@@ -628,7 +630,6 @@ def _flash_up():
         return False
 
 
-SMOKE = os.path.expanduser("~/flash-projects/flash-smoke")
 SMOKE_CALC = ('def average(values):\n    """Return the arithmetic mean of a non-empty list of numbers."""\n'
               "    return sum(values) / (len(values) + 1)\n")
 SMOKE_TEST = ("import sys\nfrom calc import average\n\ndef main():\n    assert average([2, 4, 6]) == 4\n"
@@ -637,9 +638,6 @@ SMOKE_TEST = ("import sys\nfrom calc import average\n\ndef main():\n    assert a
 
 
 def _smoke_project():
-    """The smoke project the coordinator names when it is on this machine, else an identical throwaway copy."""
-    if os.path.isdir(os.path.join(SMOKE, ".git")):
-        return SMOKE
     p = _work()
     for name, body in (("calc.py", SMOKE_CALC), ("test_calc.py", SMOKE_TEST)):
         with open(os.path.join(p, name), "w") as fh:
@@ -702,6 +700,29 @@ def the_launcher_exec_allowance_opens_that_one_file_not_its_folder():
 
 
 @sandboxed
+def sandboxed_attempt_launches_and_verifies_a_patch_without_a_model():
+    project = _smoke_project()
+    with open(os.path.join(project, "calc.py")) as fh:
+        before = fh.read()
+    launcher = os.path.join(_work(), "flash")
+    with open(launcher, "w") as fh:
+        fh.write("#!/bin/sh\nprintf '%s\\n' 'def average(values):' "
+                 "'    return sum(values) / len(values)' > calc.py\n"
+                 'printf "fixture\\n" > "$CLAUDE_CODE_TMPDIR/launcher.log"\n')
+    os.chmod(launcher, 0o755)
+    with patch.object(fr, "FLASH", launcher), \
+            patch.object(fr.flashlib, "request_scope", return_value=ExitStack()):
+        row = fr.run_attempt(1, project, "Fix calc.py", "python3 test_calc.py",
+                             "low", _work(), think=False, sandbox=True)
+    assert row["probe_results"]["agent_exit_code"] == 0, row["agent_output"]
+    assert row["probe_results"]["tests_passed"], row["test_output"]
+    assert _patch_files(row["patch"]) == ["calc.py"], row["patch"]
+    assert "return sum(values) / len(values)" in row["patch"], row["patch"]
+    with open(os.path.join(project, "calc.py")) as fh:
+        assert fh.read() == before, "the attempt edited its source project"
+
+
+@sandboxed
 @live
 def live_the_real_flash_agent_starts_sandboxed_and_patches_the_smoke_project():
     project = _smoke_project()
@@ -721,6 +742,12 @@ def live_the_real_flash_agent_starts_sandboxed_and_patches_the_smoke_project():
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--live", action="store_true", help="also run the local-model integration smoke test")
+    args = parser.parse_args()
+    if args.live and (not SANDBOXED or not _flash_up()):
+        print("live Flash check requires macOS sandbox-exec, a launcher, and an answering server", file=sys.stderr)
+        return 78
     if not SANDBOXED:
         print("no macOS sandbox-exec on this machine; @sandboxed exploit-replay cases are skipped (Linux CI)")
     for name, fn in list(globals().items()):
@@ -733,8 +760,7 @@ def main() -> int:
         if getattr(fn, "_sandboxed", False) and not SANDBOXED:
             print(f"  skip  {name} (needs the macOS sandbox)")
             continue
-        if getattr(fn, "_live", False) and not _flash_up():
-            print(f"  skip  {name} (the Flash server is not answering, or no launcher)")
+        if getattr(fn, "_live", False) and not args.live:
             continue
         check(name.replace("_", " "), fn)
     for d in TEMPS:
