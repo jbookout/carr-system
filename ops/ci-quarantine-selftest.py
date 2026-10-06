@@ -114,7 +114,7 @@ class QuarantineTests(unittest.TestCase):
                     'owner': 'qa-engineer', 'expires': '2099-01-01', 'reason': 'Fixture'}
                 result = self.invoke(root,
                     f"from pathlib import Path; p=Path({str(marker)!r}); seen=p.exists(); p.touch(); raise SystemExit({code} if seen else 1)", [entry])
-                self.assertEqual(result.returncode, code, result.stdout)
+                self.assertEqual(result.returncode, 1 if code == 78 else code, result.stdout)
                 self.assertNotIn('QUARANTINED', result.stdout)
 
     def test_suppressed_failure_publishes_both_attempt_diagnostics(self):

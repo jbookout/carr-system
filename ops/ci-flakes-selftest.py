@@ -155,6 +155,33 @@ class ReviewRegressions(unittest.TestCase):
                 ''.join(self.log(row) for row in invalid) + self.log(self.receipt)})
         self.assertEqual([row['test'] for row in rows], [self.test])
 
+    def test_receipts_require_every_field_and_preserve_other_candidates(self):
+        invalid = [{key: value for key, value in self.receipt.items() if key != missing}
+            for missing in self.receipt]
+        with patch.object(self.module, 'gh_api', side_effect=self.api):
+            rows = self.module.candidate_rows(self.repo, self.run, 2, {'job.txt': self.checkout +
+                ''.join(self.log(row) for row in invalid) + self.log(self.receipt)})
+        self.assertEqual([row['test'] for row in rows], [self.test])
+
+    def test_source_inventory_includes_collected_nested_and_tool_selftest_suites(self):
+        paths = ['tools/room-bridge/test_queue_unit.py', 'tools/room-bridge/test_activation_reliability.py',
+                 'tools/example-selftest.py']
+        def api(endpoint, *args, **kwargs):
+            if '/git/trees/' in endpoint:
+                return {'truncated': False, 'tree': [{'path': name, 'type': 'blob'} for name in paths]}
+            return self.api(endpoint)
+        with patch.object(self.module, 'gh_api', side_effect=api):
+            rows = self.module.candidate_rows(self.repo, self.run, 2, {'job.txt': self.checkout +
+                ''.join(self.log({**self.receipt, 'test': name}) for name in paths)})
+        self.assertEqual(sorted(row['test'] for row in rows), sorted(paths))
+
+    def test_explicit_passing_receipt_proves_only_its_suite_passed(self):
+        passed = {**self.receipt, 'first_exit': 0, 'rerun_exit': None, 'candidate': False, 'status': 'passed'}
+        rows = self.module.observations_from_logs(self.repo, self.run, 1,
+            {'job.txt': self.checkout + self.log(passed) + 'OK unit all passed\n'},
+            [self.test, 'mcp-server/test/unexecuted.test.mjs'])
+        self.assertEqual({row['test']: row['result'] for row in rows}, {self.test: 'pass'})
+
     def test_candidates_bind_checkout_tree_and_collected_suite(self):
         for changes in ({'tree': 'c' * 40}, {'test': '/invented/test.py'},
                         {'test': 'ops/invented-selftest.py'}, {'test': 'mcp-server/src/plain.js'},
