@@ -87,14 +87,8 @@ def _record(jj, check_id, subject_ref, answer, existing_decision, *, error=None,
 
 
 def _choice_value(answer, key):
-    import math
     body = answer["answers"][key]
-    confidence = body.get("confidence")
-    if confidence is not None:
-        confidence = float(confidence)
-        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
-            raise ValueError(f"{key}: invalid choice confidence")
-    return body.get("choice"), confidence
+    return body.get("choice"), _module("jev_semantic").choice_confidence(answer, key)
 
 
 def _tail_lines(path, tail_bytes=TAIL_BYTES):

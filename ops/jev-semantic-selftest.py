@@ -15,6 +15,39 @@ spec.loader.exec_module(semantic)
 
 
 class JudgmentTests(unittest.TestCase):
+    def test_choice_confidence_has_one_owner_and_preserves_original_answer(self):
+        watch = semantic._load('jev_session_watch')
+        answer = {'answers': {'q': {'choice': 'none', 'confidence': '0.25'}}}
+        request = semantic.JudgmentRequest('fixture',
+            {'q': {'type': 'choice', 'criteria': {'none': 'No bug'}}},
+            caller='fixture', version='v1', validate_confidence=True)
+        with patch.object(semantic, 'choice_confidence', return_value=.25) as validate, \
+                patch.object(watch, '_module', return_value=semantic):
+            result = semantic.evaluate(request, adapter=semantic.OfflineAdapter(answer)).unwrap()
+            self.assertEqual(watch._choice_value(result, 'q'), ('none', .25))
+            self.assertEqual(validate.call_count, 2)
+        self.assertEqual(result['answers'], answer['answers'])
+
+    def test_choice_confidence_contract_for_both_consumers(self):
+        watch = semantic._load('jev_session_watch')
+        request = semantic.JudgmentRequest('fixture',
+            {'q': {'type': 'choice', 'criteria': {'none': 'No bug'}}},
+            caller='fixture', version='v1', validate_confidence=True)
+        for confidence in (None, 0, 1, '0.25', -1, 2, float('nan'), float('inf'), 'bad'):
+            answer = {'answers': {'q': {'choice': 'none', 'confidence': confidence}}}
+            receipt = semantic.evaluate(request, adapter=semantic.OfflineAdapter(answer))
+            with self.subTest(confidence=confidence):
+                if confidence in (None, 0, 1, '0.25'):
+                    result = receipt.unwrap()
+                    expected = None if confidence is None else float(confidence)
+                    self.assertEqual(watch._choice_value(result, 'q'), ('none', expected))
+                    self.assertEqual(result['answers'], answer['answers'])
+                else:
+                    with self.assertRaises(ValueError):
+                        receipt.unwrap()
+                    with self.assertRaises(ValueError):
+                        watch._choice_value(answer, 'q')
+
     def test_receipt_summary_is_bounded_even_for_rejected_large_requests(self):
         request = semantic.JudgmentRequest('fixture',
             {str(i).zfill(4)+'x'*200: {'type': 'noul'} for i in range(300)},

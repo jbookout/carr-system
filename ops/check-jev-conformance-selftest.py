@@ -14,6 +14,113 @@ def load(name):
     return module
 
 class Conformance(unittest.TestCase):
+    def test_request_bindings_are_resolved_at_each_call(self):
+        checker = load('check-jev-conformance')
+        prefix = "from jev_semantic import JudgmentRequest as R, evaluate as E\n"
+        distinct = prefix + """def run(a, b, q):
+ r = R(a, q, caller='fixture', version='v1')
+ E(r)
+ r = R(b, q, caller='fixture', version='v1')
+ E(r)
+"""
+        with self.subTest(case='distinct states'):
+            self.assertEqual(checker.python_errors(distinct), [])
+        split = prefix + """def run(a, b, qa, qb, adapter):
+ r = R(a, qa, caller='fixture', version='v1')
+ E(r, adapter=adapter)
+ s = R(a, qb, caller='fixture', version='v1')
+ E(s, adapter=adapter)
+ r = R(b, qa, caller='fixture', version='v1')
+ return r
+"""
+        self.assertEqual(checker.python_errors(split),
+                         ['6: fanout: combine all questions for this state'])
+
+    def test_annotated_requests_and_branch_bindings(self):
+        checker = load('check-jev-conformance')
+        prefix = 'from jev_semantic import JudgmentRequest, evaluate\n'
+        annotated = prefix + """def run(state, questions):
+ request: JudgmentRequest = JudgmentRequest(state, questions, caller='fixture', version='v1')
+ evaluate(request)
+"""
+        with self.subTest(case='annotated request'):
+            self.assertEqual(checker.python_errors(annotated), [])
+        branch = prefix + """def run(a, b, q, flag):
+ request = JudgmentRequest(a, q, caller='fixture', version='v1')
+ evaluate(request)
+ if flag:
+  request = JudgmentRequest(b, q, caller='fixture', version='v1')
+ evaluate(request)
+"""
+        self.assertEqual(checker.python_errors(branch),
+                         ['7: fanout: combine all questions for this state'])
+        exclusive = prefix + """def run(a, q, flag):
+ if flag:
+  evaluate(JudgmentRequest(a, q, caller='fixture', version='v1'))
+ else:
+  evaluate(JudgmentRequest(a, q, caller='fixture', version='v1'))
+"""
+        self.assertEqual(checker.python_errors(exclusive), [])
+
+    def test_known_transports_named_evaluate_keep_model_and_cache_checks(self):
+        checker = load('check-jev-conformance')
+        for module, target in (('typesafe_client', 'ask'), ('jev_judge', 'judge')):
+            source = f'from {module} import {target} as evaluate\ndef run(state, questions):\n return evaluate(state, questions)\n'
+            with self.subTest(module=module):
+                self.assertEqual(checker.python_errors(source), [
+                    '3: cache: use jev_semantic.ask with complete input key',
+                    '3: model: pin jev-1.13.0'])
+        self.assertEqual(checker.python_errors(
+            "import typesafe_client\ndef evaluate(state):\n return state\ndef run(state):\n return evaluate(state)"), [])
+
+    def test_dynamic_semantic_imports_keep_loop_and_provenance_checks(self):
+        checker = load('check-jev-conformance')
+        for loader in ("import importlib\n", "from importlib import import_module\n"):
+            factory = 'importlib.import_module' if loader.startswith('import ') else 'import_module'
+            source = loader + f"""def run(state, question_sets):
+ api = {factory}('jev_semantic')
+ for questions in question_sets:
+  api.evaluate(api.JudgmentRequest(state, questions, caller='fixture', version='v1'))
+"""
+            with self.subTest(loader=loader):
+                self.assertEqual(checker.python_errors(source),
+                                 ['5: fanout: loop repeats unchanged state'])
+
+    def test_loop_with_new_evidence_and_frozen_request_state(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(states, questions):
+ for state in states:
+  evidence = {'text': state}
+  request = R(evidence, questions, caller='fixture', version='v1')
+  E(request)
+"""
+        self.assertEqual(checker.python_errors(source), [])
+        frozen = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(a, b, q):
+ state = a
+ request = R(state, q, caller='fixture', version='v1')
+ state = b
+ E(request)
+ E(R(a, q, caller='fixture', version='v1'))
+"""
+        self.assertEqual(checker.python_errors(frozen),
+                         ['7: fanout: combine all questions for this state'])
+
+    def test_branch_loaded_transport_cannot_inherit_semantic_exemption(self):
+        checker = load('check-jev-conformance')
+        source = """import importlib
+def run(state, questions, flag):
+ if flag:
+  api = importlib.import_module('jev_semantic')
+ else:
+  api = importlib.import_module('typesafe_client')
+ api.ask(state, questions, caller='fixture', version='v1')
+"""
+        self.assertEqual(checker.python_errors(source), [
+            '7: cache: use jev_semantic.ask with complete input key',
+            '7: model: pin jev-1.13.0'])
+
     def test_scan_separates_cache_probe_suites_from_production_violations(self):
         checker = load('check-jev-conformance')
         # CI collects both test naming styles. Cache probes deliberately repeat

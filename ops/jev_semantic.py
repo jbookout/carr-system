@@ -91,6 +91,16 @@ class OfflineAdapter:
                     cache_key=key)
 
 
+def choice_confidence(answer, name):
+    confidence = answer['answers'][name].get('confidence')
+    if confidence is None:
+        return None
+    value = float(confidence)
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError(f'{name}: invalid choice confidence')
+    return value
+
+
 def evaluate(request, *, adapter=None):
     """One request in, one receipt out; a failure never becomes affirmative advice."""
     try:
@@ -100,11 +110,7 @@ def evaluate(request, *, adapter=None):
             for name, question in request.questions.items():
                 if question.get('type') != 'choice':
                     continue
-                confidence = answer['answers'][name].get('confidence')
-                if confidence is not None:
-                    value = float(confidence)
-                    if not math.isfinite(value) or not 0 <= value <= 1:
-                        raise ValueError(f'{name}: invalid choice confidence')
+                choice_confidence(answer, name)
     except Exception as exc:
         return JudgmentReceipt(request, error=exc)
     return JudgmentReceipt(request, answer=answer)
