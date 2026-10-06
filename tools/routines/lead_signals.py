@@ -275,7 +275,11 @@ def execute(ctx, plan):
             if hasattr(ctx, "save"):
                 ctx.save()
     if ctx.dry_run:
-        return {"dry_run": True, "candidate_count": len(plan["candidates"]), "candidates": plan["candidates"], "lane_health": plan["lane_health"], "model_calls": 0}
+        return {"routine": "lead-signals-weekly", "dry_run": True, "work": plan["work"],
+                "candidate_count": len(plan["candidates"]),
+                "estimated_scores": [r["score"] for r in plan["candidates"]],
+                "lane_health": plan["lane_health"], "model_calls": 0,
+                "record_writes": 0, "local_writes": 0}
     created, reviews = [], []
     consumed = set(plan.get("consumed_keys", []))
     def remember(key):
