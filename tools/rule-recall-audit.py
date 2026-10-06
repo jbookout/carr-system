@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from lib.rule_boot_gate import boot_delivery
 from lib.rule_recall import delivery_counts, delivered_ids, timestamp
 
 
@@ -75,6 +76,7 @@ def audit(active_ids, sections, paths, now):
     unknown_gate = missing_dates = 0
     turn_keys = set()
     boots = defaultdict(dict)
+    epochs = Counter()
     source_seen = set()
     start = timestamp(now).timestamp() - 30 * 86400
     for path in paths:
@@ -108,6 +110,10 @@ def audit(active_ids, sections, paths, now):
                     continue
                 source_seen.add(key)
                 state["in_window"] += 1
+                context = (row.get("sessionId", path.name.split(".jsonl")[0]),
+                           row.get("agentId") or "main")
+                if row.get("subtype") == "compact_boundary":
+                    epochs[context] += 1
                 if row.get("type") == "user" and not row.get("isMeta"):
                     turn_keys.add(key)
                 if delivered_ids(row):
@@ -125,9 +131,8 @@ def audit(active_ids, sections, paths, now):
                         receipts.append({**obj, "observed_at": at.isoformat()})
                     boot = obj.get("rule_boot")
                     if isinstance(boot, dict) and boot.get("schema") == "carr-rule-boot/v1":
-                        sid = row.get("sessionId", path.name.split(".jsonl")[0])
-                        bkey = (sid, boot["digest"])
-                        boots[bkey][boot["page"]] = (boot, at.isoformat())
+                        bkey = (*context, epochs[context], boot.get("digest"))
+                        boots[bkey][boot.get("page")] = (boot, at.isoformat())
                 message = row.get("message") or {}
                 for block in message.get("content", []) if isinstance(message.get("content"), list) else []:
                     if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -153,15 +158,13 @@ def audit(active_ids, sections, paths, now):
                         if verb == "doctrine-sections":
                             section_reads.update(str(s) for s in args.get("section_ids", []))
         inventory.append(state)
-    for (sid, digest), pages in boots.items():
-        first = next(iter(pages.values()))[0]
-        if set(pages) != set(range(1, first["pages_total"] + 1)):
+    for (sid, agent, epoch, digest), pages in boots.items():
+        ids = boot_delivery({n: boot for n, (boot, _) in pages.items()})
+        if not ids:
             continue
-        body = "".join(pages[n][0]["text"] for n in sorted(pages))
-        ids = re.findall(r"^### ([0-9a-f]{8})(?: \(personal\))?$", body, re.M)
         receipts.append({"schema": "rule-recall-boot-observation/v1", "delivered": ids,
                          "observed_at": max(v[1] for v in pages.values()),
-                         "receipt_id": f"boot:{sid}:{digest}"})
+                         "receipt_id": f"boot:{sid}:{agent}:{epoch}:{digest}"})
     reads = []
     for section in sections:
         count = section_reads[section["id"]] + doc_reads[section["slug"]]

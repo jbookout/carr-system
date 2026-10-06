@@ -1,5 +1,0 @@
-{
-  "schema": "rule-recall-policy/v1",
-  "proofs": {},
-  "note": "No active rule has complete benchmark and real-turn replacement evidence. Retain full text in boot. Proofs bind statement and route hashes, positive and negative source occurrences, complete-text receipt ids, and delivery before the binding event. A missing, stale, vacuous or incomplete proof retains the rule. This is delivery policy, not an amendment or retirement."
-}

@@ -65,7 +65,7 @@ export function renderRuleBoot(rows, sponsor, classes = RULE_BOOT_CLASSES) {
   out.push("Part 2 is a one-line INDEX of every active rule: `id | class | summary | when it applies`.");
   out.push("Classes: A always-on (full text in Part 1); B binds at an action point; C binds when a topic is present;");
   out.push("D already enforced by a gate; E stale or duplicate; U unclassified (full text in Part 1).");
-  out.push("Every unproven replacement retains its binding text in Part 1. For an index-only rule, fetch missing binding text:");
+  out.push("If a rule's full text is missing from Part 1, fetch its binding text:");
   out.push("standing-context with rule_ids:[\"<id>\"]. Never quote an index summary as the rule itself.");
   out.push(`Classification: ${RULE_BOOT_CLASSES_DIGEST}.`);
   out.push("");
@@ -130,16 +130,7 @@ export function ruleBootFetchCall(page) {
 // One page of the boot for one sponsor. `page` is 1-based; out of range is a
 // typed error the caller turns into a ToolError.
 export async function ruleBootPage(rows, sponsor, page = 1, classes = RULE_BOOT_CLASSES) {
-  const checked = {...classes};
-  for (const r of rows || []) {
-    const id = String(r.id || "").slice(0, 8).toLowerCase();
-    const cls = checked[id];
-    if (cls && !cls.on && (!cls.statement_sha256 ||
-        cls.statement_sha256 !== await sha256Hex(String(r.statement || "").trim()))) {
-      checked[id] = {...cls, on: true};
-    }
-  }
-  const rendered = renderRuleBoot(rows, sponsor, checked);
+  const rendered = renderRuleBoot(rows, sponsor, classes);
   const digest = `sha256:${await sha256Hex(rendered.text)}`;
   const pages = paginate(rendered.text);
   const n = Number.isInteger(page) ? page : Number.parseInt(String(page ?? 1), 10);

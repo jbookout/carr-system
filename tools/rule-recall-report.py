@@ -7,7 +7,6 @@ import importlib.util
 import re
 import html
 import json
-from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +17,13 @@ def load(path):
 
 
 REDACTIONS: list[tuple[re.Pattern[str], str]] = []
+# Section keys, titles and document names can identify a person; the
+# published audit carries the stable ID and counts only.
+PUBLIC_SECTION_FIELDS = {"id", "version", "observed_read_calls", "status"}
+
+
+def public_sections(sections):
+    return [{k: s[k] for k in sorted(PUBLIC_SECTION_FIELDS)} for s in sections]
 
 
 def redact(value):
@@ -128,7 +134,7 @@ def main():
         q2 = 'not reached' if exact else ('YES: frequent conduct/judgment' if cls.get('always_on') else 'NO: occasional subject/judgment')
         q3 = 'not reached' if exact or cls.get('always_on') else 'Retain boot; declare the subject before '+entry['moment']+'; propose that event contract to Joe'
         route_names = '; '.join(json.dumps(x,sort_keys=True,separators=(',',':')) for x in entry['routes']) or 'no current route'
-        design.append([cls.get('summary',rule['statement'][:160])+' ('+rid+')',entry['moment'],q1,q2,q3,route_names,'FULL BOOT before every ordinary tool; no proven exemption', 'candidate repaired here' if rid in mechanical else 'existing candidate / boot fallback'])
+        design.append([cls.get('summary','Unclassified rule')+' ('+rid+')',entry['moment'],q1,q2,q3,route_names,'FULL BOOT before every ordinary tool; no proven exemption', 'candidate repaired here' if rid in mechanical else 'existing candidate / boot fallback'])
         if rid == '99e951b9':
             cause,remedy='Filesystem index subject needs review against current record homes','Mechanical write route repaired; propose generated/database index contract to Joe; retain boot'
         elif rid in mechanical:
@@ -143,29 +149,30 @@ def main():
             cause,remedy='Wrong binding moment: topic judgment routed to a later tool proxy','Keep full boot; propose earlier explicit subject event; zero occurrences unproven'
         else:
             cause,remedy='Candidate trigger is reachable; occurrence or telemetry gap unproven','Keep with reason: infrequent business event remains valid; inspect adapter and receipts, never auto-retire'
-        dead.append([cls.get('summary',rule['statement'][:160])+' ('+rid+')',usage['deliveries_30d']['counts'][rid],usage['deliveries_14d']['counts'][rid], str(usage['gate_firings_30d'][rid])+' attributed; total unknown',cause if rid in zeros else 'Observed full-text deliveries; no dead-rule claim',remedy if rid in zeros else 'Keep; full boot until complete replacement proof'])
+        dead.append([cls.get('summary','Unclassified rule')+' ('+rid+')',usage['deliveries_30d']['counts'][rid],usage['deliveries_14d']['counts'][rid], str(usage['gate_firings_30d'][rid])+' attributed; total unknown',cause if rid in zeros else 'Observed full-text deliveries; no dead-rule claim',remedy if rid in zeros else 'Keep; full boot until complete replacement proof'])
     sections = usage['sections']
-    doc_counts = Counter(s['slug'] for s in sections)
     unread = [s for s in sections if not s['observed_read_calls']]
-    unread_docs = [slug for slug in doc_counts if all(not s['observed_read_calls'] for s in sections if s['slug']==slug)]
+    read_docs = {s['slug'] for s in sections if s['observed_read_calls']}
+    unread_docs = {s['slug'] for s in sections} - read_docs
+    sections = public_sections(sections)
     sanitized = [{'collection':str(Path(x['collection']).relative_to(Path.home())) if str(x['collection']).startswith(str(Path.home())+'/') else x['collection'],**{k:v for k,v in x.items() if k!='collection'}} for x in usage['inventory']]
     (p / 'inventory.json').write_text(json.dumps(sanitized,indent=2)+'\n')
-    (p / 'rule-data.json').write_text(json.dumps(redact({'label_status':'Display metadata with client pseudonyms; use stable section IDs for canonical lookup','rules':dead,'routes':design,'sections':sections,'unread_documents':unread_docs,'window_start':usage['deliveries_30d']['start'],'window_end':usage['now'],'limitations':usage['limitations']}),indent=2)+'\n')
+    (p / 'rule-data.json').write_text(json.dumps(redact({'label_status':'Display metadata with client pseudonyms; use stable section IDs for canonical lookup','rules':dead,'routes':design,'sections':sections,'unread_document_count':len(unread_docs),'window_start':usage['deliveries_30d']['start'],'window_end':usage['now'],'limitations':usage['limitations']}),indent=2)+'\n')
     body = f'<div class="card"><span class="stat">{len(zeros)} / {len(rules)}</span> active rules with zero observed full-text deliveries in 30 days.<br>{len(unread)} / {len(sections)} active doctrine sections with no observed direct read request. {len(unread_docs)} documents have no observed direct section or document read.</div>'
     body += '<p>Window: '+html.escape(usage['deliveries_30d']['start'])+' through '+html.escape(usage['now'])+'. Active means the live Joe-scoped standing-context set: 199, not the 210-row committed evaluation corpus. Deliveries are deduplicated full-text receipts and complete boot observations. Route matches, summaries and overflow pointers do not count.</p>'
     body += '<p>'+str(usage['unattributed_gate_firings'])+' refusals lack rule attribution. Per-rule attributed zeros therefore cannot establish “never fired.” Hook invocation meters have no rule IDs. Topic absence, wiped history, tool-only sessions and search/retrieve may leave reads unobserved.</p>'
     body += '<h2>All active rules: observed counts, cause and remedy</h2>'+table(['Rule','Full-text deliveries in 30 days','Full-text deliveries in 14 days','Gate firings in 30 days','Cause (zero rows only)','Remedy'],dead)
-    body += '<h2>Every active doctrine section, including playbooks</h2><p>These count direct read requests in available CARR project transcripts. A request is not proof of successful response or obedience. Zero is a review candidate, never permission to retire. Freshness/version and task relevance govern the next read.</p>'+table(['Document / section','Stable section ID','Version','Observed read calls','Status'],[[s['slug']+'#'+s['key'],s['id'],s['version'],s['observed_read_calls'],s['status']] for s in sections])
+    body += '<h2>Every active doctrine section, including playbooks</h2><p>These count direct read requests in available CARR project transcripts. A request is not proof of successful response or obedience. Zero is a review candidate, never permission to retire. Freshness/version and task relevance govern the next read.</p>'+table(['Stable section ID','Version','Observed read calls','Status'],[[s['id'],s['version'],s['observed_read_calls'],s['status']] for s in sections])
     body += '<details><summary>Named source inventory and parsing limits</summary>'+table(['Collection','Rows','In window','Invalid / missing'],[[x['collection'],x.get('rows'),x.get('in_window'),str(x.get('invalid',0))+(' missing' if x.get('missing') else '')] for x in sanitized])+'</details>'
     (p / 'dead-rules.html').write_text(page('Find silence without inventing obsolescence','Delivery and enforcement are measured separately. Missing attribution is reported as unknown; no rule is retired by this audit.',body))
     body = f'<div class="card"><span class="stat">583 / 717 → {benchmark["available_applications"]} / 717</span><br>81.3% → 100% full-text availability on the same 72 held-out cases. Candidate boot: 199 rules, {benchmark["approx_tokens"]:,} estimated tokens, {benchmark["pages"]} pages; explicit 80,000-token budget.</div>'
     body += '<p>The guarantee is delivery before an ordinary tool effect when the installed adapter invokes the gate. Every rule stays in full boot until a replacement is proven. Outages, three refusals, missing deployment and unwritable state now hold the effect. Rule reads and discovery stay available. This does not prove that a model obeys every rule, that every client invokes the adapter, or that production has this unmerged change.</p>'
-    body += '<h2>One invariant; two separate measurements</h2>'+table(['Stage','Condition','Result'],[['Boot','All live binding text read, complete digest/pages/length verified','Allow ordinary tools'],['Replacement admission','Exact statement, route and delivery-source hashes; every frozen test case; benchmark positive and negative receipts; 200 unique labelled real turns bound to a separately captured, hashed native sampling frame; full text before event in every positive','Permit only that proven route to replace boot'],['Any stale/missing/late/empty proof','Missing source, changed statement/route/source, no positive example, asserted scores, late receipt','Keep full boot'],['Health','Zero observed full-text deliveries in 14 days','Dedup open/update loop owned by orchestrator; listed remediation, verification and auto-clear in row']])
+    body += '<h2>One invariant; two separate measurements</h2>'+table(['Stage','Condition','Result'],[['Boot','All live binding text read, complete digest/pages/length verified','Allow ordinary tools'],['Replacement admission','Not built. Committed proof files cannot show that a replacement route ran; admission needs native, independently verifiable occurrence evidence and route receipts that exclude boot','Every rule keeps full boot'],['Health','Zero observed full-text deliveries in 14 days','Dedup open/update loop owned by orchestrator; listed remediation, verification and auto-clear in row']])
     body += '<p>JIT precision keeps its frozen owed-rule labels. Larger startup availability cannot remove labels or count as a precision improvement. The baseline report measured 583/717 on this frozen split; after is independently rendered from the live 199-rule snapshot. No rule yet has sufficient real-turn applicability labels, so no exemption is admitted.</p>'
     body += '<h2>Ordered decision procedure for all 199 rules</h2><p>Q1: detectable named event? Q2: judgment applying nearly every turn? Q3: what earlier structured event or approved rewrite would make it detectable, otherwise retain boot? Routes below name candidates; existence is never credited as 100% moment coverage. The full boot protects semantic clauses while each narrower route earns its proof.</p>'+table(['Rule','Moment','Q1','Q2','Q3','Named route / gate','Guaranteed current delivery','Source disposition'],design)
     body += '<h2>Frozen benchmark observations</h2>'+table(['Case','Required','Full text available','Missing'],[[x['id'],len(x['gold']),len(x['available']),', '.join(x['missing']) or 'none'] for x in benchmark['observations']])
     body += '<h2>Proof and remaining operational limits</h2><p>Fixture SHA256: '+benchmark['fixture_sha256']+'. Boot digest: '+benchmark['boot_digest']+'. Full boot cost rises from 34,845 to '+f'{benchmark["approx_tokens"]:,}'+' estimated tokens. No paid Claude call or Jev call was used. Tests prove fail-closed behavior and counterexamples, not installation. Current real logs are before-change evidence; real-turn applicability proof and distinct live Claude/Codex invocation remain required before shrinking boot.</p>'
-    (p / 'design.html').write_text(page('Guarantee delivery by retaining unproven rules','A route may replace startup text only after its own benchmark and real-turn proof passes. There are currently zero exemptions.',body))
+    (p / 'design.html').write_text(page('Guarantee delivery by retaining unproven rules','No route replaces startup text: an admission path needs native occurrence evidence that does not yet exist. There are zero exemptions.',body))
     print(json.dumps({'recommendations':len(recommendations),'rules':len(design),'zero':len(zeros),'sections':len(sections),'unread_sections':len(unread),'unread_documents':len(unread_docs)}))
 
 

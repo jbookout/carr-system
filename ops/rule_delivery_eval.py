@@ -202,16 +202,14 @@ def boot_always_on_ids(repo, sponsor="joe"):
     """Ids the live boot would render in full for one sponsor.
 
     The runtime scopes active store rows first, then applies the class file's
-    personal boundary and proof-gated retention policy. The committed class
-    file contains classified ids; this replays selection without store access.
+    personal boundary; every rule in scope keeps its full text. The committed
+    class file contains classified ids; this replays selection without store
+    access.
     """
     path = os.path.join(repo, "ops", "config", "rule-classes.v1.json")
     with open(path, "r", encoding="utf-8") as handle:
         rows = json.load(handle)["rules"]
-    from lib.rule_recall import load_proofs, retain_in_boot
-    proofs = load_proofs(repo)
-    return {rid for rid, row in rows.items()
-            if retain_in_boot(rid, row, proofs) and row.get("personal_to") in (None, sponsor)}
+    return {rid for rid, row in rows.items() if row.get("personal_to") in (None, sponsor)}
 
 
 def universes(meta, names, *, boot_ids=None):

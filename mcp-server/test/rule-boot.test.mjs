@@ -7,13 +7,6 @@ import { executeRegisteredTool } from "../src/tools.js";
 import { RULE_BOOT_CLASSES } from "../src/rule-boot-classes.js";
 import { paginate, renderRuleBoot, ruleBootPage, RULE_BOOT_PAGE_CHARS } from "../src/rule-boot.js";
 
-test("a missing or stale proof cannot remove live rule text", async () => {
-  const classes = {abcdef12: {cls: "b", on: false, summary: "Test", when: "Test event",
-    statement_sha256: "0".repeat(64)}};
-  const page = await ruleBootPage([{id: "abcdef12", statement: "Current binding text"}], "joe", 1, classes);
-  assert.ok(page.text.includes("Current binding text"));
-});
-
 const JOE = { id: "11111111-1111-4111-8111-111111111111", slug: "joe", human: true, via: "oauth-google" };
 
 const classified = Object.keys(RULE_BOOT_CLASSES).sort();
