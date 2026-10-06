@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 import json
+import os
+import io
+import importlib.util
+from datetime import datetime, timezone
+from unittest import mock
 from pathlib import Path
 import subprocess
 import sys
@@ -9,7 +14,201 @@ import unittest
 import seat_health as health
 
 
+spec = importlib.util.spec_from_file_location('seat_cli', Path(__file__).with_name('seat-health.py'))
+assert spec is not None and spec.loader is not None
+cli = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cli)
+
+
 class SeatHealthTests(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        patch = mock.patch.dict(os.environ, {'HOME': self.home.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def invoke(self, root, *args, probe=None, reconcile=None):
+        command = ['seat-health', '--runtime-repo', str(root), '--output-root', str(root / 'results'), *args]
+        with mock.patch.object(sys, 'argv', command), mock.patch.object(sys, 'stdout', io.StringIO()), \
+             mock.patch.object(cli, 'probe', side_effect=probe or self.passing), \
+             mock.patch.object(cli, 'reconcile', side_effect=reconcile or (lambda *a: 'none')):
+            return cli.main()
+
+    def passing(self, seat, *args):
+        return health.assess(seat, '323', '', 0, .01)
+
+    def test_01_jev_conformance(self):
+        spec = importlib.util.spec_from_file_location('conformance', Path(__file__).with_name('check-jev-conformance.py'))
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        self.assertEqual(checker.python_errors(Path(health.__file__).read_text()), [])
+
+    def test_01_jev_rejects_cached_observations(self):
+        import jev_semantic
+        fresh = {'model': 'jev-1.13.0', 'answers': {'answer': {'choice': '323'}}}
+        seen = []
+        def request(state, *a, **kw):
+            seen.append(state['run_id'])
+            return fresh
+        with mock.patch.object(jev_semantic, 'ask', side_effect=request), mock.patch.object(sys, 'stdout', io.StringIO()):
+            self.assertEqual(health.probe_jev('run-one'), 0)
+            self.assertEqual(health.probe_jev('run-two'), 0)
+        self.assertEqual(seen, ['run-one', 'run-two'])
+        with mock.patch.object(jev_semantic, 'ask', return_value=dict(fresh, cache_hit=True)), mock.patch.object(sys, 'stdout', io.StringIO()):
+            self.assertEqual(health.probe_jev('run-three'), 1)
+
+    def test_02_observations_do_not_complete_daily_recording(self):
+        for options in [('--seat', 'grok', '--no-record'), ('--no-record',)]:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                observed = self.passing if len(options) > 1 else lambda seat, *a: health.assess(seat, '', '', 1, .01)
+                self.invoke(root, *options, probe=observed)
+                seen = []
+                def record(row, *args):
+                    seen.append(row['seat'])
+                    return 'none'
+                self.assertEqual(self.invoke(root, reconcile=record), 0)
+                self.assertEqual(seen, list(health.SEATS))
+                seen.clear()
+                self.assertEqual(self.invoke(root, reconcile=record), 0)
+                self.assertEqual(seen, [])
+
+    def test_03_refresh_preserves_unselected_and_interrupted_evidence(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            output = root / 'results'
+            report = output / 'seat-health.json'
+            seed = {seat: dict(self.passing(seat), observed_at=datetime.now(timezone.utc).isoformat()) for seat in health.SEATS}
+            health.atomic_json(report, {'schema': 'carr-seat-health/v1', 'seats': seed})
+            self.invoke(root, '--seat', 'grok', '--no-record')
+            self.assertEqual(set(json.loads(report.read_text())['seats']), set(health.SEATS))
+            count = 0
+            def interrupted(seat, *args):
+                nonlocal count
+                count += 1
+                if count == 2:
+                    saved = json.loads(report.read_text())
+                    self.assertTrue(all(health.dispatchable(saved, s) for s in health.SEATS))
+                    raise KeyboardInterrupt()
+                return self.passing(seat)
+            with self.assertRaises(KeyboardInterrupt):
+                self.invoke(root, '--force', '--no-record', probe=interrupted)
+            self.assertEqual(set(json.loads(report.read_text())['seats']), set(health.SEATS))
+
+    def test_04_telemetry_cannot_escape_deadline(self):
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sol-studio.log').write_text('model: gpt-6.1-sol\ncodex\n323\nCODEX_EXIT 0\n')
+            def delayed(*a):
+                time.sleep(.6)
+                return None
+            started = time.monotonic()
+            with mock.patch.object(health, 'execute', return_value=('', '', 0, .01)), mock.patch.object(health, 'codex_usage', side_effect=delayed):
+                row = health.probe('sol-studio', root, root, .05, '')
+            self.assertLess(time.monotonic() - started, .4)
+            self.assertFalse(row['passed'])
+            self.assertGreaterEqual(row['latency_seconds'], .05)
+
+    def test_05_builders_require_completion_and_model(self):
+        good = {'type': 'result', 'subtype': 'success', 'result': '323', 'is_error': False, 'modelUsage': {'opus-5.5': {}}}
+        cases = [('opus-studio', '323', False),
+                 ('opus-studio', json.dumps(good) + '\nOPUS_EXIT 0', True),
+                 ('opus-studio', json.dumps(dict(good, subtype='error_max_turns')) + '\nOPUS_EXIT 0', False),
+                 ('opus-studio', json.dumps(dict(good, modelUsage={'other': {}})) + '\nOPUS_EXIT 0', False),
+                 ('sol-studio', 'model: other\ncodex\n323\nCODEX_EXIT 0', False),
+                 ('sol-studio', 'model: gpt-6.1-sol\ncodex\n323\nCODEX_EXIT 0', True),
+                 ('sol-studio', 'model: gpt-6.1-sol\ncodex\n323', False),
+                 ('sol-studio', 'CODEX_EXIT 0\nmodel: gpt-6.1-sol\ncodex\n323', False)]
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for seat, raw, passed in cases:
+                with self.subTest(seat=seat, raw=raw):
+                    (root / (seat + '.log')).write_text(raw)
+                    with mock.patch.object(health, 'execute', return_value=('', '', 0, .01)):
+                        row = health.probe(seat, root, root, 1, '')
+                    self.assertEqual(row['passed'], passed)
+
+    def test_06_malformed_values_fail_closed_and_continue(self):
+        report = {'schema': 'carr-seat-health/v1', 'seats': {'grok': {'observed_at': None}}}
+        self.assertFalse(health.dispatchable(report, 'grok'))
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'session.jsonl').write_text(json.dumps({'timestamp': None, 'payload': {'rate_limits': {'used_percent': 4}}}) + '\n')
+            self.assertIsNone(health.codex_usage(root))
+            with mock.patch.object(health, 'execute', return_value=(json.dumps({'error': {'message': 'bad'}}), '', 1, .01)):
+                self.assertFalse(health.probe('jev', root, root, 1, '')['passed'])
+            health.atomic_json(root / 'results/seat-health-grok-loop.json', [])
+            seen = []
+            def observed(seat, *args):
+                seen.append(seat)
+                return health.assess(seat, '', '', 1, .01)
+            self.invoke(root, '--seat', 'grok', '--seat', 'jev', probe=observed, reconcile=lambda row, path, verb: health.reconcile(row, path, lambda *a: {'ok': False}))
+            self.assertEqual(seen, ['grok', 'jev'])
+            self.assertEqual(set(json.loads((root / 'results/seat-health.json').read_text())['seats']), {'grok', 'jev'})
+
+    def test_07_torn_and_malformed_ledger_recovers(self):
+        for tail in ['{"day":', '[]', '{"day": "today"}', json.dumps({'completed_recording': True, 'day': datetime.now(timezone.utc).date().isoformat(), 'passed': True, 'seats': [{}] * 6})]:
+            with self.subTest(tail=tail), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                ledger = root / 'results/seat-health-runs.jsonl'
+                ledger.parent.mkdir()
+                ledger.write_text(tail)
+                self.assertEqual(self.invoke(root), 0)
+                lines = ledger.read_text().splitlines()
+                self.assertIsInstance(json.loads(lines[-1]), dict)
+                self.assertEqual(self.invoke(root), 0)
+
+    def test_07_interrupted_ledger_publication_does_not_disable_retry(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            ledger = root / 'results/seat-health-runs.jsonl'
+            ledger.parent.mkdir()
+            old = json.dumps({'day': '2020-01-01', 'passed': True, 'seats': list(health.SEATS), 'completed_recording': True}) + '\n'
+            ledger.write_text(old)
+            replace = Path.replace
+            def interrupted(path, target):
+                if target == ledger:
+                    raise OSError('interrupted publication')
+                return replace(path, target)
+            with mock.patch.object(Path, 'replace', interrupted), self.assertRaises(OSError):
+                self.invoke(root)
+            self.assertEqual(ledger.read_text(), old)
+            self.assertEqual(self.invoke(root), 0)
+            seen = []
+            self.invoke(root, probe=lambda seat, *a: seen.append(seat) or self.passing(seat))
+            self.assertEqual(seen, [])
+
+    def test_08_closed_failed_loop_replaced_in_same_observation(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d) / 'loop.json'
+            health.atomic_json(state, {'loop_id': 'old', 'open_key': 'old-key'})
+            calls = []
+            def verb(name, payload):
+                calls.append(name)
+                if name == 'add-loop': return {'ok': True, 'loop_id': 'new'}
+                if name == 'read-loop': return {'loop': {'status': 'done' if payload['loop_id'] == 'old' else 'open', 'version': 2}}
+                return {'ok': True}
+            self.assertEqual(health.reconcile(health.assess('grok', '', '', 1, .01), state, verb), 'open')
+            self.assertEqual(calls, ['read-loop', 'add-loop', 'read-loop', 'update-loop'])
+            self.assertEqual(json.loads(state.read_text())['loop_id'], 'new')
+
+    def test_09_relative_runtime_executes_record_verb(self):
+        with tempfile.TemporaryDirectory(dir='.') as d:
+            root = Path(d).relative_to(Path.cwd())
+            runner = root / 'run.sh'
+            runner.write_text("#!/bin/sh\nprintf '{\"ok\":true}\\n'\n")
+            runner.chmod(0o700)
+            self.assertEqual(health.verb_call(root, 'read-loop', {}), {'ok': True})
+
+    def test_10_boot_prose_does_not_classify_terminal_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'sol-studio.log').write_text('model: gpt-6.1-sol\nRule: sign-in needs credentials\ncodex\n323\nCODEX_EXIT 7')
+            with mock.patch.object(health, 'execute', return_value=('', 'runner failure', 0, .01)):
+                row = health.probe('sol-studio', root, root, 1, '')
+            self.assertEqual(row['failing_layer'], 'runner_wrapper')
     maxDiff = 800
     def test_only_exact_answer_passes(self):
         for answer, code, expected in [('323\n', 0, True), ('324', 0, False),
@@ -27,7 +226,7 @@ class SeatHealthTests(unittest.TestCase):
             root = Path(directory)
             runner = root / 'out/orch/sol-run.sh'
             runner.parent.mkdir(parents=True)
-            runner.write_text('#!/bin/zsh\nprint -r -- "codex\n323\nrunner receipt noise\ntokens used\n99\n323\nCODEX_EXIT 0" > "$2"\n')
+            runner.write_text('#!/bin/zsh\nprint -r -- "model: gpt-6.1-sol\ncodex\n323\nrunner receipt noise\ntokens used\n99\n323\nCODEX_EXIT 0" > "$2"\n')
             output = root / 'results'
             command = [sys.executable, str(Path(__file__).with_name('seat-health.py')),
                        '--runtime-repo', str(root), '--output-root', str(output),

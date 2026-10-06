@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import math
 import re
+import time
 from pathlib import Path
 
 EXPECTED = '323'
@@ -77,29 +78,37 @@ def reconcile(row, state_path, verb):
     import uuid
     path = Path(state_path)
     state = json.loads(path.read_text()) if path.exists() else {}
+    if not isinstance(state, dict) or any(key in state and not isinstance(state[key], str) for key in ('loop_id', 'open_key', 'mutation_key')):
+        return 'error'
     if row['passed'] and not state.get('loop_id') and not state.get('open_key'):
         return 'none'
-    if not state.get('loop_id'):
-        state.setdefault('open_key', 'seat-health:' + row['seat'] + ':' + str(uuid.uuid4()))
-        atomic_json(path, state)
-        result = verb('add-loop', {'idempotency_key': state['open_key'],
-            'kind': 'open_loop', 'owner': 'claude', 'domain': 'system',
-            'body': row['action'], 'source_note': 'Daily AI seat probe: ' + row['seat'],
-            'blocker': 'other_lane', 'blocker_detail': 'Orchestrator runner remediation for ' + row['seat']})
-        if result.get('ok') is not True or not result.get('loop_id'):
+    for attempt in range(2):
+        if not state.get('loop_id'):
+            state.setdefault('open_key', 'seat-health:' + row['seat'] + ':' + str(uuid.uuid4()))
+            atomic_json(path, state)
+            result = verb('add-loop', {'idempotency_key': state['open_key'],
+                'kind': 'open_loop', 'owner': 'claude', 'domain': 'system',
+                'body': row['action'], 'source_note': 'Daily AI seat probe: ' + row['seat'],
+                'blocker': 'other_lane', 'blocker_detail': 'Orchestrator runner remediation for ' + row['seat']})
+            if not isinstance(result, dict) or result.get('ok') is not True or not isinstance(result.get('loop_id'), str) or not result['loop_id']:
+                return 'error'
+            state['loop_id'] = result['loop_id']
+            atomic_json(path, state)
+        current = verb('read-loop', {'loop_id': state['loop_id']})
+        if not isinstance(current, dict) or current.get('error') or not isinstance(current.get('loop'), dict):
             return 'error'
-        state['loop_id'] = result['loop_id']
-        atomic_json(path, state)
-    current = verb('read-loop', {'loop_id': state['loop_id']})
-    if current.get('error') or not isinstance(current.get('loop'), dict):
-        return 'error'
-    loop = current.get('loop', current)
-    version = loop.get('version', loop.get('current_version'))
-    if version is None:
-        return 'error'
-    if loop.get('status') in ('done', 'dropped'):
+        loop = current['loop']
+        if loop.get('status') not in ('done', 'dropped'):
+            break
         atomic_json(path, {})
-        return 'cleared' if row['passed'] else 'error'
+        state = {}
+        if row['passed']:
+            return 'cleared'
+    else:
+        return 'error'
+    version = loop.get('version', loop.get('current_version'))
+    if type(version) is not int or version < 1:
+        return 'error'
     intent = {'verb': 'close-loop' if row['passed'] else 'update-loop',
               'base_version': version, 'body': row['action']}
     if state.get('intent') != intent:
@@ -112,7 +121,7 @@ def reconcile(row, state_path, verb):
     else:
         payload['body'] = row['action']
     result = verb(intent['verb'], payload)
-    if result.get('ok') is not True:
+    if not isinstance(result, dict) or result.get('ok') is not True:
         return 'error'
     atomic_json(path, {} if row['passed'] else {'loop_id': state['loop_id'], 'open_key': state['open_key']})
     return 'cleared' if row['passed'] else 'open'
@@ -127,7 +136,7 @@ def dispatchable(report, seat, *, now=None):
         return (report['schema'] == 'carr-seat-health/v1' and 0 <= age <= 86400
                 and report['seats'][seat]['passed'] is True
                 and report['seats'][seat]['dispatchable'] is True)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return False
 
 
@@ -160,7 +169,7 @@ def codex_usage(sessions):
                         at = datetime.fromisoformat(row['timestamp'].replace('Z', '+00:00'))
                         if usage and at.tzinfo and (latest is None or at > latest[0]):
                             latest = (at, usage)
-                    except (ValueError, KeyError, TypeError):
+                    except (ValueError, KeyError, TypeError, AttributeError):
                         continue
         except OSError:
             continue
@@ -192,7 +201,8 @@ def execute(argv, cwd, timeout, env=None):
 
 
 def verb_call(repo, name, payload):
-    output, _, code, _ = execute([str(Path(repo) / 'run.sh'), 'call', name,
+    repo = Path(repo).resolve()
+    output, _, code, _ = execute([str(repo / 'run.sh'), 'call', name,
                                  json.dumps(payload)], repo, 35)
     if code:
         return {'ok': False}
@@ -206,29 +216,62 @@ def verb_call(repo, name, payload):
 def probe_jev(run_id):
     """One paid Worker invocation through the same shared admission as builders."""
     import typesafe_client as ts
+    import jev_semantic
     try:
-        value, error = ts.server_ask({'task': PROMPT, 'run_id': run_id},
+        value = jev_semantic.ask({'task': PROMPT, 'run_id': run_id},
             {'answer': ts.choice('Choose the result of 17 * 19.',
                                {'323': 'Select if this is the product.',
                                 '324': 'Select if this is the product.'})},
-            model=SEATS['jev'], facets=[], purpose='call', session_id=run_id,
-            timeout=20, transport_mode='paid_once', caller='seat_health')
-        if error or not value:
-            print(json.dumps({'ok': False, 'error': error or 'runner unavailable'}))
-            return 1
+            caller='seat_health', version='1', client=ts, facets=[], purpose='call',
+            session_id=run_id, timeout=20, retries=0, cache_ttl_seconds=0)
+        if value.get('cache_hit') is True or value.get('model') != SEATS['jev']:
+            raise ValueError('probe requires a fresh pinned model observation')
         print(json.dumps({'ok': True, 'answer': value['answers']['answer'].get('choice'),
                           'model': value.get('model'), 'usage': numeric_usage(value.get('usage'))}))
         return 0
-    except (ts.TypeSafeError, ValueError, KeyError, OSError) as exc:
-        print(json.dumps({'ok': False, 'error': str(exc)}))
+    except (ts.TypeSafeError, ValueError, KeyError, OSError, TimeoutError):
+        print(json.dumps({'ok': False, 'error': 'Jev probe unavailable'}))
         return 1
+
+
+def bounded_codex_usage(sessions, timeout):
+    """Telemetry shares the probe deadline; terminate scans that exceed it."""
+    import multiprocessing
+    context = multiprocessing.get_context('fork')
+    receive, send = context.Pipe(duplex=False)
+    def collect():
+        try:
+            send.send(codex_usage(sessions))
+        except (OSError, ValueError, TypeError, AttributeError):
+            send.send(None)
+        finally:
+            send.close()
+    process = context.Process(target=collect)
+    process.start()
+    send.close()
+    try:
+        if receive.poll(max(0, timeout)):
+            try:
+                return receive.recv(), False
+            except EOFError:
+                return None, False
+        return None, True
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(.05)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        receive.close()
 
 
 def probe(seat, runtime, run_dir, timeout, e2e_cli):
     import os
     import shlex
     import sys
-    runtime, run_dir = Path(runtime), Path(run_dir)
+    started = time.monotonic()
+    runtime, run_dir = Path(runtime).resolve(), Path(run_dir).resolve()
     prompt = run_dir / (seat + '.prompt')
     log = run_dir / (seat + '.log')
     prompt.write_text(PROMPT + '\n')
@@ -258,33 +301,44 @@ def probe(seat, runtime, run_dir, timeout, e2e_cli):
     answer = output
     if seat in ('opus-studio', 'sol-studio', 'sol-macbook'):
         raw = log.read_text() if seat != 'sol-macbook' and log.exists() else output
-        diagnostics += '\n' + raw
-        exits = re.findall(r'(?m)^(?:CODEX|CLAUDE|OPUS)_EXIT (\d+)\s*$', raw)
-        if exits:
-            code = int(exits[-1]) or code
-        elif seat.startswith('sol-'):
-            code = code or 4
-        raw = re.sub(r'(?m)^(?:CODEX|CLAUDE|OPUS)_EXIT \d+\s*$', '', raw).strip()
+        terminal = 'OPUS' if seat == 'opus-studio' else 'CODEX'
+        exits = re.findall(r'(?m)^' + terminal + r'_EXIT (\d+)\s*$', raw)
+        completed = re.search(r'(?m)^' + terminal + r'_EXIT (\d+)\s*\Z', raw)
+        code = code or (int(completed[1]) if completed and len(exits) == 1 else 4)
+        raw = re.sub(r'(?m)^' + terminal + r'_EXIT \d+\s*$', '', raw).strip()
         if seat.startswith('sol-'):
+            models = re.findall(r'(?m)^model:\s*(\S+)\s*$', raw)
+            if models != [SEATS[seat]]:
+                code = code or 5
             footer = re.search(r'(?s)\ntokens used\n[0-9,]+\n(.*)$', raw)
-            answer = footer[1] if footer else (raw.rsplit('\ncodex\n', 1)[-1] if '\ncodex\n' in raw else raw.removeprefix('codex\n'))
+            answer = footer[1] if footer else (raw.rsplit('\ncodex\n', 1)[-1] if '\ncodex\n' in raw else '')
         else:
             try:
                 result = json.loads(raw)
-                answer = result.get('result', '') if result.get('is_error') is not True else ''
-                code = code or int(result.get('is_error') is True)
+                if not isinstance(result, dict):
+                    raise ValueError('invalid result')
+                answer = result.get('result', '')
+                if result.get('type') != 'result' or result.get('subtype') != 'success' or result.get('is_error') is not False:
+                    code = code or 4
+                models = result.get('modelUsage')
+                if not isinstance(models, dict) or set(models) != {SEATS[seat]}:
+                    code = code or 5
                 usage = numeric_usage(result)
-            except (ValueError, AttributeError):
-                answer = raw
+            except (ValueError, TypeError):
+                answer, code = '', code or 4
     elif seat == 'jev':
         try:
             result = json.loads(output)
+            if not isinstance(result, dict):
+                raise ValueError('invalid result')
             answer = result.get('answer') or ''
             usage = numeric_usage(result.get('usage'))
-            diagnostics += result.get('error', '')
+            error = result.get('error')
+            if isinstance(error, str):
+                diagnostics += error
             if result.get('model') != SEATS['jev'] or result.get('ok') is not True:
                 code = code or 5
-        except (ValueError, AttributeError):
+        except (ValueError, TypeError):
             answer, code = '', code or 4
     elif seat == 'e2e-auth':
         diagnostics += output
@@ -298,21 +352,25 @@ def probe(seat, runtime, run_dir, timeout, e2e_cli):
             except ValueError:
                 pass
     if seat == 'sol-studio':
-        usage = codex_usage(Path.home() / '.codex/sessions')
+        usage, timed_out = bounded_codex_usage(Path.home() / '.codex/sessions', max(0, timeout - (time.monotonic() - started)))
+        if timed_out:
+            code, diagnostics = 124, 'runner timed out collecting telemetry'
     elif seat == 'sol-macbook':
         import inspect
         script = ('from pathlib import Path\nfrom datetime import datetime\nimport json,math\n'
                   + inspect.getsource(numeric_usage) + '\n' + inspect.getsource(codex_usage)
                   + '\nprint(json.dumps(codex_usage(Path.home()/".codex/sessions")))')
         raw, _, rc, _ = execute(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
-                                'macbook', 'python3 -c ' + shlex.quote(script)], runtime, 10)
+                                'macbook', 'python3 -c ' + shlex.quote(script)], runtime, max(.001, timeout - (time.monotonic() - started)))
+        if rc == 124:
+            code, diagnostics = 124, 'runner timed out collecting telemetry'
         if not rc:
             try:
                 value = json.loads(raw)
                 usage = numeric_usage(value)
                 if usage and value.get('observed_at'):
                     usage['observed_at'] = datetime.fromisoformat(value['observed_at']).isoformat()
-            except ValueError:
+            except (ValueError, TypeError, AttributeError):
                 pass
     elif seat == 'opus-studio' and usage is None:
         path = runtime / 'out/orch/budget/claude-usage.json'
@@ -324,8 +382,13 @@ def probe(seat, runtime, run_dir, timeout, e2e_cli):
                     at = datetime.fromisoformat(value['observed_at'].replace('Z', '+00:00'))
                     usage['observed_at'] = at.isoformat()
                     usage['stale'] = (datetime.now(timezone.utc) - at).total_seconds() > 1800
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, AttributeError):
                 usage = None
+    if not isinstance(answer, str):
+        answer, code = '', code or 4
+    latency = time.monotonic() - started
+    if latency > timeout:
+        code, diagnostics = 124, 'runner timed out'
     return assess(seat, answer, diagnostics, code, latency, usage=usage)
 
 

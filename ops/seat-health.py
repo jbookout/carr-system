@@ -7,9 +7,42 @@ import json
 from pathlib import Path
 import sys
 import uuid
-from seat_health import SEATS, atomic_json, dispatchable, health_rows, probe, probe_jev, reconcile, verb_call
+from seat_health import assess, SEATS, atomic_json, dispatchable, health_rows, probe, probe_jev, reconcile, verb_call
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def read_report(path):
+    try:
+        report = json.loads(path.read_text())
+        seats = report.get('seats') if isinstance(report, dict) and report.get('schema') == 'carr-seat-health/v1' else None
+        return {seat: row for seat, row in seats.items() if seat in SEATS and isinstance(row, dict)} if isinstance(seats, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def completed_today(ledger, day):
+    if not ledger.exists():
+        return None
+    for line in reversed(ledger.read_text().splitlines()):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, dict) and row.get('completed_recording') is True
+                and row.get('day') == day and type(row.get('passed')) is bool
+                and isinstance(row.get('seats'), list)
+                and all(isinstance(seat, str) for seat in row['seats'])
+                and len(row['seats']) == len(SEATS) and set(row['seats']) == set(SEATS)):
+            return row
+    return None
+
+
+def publish_receipt(ledger, receipt):
+    previous = ledger.read_text() if ledger.exists() else ''
+    temp = ledger.with_suffix('.tmp')
+    temp.write_text(previous.rstrip('\n') + ('\n' if previous else '') + json.dumps(receipt) + '\n')
+    temp.replace(ledger)
 
 
 def main():
@@ -28,6 +61,7 @@ def main():
         return probe_jev(args.jev_task)
     if args.timeout_seconds < 1 or args.timeout_seconds > 1800:
         parser.error('timeout must be between 1 and 1800 seconds')
+    args.runtime_repo = args.runtime_repo.resolve()
     output = args.output_root or args.runtime_repo / 'out/orch/budget'
     report_path = output / 'seat-health.json'
     if args.show:
@@ -47,25 +81,31 @@ def main():
             return 2
         now = datetime.now(timezone.utc)
         ledger = output / 'seat-health-runs.jsonl'
-        previous = ledger.read_text().splitlines() if ledger.exists() else []
-        if previous and not args.force and not args.seat and json.loads(previous[-1]).get('day') == now.date().isoformat():
-            print('seat-health: today already probed; read seat-health.json')
-            return int(not json.loads(previous[-1]).get('passed'))
+        previous = completed_today(ledger, now.date().isoformat())
+        if previous and not args.force and not args.seat and not args.no_record:
+            print('seat-health: today recording completed; read seat-health.json')
+            return int(not previous['passed'])
         run_id = 'seat-health-' + str(uuid.uuid4())
         run_dir = args.runtime_repo / 'out/seat-health-runs' / run_id
         run_dir.mkdir(parents=True, mode=0o700)
-        rows = {}
+        rows = read_report(report_path)
+        selected = list(args.seat or SEATS)
+        recorded = True
         failed = False
-        for seat in args.seat or SEATS:
-            row = probe(seat, args.runtime_repo.resolve(), run_dir.resolve(), args.timeout_seconds, args.e2e_cli)
+        for seat in selected:
+            try:
+                row = probe(seat, args.runtime_repo, run_dir.resolve(), args.timeout_seconds, args.e2e_cli)
+            except (ValueError, OSError, TypeError, AttributeError):
+                row = assess(seat, '', '', 4, 0, reason='invalid_probe_data')
             row['observed_at'] = datetime.now(timezone.utc).isoformat()
             row['record_action'] = 'not_requested'
             if not args.no_record:
                 try:
                     row['record_action'] = reconcile(row, output / ('seat-health-' + seat + '-loop.json'),
                         lambda name, payload: verb_call(args.runtime_repo, name, payload))
-                except (ValueError, OSError):
+                except (ValueError, OSError, TypeError, AttributeError):
                     row['record_action'] = 'error'
+            recorded &= row['record_action'] in ('none', 'open', 'cleared')
             failed |= not row['passed'] or row['record_action'] == 'error'
             rows[seat] = row
             atomic_json(report_path, {'schema': 'carr-seat-health/v1', 'run_id': run_id,
@@ -73,10 +113,10 @@ def main():
                 'recipient': 'orchestrator', 'seats': rows})
             print(f"{'PASS' if row['passed'] else 'FAIL'} {seat} latency={row['latency_seconds']}s "
                   f"layer={row['failing_layer'] or 'none'} record={row['record_action']} · {row['action']}")
-        with ledger.open('a') as log:
-            log.write(json.dumps({'run_id': run_id, 'day': now.date().isoformat(),
-                'ended_at': datetime.now(timezone.utc).isoformat(), 'seats': list(rows),
-                'passed': not failed}) + '\n')
+        publish_receipt(ledger, {'run_id': run_id, 'day': now.date().isoformat(),
+            'ended_at': datetime.now(timezone.utc).isoformat(), 'seats': selected,
+            'completed_recording': not args.no_record and set(selected) == set(SEATS) and recorded,
+            'passed': not failed})
         return int(failed)
 
 
