@@ -32,7 +32,7 @@ export function preservesRegistryChainHistory(before, after) {
     same(after.strict_atomic_groups, [...before.strict_atomic_groups, ...appended.filter(row => row.strict_atomic).map(row => row.atomic_pair)]);
 }
 
-export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest, chain = registryChain }) {
+export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest, chain = registryChain, predecessorSql = null }) {
   const predecessor = chain.versions.at(-1);
   const domains = Array.isArray(domainMigration) ? domainMigration : [domainMigration];
   const domain = domains.at(-1);
@@ -61,7 +61,7 @@ export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest
     dependencies: [basename(predecessor.migration), ...domains.map(item => basename(item.filename))],
     snapshot: {include_current_entry_set: true, catalog_function: `ops.scac_mutation_catalog_v${number}_current()`},
   };
-  const template = readFileSync(new URL('../' + predecessor.migration, import.meta.url), 'utf8');
+  const template = predecessorSql ?? readFileSync(new URL('../' + predecessor.migration, import.meta.url), 'utf8');
   if (digest(template) !== predecessor.migration_sha256) throw new Error('predecessor migration pin drifted');
   const request = { template, predecessor: { number: predecessor.number, digest: predecessor.digest,
     entry_count: predecessor.entry_count, source_count: predecessor.source_count, catalog: predecessor.catalog,
