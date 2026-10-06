@@ -1335,6 +1335,11 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+_BUILD_DURATION_UNAVAILABLE = ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled "
+                               "checker; verify ops/build-duration-check.py --health; "
+                               "auto-clear after fresh complete scan")
+
+
 def _build_duration_row():
     from lib.machine_role import is_primary
     if not CANONICAL_FIXTURE and not is_primary(REPO_ROOT):
@@ -1346,8 +1351,7 @@ def _build_duration_row():
     result = subprocess.run(args, capture_output=True, text=True, timeout=15)
     lines = result.stdout.strip().splitlines()
     if result.returncode not in (0, 1) or not lines:
-        return ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled checker; "
-                "verify ops/build-duration-check.py --health; auto-clear after fresh complete scan", 1)
+        return _BUILD_DURATION_UNAVAILABLE, 1
     return lines[0], result.returncode
 
 
@@ -1371,9 +1375,7 @@ def _canonical_health():
         try:
             build_line, build_rc = _build_duration_row()
         except (OSError, subprocess.TimeoutExpired):
-            build_line, build_rc = ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled "
-                                   "checker; verify ops/build-duration-check.py --health; "
-                                   "auto-clear after fresh complete scan", 1)
+            build_line, build_rc = _BUILD_DURATION_UNAVAILABLE, 1
         print('  ' + build_line)
         if build_rc:
             rc = _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)

@@ -496,21 +496,21 @@ def health_line(report):
     return f'{report["status"]} build duration · {len(flagged)} workflow(s) flagged' + (f' · {details}' if details else '') + f' · {ACTION}'
 
 
-def deployed_at(deployed=DEPLOYED):
-    return datetime.fromtimestamp(deployed.stat().st_mtime, timezone.utc)
+def deployed_at():
+    return datetime.fromtimestamp(DEPLOYED.stat().st_mtime, timezone.utc)
 
 
-def awaiting_deployment(path, now, deployed=DEPLOYED):
+def awaiting_deployment(path, now):
     """A release cannot hard-fail on a monitor it has not deployed or not yet given one scan window."""
-    if not deployed.exists():
+    if not DEPLOYED.exists():
         return 'monitor not deployed at canonical checkout'
-    since = deployed_at(deployed)
+    since = deployed_at()
     if not path.exists() and seconds(since.isoformat(), now) <= FRESHNESS_SECONDS:
         return f'checker deployed {since:%Y-%m-%dT%H:%MZ}; first scheduled receipt due within 20 minutes'
     return None
 
 
-def read_receipt(path, now, deployed=DEPLOYED):
+def read_receipt(path, now):
     report = json.loads(path.read_text())
     if not isinstance(report, dict) or report['status'] not in ('OK', 'WARN', 'UNAVAILABLE'):
         raise ValueError('invalid receipt status')
@@ -532,8 +532,8 @@ def read_receipt(path, now, deployed=DEPLOYED):
     if report['status'] == 'OK' and (report['errors'] or any(w['flags'] for w in report['workflows'])):
         raise ValueError('green receipt contradicts evidence')
     # A receipt from the previous revision stays valid only until the deployed checker's first scan.
-    if (report['source_sha256'] != hashlib.sha256(deployed.read_bytes()).hexdigest()
-            and timestamp(report['observed_at']) >= deployed_at(deployed)):
+    if (report['source_sha256'] != hashlib.sha256(DEPLOYED.read_bytes()).hexdigest()
+            and timestamp(report['observed_at']) >= deployed_at()):
         raise ValueError('receipt source differs from deployed checker')
     if timestamp(report['observed_at']) > timestamp(now) or seconds(report['observed_at'], now) > FRESHNESS_SECONDS:
         raise ValueError('scheduled receipt older than 20 minutes')
