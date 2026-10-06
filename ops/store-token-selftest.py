@@ -333,6 +333,28 @@ def test_claude_oauth_token_has_no_verify_probe():
             st.CREDENTIALS.update(original)
 
 
+def test_claude_oauth_token_truncated_paste_refused():
+    """setup-token wraps the 108-character token across two Terminal lines; a
+    paste of only the first line (79 characters, 2026-10-06) was saved and then
+    failed with HTTP 401. The real entry must refuse it and write nothing."""
+    with scratch_env_file() as target:
+        original = dict(st.CREDENTIALS)
+        try:
+            st.CREDENTIALS["CLAUDE_CODE_OAUTH_TOKEN"] = {**original["CLAUDE_CODE_OAUTH_TOKEN"], "target": target}
+            short = "sk-ant-oat01-" + "a" * 66
+            rc, _out, err, clip = _run("CLAUDE_CODE_OAUTH_TOKEN", short)
+            check("truncated Claude token refused", rc != 0)
+            check("truncated Claude token wrote nothing", not os.path.exists(target))
+            check("refusal names the expected length", "108" in err and short not in err)
+            check("clipboard kept after refusal", not clip)
+            full = "sk-ant-oat01-" + "b" * 95
+            rc, _out, _err, _clip = _run("CLAUDE_CODE_OAUTH_TOKEN", full)
+            check("full-length Claude token saved", rc == 0 and full in open(target, encoding="utf-8").read())
+        finally:
+            st.CREDENTIALS.clear()
+            st.CREDENTIALS.update(original)
+
+
 def test_http_status_helper_never_raises_on_http_error_status():
     """verify_cloudflare/verify_github read a status code, including 4xx/5xx,
     without the tool crashing -- only a genuine network failure should raise
@@ -380,6 +402,7 @@ def main() -> int:
     test_github_shape_hint_flags_missing_prefix_and_spaces()
     test_claude_oauth_token_has_no_shape_hint()
     test_claude_oauth_token_has_no_verify_probe()
+    test_claude_oauth_token_truncated_paste_refused()
     test_http_status_helper_never_raises_on_http_error_status()
 
     if FAILURES:

@@ -165,6 +165,25 @@ def github_shape_hint(value: str) -> str:
     return hint
 
 
+CLAUDE_TOKEN_PREFIX = "sk-ant-oat01-"
+CLAUDE_TOKEN_LENGTH = 108  # matches ops/config/credential-inventory.v1.json
+
+
+def verify_claude_shape(token: str) -> tuple[bool, str]:
+    # `claude setup-token` wraps the token across two Terminal lines, so a
+    # one-line copy saves a short value that only fails later with HTTP 401.
+    if token.startswith(CLAUDE_TOKEN_PREFIX) and len(token) == CLAUDE_TOKEN_LENGTH:
+        return True, "shape checked (no live probe)"
+    return False, "not a complete setup-token value; copy both wrapped lines as one"
+
+
+def claude_shape_hint(value: str) -> str:
+    hint = f"expected {CLAUDE_TOKEN_LENGTH} characters starting {CLAUDE_TOKEN_PREFIX}; got {len(value)} characters"
+    if any(c.isspace() for c in value):
+        hint += ", contains spaces"
+    return hint
+
+
 # NAME -> {"target": <path under ~/.config/carr/>, "verify": callable | None,
 #          "shape_hint": callable | None}
 # Room for more: add an entry here, nothing else needs to change to support it.
@@ -181,8 +200,8 @@ CREDENTIALS: dict[str, dict[str, object]] = {
     },
     "CLAUDE_CODE_OAUTH_TOKEN": {
         "target": TOKENS_ENV,
-        "verify": None,
-        "shape_hint": None,
+        "verify": verify_claude_shape,
+        "shape_hint": claude_shape_hint,
     },
 }
 
