@@ -257,8 +257,6 @@ class FakeGitHub:
         return [{"id": 7, "name": "main canary", "event": "push", "status": status, "conclusion": conclusion}]
 
     def jobs(self, run_id):
-        if run_id == 7:
-            return [{"name": "main canary (gates, migration, types, freshness)", "conclusion": "success"}]
         return [{"name": "ops/ci.sh --strict", "conclusion": "success"},
                 {"name": "ops/ci.sh --strict --only pushfloor unit secret", "conclusion": "success"}]
 
@@ -702,26 +700,28 @@ class CanaryAggregate(Base):
         schedule = plistlib.loads(source.read_bytes())['StartCalendarInterval']
         self.assertEqual([row['Minute'] for row in schedule], list(range(60)))
 
-    def test_workflow_success_requires_a_green_aggregate(self):
+    def test_canary_verdict_uses_the_workflow_conclusion_without_jobs(self):
         pipeline = self.fx.pipeline(FakeRunner())
         class GH:
-            result = 'success'
-            name = 'main canary'
+            status = 'completed'
+            conclusion = 'success'
             def runs_for(self, sha):
-                return [{'id': 9, 'name': 'main canary', 'status': 'completed', 'conclusion': 'success'}]
+                return [{'id': 9, 'name': 'main canary', 'status': self.status,
+                         'conclusion': self.conclusion}]
             def jobs(self, run_id):
-                return [{'name': self.name, 'conclusion': self.result}]
+                raise AssertionError('canary verdict must not fetch redundant job evidence')
         gh = GH()
         cfg = self.fx.config()['worker']
         self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'green')
-        for result in ['skipped', 'neutral', 'failure', 'cancelled', None]:
-            gh.result = result
+        for conclusion in ['failure', 'timed_out', 'action_required', None]:
+            gh.conclusion = conclusion
             self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'red')
-        gh.result = 'success'
-        gh.name = 'some unrelated job'
-        self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'red')
-        gh.name = 'main canary (gates, migration, types, freshness)'
-        self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'green')
+        for conclusion in ['skipped', 'neutral', 'cancelled']:
+            gh.conclusion = conclusion
+            self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'cancelled')
+        gh.status = 'in_progress'
+        gh.conclusion = None
+        self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'pending')
 
 
 class Batching(Base):
