@@ -1109,11 +1109,8 @@ step "rule-delivery shadow (reports, never scopes)" ./.venv/bin/python ops/rule-
 step "credential health (reports, never rotates; loops on a finding)" \
      ./.venv/bin/python ops/credential-health.py --nightly
 
-# The loaded 02:05 launchd chain runs the same spend reader and response loop
-# as manual health. Its narrow mode fails the step when Worker usage, a receipt,
-# or the loop action is unavailable; step() records that failure in the job ledger.
-step "Jev daily spend alarm" \
-     ./.venv/bin/python tools/health-check.py --section jev-spend
+step "Monthly system cost view and spike loops" \
+     ./run.sh costs --publish --alerts
 
 # Authentication readback only; no model work and no interactive login.
 step "Grok authentication health" \
