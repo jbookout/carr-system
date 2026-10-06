@@ -1972,6 +1972,12 @@ const RULE_ENFORCEMENT_FALLBACK_REFUSALS = Object.freeze(new Set([
   "rule_enforcement_fallback_receipts_append_only",
 ]));
 
+function validateRuleScope(scope) {
+  if (scope !== undefined && (scope === null || typeof scope !== "object" || Array.isArray(scope)))
+    throw new ToolError({ error: "invalid_object", field: "scope",
+      hint: "scope must be a JSON object, e.g. {} or {\"section\":\"...\"}; omit scope to use the existing default" });
+}
+
 async function resolveRuleId(c, value, field = "rule_id") {
   const raw = String(value || "").trim();
   if (!raw) throw new ToolError({ error: "rule_id_required", field });
@@ -6034,6 +6040,7 @@ export const TOOLS = {
       why_no_machine: { type: "string", description: "REQUIRED when enforcement_home is 'judgment_advisory'. One line: why no mechanical control can carry this rule." } },
       required: ["idempotency_key","statement","human_quote","enforcement_home"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "teach", args, async () => {
+      validateRuleScope(args.scope);
       // ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10). See the description
       // above: a clear, named refusal rather than a silent default, so an
       // existing caller that has not been told about this yet gets an error
@@ -6529,6 +6536,7 @@ export const TOOLS = {
       reason: { type: "string", description: "REQUIRED. Why the wording is being corrected — an unexplained edit to a binding rule is indistinguishable from drift." } },
       required: ["idempotency_key","rule_id","base_version","reason"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "amend-rule", args, async () => {
+      validateRuleScope(args.scope);
       const reason = String(args.reason || "").trim();
       if (!reason) throw new ToolError({ error: "reason_required",
         hint: "say in one line why the wording is wrong; a silent edit to a binding rule reads as drift later" });
