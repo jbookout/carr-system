@@ -367,8 +367,6 @@ class ReportTests(unittest.TestCase):
         class Effects:
             def report(self, finding):
                 return {}
-            def clear(self, finding):
-                pass
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             effects = Effects()
