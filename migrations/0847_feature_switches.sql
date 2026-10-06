@@ -1,4 +1,5 @@
 -- App feature configuration extends the existing versioned record/audit envelope.
+-- rollback: forward-only — retain switch state and audit history; retire or restore switches through their audited verbs.
 create table public.feature_switch (
   id uuid primary key default gen_random_uuid(),
   organization_tenant_id text not null,

@@ -22,6 +22,13 @@ class Rendering(unittest.TestCase):
         self.assertIn("when 'scac-mutation-registry.v109' then '" + predecessor['digest'], sql)
         self.assertIn("when 'scac-mutation-registry.v110' then '" + json.dumps(measured, separators=(',', ':')) + "'::jsonb end;", sql)
         self.assertIn('observed_count<>1243', sql)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('migration_safety', ROOT / 'ops/migration-safety-gate.py')
+        gate = importlib.util.module_from_spec(spec)
+        import sys
+        sys.modules[spec.name] = gate
+        spec.loader.exec_module(gate)
+        self.assertEqual(gate.findings(sql), [], 'generated successors must satisfy migration safety')
         probe = probe_sql(sql)
         self.assertNotRegex(probe, r'(?m)^do \$')
         self.assertIn('create or replace function ops.scac_mutation_catalog_v110_current()', probe)
