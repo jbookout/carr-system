@@ -1151,6 +1151,24 @@ class PostReleaseProof(Base):
         self.assertEqual(rec["preexisting"], ["browser-journeys::a.e2e.ts::one"])
         self.assertIn("app-rollback", runner.names())
 
+    def assert_browser_regression_across_granularity(self, post, retry):
+        sha = self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner(smoke={"smoke-post": post, "smoke-retry": retry})
+        rc, _ = self.app(runner, sha, [])
+        self.assertEqual(rc, 1)
+        rec = self.fx.records()[-1]["post_release"]
+        self.assertEqual(rec["flaky"], [])
+        self.assertEqual(rec["regressions"], ["browser-journeys"])
+        self.assertIn("app-rollback", runner.names())
+
+    def test_a_whole_browser_failure_then_a_named_one_is_a_regression_not_a_flake(self):
+        self.assert_browser_regression_across_granularity(
+            ["browser-journeys"], ["browser-journeys::b.e2e.ts::two"])
+
+    def test_a_named_browser_failure_then_a_whole_one_is_a_regression_not_a_flake(self):
+        self.assert_browser_regression_across_granularity(
+            ["browser-journeys::b.e2e.ts::two"], ["browser-journeys"])
+
     def test_each_lane_proves_only_its_own_journeys(self):
         sha = self.fx.commit({"src/worker.js": "1"})
         runner = FakeRunner()

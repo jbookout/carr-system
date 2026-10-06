@@ -331,6 +331,15 @@ def smoke_failures(summary: dict) -> set[str]:
     return units
 
 
+def retry_still_failing(post: set[str], retry: set[str]) -> tuple[set[str], set[str]]:
+    """The post failures and those the retry failed again, at one granularity:
+    a browser proof that named no failed tests on either run is compared as
+    the whole journey, so a failure seen twice is never read as a flake."""
+    if "browser-journeys" in post | retry:
+        post, retry = ({u.split("::", 1)[0] for u in units} for units in (post, retry))
+    return post, retry & post
+
+
 class Runner:
     """Runs one command with stdin closed, output to its own log file."""
 
@@ -2564,7 +2573,7 @@ class Pipeline:
         elif failed is None:
             still = smoke_failures(final)
         else:
-            still = smoke_failures(final) & failed
+            failed, still = retry_still_failing(failed, smoke_failures(final))
         # An unreadable baseline excuses nothing: every failure after the
         # release is then attributed to it.
         before = smoke_failures(baseline) if baseline else set()
