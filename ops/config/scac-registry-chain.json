@@ -5616,7 +5616,7 @@
       "entry_count": 2707,
       "source_count": 1130,
       "migration": "migrations/0847_architecture_worker_registration_scac_successor.sql",
-      "migration_sha256": "9c20ccfc69ba80687b5de6d007eacf40e4fcb3e3927f1694010b5a31f5795df3",
+      "migration_sha256": "4643416f7a98bd211a1db2f86ef12247f6f66f9a5ebb81bbe56a93a58e75d0ad",
       "commit": "6797ea5a87ffaf88405a53ffaf02f58e6bf369d9",
       "entry_set_digest": "sha256:cbf23259a96762f202c92b471860c6491ca0025ade2f17e0bbcf6eb6be2fb3ea",
       "atomic_pair": [
