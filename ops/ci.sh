@@ -191,7 +191,9 @@ run_quiet() {  # run_quiet <logfile> <cmd...>  — capture output, return status
   "$@" >"$log" 2>&1
 }
 
-LOGDIR="$(mktemp -d)"
+# macOS mktemp ignores TMPDIR without a template and writes under /var/folders,
+# which a sandboxed session cannot write; name the directory so TMPDIR binds.
+LOGDIR="$(mktemp -d "${TMPDIR:-/tmp}/carr-ci.XXXXXX")"
 trap 'rm -rf "$LOGDIR"' EXIT
 
 # ------------------------------------------- inherited-from-main short-circuit
@@ -329,7 +331,7 @@ fail_tail() {  # fail_tail <logfile>
   local log="$1" lines window
   lines="$(wc -l < "$log" 2>/dev/null | tr -d ' ')"
   [ -n "$lines" ] || lines=0
-  window="$(mktemp)"
+  window="$(mktemp "$LOGDIR/window.XXXXXX")"
   if [ "$lines" -lt 200 ]; then cat "$log" >"$window" 2>/dev/null
   else tail -80 "$log" >"$window" 2>/dev/null; fi
   if "$PY" ops/ci-secret-scan.py --redact <"$window" >"$window.redacted" 2>/dev/null; then
