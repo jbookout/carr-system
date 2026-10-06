@@ -26,6 +26,7 @@ class Store:
 
     def __init__(self):
         self.loops, self.keys, self.writes, self.lose_next = {}, {}, [], set()
+        self.timeout_before_write = set()
 
     def __call__(self, name, args):
         if name == "read-loop":
@@ -36,6 +37,9 @@ class Store:
             if self.keys[key][0] != request:
                 raise RuntimeError(f"{name} failed (key_reuse)")
             return {"replayed": True, **self.keys[key][1]}
+        if name in self.timeout_before_write:
+            self.timeout_before_write.discard(name)
+            raise subprocess.TimeoutExpired(name, 35)
         answer = self.write(name, args)
         self.keys[key] = (request, answer)
         self.writes.append(name)
@@ -129,6 +133,76 @@ class Health(unittest.TestCase):
         line = self.check([receipt("abcdef13")])
         self.assertNotIn("FAILED", line)
         self.assertEqual(self.store.writes, ["add-loop", "update-loop"])
+
+    def pending_update(self):
+        self.check([receipt("abcdef12")])
+        self.store.timeout_before_write.add("update-loop")
+        self.assertIn("FAILED", self.check([receipt("abcdef13")]))
+        return json.loads(self.state.read_text())["pending"]
+
+    def test_uncommitted_update_recovers_after_an_external_version_change(self):
+        pending = self.pending_update()
+        self.store.loops["loop-1"]["version"] += 1
+        for later in ("2026-10-06T12:00:00Z", "2026-10-07T12:00:00Z"):
+            line = self.check([receipt("abcdef12", "abcdef13", at=later)], now=later)
+            self.assertNotIn("FAILED", line)
+            self.assertEqual(self.store.open_loops(), [])
+            self.assertEqual(json.loads(self.state.read_text()), {})
+        self.assertEqual(self.store.writes, ["add-loop", "close-loop"])
+        self.assertNotIn(pending["args"]["idempotency_key"], self.store.keys)
+
+    def test_uncommitted_update_reissues_changed_breach_from_current_version(self):
+        pending = self.pending_update()
+        self.store.loops["loop-1"]["version"] += 1
+        line = self.check([receipt("abcdef13")])
+        self.assertNotIn("FAILED", line)
+        self.assertEqual(self.store.writes, ["add-loop", "update-loop"])
+        self.assertEqual(self.store.loops["loop-1"]["version"], 3)
+        self.assertIn("First (abcdef12)", self.store.loops["loop-1"]["body"])
+        self.assertEqual(json.loads(self.state.read_text())["silence"]["zero"], ["abcdef12"])
+        self.assertNotIn(pending["args"]["idempotency_key"], self.store.keys)
+
+    def test_uncommitted_update_reconciles_an_externally_closed_loop(self):
+        for status in ("done", "dropped"):
+            with self.subTest(status=status):
+                self.setUp()
+                self.pending_update()
+                self.store.loops["loop-1"].update(version=2, status=status)
+                line = self.check([receipt("abcdef12", "abcdef13")])
+                self.assertNotIn("FAILED", line)
+                self.assertEqual(json.loads(self.state.read_text()), {})
+                self.assertEqual(self.store.writes, ["add-loop"])
+
+    def test_failed_reconciliation_save_keeps_pending_recoverable(self):
+        pending = self.pending_update()
+        self.store.loops["loop-1"]["version"] += 1
+        with patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            line = self.check([receipt("abcdef12", "abcdef13")])
+        self.assertIn("FAILED", line)
+        self.assertEqual(json.loads(self.state.read_text())["pending"], pending)
+        self.assertEqual(self.store.writes, ["add-loop"])
+        line = self.check([receipt("abcdef12", "abcdef13")])
+        self.assertNotIn("FAILED", line)
+        self.assertEqual(json.loads(self.state.read_text()), {})
+        self.assertEqual(self.store.writes, ["add-loop", "close-loop"])
+
+    def test_unrelated_rejection_keeps_the_exact_pending_request(self):
+        pending = self.pending_update()
+        with patch.object(self.store, "write", side_effect=RuntimeError("service unavailable")):
+            line = self.check([receipt("abcdef12", "abcdef13")])
+        self.assertIn("FAILED", line)
+        self.assertEqual(json.loads(self.state.read_text())["pending"], pending)
+        self.assertEqual(self.store.writes, ["add-loop"])
+
+    def test_uncommitted_close_recovers_after_an_external_version_change(self):
+        self.check([receipt("abcdef12")])
+        self.store.timeout_before_write.add("close-loop")
+        self.assertIn("FAILED", self.check([receipt("abcdef12", "abcdef13")]))
+        self.store.loops["loop-1"]["version"] += 1
+        line = self.check([receipt("abcdef12", "abcdef13")])
+        self.assertNotIn("FAILED", line)
+        self.assertEqual(json.loads(self.state.read_text()), {})
+        self.assertEqual(self.store.writes, ["add-loop", "close-loop"])
 
     def test_state_write_failure_after_add_does_not_duplicate_the_loop(self):
         real = Path.write_text

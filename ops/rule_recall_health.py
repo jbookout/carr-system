@@ -37,8 +37,9 @@ def check_recall(rows, rules, state_path, run, *, now=None):
 
     Each warning ("silence", "unavailable") owns at most one loop. A write is
     saved as `pending` before it is sent and replayed verbatim (same key, same
-    request) until its answer is applied, so a lost response or a failed state
-    save never mints a second loop or reuses a key for a changed request."""
+    request) until its answer is applied or a rejected write is reconciled
+    against the loop's current state. A lost response or a failed state save
+    never mints a second loop or reuses a key for a changed request."""
     now = now or datetime.now(timezone.utc).isoformat()
     measured = delivery_counts(rows, rules, now, 14)
     zero = measured["zero"] if measured["readable"] else None
@@ -98,8 +99,8 @@ def _read(run, loop_id):
 
 def _settle(state, run, path):
     """Send the saved write (a replay returns the stored answer), apply its
-    result to the state, and save. A loop already closed elsewhere counts as
-    closed, so a stale close never blocks the warning from clearing."""
+    result to the state, and save. Reconcile rejected versioned writes so the
+    current measurement can choose a fresh request after another writer acts."""
     pending = state["pending"]
     warning, name, args = pending["warning"], pending["verb"], pending["args"]
     try:
@@ -107,9 +108,16 @@ def _settle(state, run, path):
         if answer.get("ok") is not True:
             raise RuntimeError(f"{name} did not confirm write")
     except RuntimeError:
-        if name != "close-loop" or _read(run, args["loop_id"]).get("status") == "open":
+        if name not in ("update-loop", "close-loop"):
             raise
-        answer = {"ok": True}
+        loop = _read(run, args["loop_id"])
+        if loop.get("status") in ("done", "dropped"):
+            state.pop(warning, None)
+        elif loop.get("status") != "open" or loop["version"] == args["base_version"]:
+            raise
+        del state["pending"]
+        _save(path, state)
+        return
     if name == "add-loop":
         if not answer.get("loop_id"):
             raise RuntimeError("missing loop id")
