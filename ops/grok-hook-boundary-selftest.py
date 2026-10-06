@@ -53,6 +53,39 @@ class GrokHookBoundaryTests(unittest.TestCase):
                 self.assertFalse(boundary.bounded_grok_read_only())
                 self.assertEqual(ps.call_count, 2)
 
+    def test_any_grok_session_owns_context_hooks(self):
+        # Joe 2026-10-06: writable and interactive Grok sessions skip context hooks too.
+        from hooks import grok_invocation as boundary
+        for owner in ('grok -p task -m grok-4.7 --reasoning-effort high --sandbox workspace --cwd /tmp',
+                      'grok --sandbox workspace --print task',
+                      '/opt/homebrew/bin/grok -p task'):
+            with self.subTest(owner=owner), mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(boundary.subprocess, 'run', side_effect=[
+                        subprocess.CompletedProcess([], 0, '123 /bin/sh -c hook', ''),
+                        subprocess.CompletedProcess([], 0, '124 ' + owner, '')]):
+                self.assertTrue(boundary.grok_session())
+
+    def test_other_agent_between_hook_and_grok_keeps_gates(self):
+        from hooks import grok_invocation as boundary
+        for owner in ('claude --permission-mode acceptEdits task',
+                      'codex exec --sandbox workspace-write task',
+                      'node /opt/bin/claude -p task', 'python unrelated.py'):
+            with self.subTest(owner=owner), mock.patch.object(boundary.subprocess, 'run', side_effect=[
+                    subprocess.CompletedProcess([], 0, '123 /bin/sh -c hook', ''),
+                    subprocess.CompletedProcess([], 0, '124 ' + owner, ''),
+                    subprocess.CompletedProcess([], 0, '1 grok -p outer', '')]):
+                self.assertFalse(boundary.grok_session())
+        with mock.patch.object(boundary.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ps', 0.75)):
+            self.assertFalse(boundary.grok_session())
+
+    def test_meter_skips_context_hooks_only_for_grok_sessions(self):
+        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        self.assertIn('rule-boot-gate.py', meter.GROK_CONTEXT_HOOKS)
+        self.assertNotIn('guard-unattended.py', meter.GROK_CONTEXT_HOOKS)
+        with mock.patch.object(meter, 'grok_session', return_value=True), \
+                mock.patch.object(sys, 'argv', ['hook-meter-run.py', str(ROOT / 'hooks/rule-boot-gate.py')]):
+            self.assertEqual(meter.main(), 0)
+
     def test_total_probe_deadline_reserves_time_for_gate(self):
         from hooks import grok_invocation as boundary
         clock = [0.0]
@@ -226,7 +259,7 @@ int main(int argc, char **argv) {
                        'rule-pack-drift-gate.py', 'chat-lint-carryover.py'):
             with self.subTest(target=target), mock.patch.object(sys, 'argv',
                     ['meter', str(ROOT / 'hooks' / target)]), \
-                    mock.patch.object(meter, 'bounded_grok_read_only', return_value=True, create=True), \
+                    mock.patch.object(meter, 'grok_session', return_value=True, create=True), \
                     mock.patch.object(sys, 'stdin', io.StringIO('invalid payload')), \
                     mock.patch('builtins.open', side_effect=AssertionError('context hook ran')):
                 self.assertEqual(meter.main(), 0)

@@ -1,4 +1,14 @@
-"""Identify the runner's bounded read-only child, not an interactive session.
+"""Identify Grok-owned hook invocations.
+
+grok_session(): any Grok CLI process owns this hook through shell transports.
+Joe 2026-10-06: "there is no reason to block any of my subscriptions from doing
+real work. the model router is our protection from unqualified work." Grok
+imports Claude's user-level hooks but has no CARR session lifecycle, so the
+rule boot is never armed for it and every tool call was refused. Context
+delivery hooks skip Grok sessions in every mode; effect guards stay on.
+
+bounded_grok_read_only(): the runner's bounded read-only child, not an
+interactive session (kept for the lifecycle hooks that only skip that case).
 
 The marker alone is insufficient: inherited or forged markers cannot exempt
 a writable/interactive Grok ancestor. Failed process readback keeps hooks on.
@@ -48,6 +58,39 @@ def bounded_grok_read_only() -> bool:
             # Only shell transports can connect this hook to its owner.
             # A separate agent or an unknown launcher must retain lifecycle
             # hooks, even when a read-only Grok exists farther up the chain.
+            if binary not in TRANSPARENT_SHELLS:
+                return False
+            pid = int(parent)
+            if pid <= 1:
+                return False
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+def grok_session() -> bool:
+    """True when the nearest non-shell ancestor of this hook is the Grok CLI.
+
+    Process ancestry, not an environment marker, so nothing inherited or
+    forged can nominate a session. A Claude, Codex or other agent between the
+    hook and Grok owns the hook and keeps every gate. Any failed or slow
+    readback returns False, which keeps the gates on.
+    """
+    pid = os.getppid()
+    deadline = time.monotonic() + PROBE_BUDGET_S
+    try:
+        for _ in range(8):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            result = subprocess.run(["ps", "-ww", "-o", "ppid=,args=", "-p", str(pid)],
+                                    capture_output=True, text=True, timeout=remaining)
+            if result.returncode or time.monotonic() >= deadline:
+                return False
+            parent, command = result.stdout.strip().split(None, 1)
+            binary = os.path.basename(command.split()[0]).lstrip('-')
+            if re.fullmatch(r"grok(?:-\d+\.\d+\.\d+)?", binary):
+                return True
             if binary not in TRANSPARENT_SHELLS:
                 return False
             pid = int(parent)
