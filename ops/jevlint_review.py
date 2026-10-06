@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import shutil
 import socket
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -42,6 +41,7 @@ class Shim:
         self.errors = 0
         self.cached = 0
         self.paid_attempts = 0
+        self.paid_attempts_complete = True
         self.paid_attempts_by_utc_day = {}
         self.run_id = str(uuid.uuid4())
 
@@ -64,11 +64,15 @@ class Shim:
                 with ts.capture_paid_reservations(caller="jevlint_review", session_id=self.session,
                                                   run_id=self.run_id) as receipt:
                     try:
-                        result = jev_semantic.ask(payload["state"], payload["questions"], client=ts,
+                        state = payload["state"]
+                        state = dict(state) if isinstance(state, dict) else {"source": state}
+                        state["review_attribution"] = self.attribution
+                        result = jev_semantic.ask(state, payload["questions"], client=ts,
                                         caller="jevlint_review", version="jevlint-systemone-v1", session_id=self.session,
-                                        facets=["code-taste", self.attribution], retries=0,
+                                        facets=["evidence_matching"],
                                         cache_ttl_seconds=0, timeout=8, deadline=time.monotonic() + 8)
                     finally:
+                        self.paid_attempts_complete = self.paid_attempts_complete and receipt["complete"]
                         for day, count in receipt["utc_days"].items():
                             self.paid_attempts_by_utc_day[day] = self.paid_attempts_by_utc_day.get(day, 0) + count
                             self.paid_attempts += count
@@ -281,12 +285,13 @@ def main():
                               "base": base, "head": head, "pr": args.pr, "files": selected,
                               "shim": {"requests": shim.requests, "answered": shim.answered,
                                        "paid_attempts": shim.paid_attempts,
+                                       "paid_attempts_complete": shim.paid_attempts_complete,
                                        "paid_attempts_by_utc_day": shim.paid_attempts_by_utc_day,
                                        "run_id": shim.run_id, "session_id": shim.session,
                                        "retry_cache_hits": shim.cached, "refused": shim.refused,
                                        "errors": shim.errors}, "exit_code": code, "report": report}, indent=2))
             return code
-    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         print(json.dumps({"error": "jevlint_setup_failed", "exit_code": 2}))
         return 2
 

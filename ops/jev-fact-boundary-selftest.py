@@ -666,6 +666,13 @@ def _live_eval(live_store):
     return format_report(report, "LIVE Jev" + (" + live store" if live_store else ", fixture passages"))
 
 
+class WorkerReadinessRegression(unittest.TestCase):
+    def test_worker_access_does_not_require_local_vendor_key(self):
+        class WorkerClient:
+            def worker_ready(self): return True
+            def read_api_key(self): raise AssertionError('local vendor key is irrelevant')
+        self.assertTrue(fb.credential_ready(WorkerClient()))
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--eval" in args:

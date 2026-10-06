@@ -16,6 +16,7 @@ COUNT = ROOT / "ops" / "verb-count.sh"
 with tempfile.TemporaryDirectory(prefix="verb-count-selftest-") as tmp:
     worker = Path(tmp) / "mcp-server"
     shutil.copytree(SOURCE, worker, ignore=shutil.ignore_patterns("node_modules"))
+    shutil.copytree(ROOT / "ops/config", Path(tmp) / "ops/config")
     assert not (worker / "node_modules").exists(), "fixture must have no dependencies"
     baseline = subprocess.run(["sh", str(COUNT), str(SOURCE)], cwd=ROOT,
                               capture_output=True, text=True, check=False)

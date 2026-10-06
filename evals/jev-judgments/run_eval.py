@@ -2,11 +2,14 @@
 """Paid-call admission eval for the jev-judgments surface (2026-10-04 audit).
 
 THE FLOW MEASURED: a would-be paid Jev call reaches ops/typesafe_client.py.
-Does the client pay for it? The baseline arm is the client at the merge base
+Does the client pay for it? The baseline arm is the client at the explicit historical baseline
 (daily cap only); the candidate arm is this tree's client (call-site registry,
 attribution, unattended policy, fixture/CI refusal, site budgets). Both arms
-run the REAL ask() with the vendor transport replaced by a recorder, so the
+run the REAL ask(); the candidate fake Worker runs canonical checkJevSpend
+against an empty ledger, and vendor transport is replaced by a recorder, so the
 observation is simply whether a request would have left the machine.
+Admission policy is frozen at the reviewed transport revision. Live budget
+pauses can change independently and are tested by the Worker budget suites.
 
 CASES. `--build` samples production traces from out/jev-calls.jsonl
 (2026-09-28..10-04, every non-cache attempt with a caller), stratified by the
@@ -46,6 +49,8 @@ sys.path.insert(0, str(REPO / "tools" / "room-bridge"))
 import evaluation_kernel as kernel
 
 EXPECTATIONS = HERE / "expectations.v1.json"
+ADMISSION_POLICY = REPO / "evals/jev-judgments/admission-policy.v1.json"
+HISTORICAL_BASELINE = "f5e44115^"
 VERSION = "jev-judgments-expectations/v1"
 WINDOW = ("2026-09-28", "2026-10-05")
 PER_SITE = 14
@@ -185,7 +190,8 @@ ARM_FILES = ("ops/typesafe_client.py", "ops/config/jev-cost-guard.v1.json",
              "ops/config/jev-call-sites.v1.json", "tools/judge/interface.py",
              "mcp-server/src/judge-providers.v1.json", "lib/jev_required_actions.py",
              "mcp-server/src/jev-request-contract.v1.json",
-             "lib/transcript_read.py", "lib/__init__.py")
+             "lib/transcript_read.py", "lib/__init__.py",
+             "mcp-server/src/jev-spend-authority.js", "mcp-server/src/errors.js")
 
 
 def _tree(ref, root):
@@ -240,14 +246,35 @@ def observe(client, case, scratch):
         env["CARR_JEV_JOB"] = case["carr_job"]
     log = scratch / "calls.jsonl"
     refusal = None
-    with mock.patch.dict(os.environ, env, clear=True), \
-            mock.patch.object(client, "JEV_DAILY_CAP_LOG", str(log)), \
-            mock.patch.object(client, "_launch_spend_alert_worker", lambda *a: None, create=True), \
-            mock.patch.object(client.urllib.request, "urlopen",
-                              lambda request, timeout=None: sent.append(1) or _Response()):
+    def worker(state, questions, **options):
+        who = {key: options.get(key) for key in ('caller', 'session_id', 'job_id', 'unattended')}
+        if who['session_id'] == 'unbound': who['session_id'] = None
+        registry = json.loads(ADMISSION_POLICY.read_text())
+        script = """import {checkJevSpend,costPolicy} from './mcp-server/src/jev-spend-authority.js';
+            let input='';for await(const chunk of process.stdin)input+=chunk;
+            const {who,registry}=JSON.parse(input);
+            const db={query:async sql=>({rows:sql.includes('day_used')?[{
+                day_used:0,hour_used:0,site_day:0,site_hour:0,
+                resets_day:'2099-01-01T00:00:00Z',resets_hour:'2099-01-01T00:00:00Z',hold_until:null}]:[]})};
+            try {await checkJevSpend(db,who,registry,costPolicy);console.log(JSON.stringify({ok:true}));}
+            catch(e){console.log(JSON.stringify({error:e.payload.error}));}"""
+        run = subprocess.run(['node','--input-type=module','-e',script],cwd=REPO,
+            input=json.dumps({'who':who,'registry':registry}),capture_output=True,text=True,check=True)
+        outcome = json.loads(run.stdout)
+        if outcome.get('error'): return None, outcome['error']
+        sent.append(1)
+        return json.loads(_Response().body), None
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+        stack.enter_context(mock.patch.object(client, "JEV_DAILY_CAP_LOG", str(log)))
+        if hasattr(client, 'SPEND_AUTHORITY'):
+            stack.enter_context(mock.patch.object(client, 'server_ask', worker))
+        else:
+            stack.enter_context(mock.patch.object(client.urllib.request, 'urlopen',
+                lambda request, timeout=None: sent.append(1) or _Response()))
         try:
-            client.ask("eval state", {"q": client.noul("Eval judgment")}, api_key="eval-fixture",
-                       calls_log=str(log), cache_ttl_seconds=0, retries=0, caller=case["site"],
+            client.ask("eval state", {"q": client.noul("Eval judgment")},
+                       calls_log=str(log), cache_ttl_seconds=0, caller=case["site"],
                        session_id="eval-session" if case.get("session") else None)
         except Exception as exc:  # a refusal is the observation, not a crash
             refusal = getattr(exc, "code", None) or type(exc).__name__
@@ -295,8 +322,9 @@ def report(base_ref):
                                        "evals/jev-judgments/evidence/candidate.jsonl"], **m})
     policy_files = [f"tools/room-bridge/{name}.py" for name in
                     ("evaluation_kernel", "execution_contract", "design_kernel", "policy_learning")]
-    deps = [p for p in ARM_FILES if (REPO / p).exists()] + policy_files + ["evals/jev-judgments/expectations.v1.json"]
-    fingerprint = hashlib.sha256("".join(_sha(REPO / p) for p in ARM_FILES if (REPO / p).exists())
+    deps = [p for p in ARM_FILES if (REPO / p).exists()] + policy_files + [
+        "evals/jev-judgments/expectations.v1.json", "evals/jev-judgments/admission-policy.v1.json"]
+    fingerprint = hashlib.sha256("".join(_sha(REPO / p) for p in deps)
                                  .encode()).hexdigest()
     harness = _sha(HERE / "run_eval.py")
     receipt = {
@@ -308,7 +336,7 @@ def report(base_ref):
         "adapter": {"surface": "offline_programmatic", "adapter_id": "jev-judgments-admission-replay",
                     "adapter_version": "1", "harness_id": "evals/jev-judgments/run_eval.py",
                     "harness_version": harness, "provider_id": "none", "model_id": "deterministic-no-model",
-                    "native_session_ref": os.environ.get("CLAUDE_CODE_SESSION_ID") or "local",
+                    "native_session_ref": os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "local",
                     "configuration_fingerprint": f"sha256:{fingerprint}"},
         "cases": {"total": len(cases), "train": len(cases) - len(test), "test": len(test),
                   "should_not_fire": sum(1 for e in cases.values() if e["should_not_fire"]),
@@ -328,13 +356,17 @@ def report(base_ref):
                  "candidate_usd_per_case": round(paid["candidate"] * PRICE_PER_CALL_USD, 10)},
         "verdict": {"decision": "ship", "statement": ""},
         "notes": [
+            f"Baseline git ref: {base_ref}",
+            "Admission policy is frozen from reviewed source 1cdaa6729708f7aff26837a1165fcdc1b6adb999 "
+            "in admission-policy.v1.json. Labels remain sealed; this replay measures transport admission "
+            "under that policy, not current production budgets or live paid-call availability.",
             "Production cases replay the call site, session presence and fixture provenance of real "
             "out/jev-calls.jsonl rows; a fixture row is replayed under CARR_HOOK_FIXTURE=1, which is how "
             "ops/ci.sh's gates class ran it (other classes now export CARR_JEV_OFFLINE).",
             "Fixture provenance is inferred: a prompt hash seen in three or more sessions. Ad-hoc explicit "
             "callers are excluded from the trace sample and covered by hand-written hard cases.",
             "Budgets (site hourly/daily, global hourly) do not bind at this sample size; "
-            "ops/jev-call-sites-selftest.py exercises them.",
+            "Worker unit tests and disposable PostgreSQL exercise them.",
             "Native /claude-api slash commands are unavailable in this runtime; the replay runs the real "
             "client functions with the vendor transport recorded, no model call.",
         ],
@@ -385,14 +417,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--build", metavar="JEV_CALLS_LOG")
     parser.add_argument("--report", action="store_true")
-    parser.add_argument("--base", default=None, help="baseline git ref (default: merge base with origin/main)")
+    parser.add_argument("--base", default=HISTORICAL_BASELINE,
+                        help=f"baseline git ref (default: {HISTORICAL_BASELINE}, the daily-cap-only client)")
     args = parser.parse_args(argv)
     if args.build:
         build(args.build)
     if args.report:
-        base = args.base or subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=REPO,
-                                           capture_output=True, text=True, check=True).stdout.strip()
-        return report(base)
+        return report(args.base)
     return 0
 
 

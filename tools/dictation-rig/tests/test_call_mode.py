@@ -11,11 +11,11 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
-import urllib.error
 from email.message import Message
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -769,26 +769,39 @@ class PostCallTests(SemanticTestCase):
             self.assertIsNone(post_call_jev.topic_cut(segments, [1]))
         kwargs = client.ask.call_args.kwargs
         self.assertEqual(kwargs["work_class"], "app_runtime")
-        self.assertEqual(kwargs["retries"], 0)
+        self.assertEqual(kwargs["caller"], "post_call_jev")
+        self.assertNotIn("retries", kwargs)
         self.assertEqual(kwargs["timeout"], 5.0)
         self.assertEqual(kwargs["deadline"], 105.0)
 
-    def _transport_client(self, opener):
-        # Fresh real client, pinned offline before credentials or transport.
+    def _transport_client(self, worker_failure):
+        """Fresh real client whose Worker is a fake: the capability probe
+        passes, and each paid attempt fails as `worker_failure` says."""
         spec = importlib.util.spec_from_file_location("topic_transport_test", _OFFLINE_CLIENT.__file__)
         client = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(client)
+        attempts = []
+
+        def runner(argv, *, timeout, **_options):
+            if json.loads(argv[3]).get("transport_mode") == "cache_only":
+                return subprocess.CompletedProcess(argv, 1, "", "TOOL ERROR " + json.dumps(
+                    {"error": "jev_cache_miss", "spend_authority": client.SPEND_AUTHORITY}))
+            attempts.append(timeout)
+            return worker_failure(argv, timeout)
+
         real_ask = client.ask
         client.ask = lambda state, questions, **kwargs: real_ask(
-            state, questions, api_key="synthetic-offline-key", opener=opener, **kwargs)
-        return client
+            state, questions, server_runner=runner, **kwargs)
+        env = {k: v for k, v in os.environ.items() if k not in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE")}
+        self.enterContext(patch.dict(os.environ, env, clear=True))
+        return client, attempts
 
     def test_topic_rate_limit_keeps_greedy_chunks_without_backoff(self) -> None:
-        def rate_limited(_request, timeout):
-            raise urllib.error.HTTPError("https://offline.invalid", 429, "limited",
-                                         {"retry-after": "86400"}, io.BytesIO(b""))
+        def rate_limited(argv, _timeout):
+            return subprocess.CompletedProcess(argv, 1, "", "TOOL ERROR " + json.dumps(
+                {"error": "jev_upstream_failed", "status": 429, "reason": "http_status"}))
 
-        client = self._transport_client(rate_limited)
+        client, attempts = self._transport_client(rate_limited)
         segments = self.long_segments()
         greedy = post_call.transcript_chunks({"segments": segments}, limit=10000)
         with patch.object(post_call_jev, "_client", return_value=client), \
@@ -796,6 +809,7 @@ class PostCallTests(SemanticTestCase):
             chunks = post_call.transcript_chunks({"segments": segments}, limit=10000,
                                                  choose_cut=post_call_jev.topic_cut)
         self.assertEqual(chunks, greedy)
+        self.assertEqual(len(attempts), len(greedy) - 1, "one Worker attempt per cut; the Worker owns retries")
         sleep.assert_not_called()
 
     def test_topic_budget_exhaustion_allows_both_local_distillers_to_proceed(self) -> None:
@@ -808,12 +822,12 @@ class PostCallTests(SemanticTestCase):
                 clock = [100.0]
                 timeouts = []
 
-                def timed_out(_request, timeout):
+                def timed_out(argv, timeout):
                     timeouts.append(timeout)
                     clock[0] += timeout
-                    raise urllib.error.URLError("synthetic timeout")
+                    raise subprocess.TimeoutExpired(argv, timeout)
 
-                client = self._transport_client(timed_out)
+                client, _ = self._transport_client(timed_out)
                 chunks_sent = []
                 child = Mock()
 

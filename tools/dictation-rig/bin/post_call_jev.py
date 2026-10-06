@@ -317,7 +317,7 @@ def topic_cut(segments: list[Any], options: list[int], *,
         tsc = _client()
         live_ask = ask if ask is not None else (
             lambda state, questions: _semantic().ask(state, questions, client=tsc, caller="post_call_jev", version="topic-v1", work_class="app_runtime",
-                timeout=TOPIC_CUT_BUDGET_SECONDS, deadline=deadline, retries=0)
+                timeout=TOPIC_CUT_BUDGET_SECONDS, deadline=deadline)
         )
         state = {"boundaries": {
             f"b{j}": {"before": _cut_side(segments[k - 1], before=True), "after": _cut_side(segments[k])}

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Offline acceptance tests. Only loopback and recorded vendor responses run."""
-import io
 import hashlib
+import io
 import json
 import os
-from contextlib import closing
 from pathlib import Path
 import sys
 import tempfile
@@ -15,6 +14,9 @@ from urllib.parse import urlsplit
 from datetime import datetime, timezone
 import subprocess
 import unittest
+import urllib.request
+import urllib.error
+from unittest.mock import Mock
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,16 +26,6 @@ import jevlint_review as review
 RECORDING = json.loads((Path(__file__).parent / "fixtures/jevlint/systemone-recording.json").read_text())
 PAYLOAD = RECORDING["payload"]
 RESPONSE = RECORDING["response"]
-
-
-class VendorResponse(io.BytesIO):
-    status = 200
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
 
 
 class AdmissionTests(unittest.TestCase):
@@ -51,16 +43,49 @@ class AdmissionTests(unittest.TestCase):
         self.enterContext(patch.object(ts, "JEV_CALL_SITES_PATH", str(registry)))
         self.enterContext(patch.dict(ts.ask.__kwdefaults__, calls_log=str(self.log)))
         self.enterContext(patch.dict(ts.JEV_COST_CONFIG, daily_paid_call_cap=10))
-        self.enterContext(patch.object(ts, "read_api_key", return_value="offline-recording"))
-        self.server_ask = ts.server_ask
-        self.enterContext(patch.object(ts, "server_ask", return_value=(None, "offline")))
-        self.enterContext(patch.object(ts, "_launch_spend_alert_worker", return_value=None))
         env = {k: v for k, v in os.environ.items() if k not in ts.SESSION_ID_ENV_KEYS and
                k not in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER", "CARR_JEV_JOB")}
         self.enterContext(patch.dict(os.environ, env, clear=True))
         self.enterContext(patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=str(self.root / "semantic-cache.json")))
-        self.transport = self.enterContext(patch.object(ts.urllib.request, "urlopen",
-            side_effect=lambda *a, **kw: VendorResponse(json.dumps(RESPONSE).encode())))
+        self.attempts = []
+        self.transport = Mock(return_value=RESPONSE)
+
+        def worker(state, questions, **options):
+            now = ts.datetime.now(timezone.utc)
+            day = now.date().isoformat()
+            used = sum(a["recorded_at"].startswith(day) for a in self.attempts)
+            if used >= ts.JEV_COST_CONFIG["daily_paid_call_cap"]:
+                return None, "daily_paid_call_cap"
+            if used >= 1:
+                return None, "site_daily_budget"
+            attempt = {"receipt_id": str(len(self.attempts)), "recorded_at": now.isoformat()}
+            self.attempts.append(attempt)
+            result = self.transport()
+            return {**result, "paid_attempts": [attempt], "cache_hit": False}, None
+        self.real_server_ask = ts.server_ask
+        self.worker = worker
+        self.enterContext(patch.object(ts, "server_ask", side_effect=worker))
+
+    def test_worker_wire_contract_accepts_review_and_observes_reservation(self):
+        def runner(argv, **options):
+            args = json.loads(argv[3])
+            if args.get("transport_mode") == "cache_only":
+                return subprocess.CompletedProcess(argv, 1, "", 'TOOL ERROR ' + json.dumps({
+                    "error":"jev_cache_miss", "spend_authority":ts.SPEND_AUTHORITY}))
+            script = """import {validateAskJevArgs} from './mcp-server/src/jev-call-receipt.js';
+let input=''; for await(const chunk of process.stdin) input+=chunk;
+validateAskJevArgs(JSON.parse(input));"""
+            subprocess.run(["node", "--input-type=module", "-e", script],
+                           cwd=review.ROOT, input=json.dumps(args), text=True, capture_output=True, check=True)
+            self.assertEqual(args["state"]["input"]["review_attribution"], "pr:1537:head")
+            return subprocess.CompletedProcess(argv, 0, json.dumps({**RESPONSE, "ok":True,
+                "receipt_id":"answer", "paid_attempts":[{"receipt_id":"attempt",
+                    "recorded_at":"2026-10-04T23:59:59Z"}]}), "")
+        shim = review.Shim("wire-session", "pr:1537:head")
+        with patch.object(ts, "server_ask", self.real_server_ask), \
+                patch.dict(ts.ask.__kwdefaults__, server_runner=runner):
+            self.assertEqual(shim.evaluate(PAYLOAD), (200, RESPONSE))
+        self.assertEqual(shim.paid_attempts_by_utc_day, {"2026-10-04":1})
 
     def rows(self):
         return [json.loads(row) for row in self.log.read_text().splitlines()]
@@ -83,10 +108,9 @@ class AdmissionTests(unittest.TestCase):
         row = self.rows()[-1]
         self.assertEqual(row["session"], "fixture-session")
         self.assertEqual(row["caller"], "jevlint_review")
-        self.assertIn("pr:1537:head", row["facets"])
+        self.assertIn("evidence_matching", row["facets"])
         self.assertTrue(row["ok"])
-        with closing(ts.sqlite3.connect(ts._cap_db_path())) as db:
-            self.assertEqual(db.execute("SELECT attempts FROM daily_cap").fetchone()[0], 1)
+        self.assertEqual(len(self.attempts), 1)
 
     def test_missing_attribution_makes_zero_vendor_calls(self):
         status, body = review.Shim(None, "pr:1537:head").evaluate(PAYLOAD)
@@ -179,7 +203,7 @@ print(json.dumps({'findings':[]}))
 
     def test_paid_receipt_counts_each_utc_day_across_midnight(self):
         shim = review.Shim('fixture-session', 'pr:fixture:head')
-        with patch.object(ts, 'datetime') as clock:
+        with patch.object(ts, 'datetime', wraps=datetime) as clock:
             clock.now.return_value = datetime(2026, 10, 4, 23, 59, tzinfo=timezone.utc)
             self.assertEqual(shim.evaluate(PAYLOAD)[0], 200)
             clock.now.return_value = datetime(2026, 10, 5, tzinfo=timezone.utc)
@@ -188,42 +212,28 @@ print(json.dumps({'findings':[]}))
         self.assertEqual(shim.paid_attempts, 2)
         self.assertEqual(shim.paid_attempts_by_utc_day, {'2026-10-04':1, '2026-10-05':1})
 
-    def test_retained_yesterday_and_foreign_runs_do_not_change_paid_receipt(self):
-        # Admission prunes old site buckets; neither that nor another caller's
-        # session can change the receipt of a run with no requests.
-        ts._reserve_paid_call({}, [], "jevlint_review", "fixture", "seed")
-        with closing(ts.sqlite3.connect(ts._cap_db_path())) as db:
-            db.execute("UPDATE site_usage SET day='2000-01-01', count=200")
-            db.commit()
+    def test_foreign_runs_do_not_change_paid_receipt(self):
         shim = review.Shim("fixture-session", "pr:fixture:head")
         def other_run(*args, **kwargs):
-            ts._reserve_paid_call({}, [], "jevlint_review", "fixture", "foreign")
+            ts.ask(PAYLOAD["state"], PAYLOAD["questions"], caller="jevlint_review", session_id="foreign")
             return subprocess.CompletedProcess(args, 0, '{"findings":[]}', '')
         with patch.object(review.subprocess, "run", side_effect=other_run):
             code, _ = review.run_jevlint("unused", self.root, shim, port=0)
         self.assertEqual(code, 0)
         self.assertEqual(shim.paid_attempts, 0)
 
-    def test_paid_receipt_includes_failed_worker_and_direct_fallback_only_once_each(self):
-        registry = ts.load_call_sites()
-        registry['sites']['jevlint_review'].update(hourly_budget=10, daily_budget=10)
+    def test_paid_receipt_includes_failed_worker_once_without_fallback(self):
         shim = review.Shim("fixture-session", "pr:fixture:head")
-        calls = []
-        def worker(argv, **kwargs):
-            mode = json.loads(argv[3])['transport_mode']
-            calls.append(mode)
-            error = 'jev_cache_miss' if mode == 'cache_only' else 'jev_upstream_failed'
-            return subprocess.CompletedProcess(argv, 1, '', json.dumps({'error': error}))
-        with patch.object(ts, 'load_call_sites', return_value=registry), \
-                patch.object(ts, 'server_ask', self.server_ask), \
-                patch.object(ts, 'read_admission_secret', return_value='offline-admission'), \
-                patch.object(ts.subprocess, 'run', side_effect=worker):
-            self.assertEqual(shim.evaluate(PAYLOAD), (200, RESPONSE))
-            self.assertEqual(shim.evaluate(PAYLOAD), (200, RESPONSE))
-        self.assertEqual(calls, ['cache_only', 'paid_once'])
-        self.assertEqual(shim.paid_attempts, 2)
+        def worker(*args, **kwargs):
+            kwargs["upstream"]["paid_attempts"] = [{"receipt_id":"failed", "recorded_at":"2026-10-04T23:59:59Z"}]
+            return None, "vendor_failed_at_worker"
+        with patch.object(ts, "server_ask", side_effect=worker):
+            self.assertEqual(shim.evaluate(PAYLOAD), (424, {"error":"jev_unavailable"}))
+            self.assertEqual(shim.evaluate(PAYLOAD), (424, {"error":"jev_unavailable"}))
+        self.assertEqual(shim.paid_attempts, 1)
+        self.assertEqual(shim.paid_attempts_by_utc_day, {"2026-10-04":1})
         self.assertEqual(shim.cached, 1)
-        self.assertEqual(self.transport.call_count, 1)
+        self.transport.assert_not_called()
 
     def test_worker_cache_hit_and_refusal_have_no_paid_reservation(self):
         shim = review.Shim("fixture-session", "pr:fixture:head")
@@ -237,6 +247,29 @@ print(json.dumps({'findings':[]}))
             self.assertEqual(refused.evaluate(changed)[0], 403)
         self.assertEqual(refused.paid_attempts, 0)
 
+    def test_worker_error_wire_preserves_attempt_evidence_and_missing_evidence(self):
+        for include in (False, True):
+            def runner(argv, **options):
+                args = json.loads(argv[3])
+                error = {"error":"jev_cache_miss", "spend_authority":ts.SPEND_AUTHORITY}
+                if args.get("transport_mode") != "cache_only":
+                    error = {"error":"jev_upstream_failed", "status":500, "reason":"http_status"}
+                    if include:
+                        error["paid_attempts"] = [{"receipt_id":"failed", "recorded_at":"2026-10-04T23:59:59Z"}]
+                return subprocess.CompletedProcess(argv, 1, "", "TOOL ERROR " + json.dumps(error))
+            shim = review.Shim("wire-session", "pr:fixture:head")
+            with patch.object(ts, "server_ask", self.real_server_ask), \
+                    patch.dict(ts.ask.__kwdefaults__, server_runner=runner):
+                self.assertEqual(shim.evaluate(PAYLOAD)[0], 424)
+            self.assertEqual(shim.paid_attempts, int(include))
+            self.assertEqual(shim.paid_attempts_complete, include)
+
+    def test_lost_worker_response_marks_paid_count_incomplete(self):
+        shim = review.Shim("fixture-session", "pr:fixture:head")
+        with patch.object(ts, "server_ask", return_value=(None, "server_timeout")):
+            self.assertEqual(shim.evaluate(PAYLOAD)[0], 424)
+        self.assertFalse(shim.paid_attempts_complete)
+
     def test_concurrent_same_caller_and_session_reservations_stay_in_their_run(self):
         barrier = threading.Barrier(2)
         receipts = []
@@ -246,12 +279,16 @@ print(json.dumps({'findings':[]}))
                 with ts.capture_paid_reservations(caller='jevlint_review', session_id='same-session', run_id=run) as receipt:
                     barrier.wait(2)
                     for _ in range(attempts):
-                        ts._reserve_paid_call({}, [], 'jevlint_review', 'fixture', run, session='same-session')
+                        ts.ask(PAYLOAD["state"], PAYLOAD["questions"], caller="jevlint_review", session_id="same-session")
                     # Same thread, foreign session: also excluded.
-                    ts._reserve_paid_call({}, [], 'jevlint_review', 'fixture', run, session='foreign-session')
+                    ts.ask(PAYLOAD["state"], PAYLOAD["questions"], caller="jevlint_review", session_id="foreign-session")
                 receipts.append(receipt)
             except Exception as error:
                 failures.append(error)
+        def worker(*args, **kwargs):
+            return {**RESPONSE, "paid_attempts":[{"receipt_id":str(time.monotonic_ns()),
+                    "recorded_at":"2026-10-04T23:59:59Z"}]}, None
+        self.enterContext(patch.object(ts, "server_ask", side_effect=worker))
         threads = [threading.Thread(target=reserve, args=('first', 1)),
                    threading.Thread(target=reserve, args=('second', 3))]
         for thread in threads:
@@ -328,10 +365,10 @@ class ServerTests(unittest.TestCase):
                     peer.sendall(b'POST /v1/systemone HTTP/1.1\r\n')
                     peer.settimeout(1)
                     self.assertEqual(peer.recv(1024), b'')
-                req = ts.urllib.request.Request(url, data=b'{}', headers={
+                req = urllib.request.Request(url, data=b'{}', headers={
                     'Authorization':'Bearer carr-jevlint-loopback'})
-                with self.assertRaises(ts.urllib.error.HTTPError) as error:
-                    ts.urllib.request.urlopen(req, timeout=1)
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(req, timeout=1)
                 self.assertEqual(error.exception.code, 400)
                 error.exception.close()
         self.assertGreater(shim.errors, 0)

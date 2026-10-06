@@ -223,7 +223,7 @@ def probe_jev(run_id):
                                {'323': 'Select if this is the product.',
                                 '324': 'Select if this is the product.'})},
             caller='seat_health', version='1', client=ts, facets=[], purpose='call',
-            session_id=run_id, timeout=20, retries=0, cache_ttl_seconds=0)
+            session_id=run_id, timeout=20, cache_ttl_seconds=0)
         if value.get('cache_hit') is True or value.get('model') != SEATS['jev']:
             raise ValueError('probe requires a fresh pinned model observation')
         print(json.dumps({'ok': True, 'answer': value['answers']['answer'].get('choice'),

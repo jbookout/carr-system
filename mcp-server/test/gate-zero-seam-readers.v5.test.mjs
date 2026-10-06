@@ -4425,9 +4425,15 @@ test("SURFACE: the shared predicate is unreachable from every public namespace i
     // left behind.
     const base = mkdtempSync(join(tmpdir(), "gate-zero-reexport-src-"));
     staged.push(base);
-    const control = join(base, "src");
-    cpSync(fileURLToPath(new URL("..", import.meta.url)), base,
+    const controlPackage = join(base, "mcp-server");
+    const control = join(controlPackage, "src");
+    cpSync(fileURLToPath(new URL("..", import.meta.url)), controlPackage,
       { recursive: true, filter: source => !/\/(?:node_modules|test)$/.test(source) });
+    // Preserve the repository layout for shared Worker policy imports.
+    mkdirSync(join(base, "ops", "config"), { recursive: true });
+    for (const name of ["jev-call-sites.v1.json", "jev-cost-guard.v1.json"])
+      cpSync(fileURLToPath(new URL(`../../ops/config/${name}`, import.meta.url)),
+        join(base, "ops", "config", name));
     const readersPath = join(control, READERS_FILE);
     writeFileSync(readersPath,
       `${readFileSync(readersPath, "utf8")}\nexport * as seam from "./${BINDING_FILE}";\n`);

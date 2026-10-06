@@ -1,3 +1,4 @@
+import { attributedJevState } from "./jev-spend-authority.js";
 // Browser entrypoint for the configured production app host (with a narrow
 // legacy Deal Room compatibility door).
 //
@@ -866,11 +867,13 @@ async function jevDealReadingResponse(request, env, session, dependencies) {
     });
     const record = await reader(args.deal);
     const read = dependencies.jevDealRead || readDealWithJev;
-    return json(await read(record, { askJev: env.TYPESAFE_API_KEY ? request =>
-      callTool(env, session.actor, "ask-jev", {
-        idempotency_key: crypto.randomUUID(), session_id: `worker-deal-reading-${crypto.randomUUID()}`,
-        purpose: "call", ...request,
-      }, "full", "app_runtime") : undefined }));
+    return json(await read(record, { askJev: env.TYPESAFE_API_KEY ? request => {
+      const sessionId = `worker-deal-reading-${crypto.randomUUID()}`;
+      return callTool(env, session.actor, "ask-jev", {
+        idempotency_key: crypto.randomUUID(), session_id: sessionId,
+        purpose: "call", ...request, state: attributedJevState(request.state, {
+          caller: "jev_deal_read", session_id: sessionId, job_id: null, unattended: false }),
+      }, "full", "app_runtime"); } : undefined }));
   } catch {
     return json({ error: "DEPENDENCY_UNAVAILABLE" }, 503);
   }

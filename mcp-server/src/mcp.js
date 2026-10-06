@@ -1,3 +1,4 @@
+import { holdJevBilling, jevCallSite, unpackJevState, refuseJevSpend } from "./jev-spend-authority.js";
 // CARR MCP server — the MCP transport (stateless streamable HTTP:
 // initialize / tools/list / tools/call). Verb surface unchanged.
 //
@@ -938,6 +939,10 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
     await assertRegisteredToolInput(name, tool, jevArgs);
     coerceArgsToSchema(tool.inputSchema, jevArgs);
     const normalized = validateAskJevArgs(jevArgs);
+    const attribution = unpackJevState(jevArgs.state).attribution;
+    jevCallSite(attribution);
+    if (attribution.session_id && attribution.session_id !== jevArgs.session_id)
+      refuseJevSpend("unattributed_call", attribution.caller);
     validatedJevRequest = { state: normalized.state, model: normalized.model,
       questions: normalized.questions };
   }
@@ -980,7 +985,7 @@ export async function callTool(env, actor, name, args, profile = "full", judgeWo
           throw new ToolError({ error: "actor_not_provisioned", slug: actor.slug });
         jevAsk = jevAskBinding(env, fetch, { reserveAttempt: async () => {
           return reserveJevCallAttempt(client, { ...actor, id: actorRow.id }, jevArgs);
-        } });
+        }, billingHold: () => holdJevBilling(client, { ...actor, id: actorRow.id }) });
         jevPrefetched = await prefetchJevAnswer(jevArgs, jevAsk, judgeWorkClass);
         client.jevPrefetched = jevPrefetched;
       }

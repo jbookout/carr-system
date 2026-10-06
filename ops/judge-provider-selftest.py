@@ -2,13 +2,47 @@
 """Offline behavioral tests of class routing and paired judge evaluation."""
 import importlib.util
 import unittest
-import io
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def setUpModule():
+    # ci.sh exports the offline flags so fixtures never pay. This suite drives
+    # injected fake Workers instead, so it clears them and fails any escape.
+    env = patch.dict(os.environ)
+    env.start()
+    unittest.addModuleCleanup(env.stop)
+    for name in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER"):
+        os.environ.pop(name, None)
+    real_run = subprocess.run
+
+    def guard_run(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and any(str(a).endswith("local-verb.mjs") for a in argv):
+            raise AssertionError("fixture reached real local-verb")
+        return real_run(argv, *args, **kwargs)
+    guard = patch.object(subprocess, "run", guard_run)
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
+
+
+def worker_runner(client, answer, seen):
+    """Fake the authenticated Worker, including its zero-spend probe."""
+    def run(argv, **options):
+        request = json.loads(argv[3])
+        if request.get("transport_mode") == "cache_only":
+            return subprocess.CompletedProcess(argv, 1, "", "TOOL ERROR " + json.dumps({
+                "error": "jev_cache_miss", "spend_authority": client.SPEND_AUTHORITY}))
+        seen.append(request)
+        return subprocess.CompletedProcess(argv, 0, json.dumps({
+            **answer, "ok": True, "receipt_id": "offline-receipt"}), "")
+    return run
 
 
 def load(name):
@@ -19,6 +53,10 @@ def load(name):
 
 
 class RoutingTests(unittest.TestCase):
+    def setUp(self):
+        storage = self.enterContext(tempfile.TemporaryDirectory(prefix="judge-provider-selftest-"))
+        self.enterContext(patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=str(Path(storage) / "cache")))
+
     def test_default_passes_exact_request_options_and_response(self):
         judge = load("interface")
         seen = []
@@ -51,20 +89,21 @@ class RoutingTests(unittest.TestCase):
         spec.loader.exec_module(client)
         routing = {"schema": "carr-judge-providers/v1", "providers": {
             "system_work": "decisions", "app_runtime": "jev"}}
-        class Response(io.BytesIO):
-            status = 200
         # The client refuses a question with no instructions before sending it.
         QUESTION = {"type": "noul", "instructions": "Is this the fixture?"}
         seen = []
-        def transport(request, **kwargs):
-            seen.append(json.loads(request.data))
-            return Response(b'{"model":"jev-1.13.0","answers":{"q":{"type":"noul","noul":0.75}},"usage":{"input_tokens":10,"output_tokens":2}}')
-        options = dict(api_key="offline-test-value", opener=transport, caller="review")
+        answer = {"model": "jev-1.13.0", "answers": {"q": {"type": "noul", "noul": .75}},
+                  "usage": {"input_tokens": 10, "output_tokens": 2}}
+        options = dict(server_runner=worker_runner(client, answer, seen), caller="review", calls_log=os.devnull)
         with patch.object(client.JUDGE, "provider_for", side_effect=lambda cls, config=None: "decisions" if cls == "system_work" else "jev"):
             with self.assertRaisesRegex(client.TypeSafeError, "decisions contract not yet verified / no key"):
                 client.ask("code", {"q": QUESTION}, **options)
             result = client.ask("deal", {"q": QUESTION}, work_class="app_runtime", **options)
-        self.assertEqual(seen, [{"state": "deal", "model": "jev-latest", "questions": {"q": QUESTION}}])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["state"]["input"], "deal")
+        self.assertEqual(seen[0]["state"]["jev_attribution"]["caller"], "review")
+        self.assertEqual(seen[0]["questions"], {"q": QUESTION})
+        self.assertEqual(seen[0]["model"], "jev-latest")
         self.assertEqual(result["answers"]["q"]["noul"], 0.75)
         self.assertEqual(result["usage"], {"input_tokens": 10, "output_tokens": 2})
 
@@ -76,17 +115,21 @@ class RoutingTests(unittest.TestCase):
                       city="Town", owner="Broker", next_step=None, next_step_due=None,
                       status_narrative="Offer submitted; landlord response pending", history=[],
                       days_since_record_touched=2)
-        class Response(io.BytesIO):
-            status = 200
-        def transport(request, **options):
-            return Response(json.dumps({"model": "jev-1.13.0", "answers": {
+        answer = {"model": "jev-1.13.0", "answers": {
                 "movement": {"type": "score", "score": 2, "confidence": .9, "probabilities": {"2": 1}},
                 "waiting_on": {"type": "choice", "choice": "counterparty", "confidence": .9, "probabilities": {"counterparty": 1}},
                 "silence_is_bad": {"type": "noul", "noul": .1}},
-                "usage": {"input_tokens": 10, "output_tokens": 3}}).encode())
+                "usage": {"input_tokens": 10, "output_tokens": 3}}
+        seen = []
         with patch.object(deals.ts.JUDGE, "provider_for", side_effect=lambda cls, config=None: "decisions" if cls == "system_work" else "jev"):
-            result = deals.read_deal(bundle, api_key="offline-test-value", opener=transport)
+            result = deals.read_deal(bundle, server_runner=worker_runner(deals.ts, answer, seen))
         self.assertTrue(result["judged"], result)
+        self.assertEqual(len(seen), 1)
+        # A repeat may reuse this test's answer, never another run's cache.
+        with patch.object(deals.ts.JUDGE, "provider_for", return_value="jev"):
+            cached = deals.read_deal(bundle, server_runner=worker_runner(deals.ts, answer, seen))
+        self.assertEqual(cached, result)
+        self.assertEqual(len(seen), 1)
 
 
 class EvaluationTests(unittest.TestCase):

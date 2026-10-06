@@ -376,7 +376,7 @@ def questions(bundle):
     }
 
 
-def read_deal(bundle, *, api_key=None, timeout=20.0, opener=None):
+def read_deal(bundle, *, api_key=None, timeout=20.0, server_runner=None):
     """Judge one deal, or say why it was not judged. Never raises."""
     if not bundle["has_evidence"]:
         return dict(bundle, judged=False, reason=(
@@ -389,8 +389,8 @@ def read_deal(bundle, *, api_key=None, timeout=20.0, opener=None):
     # wearing a service outage's clothes, in the one place nobody would look.
     state, asked = state_for(bundle), questions(bundle)
     try:
-        answer = _semantic().ask(state, asked, caller="jev_deal_read", version="vendor-v1", client=ts, timeout=timeout, api_key=api_key,
-                        opener=opener, work_class="app_runtime")
+        answer = _semantic().ask(state, asked, caller="jev_deal_read", version="vendor-v1", client=ts, timeout=timeout,
+                                 server_runner=server_runner, work_class="app_runtime")
     except Exception as exc:  # the room must build whatever the service does
         return dict(bundle, judged=False, reason=f"the judgment did not run: {exc}")
     answers = answer.get("answers") or {}

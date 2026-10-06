@@ -14,6 +14,33 @@ HERE = ROOT / "evals/jev-judgments"
 
 
 class ReportTests(unittest.TestCase):
+    def test_admission_replay_is_independent_of_live_budget_pauses(self):
+        spec = importlib.util.spec_from_file_location("eval_replay", HERE / "run_eval.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        client = runner._load(ROOT)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+                client, "JEV_CALL_SITES_PATH", str(Path(tmp) / "unused-live-policy.json")):
+            observed = runner.observe(client, {"site": "rule_trigger_delivery", "session": True}, Path(tmp))
+        self.assertEqual(observed, {"paid": True, "refusal": None})
+
+    def test_report_matches_receipt_schema_and_preserves_baseline_provenance(self):
+        spec = importlib.util.spec_from_file_location("receipt_checker", ROOT / "ops/check-eval-receipt.py")
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        code, receipt = self.report(lambda case: not runner_label(case))
+        self.assertEqual(code, 0)
+        self.assertEqual(checker.claim_errors(receipt, "jev-judgments"), [])
+        self.assertIn("Baseline git ref: fixture", receipt["notes"])
+
+    def test_default_baseline_is_the_recorded_historical_client(self):
+        # Merge-base with main moves as main absorbs the registry; the baseline must not.
+        spec = importlib.util.spec_from_file_location("eval_default_base", HERE / "run_eval.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        with patch.object(runner, "report", side_effect=lambda base: base):
+            self.assertEqual(runner.main(["--report"]), "f5e44115^")
+
     def report(self, candidate, controls_fail=False):
         spec = importlib.util.spec_from_file_location("eval_report", HERE / "run_eval.py")
         runner = importlib.util.module_from_spec(spec)

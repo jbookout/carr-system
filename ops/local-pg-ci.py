@@ -141,7 +141,9 @@ def scrub_cloud_environment(source: Mapping[str, str]) -> dict[str, str]:
         "TMPDIR",
         "USER",
     }
-    return {key: value for key, value in source.items() if key in allowed}
+    # Cluster commands also run outside DisposablePostgres (for example the
+    # Jev admission proof); they need the same deterministic startup locale.
+    return {**{key: value for key, value in source.items() if key in allowed}, "LC_ALL": "C"}
 
 
 def find_postgres_binaries() -> PostgresBinaries:
@@ -245,7 +247,6 @@ def run_local_ci(
     binaries = find_postgres_binaries()
     command_runner = runner or SubprocessRunner()
     clean_env = scrub_cloud_environment(os.environ)
-    clean_env["LC_ALL"] = "C"
     clean_env["PATH"] = f"{binaries.initdb.parent}{os.pathsep}{clean_env.get('PATH', '')}"
     fixture = DisposablePostgres("carr-local-pg-ci.", binaries.pg_ctl, clean_env, runner=command_runner.run)
     root = fixture.root

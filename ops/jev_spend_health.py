@@ -86,13 +86,13 @@ def _loop_lock(path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def _today_usage(log_path, day):
+def _today_usage(log_path, day, *, worker_authority=False):
     calls = tokens = unknown = 0
     with Path(log_path).open(encoding="utf-8") as handle:
         for line in handle:
             try:
                 row = json.loads(line)
-                if row.get("cache_hit") is True:
+                if row.get("cache_hit") is True or (worker_authority and row.get("server_receipt_id")):
                     continue
                 stamp = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
                 if stamp.astimezone(timezone.utc).date().isoformat() != day:
@@ -138,44 +138,48 @@ def check_spend(log_path=USAGE_LOG, config_path=CONFIG, *, now=None, extra_logs=
     if not Path(log_path).is_file() and not any(Path(extra).is_file() for extra in extra_logs) and worker_usage is None:
         return f"UNAVAILABLE jev spend — local usage log absent · {ACTION}"
     calls = tokens = unknown = 0
-    try:
-        for path in (log_path, *extra_logs):
-            if Path(path).is_file():
-                measured = _today_usage(path, day)
-                calls += measured[0]
-                tokens += measured[1]
-                unknown += measured[2]
-    except (OSError, UnicodeError):
-        return f"UNAVAILABLE jev spend — local usage unavailable · {ACTION}"
     abandoned = 0
     abandon_after = 3600
     worker_unavailable = False
+    measured_worker = None
     if worker_usage is not None:
         try:
             measured = worker_usage(day)
             if not isinstance(measured, dict) or any(type(measured.get(key)) is not int or measured[key] < 0
                                                      for key in ("calls", "input_tokens", "unknown")):
                 raise ValueError("invalid Worker Jev usage")
-            calls += measured["calls"]
-            tokens += measured["input_tokens"]
-            unknown += measured["unknown"]
             abandoned = measured.get("abandoned_attempts", 0)
             abandon_after = measured.get("abandon_after_seconds", 3600)
             if type(abandoned) is not int or abandoned < 0 or type(abandon_after) is not int or abandon_after <= 0:
                 raise ValueError("invalid Worker abandoned attempt usage")
+            measured_worker = measured
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             worker_unavailable = True
+    try:
+        for path in (log_path, *extra_logs):
+            if Path(path).is_file():
+                measured = _today_usage(path, day, worker_authority=measured_worker is not None)
+                calls += measured[0]
+                tokens += measured[1]
+                unknown += measured[2]
+    except (OSError, UnicodeError):
+        return f"UNAVAILABLE jev spend — local usage unavailable · {ACTION}"
+    if measured_worker is not None:
+        calls += measured_worker["calls"]
+        tokens += measured_worker["input_tokens"]
+        unknown += measured_worker["unknown"]
     amount = tokens * price / 1_000_000
     missing = f"{unknown} call or attempt{'s' if unknown != 1 else ''} missing usage"
     attempts = f" · {abandoned} abandoned attempts (older than {abandon_after}s; excluded from missing usage)"
     if (unknown or worker_unavailable) and amount <= threshold:
         return (f"UNKNOWN jev spend — {missing}"
                 f"; Worker usage {'unavailable' if worker_unavailable else 'read'} "
-                f"({calls} measured calls; warning retained until usage is measurable) "
+                f"({calls} measured calls, ${amount:.3f} lower bound / UTC day; "
+                f"{tokens} input tokens × ${price:g}/M; warning retained until usage is measurable) "
                 f"· {ACTION}{attempts}")
     status = "WARN" if amount > threshold else "OK"
     line = (f"{status} jev spend — ${amount:.3f} estimated / UTC day "
-            f"({calls} calls, {tokens} input tokens; threshold ${threshold:.2f}) · {ACTION}{attempts}")
+            f"({calls} calls, {tokens} input tokens × ${price:g}/M; threshold ${threshold:.2f}) · {ACTION}{attempts}")
     if unknown:
         line += f" · at least this amount; {missing}"
     if worker_unavailable:

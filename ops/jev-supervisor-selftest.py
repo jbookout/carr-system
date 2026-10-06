@@ -862,11 +862,9 @@ class QuietUnavailabilityTests(unittest.TestCase):
             self.hook.post_tool_use = lambda *a: calls.append("watch")
             self.hook.fact_boundary = lambda *a: calls.append("fact")
             self.hook.stop = lambda *a: calls.append("done")
-            # The same registry admits the watch and refuses the other sites.
-            with mock.patch.object(live, "_fixture_offline", return_value=False):
-                live._admit_paid_call("jev_session_watch", "s1", {}, None, "noul", "fixture")
-                with self.assertRaises(live.JevCallRefused):
-                    live._admit_paid_call("jev_fact_boundary", "s1", {}, None, "noul", "fixture")
+            # Dispatch hints observe the registry; Worker admission alone refuses paid calls.
+            self.assertTrue(live.call_site_enabled("jev_session_watch"))
+            self.assertFalse(live.call_site_enabled("jev_fact_boundary"))
             run_main(self.hook, self.failing())
             run_main(self.hook, {"hook_event_name": "Stop", "session_id": "s1", "cwd": self.dir})
         self.assertEqual(calls, ["watch", "done"])

@@ -61,6 +61,7 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False,
     shutil.copytree(ROOT / "mcp-server", root / "mcp-server",
                     ignore=shutil.ignore_patterns("node_modules"))
     shutil.copytree(ROOT / "dealroom", root / "dealroom")
+    shutil.copytree(ROOT / "ops/config", root / "ops/config")
     assert not (root / "mcp-server" / "node_modules").exists()
     if mismatch:
         lock = root / "mcp-server" / "package-lock.json"
@@ -79,7 +80,7 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False,
                    check=True, env=FIXTURE_GIT_ENV)
     subprocess.run(["git", "-C", str(root), "config", "user.name", "selftest"],
                    check=True, env=FIXTURE_GIT_ENV)
-    subprocess.run(["git", "-C", str(root), "add", "mcp-server", "dealroom"],
+    subprocess.run(["git", "-C", str(root), "add", "mcp-server", "dealroom", "ops/config"],
                    check=True, env=FIXTURE_GIT_ENV)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"],
                    check=True, env=FIXTURE_GIT_ENV)
@@ -122,6 +123,7 @@ def test_wrangler_dry_run() -> None:
         shutil.copytree(ROOT / "mcp-server", root / "mcp-server",
                         ignore=shutil.ignore_patterns("node_modules"))
         shutil.copytree(ROOT / "dealroom", root / "dealroom")
+        shutil.copytree(ROOT / "ops/config", root / "ops/config")
         # Wrangler validates the generated assets directory before a dry-run.
         # Artifact identity/tamper/rollback behavior is exercised separately by
         # doctorcre-artifact-selftest; this fixture only proves runtime bundling.

@@ -169,18 +169,13 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
     gates that sit in someone's way, and a judgment that has not arrived in
     twenty seconds has already cost more than it is worth.
 
-    `retries` and `deadline` pass through to the client's ask() when given
-    (typesafe_client.ask: rate-limit retries, and an absolute monotonic
-    deadline). A caller under a hook timeout passes retries=0: a 429's
-    retry-after is otherwise unbounded.
+    deadline bounds the Worker call. The Worker owns retries and spend admission.
     """
     started = time.monotonic()
     tsc = None
     try:
         tsc = client or _client()
         extra = {}
-        if retries is not None:
-            extra["retries"] = retries
         if deadline is not None:
             extra["deadline"] = deadline
         if model is not None:
@@ -191,7 +186,7 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
             # calls behind one name. ops/config/jev-call-sites.v1.json keys on it.
             extra.update(caller=caller or _calling_module(),
                          cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
-        answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key, **extra)
+        answer = tsc.ask(subject, questions, timeout=timeout, **extra)
     except Exception as exc:  # deliberately broad: see JudgeUnavailable
         reason = (getattr(exc, "code", None) or "vendor_unavailable"
                   if isinstance(exc, getattr(tsc, "TypeSafeError", ())) else "inspection_error")

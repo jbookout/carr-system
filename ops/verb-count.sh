@@ -57,6 +57,11 @@ fi
 IMPORT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/verb-count.XXXXXX")"
 trap 'rm -rf "$IMPORT_ROOT"' EXIT HUP INT TERM
 ln -s "$WORKER_DIR" "$IMPORT_ROOT/mcp-server"
+# Shared spend policy belongs to the exact candidate, never the runtime tree.
+if [ -d "$WORKER_DIR/../ops/config" ]; then
+  mkdir "$IMPORT_ROOT/ops"
+  ln -s "$WORKER_DIR/../ops/config" "$IMPORT_ROOT/ops/config"
+fi
 ln -s "$RUNTIME_NODE_MODULES" "$IMPORT_ROOT/node_modules"
 
 COUNT="$(node --preserve-symlinks --input-type=module -e '
