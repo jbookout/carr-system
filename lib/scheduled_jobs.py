@@ -6,6 +6,7 @@ import re
 import hashlib
 import json
 import plistlib
+import shlex
 import subprocess
 import sys
 import time
@@ -14,10 +15,17 @@ from pathlib import Path
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "ops"))
 from git_env import scrubbed_env
+import launchd_scope
 import machine_role
 
 SCHEDULE_KEYS = ("StartInterval", "StartCalendarInterval", "KeepAlive", "RunAtLoad",
                  "WatchPaths", "QueueDirectories", "ThrottleInterval")
+# Environment fields whose value IS the checkout a job runs against.
+CHECKOUT_ENV = ("CARR_REPO", "CARR_REPO_ROOT")
+# Every bin/run-scheduled.sh wrapper appends to this one log, so its age says
+# nothing about any single job.
+SHARED_WRAPPER_LOG = "out/run-scheduled.log"
+WEEK_MINUTES = 7 * 24 * 60
 
 
 def schedule(plist):
@@ -38,8 +46,13 @@ def disabled(text):
             re.findall(r'"([^"\n]+)"\s*=>\s*(true|false|disabled|enabled)', text)}
 
 
+def cron_label(command):
+    return "cron." + hashlib.sha256(command.encode()).hexdigest()[:16]
+
+
 def cron_entries(text):
-    result = {}
+    """Every crontab firing, in order; one command may legitimately appear once only."""
+    result = []
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or re.match(r"^[A-Za-z_][\w]*\s*=", line):
@@ -48,9 +61,23 @@ def cron_entries(text):
         if len(parts) not in (2, 6):
             raise ValueError("unrecognized crontab entry")
         command = parts[-1]
-        label = "cron." + hashlib.sha256(command.encode()).hexdigest()[:16]
-        result[label] = {"command": command, "interval": " ".join(parts[:-1])}
+        result.append({"label": cron_label(command), "command": command, "interval": " ".join(parts[:-1])})
     return result
+
+
+def cron_words(command):
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def cron_directory(command):
+    """The directory a cron command's last `cd` selects; None means cron's default home."""
+    words = cron_words(command)
+    targets = [words[i + 1] for i, w in enumerate(words[:-1])
+               if w == "cd" and (i == 0 or words[i - 1] in ("&&", ";", "||"))]
+    return targets[-1].rstrip(";") if targets else None
 
 
 def expand(value):
@@ -63,17 +90,129 @@ def expand(value):
     return os.path.expanduser(value)
 
 
-def paths(text):
-    return re.findall(r"(?<!\w)/(?:[^\s\"'{};]+)", text)
+def calendar_entries(value):
+    entries = [value] if isinstance(value, dict) else list(value or [])
+    return sorted(entries, key=lambda e: sorted(e.items()))
 
 
-def runtime_paths(text):
-    fields = re.findall(r"(?m)^\s*(?:program|working directory)\s*=\s*(.+)$", text)
-    arguments = re.search(r"(?ms)^\s*arguments\s*=\s*\{(.*?)^\s*\}", text)
-    if arguments:
-        fields.append(arguments[1])
-    fields.extend(re.findall(r"(?m)^\s*CARR_REPO(?:_ROOT)?\s*=>\s*(.+)$", text))
-    return paths(" ".join(fields))
+def cadence(interval):
+    """The part of a schedule launchd reports back for a loaded job."""
+    view = {}
+    if "StartInterval" in interval:
+        view["StartInterval"] = interval["StartInterval"]
+    if "StartCalendarInterval" in interval:
+        view["StartCalendarInterval"] = calendar_entries(interval["StartCalendarInterval"])
+    if interval.get("WatchPaths"):
+        view["WatchPaths"] = sorted(interval["WatchPaths"])
+    return view
+
+
+def loaded_cadence(text):
+    view = {}
+    interval = re.search(r"(?m)^\s*run interval = (\d+) seconds\s*$", text)
+    if interval:
+        view["StartInterval"] = int(interval[1])
+    calendar, watched = [], []
+    for stream, body in re.findall(r"(?ms)^\s*stream = (\S+)\s*$.*?^\s*descriptor = \{\s*$(.*?)^\s*\}\s*$", text):
+        if stream.startswith("com.apple.launchd.calendarinterval"):
+            calendar.append({k: int(v) for k, v in re.findall(r'"(\w+)" => (-?\d+)', body)})
+        elif stream == "com.apple.fsevents.matching":
+            watched.extend(re.findall(r'(?m)^\s*\d+ = "(.*)"\s*$', body))
+    if calendar:
+        view["StartCalendarInterval"] = calendar_entries(calendar)
+    if watched:
+        view["WatchPaths"] = sorted(watched)
+    return view
+
+
+def loaded_arguments(text):
+    block = re.search(r"(?ms)^\s*arguments = \{\s*$(.*?)^\s*\}\s*$", text)
+    return [line.strip() for line in block[1].splitlines() if line.strip()] if block else None
+
+
+def installed_arguments(plist):
+    return plist.get("ProgramArguments") or ([plist["Program"]] if plist.get("Program") else [])
+
+
+def checkout_environment(plist, runtime):
+    """Installed and loaded values of the environment fields that name a checkout."""
+    env = plist.get("EnvironmentVariables") or {}
+    return ([env[k] for k in CHECKOUT_ENV if env.get(k)] +
+            re.findall(r"(?m)^\s*(?:%s)\s*=>\s*(.+?)\s*$" % "|".join(CHECKOUT_ENV), runtime))
+
+
+def working_directories(plist, runtime):
+    return ([plist["WorkingDirectory"]] if plist.get("WorkingDirectory") else []) + \
+        re.findall(r"(?m)^\s*working directory\s*=\s*(.+?)\s*$", runtime)
+
+
+def running(label, live, runtime):
+    pid = live.get(label, {}).get("pid", "-")
+    return pid.isdigit() or bool(re.search(r"(?m)^\s*state = running\s*$", runtime))
+
+
+def expectation(job, role):
+    """(enabled, installed) on a machine of this role; placement is launchd_scope's alone."""
+    if job["scheduler"] == "launchd" and not launchd_scope.allowed_on_machine(job["label"] + ".plist", role == "primary"):
+        return False, False
+    return job["expected_enabled"], job.get("expected_installed", True)
+
+
+def activity_path(job):
+    return expand(job.get("activity_path") or job["log_path"])
+
+
+def receipt_name(argv):
+    """The receipt bin/run-scheduled.sh mints for these arguments, parsed as it parses them."""
+    wrappers = [i for i, v in enumerate(argv) if v.endswith("/bin/run-scheduled.sh")]
+    if not wrappers:
+        return None
+    i = wrappers[0] + 1
+    while i < len(argv):
+        if argv[i] == "--":
+            i += 1
+            break
+        if argv[i] not in ("--heartbeat-interval", "--also-heartbeat"):
+            break
+        i += 2
+    service, key = argv[i:i + 2]
+    return f"{hashlib.sha256(service.encode()).hexdigest()[:16]}.{hashlib.sha256(key.encode()).hexdigest()[:32]}.receipt"
+
+
+def longest_gap_seconds(interval):
+    """Longest wait between two firings of a periodic schedule; None if it never recurs."""
+    if "StartInterval" in interval:
+        return interval["StartInterval"]
+    if "StartCalendarInterval" not in interval:
+        return None
+    entries = calendar_entries(interval["StartCalendarInterval"])
+    if any(set(e) - {"Minute", "Hour", "Weekday"} for e in entries):
+        raise ValueError("calendar fields beyond Minute/Hour/Weekday are not modelled")
+    firings = sorted({day * 1440 + hour * 60 + minute for e in entries
+                      for day in ([e["Weekday"] % 7] if "Weekday" in e else range(7))
+                      for hour in ([e["Hour"]] if "Hour" in e else range(24))
+                      for minute in ([e["Minute"]] if "Minute" in e else range(60))})
+    gaps = [b - a for a, b in zip(firings, firings[1:])] + [firings[0] + WEEK_MINUTES - firings[-1]]
+    return max(gaps) * 60
+
+
+def inside(path, required):
+    return path == required or path.startswith(required + "/")
+
+
+def checkout_drift(paths, required, roots):
+    for path in paths:
+        checkout = roots.get(path)
+        if checkout and os.path.realpath(checkout) != os.path.realpath(required):
+            return True
+        if "/carr-system" in path and not inside(path, required):
+            return True
+    return False
+
+
+def is_checkout(path, required, roots):
+    """A field whose whole value is a checkout must name exactly the required one."""
+    return os.path.realpath(roots.get(path, path)) == os.path.realpath(required)
 
 
 def render(rows):
@@ -92,7 +231,11 @@ def report(manifest, snapshot, now):
     live = listed(snapshot["launchctl_list"])
     overrides = disabled(snapshot["launchctl_disabled"])
     prefixes = tuple(manifest.get("scope", {}).get("launchd_label_prefixes", ["com.carr.", "local.carr-"]))
-    cron = cron_entries(snapshot["cron"])
+    cron = {}
+    for entry in cron_entries(snapshot["cron"]):
+        cron.setdefault(entry["label"], []).append(entry)
+    roots = snapshot.get("checkout_roots", {})
+    role = snapshot["machine_role"]
     observed = set(snapshot["plists"]) | {k for k in live.keys() | overrides.keys() if k.startswith(prefixes)} | cron.keys()
     for label in sorted(observed - registry.keys()):
         emit(label, "unknown_job", "job has no declared expectation", "review the job and declare its purpose/state or retire it through its owner")
@@ -101,74 +244,97 @@ def report(manifest, snapshot, now):
     for job in manifest["jobs"]:
         label = job["label"]
         owner = job["owner"]
-        role = snapshot.get("machine_role")
-        enabled = job.get("expected_enabled_by_role", {}).get(role, job["expected_enabled"])
-        expected_installed = job.get("expected_installed_by_role", {}).get(role, job.get("expected_installed", True))
+        required = expand(job["required_checkout"])
+        enabled, expected_installed = expectation(job, role)
         plist = snapshot["plists"].get(label)
         is_cron = job["scheduler"] == "cron"
         present = label in cron if is_cron else plist is not None
         if expected_installed and not present:
             emit(label, "missing_job", "declared job definition is absent", "restore the declared job definition from its repository source and verify registration", owner)
         if is_cron:
-            actual = cron.get(label)
-            if enabled and not actual:
-                continue
+            actual = cron.get(label, [])
             if actual and not enabled:
                 emit(label, "unexpected_enabled", "cron entry is active despite disabled expectation", "retire or pause the entry through its owner", owner)
-            if actual and actual["interval"] != job["interval"]:
+            if len(actual) > 1:
+                emit(label, "duplicate_entry", f"crontab fires this command from {len(actual)} entries", "keep exactly the declared cron entry", owner)
+            if any(e["interval"] != job["interval"] for e in actual):
                 emit(label, "interval_drift", "cron cadence differs from manifest", "restore the declared cron cadence", owner)
-            if actual and expand(job["program_path"]) not in paths(actual["command"]):
-                emit(label, "wrong_checkout", "cron command does not use declared program", "restore the declared program and checkout in crontab", owner)
+            for entry in actual:
+                words = cron_words(entry["command"])
+                directory = cron_directory(entry["command"])
+                if (expand(job["program_path"]) not in words or
+                        checkout_drift([w for w in words if w.startswith("/")], required, roots) or
+                        (directory and not (inside(directory, required) or is_checkout(directory, required, roots)))):
+                    emit(label, "wrong_checkout", "cron command does not run the declared program in the declared checkout", "restore the declared program and checkout in crontab", owner)
+                    break
         else:
+            runtime = snapshot["launchctl_print"].get(label, "")
             is_disabled = overrides.get(label, bool((plist or {}).get("Disabled", False)))
             if enabled and is_disabled:
                 emit(label, "disabled_but_expected", "launchd disabled override or plist Disabled is set", "restore expected enabled state through the agent owner and verify launchctl print-disabled", owner)
             if enabled and plist and label not in live:
                 emit(label, "missing_registration", "plist exists but launchd has no registered job", "bootstrap the declared agent and verify launchctl print", owner)
-            if not enabled and label in live and not is_disabled:
+            if not enabled and label in live and running(label, live, runtime):
+                emit(label, "unexpected_running", "job is running despite disabled expectation; a disable override does not stop it", "stop the running job through its owner (launchctl bootout) and verify launchctl list", owner)
+            elif not enabled and label in live and (not is_disabled or not expected_installed):
                 emit(label, "unexpected_enabled", "job is registered despite disabled expectation", "retire or pause the agent through its owner", owner)
-            if plist and schedule(plist) != expand(job["interval"]):
+            declared = expand(job["interval"])
+            if plist and schedule(plist) != declared:
                 emit(label, "interval_drift", "installed cadence differs from manifest", "restore declared cadence and reload the agent", owner)
+            if runtime and loaded_cadence(runtime) != cadence(declared):
+                emit(label, "loaded_interval_drift", "launchd is firing on a cadence other than the manifest's", "reload the agent from its declared definition and verify launchctl print", owner)
             if plist and job.get("log_paths") and [plist.get(k) for k in ("StandardOutPath", "StandardErrorPath")] != [expand(p) if p else None for p in job["log_paths"]]:
                 emit(label, "log_path_drift", "installed log destinations differ from manifest", "restore declared log paths and reload the agent", owner)
-            runtime = snapshot["launchctl_print"].get(label, "")
             codes = re.findall(r"last exit (?:code|status)\s*=\s*(-?\d+)", runtime)
             code = int(codes[-1]) if codes else live.get(label, {}).get("exit", 0)
             if enabled and code:
                 emit(label, "failing_exit", f"last exit status {code}", "inspect the job log and repair the failing command; verify a successful run", owner)
+            if plist is not None:
+                argv = expand(job["program_arguments"])
+                loaded = loaded_arguments(runtime) if runtime else None
+                drifted = [name for name, actual in (("installed", installed_arguments(plist)), ("loaded", loaded))
+                           if actual is not None and actual != argv]
+                if drifted:
+                    emit(label, "program_drift", " and ".join(drifted) + " arguments differ from the declared program arguments",
+                         "restore the declared program arguments and reload the agent", owner)
+                environment = checkout_environment(plist, runtime)
+                fields = (installed_arguments(plist) + (loaded or []) +
+                          working_directories(plist, runtime) + environment)
+                if checkout_drift(fields, required, roots) or not all(
+                        is_checkout(v, required, roots) for v in environment):
+                    emit(label, "wrong_checkout", "installed or loaded runtime does not use declared checkout",
+                         f"restore declared program in {job['required_checkout']} and reload the agent", owner)
         if enabled and present and job.get("log_max_age_seconds") is not None:
-            log = expand(job.get("activity_path") or job["log_path"])
-            mtime = snapshot["log_mtimes"].get(log)
+            mtime = snapshot["log_mtimes"].get(activity_path(job))
             if mtime is None or now - mtime > job["log_max_age_seconds"]:
                 emit(label, "stale_log", "declared activity log is missing or older than its allowed cadence", "inspect the scheduler and job log; restore a run that writes the declared activity signal", owner)
-        if plist is None or is_cron:
-            continue
-        runtime = snapshot["launchctl_print"].get(label, "")
-        expected = expand(job["program_path"])
-        disk_paths = paths(" ".join(plist.get("ProgramArguments", [])) + " " + plist.get("Program", ""))
-        loaded_paths = runtime_paths(runtime)
-        required = expand(job["required_checkout"])
-        wrong = expected not in disk_paths or (runtime and expected not in loaded_paths)
-        for path in disk_paths + loaded_paths + [plist.get("WorkingDirectory", "")]:
-            checkout = snapshot.get("checkout_roots", {}).get(path)
-            if checkout and os.path.realpath(checkout) != os.path.realpath(required):
-                wrong = True
-            if "/carr-system" in path and not (path == required or path.startswith(required + "/")):
-                wrong = True
-        if wrong:
-            emit(label, "wrong_checkout", "installed or loaded runtime does not use declared checkout/program",
-                 f"restore declared program {job['program_path']} in {job['required_checkout']} and reload the agent",
-                 job["owner"])
     git = snapshot.get("git", {})
     if git.get("behind", 0):
         emit("canonical", "behind_main", f"canonical checkout is {git['behind']} commits behind origin/main",
              "repair canonical fleet-sync/fast-forward through bin/fleet-sync.sh and verify HEAD equals origin/main")
+    if git.get("ahead", 0):
+        emit("canonical", "ahead_of_main", f"canonical checkout has {git['ahead']} commits not on origin/main",
+             "move the unpublished canonical commits to a branch through the repository hygiene owner, then verify HEAD equals origin/main")
     if git.get("branch") != "main":
         emit("canonical", "wrong_branch", "canonical checkout does not select main", "restore canonical main through the repository hygiene owner without discarding local work")
     if git.get("remote_matches") is False:
         emit("canonical", "remote_ref_stale", "origin/main does not match GitHub main; behind count is only a cached lower bound",
              "restore fleet-sync's fetch and fast-forward, then verify against remote main")
     return rows
+
+
+def checkout_candidates(snapshot):
+    """Every path naming the checkout a job runs against, for git to resolve."""
+    found = set()
+    for label, plist in snapshot["plists"].items():
+        runtime = snapshot["launchctl_print"].get(label, "")
+        values = (installed_arguments(plist) + (loaded_arguments(runtime) or []) +
+                  working_directories(plist, runtime) + checkout_environment(plist, runtime))
+        found.update(v for v in values if v.startswith("/"))
+    for entry in cron_entries(snapshot["cron"]):
+        directory = cron_directory(entry["command"])
+        found.update(w for w in cron_words(entry["command"]) + [directory or ""] if w.startswith("/"))
+    return found
 
 
 def collect(manifest):
@@ -206,18 +372,12 @@ def collect(manifest):
         if label.startswith(prefixes):
             snapshot["launchctl_print"][label] = command(["launchctl", "print", domain + "/" + label], "launchctl_print:" + label).stdout
     cron = command(["crontab", "-l"], "crontab", absent_ok=True)
-    if cron.returncode and not (cron.returncode == 1 and "no crontab for" in cron.stderr):
+    if cron.returncode and "crontab" not in snapshot["errors"] and not (
+            cron.returncode == 1 and "no crontab for" in cron.stderr):
         snapshot["errors"].append("crontab")
     snapshot["cron"] = cron.stdout
     directories_seen = {}
-    candidate_paths = []
-    for label, plist in snapshot["plists"].items():
-        candidate_paths.extend(paths(" ".join(plist.get("ProgramArguments", []))))
-        candidate_paths.extend(runtime_paths(snapshot["launchctl_print"].get(label, "")))
-        if plist.get("WorkingDirectory"):
-            candidate_paths.append(plist["WorkingDirectory"])
-    candidate_paths.extend(paths(snapshot["cron"]))
-    for path in set(candidate_paths):
+    for path in checkout_candidates(snapshot):
         if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(path).name):
             continue  # The interpreter's dependency checkout is not the job's code checkout.
         directory = Path(path)
@@ -235,7 +395,7 @@ def collect(manifest):
         checkout = directories_seen[directory]
         if checkout:
             snapshot["checkout_roots"][path] = checkout
-    logs = {expand(j.get("activity_path") or j["log_path"]) for j in manifest["jobs"] if j.get("log_path")}
+    logs = {activity_path(j) for j in manifest["jobs"] if j.get("log_path")}
     logs.update(p[k] for p in snapshot["plists"].values() for k in ("StandardOutPath", "StandardErrorPath") if p.get(k))
     for log in logs:
         try:
@@ -263,16 +423,36 @@ def load_manifest(path):
     manifest = json.loads(Path(path).read_text())
     if manifest.get("schema_version") != 1:
         raise ValueError("unsupported scheduled-job manifest")
-    labels = set()
+    labels, signals = set(), set()
     for job in manifest["jobs"]:
-        for field in ("label", "scheduler", "program_path", "required_checkout", "interval",
+        program = "program_arguments" if job.get("scheduler") == "launchd" else "program_path"
+        for field in ("label", "scheduler", program, "required_checkout", "interval",
                       "expected_enabled", "log_path", "owner", "done_signal"):
             if field not in job:
                 raise ValueError("job missing " + field)
         if job["label"] in labels or job["scheduler"] not in ("launchd", "cron") or not isinstance(job["expected_enabled"], bool):
             raise ValueError("invalid or duplicate scheduled job")
-        if job.get("log_max_age_seconds") is not None and job["log_max_age_seconds"] <= 0:
-            raise ValueError("invalid log freshness threshold")
+        if "{{" in json.dumps(job):
+            raise ValueError(job["label"] + " carries an unrendered template token; store the portable ~ form")
+        if "expected_enabled_by_role" in job or "expected_installed_by_role" in job:
+            raise ValueError(job["label"] + " restates machine placement; lib/launchd_scope.py owns it")
+        if job["scheduler"] == "launchd" and "StartInterval" in job["interval"]:
+            raise ValueError(job["label"] + " declares StartInterval, which launchd on macOS 27 never fires; "
+                             "declare the lib/launchd_calendar.py form")
+        bound = job.get("log_max_age_seconds")
+        if bound is None:
+            if not job.get("freshness_exception"):
+                raise ValueError(job["label"] + " has no freshness bound and no declared freshness_exception")
+        else:
+            gap = longest_gap_seconds(job["interval"]) if job["scheduler"] == "launchd" else None
+            if job["scheduler"] == "launchd" and gap is None:
+                raise ValueError(job["label"] + " never recurs, so log age cannot show a missed firing")
+            if bound <= 0 or (gap is not None and bound <= gap):
+                raise ValueError(job["label"] + " freshness bound does not outlast its longest schedule gap")
+            signal = job.get("activity_path") or job["log_path"]
+            if signal.endswith(SHARED_WRAPPER_LOG) or signal in signals:
+                raise ValueError(job["label"] + " freshness signal is shared with other jobs")
+            signals.add(signal)
         if job["required_checkout"] != manifest["canonical_checkout"] and not job.get("checkout_exception"):
             raise ValueError("noncanonical checkout needs a declared exception")
         labels.add(job["label"])
@@ -286,7 +466,6 @@ def check(path=None, snapshot=None, now=None):
 
 
 def capture_manifest():
-    canonical = str(Path.home() / "carr-system")
     manifest = {"schema_version": 1, "canonical_checkout": "~/carr-system",
                 "scope": {"launchd_label_prefixes": ["com.carr.", "local.carr-"],
                           "cron": "all current-user entries", "claude": "definition drift owned by config-as-code; execution owned by Control Plane"},
@@ -304,30 +483,22 @@ def capture_manifest():
             return {k: portable(v) for k, v in value.items()}
         return value
     for label, plist in sorted(snapshot["plists"].items()):
-        argv = plist.get("ProgramArguments", [])
-        programs = [v for v in argv if v.startswith(canonical + "/") and
-                    (v.endswith((".py", ".sh")) or "/.build/" in v) and not v.endswith("run-scheduled.sh")]
-        program = programs[0] if programs else plist.get("Program") or (argv[0] if argv else "")
-        log = plist.get("StandardOutPath") or plist.get("StandardErrorPath") or canonical + "/out/run-scheduled.log"
-        row = {"label": label, "scheduler": "launchd", "program_path": portable(program),
+        argv = installed_arguments(plist)
+        log = plist.get("StandardOutPath") or plist.get("StandardErrorPath") or str(Path.home() / "carr-system" / SHARED_WRAPPER_LOG)
+        row = {"label": label, "scheduler": "launchd", "program_arguments": portable(argv),
                "required_checkout": "~/carr-system", "interval": portable(schedule(plist)),
                "expected_enabled": None, "expected_installed": True, "log_path": portable(log),
                "log_paths": [portable(plist.get(k)) for k in ("StandardOutPath", "StandardErrorPath")],
                "log_max_age_seconds": None, "owner": "orchestrator",
                "done_signal": "No durable completion signal verified; inspect job-specific producer"}
-        wrappers = [i for i, v in enumerate(argv) if v.endswith("/bin/run-scheduled.sh")]
-        if wrappers:
-            i = wrappers[0] + 1
-            while i < len(argv) and argv[i].startswith("--"):
-                i += 2
-            service, key = argv[i:i+2]
-            receipt = f"{hashlib.sha256(service.encode()).hexdigest()[:16]}.{hashlib.sha256(key.encode()).hexdigest()[:32]}.receipt"
+        receipt = receipt_name(argv)
+        if receipt:
             row["activity_path"] = "~/carr-system/out/run-scheduled-receipts/" + receipt
-            row["done_signal"] = f"ops.run {service}/{key}; local run-scheduled receipt {row['activity_path']}"
+            row["done_signal"] = f"local run-scheduled receipt {row['activity_path']}"
         manifest["jobs"].append(row)
-    for label, entry in cron_entries(snapshot["cron"]).items():
-        command_paths = paths(entry["command"])
-        manifest["jobs"].append({"label": label, "scheduler": "cron",
+    for entry in cron_entries(snapshot["cron"]):
+        command_paths = [w for w in cron_words(entry["command"]) if w.startswith("/")]
+        manifest["jobs"].append({"label": entry["label"], "scheduler": "cron",
                                  "program_path": portable(command_paths[0] if command_paths else ""),
                                  "required_checkout": "~/carr-system", "interval": entry["interval"],
                                  "expected_enabled": None, "expected_installed": True,

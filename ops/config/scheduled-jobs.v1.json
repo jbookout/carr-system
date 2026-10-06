@@ -14,7 +14,16 @@
     {
       "label": "com.carr.calendar-eventkit",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/calendar-eventkit-capture.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "calendar-eventkit",
+        "launchd.run",
+        "/bin/sh",
+        "~/carr-system/bin/calendar-eventkit-capture.sh",
+        "--days",
+        "7"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -62,7 +71,13 @@
     {
       "label": "com.carr.calendar-prebrief-joe",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/calendar-prebrief-joe-runtime.py",
+      "program_arguments": [
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/calendar-prebrief-joe-runtime.py",
+        "--profile",
+        "~/.config/carr/calendar-prebrief-joe.env",
+        "tick"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -263,7 +278,11 @@
     {
       "label": "com.carr.call-mode",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/dictation-rig/bin/call-mode.py",
+      "program_arguments": [
+        "/Library/Developer/CommandLineTools/usr/bin/python3",
+        "~/carr-system/tools/dictation-rig/bin/call-mode.py",
+        "serve"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "KeepAlive": {
@@ -287,32 +306,41 @@
     {
       "label": "com.carr.canary-ingest-sink",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/canary-ingest-sink.py",
+      "program_arguments": [
+        "/opt/homebrew/bin/python3",
+        "~/carr-system/tools/canary-ingest-sink.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "KeepAlive": true,
         "RunAtLoad": true
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/canary/notes-ingest/sink.log",
-      "log_max_age_seconds": 172800,
+      "log_max_age_seconds": null,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/canary/notes-ingest/sink.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job.",
+      "freshness_exception": "Resident KeepAlive sink; log age is not evidence of a missed firing. Registration, running state and last exit remain checked."
     },
     {
       "label": "com.carr.canonical-dirty-watchdog",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/repo-hygiene-janitor.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "canonical-dirty-watchdog",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/repo-hygiene-janitor.py",
+        "--canonical-freshness",
+        "watchdog",
+        "--repository",
+        "~/carr-system",
+        "--max-age-hours",
+        "24"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -339,7 +367,18 @@
     {
       "label": "com.carr.canonical-fast-forward",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/repo-hygiene-janitor.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "canonical-fast-forward",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/repo-hygiene-janitor.py",
+        "--canonical-freshness",
+        "fast-forward",
+        "--repository",
+        "~/carr-system"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -366,7 +405,15 @@
     {
       "label": "com.carr.capture-poll",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/dictation-rig/bin/capture-poll.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "--heartbeat-interval",
+        "1800",
+        "capture-poll",
+        "launchd.run",
+        "~/carr-system/tools/dictation-rig/bin/capture-poll.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -425,7 +472,13 @@
     {
       "label": "com.carr.capture-watch",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/dictation-rig/bin/capture-watch.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "capture-watch",
+        "launchd.run",
+        "~/carr-system/tools/dictation-rig/bin/capture-watch.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "RunAtLoad": false,
@@ -451,7 +504,14 @@
     {
       "label": "com.carr.cc-version-sentinel",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/cc-version-sentinel.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "cc-version-sentinel",
+        "launchd.run",
+        "/bin/zsh",
+        "~/carr-system/bin/cc-version-sentinel.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -478,7 +538,10 @@
     {
       "label": "com.carr.control-plane-tick",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/control-plane-tick.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/control-plane-tick.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -665,26 +728,25 @@
         ],
         "ThrottleInterval": 60
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/control-plane-tick-launchd.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/control-plane-tick-launchd.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.cutover-watch",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/cutover-watch.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "cutover-watch",
+        "launchd.run",
+        "/bin/zsh",
+        "~/carr-system/bin/cutover-watch.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -698,26 +760,25 @@
         "RunAtLoad": true,
         "ThrottleInterval": 60
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/cutover-watch.out",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/cutover-watch.out; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.delivery-cadence-a05-sweep",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/ops/delivery-cadence-a05-sweep.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "delivery-cadence-a05-sweep",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/delivery-cadence-a05-sweep.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": {
@@ -726,26 +787,24 @@
         },
         "RunAtLoad": false
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/delivery-cadence-a05-sweep.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/delivery-cadence-a05-sweep.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.dictation-consent",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/dictation-rig/bin/consent-watch.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "dictation-consent",
+        "launchd.run",
+        "~/carr-system/tools/dictation-rig/bin/consent-watch.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -808,7 +867,10 @@
     {
       "label": "com.carr.doc-engine",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/doc-convo/bin/convo-server.py",
+      "program_arguments": [
+        "/opt/homebrew/bin/python3",
+        "~/carr-system/tools/doc-convo/bin/convo-server.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "KeepAlive": true,
@@ -830,7 +892,14 @@
     {
       "label": "com.carr.fetch-allowlist",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/ops/fetch-allowlist.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "fetch-allowlist",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/fetch-allowlist.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": {
@@ -849,20 +918,19 @@
       "owner": "orchestrator",
       "done_signal": "ops.run fetch-allowlist/launchd.run; local run-scheduled receipt ~/carr-system/out/run-scheduled-receipts/1969052ba43a7d04.fbc9c66faebfd4b4db566c360b68b894.receipt",
       "activity_path": "~/carr-system/out/run-scheduled-receipts/1969052ba43a7d04.fbc9c66faebfd4b4db566c360b68b894.receipt",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": false,
-        "secondary": true
-      },
-      "expected_installed_by_role": {
-        "primary": false,
-        "secondary": true
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.fleet-sync",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/fleet-sync.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "fleet-sync",
+        "fleet.sync",
+        "/bin/zsh",
+        "~/carr-system/bin/fleet-sync.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -888,7 +956,14 @@
     {
       "label": "com.carr.gate-zero-canary",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/gate-zero-canary.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "gate-zero-canary",
+        "gatezero.canary",
+        "/bin/zsh",
+        "~/carr-system/bin/gate-zero-canary.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -915,7 +990,15 @@
     {
       "label": "com.carr.job-watchdog",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/job-watchdog.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "job-watchdog",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/job-watchdog.py",
+        "scan"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1012,26 +1095,25 @@
         ],
         "RunAtLoad": true
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/job-watchdog.log",
       "log_max_age_seconds": 600,
       "owner": "orchestrator",
       "done_signal": "out/watchdog/runs.jsonl scan ledger; findings ledger and deduplicated orchestrator loops",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.keepalive-probe",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/probe-keepalive.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "keepalive-probe",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/bin/probe-keepalive.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1061,7 +1143,14 @@
     {
       "label": "com.carr.local-briefs",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/local-briefs.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "local-briefs",
+        "launchd.run",
+        "/bin/zsh",
+        "~/carr-system/bin/local-briefs.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1092,26 +1181,26 @@
           }
         ]
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/run-scheduled.log",
-      "log_max_age_seconds": 172800,
+      "log_max_age_seconds": 345600,
       "owner": "orchestrator",
-      "done_signal": "Job-specific completion and activity in ~/carr-system/out/run-scheduled.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "done_signal": "local run-scheduled receipt ~/carr-system/out/run-scheduled-receipts/26459840b77f5803.fbc9c66faebfd4b4db566c360b68b894.receipt; primary only",
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job.",
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/26459840b77f5803.fbc9c66faebfd4b4db566c360b68b894.receipt"
     },
     {
       "label": "com.carr.logitech-keymap",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/dictation-rig/bin/logitech-keymap.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "logitech-keymap",
+        "launchd.run",
+        "/bin/sh",
+        "~/carr-system/tools/dictation-rig/bin/logitech-keymap.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1152,7 +1241,10 @@
     {
       "label": "com.carr.nightly-exports-daytime-retry",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/nightly-exports-retry.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/nightly-exports-retry.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1163,26 +1255,21 @@
         ],
         "RunAtLoad": false
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/nightly-exports-retry-launchd.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/nightly-exports-retry-launchd.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.nightly-record-layer",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/nightly.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/nightly.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1193,26 +1280,26 @@
         ],
         "RunAtLoad": false
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/nightly-launchd.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/nightly-launchd.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.notes-sweep",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/notes-sweep-post.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "notes-sweep",
+        "launchd.run",
+        "/bin/zsh",
+        "~/carr-system/bin/notes-sweep-post.sh",
+        "--scheduled"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1239,7 +1326,21 @@
     {
       "label": "com.carr.partner-ping",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/db-tap.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "--heartbeat-interval",
+        "1800",
+        "--also-heartbeat",
+        "carr-local-edge-node",
+        "partner-ping",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/db-tap.py",
+        "run",
+        "pipelines/partner_ping.py",
+        "--scheduled"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1336,26 +1437,20 @@
         ],
         "RunAtLoad": true
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "/tmp/carr-partner-ping.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in /tmp/carr-partner-ping.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.quill-dictate",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/dictation-rig/dictate/.build/release/quill-dictate",
+      "program_arguments": [
+        "~/carr-system/tools/dictation-rig/dictate/.build/release/quill-dictate"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "KeepAlive": {
@@ -1379,7 +1474,14 @@
     {
       "label": "com.carr.recordings-purge",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/dictation-rig/bin/purge-recordings.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "recordings-purge",
+        "launchd.run",
+        "/bin/sh",
+        "~/carr-system/tools/dictation-rig/bin/purge-recordings.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": {
@@ -1404,7 +1506,16 @@
     {
       "label": "com.carr.release-pipeline",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/ops/release-pipeline.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "--heartbeat-interval",
+        "3600",
+        "release-pipeline",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/release-pipeline.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1423,26 +1534,27 @@
         ],
         "RunAtLoad": false
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/release-pipeline.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/release-pipeline.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.repo-hygiene-janitor",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/repo-hygiene-janitor.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "repo-hygiene-janitor",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/repo-hygiene-janitor.py",
+        "--repository",
+        "~/carr-system"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "RunAtLoad": false
@@ -1453,12 +1565,16 @@
       "log_max_age_seconds": null,
       "owner": "orchestrator",
       "done_signal": "Inactive source definition; no completion expected",
-      "expectation_note": "Source definition retained but not expected installed on this machine; disabled legacy or definition-only path."
+      "expectation_note": "Source definition retained but not expected installed on this machine; disabled legacy or definition-only path.",
+      "freshness_exception": "Not expected to run; no freshness signal applies."
     },
     {
       "label": "com.carr.resource-collector",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/resource-collector.py",
+      "program_arguments": [
+        "/Library/Developer/CommandLineTools/usr/bin/python3",
+        "~/carr-system/tools/resource-collector.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {},
       "expected_enabled": true,
@@ -1477,7 +1593,17 @@
     {
       "label": "com.carr.room-bridge",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/room-bridge/bridge.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "--heartbeat-interval",
+        "900",
+        "room-bridge",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/room-bridge/bridge.py",
+        "run-once"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1665,26 +1791,25 @@
         "RunAtLoad": true,
         "ThrottleInterval": 30
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/room-bridge-launchd.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/room-bridge-launchd.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.rules-refresh",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/refresh-rules.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "rules-refresh",
+        "launchd.run",
+        "/bin/zsh",
+        "~/carr-system/bin/refresh-rules.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1746,26 +1871,27 @@
           }
         ]
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/run-scheduled.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
-      "done_signal": "Job-specific completion and activity in ~/carr-system/out/run-scheduled.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "done_signal": "local run-scheduled receipt ~/carr-system/out/run-scheduled-receipts/b7f587616eb7bf71.fbc9c66faebfd4b4db566c360b68b894.receipt; primary only",
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job.",
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/b7f587616eb7bf71.fbc9c66faebfd4b4db566c360b68b894.receipt"
     },
     {
       "label": "com.carr.run-spool-flush",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/tools/ops-spool.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "run-spool-flush",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/ops-spool.py",
+        "flush"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": [
@@ -1794,7 +1920,14 @@
     {
       "label": "com.carr.session-trace-archive",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/ops/session-trace-archive.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "session-trace-archive",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/session-trace-archive.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": {
@@ -1819,31 +1952,34 @@
     {
       "label": "com.carr.tailscale-up",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/bin/tailscale-up.sh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/tailscale-up.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "RunAtLoad": true
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/tailscale-up.log",
-      "log_max_age_seconds": 172800,
+      "log_max_age_seconds": null,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/tailscale-up.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job.",
+      "freshness_exception": "Runs once at load; log age is not evidence of a missed firing. Registration and last exit remain checked."
     },
     {
       "label": "com.carr.timebomb-audit",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/ops/timebomb-audit.py",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "timebomb-audit",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/timebomb-audit.py"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "StartCalendarInterval": {
@@ -1853,58 +1989,144 @@
         },
         "RunAtLoad": false
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/timebomb-audit.log",
-      "log_max_age_seconds": 172800,
+      "log_max_age_seconds": 691200,
       "owner": "orchestrator",
       "done_signal": "Job-specific completion and activity in ~/carr-system/out/timebomb-audit.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
       "label": "com.carr.videopipeline",
       "scheduler": "launchd",
-      "program_path": "/bin/zsh",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "videopipeline",
+        "launchd.run",
+        "/bin/zsh",
+        "~/Movies/CARR Video Pipeline/Scripts/watch-encode.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
         "RunAtLoad": false,
         "WatchPaths": [
-          "{{HOME}}/Movies/CARR Video Pipeline/01_Drop_Horizontal",
-          "{{HOME}}/Movies/CARR Video Pipeline/02_Drop_Vertical"
+          "~/Movies/CARR Video Pipeline/01_Drop_Horizontal",
+          "~/Movies/CARR Video Pipeline/02_Drop_Vertical"
         ],
         "ThrottleInterval": 10
       },
-      "expected_enabled": false,
-      "expected_installed": false,
+      "expected_enabled": true,
+      "expected_installed": true,
       "log_path": "~/carr-system/out/run-scheduled.log",
-      "log_max_age_seconds": 172800,
+      "log_max_age_seconds": null,
       "owner": "orchestrator",
-      "done_signal": "Job-specific completion and activity in ~/carr-system/out/run-scheduled.log; primary only",
-      "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
-      "expected_enabled_by_role": {
-        "primary": true,
-        "secondary": false
-      },
-      "expected_installed_by_role": {
-        "primary": true,
-        "secondary": false
-      }
+      "done_signal": "local run-scheduled receipt ~/carr-system/out/run-scheduled-receipts/550c4bf0a3a27bf2.fbc9c66faebfd4b4db566c360b68b894.receipt; primary only",
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job.",
+      "freshness_exception": "Event-driven by WatchPaths; log age is not evidence of a missed firing. Registration, loaded watch paths and last exit remain checked."
     },
     {
       "label": "local.carr-progress-board",
       "scheduler": "launchd",
-      "program_path": "~/carr-system/ops/progress-board-render.sh",
+      "program_arguments": [
+        "/bin/bash",
+        "~/carr-system/ops/progress-board-render.sh"
+      ],
       "required_checkout": "~/carr-system",
       "interval": {
-        "StartInterval": 120
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 2
+          },
+          {
+            "Minute": 4
+          },
+          {
+            "Minute": 6
+          },
+          {
+            "Minute": 8
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 12
+          },
+          {
+            "Minute": 14
+          },
+          {
+            "Minute": 16
+          },
+          {
+            "Minute": 18
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 22
+          },
+          {
+            "Minute": 24
+          },
+          {
+            "Minute": 26
+          },
+          {
+            "Minute": 28
+          },
+          {
+            "Minute": 30
+          },
+          {
+            "Minute": 32
+          },
+          {
+            "Minute": 34
+          },
+          {
+            "Minute": 36
+          },
+          {
+            "Minute": 38
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 42
+          },
+          {
+            "Minute": 44
+          },
+          {
+            "Minute": 46
+          },
+          {
+            "Minute": 48
+          },
+          {
+            "Minute": 50
+          },
+          {
+            "Minute": 52
+          },
+          {
+            "Minute": 54
+          },
+          {
+            "Minute": 56
+          },
+          {
+            "Minute": 58
+          }
+        ]
       },
       "expected_enabled": true,
       "expected_installed": true,
@@ -1912,10 +2134,10 @@
       "log_max_age_seconds": 600,
       "owner": "orchestrator",
       "done_signal": "Canonical out/boards/*.json and authenticated publish acknowledgement",
-      "expectation_note": "Required board publisher named in gap #3; no installed plist at capture. Cadence is declared from the observed 2-minute job, not copied from an absent plist."
+      "expectation_note": "Required board publisher named in gap #3. Cadence is the lib/launchd_calendar.py two-minute form; StartInterval does not fire on macOS 27."
     }
   ],
   "expectations_reviewed_at": "2026-10-05",
-  "generation_note": "Live capture via ops/scheduled-jobs-check.py --capture, then hand-reviewed enabled states, source-only definitions, required missing monitors and cadence grace. Vendor/Apple agents are outside CARR ownership. User crontab had no entries. Claude definitions inspected before build; existing config-as-code/Control Plane checks retain that scheduler. Captured on a secondary Mac (machine-role marker verified); primary/secondary placement follows the existing launchd_scope contract. Primary installation and logs are not observable from this local capture.",
+  "generation_note": "Live capture via ops/scheduled-jobs-check.py --capture, then hand-reviewed enabled states, source-only definitions, required missing monitors and cadence grace. Vendor/Apple agents are outside CARR ownership. User crontab had no entries. Claude definitions inspected before build; existing config-as-code/Control Plane checks retain that scheduler. Captured on a secondary Mac (machine-role marker verified); primary/secondary placement is derived at check time from lib/launchd_scope.py and is not stored here. Primary installation and logs are not observable from this local capture.",
   "captured_machine_role": "secondary"
 }
