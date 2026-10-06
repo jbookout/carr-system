@@ -44,24 +44,61 @@ def main_snapshot(repo: Path, base: str) -> dict[str, bytes]:
             if (p.startswith('migrations/') and p.endswith('.sql')) or REGISTRY.fullmatch(p) or p=='mcp-server/src/scac-mutation-registry.generated.js'}
 
 
-def require_current_base(repo: Path, base: str) -> None:
+def require_current_base(repo: Path, base: str, *, pending_merge: bool = False) -> None:
     if not SHA.fullmatch(base) or git(repo, "rev-parse", "origin/main").decode().strip() != base:
         raise MigrationNumberError("integration base differs from current origin/main")
     result = subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], cwd=repo, env=scrubbed_env(), capture_output=True, timeout=60)
     if result.returncode:
-        raise MigrationNumberError('integrate current main before generation or proof')
+        if not pending_merge or git(repo, 'rev-parse', 'MERGE_HEAD').decode().strip() != base:
+            raise MigrationNumberError('integrate current main before generation or proof')
+        for path, content in main_snapshot(repo, base).items():
+            if not (repo/path).is_file() or (repo/path).read_bytes() != content:
+                raise MigrationNumberError(f'applied artifact missing or edited during merge: {path}')
+
+
+CHAIN_PATH = 'ops/config/scac-registry-chain.json'
+CURRENT_PATH = 'mcp-server/src/scac-mutation-registry.current.generated.js'
+
+
+def main_registry_pins(repo: Path, base: str) -> list[dict]:
+    paths = git(repo, 'ls-tree', '-r', '--name-only', base, '--', CHAIN_PATH).decode().splitlines()
+    if CHAIN_PATH in paths:
+        return json.loads(git(repo, 'show', f'{base}:{CHAIN_PATH}'))['versions']
+    return [{'number': int(match.group(1)) if match else 1,
+             'artifact_sha256': hashlib.sha256(content).hexdigest()}
+            for path, content in main_snapshot(repo, base).items()
+            if (match := REGISTRY.fullmatch(path)) or path == 'mcp-server/src/scac-mutation-registry.generated.js']
+
+
+def validate_registry_history(repo: Path, base: str) -> list[dict]:
+    before = main_registry_pins(repo, base)
+    candidate = json.loads((repo / CHAIN_PATH).read_text())['versions']
+    by_number = {row['number']: row for row in candidate}
+    for pin in before:
+        row = by_number.get(pin['number'])
+        if row is None or any(row.get(key) != value for key, value in pin.items()):
+            raise MigrationNumberError('applied registry history pin was rewritten')
+    frontier = max(row['number'] for row in before)
+    added = sorted(row['number'] for row in candidate if row['number'] > frontier)
+    if added != list(range(frontier+1, frontier+1+len(added))):
+        raise MigrationNumberError('registry must be an ordered successor of current main')
+    current = candidate[-1]
+    content = (repo / CURRENT_PATH).read_bytes()
+    if hashlib.sha256(content).hexdigest() != current['artifact_sha256']:
+        raise MigrationNumberError('current runtime artifact pin drifted')
+    return before
 
 
 def allocation_plan(repo: Path, base: str, pending: list[str]) -> dict:
     snapshot = main_snapshot(repo, base)
     migrations = [Path(p).name for p in snapshot if p.startswith('migrations/')]
-    versions = [int(match.group(1)) for p in snapshot if (match := REGISTRY.fullmatch(p))]
-    predecessor, successor = allocate_registry_successor(versions)
-    predecessor_path = f'mcp-server/src/scac-mutation-registry.v{predecessor}.generated.js'
+    pins = main_registry_pins(repo, base)
+    predecessor, successor = allocate_registry_successor([row['number'] for row in pins if row['number'] != 1])
+    predecessor_pin = next(row for row in pins if row['number'] == predecessor)
     return {'schema': 'integration-allocation/v1', 'base': base,
             'migration_names': allocate_integration_successors(migrations, pending),
             'registry_predecessor': predecessor, 'registry_successor': successor,
-            'predecessor_sha256': hashlib.sha256(snapshot[predecessor_path]).hexdigest()}
+            'predecessor_sha256': predecessor_pin['artifact_sha256']}
 
 
 def validate_candidate(repo: Path, base: str) -> dict:
@@ -73,8 +110,14 @@ def validate_candidate(repo: Path, base: str) -> dict:
     candidate = {p.name: p.read_bytes() for p in (repo/'migrations').glob('*.sql')}
     validate_integration_union(migrations, candidate)
     main_versions = []
+    manifest = (repo / CHAIN_PATH).is_file()
+    if manifest:
+        main_versions = [row['number'] for row in validate_registry_history(repo, base) if row['number'] != 1]
     for p, content in main.items():
         if p.startswith('mcp-server/src/'):
+            if manifest:
+                # validate_registry_history already preserves these Git byte pins.
+                continue
             match = REGISTRY.fullmatch(p)
             if match: main_versions.append(int(match.group(1)))
             if not (repo/p).is_file() or (repo/p).read_bytes() != content:
@@ -100,8 +143,22 @@ def validate_candidate(repo: Path, base: str) -> dict:
 
 def check_generated_write(repo: Path, target: Path, content: bytes, base: str) -> None:
     """Guard the actual generator sink, preserving byte-exact historical rebuilds."""
-    require_current_base(repo, base)
+    require_current_base(repo, base, pending_merge=True)
     relative = target.resolve().relative_to(repo.resolve()).as_posix()
+    if relative == CURRENT_PATH:
+        pins = main_registry_pins(repo, base)
+        frontier = max(row['number'] for row in pins)
+        current_match = re.search(rb'SCAC_MUTATION_REGISTRY_VERSION = "scac-mutation-registry.v([0-9]+)";', content)
+        if not current_match:
+            raise MigrationNumberError('current registry lacks a version')
+        number = int(current_match[1])
+        if number == frontier:
+            pin = next(row for row in pins if row['number'] == frontier)
+            if hashlib.sha256(content).hexdigest() != pin['artifact_sha256']:
+                raise MigrationNumberError('sealed main artifact cannot be resealed')
+        elif number != frontier + 1:
+            raise MigrationNumberError('current runtime must be the next registry successor')
+        return
     main = git(repo,'ls-tree','-r','--name-only',base,'--','migrations','mcp-server/src').decode().splitlines()
     if relative in main:
         if content != git(repo,'show',f'{base}:{relative}') and (relative.startswith('migrations/') or REGISTRY.fullmatch(relative) or relative=='mcp-server/src/scac-mutation-registry.generated.js'):
@@ -141,40 +198,50 @@ def _exclusive(lock_path: Path):
 
 
 def write_generated_artifact(repo: Path, target: Path, content: bytes) -> None:
-    """Publish immutable source bytes without ever replacing a destination.
+    """Publish a successor under the shared Git-root generation lock.
 
-    The shared Git-root lock serializes cooperating writers. A create-only
-    hard-link publication also preserves a seal promoted by a noncooperating
-    writer at the final filesystem seam. Existing byte-exact outputs need no
-    write; different bytes require a new allocated successor.
+    Historical artifacts stay create-only. The current projection can advance
+    from its pinned predecessor; byte-exact retries leave its inode unchanged.
     """
+    repo, target = repo.resolve(), target.resolve()
     with _exclusive(_ownership_path(repo)) as acquired:
         if not acquired:
             raise MigrationNumberError('integration generation already owned')
         base = git(repo, 'rev-parse', 'origin/main').decode().strip()
         head = git(repo, 'rev-parse', 'HEAD').decode().strip()
         check_generated_write(repo, target, content, base)
-        if target.exists():
-            if target.read_bytes() != content:
-                raise MigrationNumberError('existing artifact differs; allocate a fresh successor')
-            require_current_base(repo, base)
+        previous = target.read_bytes() if target.exists() else None
+        replacing_current = target.relative_to(repo).as_posix() == CURRENT_PATH and previous is not None
+        if previous == content:
+            require_current_base(repo, base, pending_merge=True)
             return
+        if previous is not None:
+            if not replacing_current:
+                raise MigrationNumberError('existing artifact differs; allocate a fresh successor')
+            pin = max(main_registry_pins(repo, base), key=lambda row: row['number'])
+            if hashlib.sha256(previous).hexdigest() != pin['artifact_sha256']:
+                raise MigrationNumberError('current predecessor differs from its sealed pin')
         fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=f'.{target.name}.')
         try:
             with os.fdopen(fd, 'wb') as out:
                 out.write(content); out.flush(); os.fsync(out.fileno())
             os.chmod(temporary, 0o644)
-            require_current_base(repo, base)
+            require_current_base(repo, base, pending_merge=True)
             if git(repo, 'rev-parse', 'HEAD').decode().strip() != head:
                 raise MigrationNumberError('HEAD moved during artifact publication')
-            try:
-                os.link(temporary, target)
-            except FileExistsError:
-                raise MigrationNumberError('artifact appeared during publication; refresh main and allocate again') from None
+            if replacing_current:
+                if target.read_bytes() != previous:
+                    raise MigrationNumberError('current predecessor changed during publication')
+                os.replace(temporary, target)
+            else:
+                try:
+                    os.link(temporary, target)
+                except FileExistsError:
+                    raise MigrationNumberError('artifact appeared during publication; refresh main and allocate again') from None
             # A racing main update can invalidate a newly created candidate,
             # but can never make this sink overwrite a promoted seal. Refuse
             # success and leave the candidate visible for source reconciliation.
-            require_current_base(repo, base)
+            require_current_base(repo, base, pending_merge=True)
             if git(repo, 'rev-parse', 'HEAD').decode().strip() != head:
                 raise MigrationNumberError('HEAD moved during artifact publication')
         finally:
