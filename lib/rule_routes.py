@@ -48,6 +48,11 @@ ROUTE_KINDS = frozenset({"boot", "trigger", "path_rule", "gate", "duplicate"})
 TRIGGER_KEYS = ("tools", "verbs", "bash_patterns")
 ENTRY_KEYS = frozenset({"moment", "routes", "no_trigger_reason", "note"})
 PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
+# Built-in tools that only look. A path_rule route is a write-moment route (the
+# moments name building, editing and committing), so a call that merely reads a
+# matching path is not that moment. evals/rule-delivery measured routine reads
+# receiving rules through these globs. Every other tool keeps matching.
+READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "NotebookRead"})
 BASH_TOOLS = frozenset({"Bash", "functions.exec"})
 
 # Tool names a route may name. Built-ins are Claude Code's own tools; the
@@ -66,12 +71,15 @@ KNOWN_CONNECTOR_TOOLS = frozenset({
     "navigate", "get_page_text", "read_page", "computer", "find", "form_input",
     # scheduled tasks connector
     "create_scheduled_task", "update_scheduled_task",
+    # Claude Code Remote connector: the two calls that launch cloud work, where
+    # rule ede4b241 (cloud model choice) is put in front of the session
+    "create_session", "create_trigger",
 })
 CONNECTOR_GLOB = re.compile(r"^mcp__(\*|[A-Za-z0-9_-]+)__([A-Za-z0-9_-]+)$")
 
 RUN_SH_CALL = re.compile(r"\brun\.sh\s+call\s+['\"]?([a-z0-9][a-z0-9-]*)", re.I)
 CALL_VERB_PY = re.compile(r"\bcall-verb\.py\s+['\"]?([a-z0-9][a-z0-9-]*)", re.I)
-REGISTRY_IMPORT = re.compile(r'from\s+"\./(scac-mutation-registry\.v\d+\.generated\.js)"')
+REGISTRY_IMPORT = re.compile(r'from\s+"\./(scac-mutation-registry\.(?:v\d+|current)\.generated\.js)"')
 REGISTRY_VERB = re.compile(r'"ingress_key":\s*"mcp-tool:([a-z0-9][a-z0-9-]*)"')
 SHORT_ID = re.compile(r"\b[0-9a-f]{8}\b")
 
@@ -300,6 +308,11 @@ def route_matches(route: dict, tool_name: str, tool_input: object,
         globs = _strings(route, "path_globs")
         if not globs:
             raise RouteShapeError("path_globs")
+        read_only = route.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise RouteShapeError("read_only")
+        if tool_name in READ_ONLY_TOOLS and not read_only:
+            return False
         paths = call_paths(tool_input)
         return any(fnmatch.fnmatch(path, pattern) for pattern in globs for path in paths)
     if kind != "trigger":

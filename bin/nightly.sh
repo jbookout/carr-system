@@ -82,6 +82,7 @@ run_canary() {
 
 if [ "${1:-}" = "--preflight" ]; then
   required=(
+    ops/seat-health.py ops/seat_health.py
     ops/vault-drift-watch.py bin/schema-snapshot.sh ops/p1-environment-gate.py
     ops/p1-rebuild-gate.py ops/p1-integration-gate.py pipelines/cadence_engine.py
     pipelines/availability_matcher.py ops/fetch-allowlist.py
@@ -90,7 +91,7 @@ if [ "${1:-}" = "--preflight" ]; then
     bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
     generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
     bin/smoke-and-record.sh tools/ops-record.py ops/staging-observed-prune.py
-    tools/health-check.py ops/jev_spend_health.py
+    tools/health-check.py ops/jev_spend_health.py ops/grok_session.py
     # bin/routine-canonical-seam-refusal.sh came off this list on 2026-08-23: the
     # chain stopped launching it when the refusals became tombstones, and a
     # preflight that requires a file no step runs is checking the wrong thing.
@@ -762,6 +763,8 @@ tombstone "environment integration proof" \
 step "staging-observed prune (temp orphans + idle sessions)" \
     ./.venv/bin/python ops/staging-observed-prune.py
 
+step "daily AI seat health" ./.venv/bin/python ops/seat-health.py
+
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
 # credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first
@@ -1106,11 +1109,12 @@ step "rule-delivery shadow (reports, never scopes)" ./.venv/bin/python ops/rule-
 step "credential health (reports, never rotates; loops on a finding)" \
      ./.venv/bin/python ops/credential-health.py --nightly
 
-# The loaded 02:05 launchd chain runs the same spend reader and response loop
-# as manual health. Its narrow mode fails the step when Worker usage, a receipt,
-# or the loop action is unavailable; step() records that failure in the job ledger.
-step "Jev daily spend alarm" \
-     ./.venv/bin/python tools/health-check.py --section jev-spend
+step "Monthly system cost view and spike loops" \
+     ./run.sh costs --publish --alerts
+
+# Authentication readback only; no model work and no interactive login.
+step "Grok authentication health" \
+     ./.venv/bin/python tools/health-check.py --section grok-session
 
 step "encrypted backup -> R2"                        env CARR_DB_BACKUP_URL="$CARR_DB_BACKUP_URL" ./bin/backup-dump.sh
 # CAPTURED HERE, ON THE NEXT LINE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
@@ -1213,6 +1217,12 @@ step "portability mirror (md+csv, 2 locations)" \
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 
+# The archive is a participant-stripped schedule, not meeting-touch evidence.
+# Use the attendee-aware EventKit capture after the live contact exports above.
+# Unknown attendees remain queued separately; exact write failures fail the step.
+step "calendar meetings to touches (EventKit)" \
+  ./bin/calendar-eventkit-capture.sh --days 7
+
 # MAIL, loop #169. The calendar lane proves a meeting happened; most follow-up
 # never becomes one, so a calendar-only view of the relationship sees a fraction
 # of the real contact. That gap is why vendor touch coverage sat at 0.7%.
@@ -1230,6 +1240,10 @@ step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 # running, because launching Joe's mail client at 02:05 with nobody at the
 # machine is a side effect no capture is worth.
 step "mail capture (extract + match, writes nothing)" ./bin/mail-capture.sh
+
+# Consume canonical local contact activities. The Worker records stage evidence
+# and prepares human-send-only drafts; this step has no mail send operation.
+step "lead stages (evidence and approval drafts)" python3 ./bin/lead-stage-job.py
 
 # Added 2026-08-12 (Joe's go, "put settings in the repo"): mirror the Claude Code
 # permission surface — the three settings.json files carrying the allow list, the

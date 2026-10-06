@@ -99,11 +99,11 @@ from typing import Callable, TypeGuard
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.rule_delivery_preuse import (  # noqa:E402
-    BUILD_RECEIPT_SCHEMA, CORPUS_RELATIVE, GENERALIZED_RECEIPT_SCHEMA, PACK, RECEIPT_SCHEMA,
+    CORPUS_RELATIVE, GENERALIZED_RECEIPT_SCHEMA, PACK, RECEIPT_SCHEMA,
     SEMANTIC_RECEIPT_SCHEMA, TRIGGER_TABLE_RELATIVE, canonical, digest,
     load_trigger_table, merge_trigger_delivery, receipt_id, semantic_delivery,
     semantic_selector_digest, scheduled_rule_ids as _scheduled_rule_ids, valid_local_identity,
-    validate_build_receipt, validate_generalized_receipt,
+    validate_generalized_receipt,
 )
 from lib.rule_delivery_shadow import (  # noqa:E402
     WINDOW_SOURCE_PATHS, file_sha256, source_sha256,
@@ -135,11 +135,9 @@ SEMANTIC_FAILURE_CONTEXT = (
 MESSAGE_LIMIT_CHARS = 90_000
 
 # ONE CLOCK FOR THE WHOLE PROMPT HOOK. ops/config/hooks.json kills this hook at
-# 20 s, and a killed hook delivers nothing. The three slow steps run in order
-# — the build advisory (ops/jev_build_advisory.py: one attempt, at most 6 s,
-# no rate-limit retries), the rule judgment (ops/rule_trigger_delivery.py:
-# its own 12 s clock, cut short here so SELECTOR_RESERVE_SECONDS stay for the
-# last step), and the standing-context door — and all of them end by
+# 20 s, and a killed hook delivers nothing. The two slow steps run in order:
+# rule judgment (ops/rule_trigger_delivery.py, with its own 12 s clock) and
+# the standing-context door. Both end by
 # HOOK_BUDGET_SECONDS after the process started, leaving ~2 s for the
 # interpreter and the receipt.
 HOOK_BUDGET_SECONDS = 18.0
@@ -149,6 +147,49 @@ _HOOK_STARTED = time.monotonic()
 
 def _hook_deadline() -> float:
     return _HOOK_STARTED + HOOK_BUDGET_SECONDS
+
+
+SELECTOR_REASONS = frozenset({
+    "selector delivery plan is not exact",
+    "selector did not return every scheduled rule",
+    "selector did not return every triggered rule",
+    "selector identity is incomplete",
+    "selector response was not ok",
+    "selector returned a malformed rule",
+    "selector returned duplicate or nonbinding rule",
+    "selector returned malformed JSON",
+    "selector returned nonzero",
+    "selector rule pools are malformed",
+})
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """Name the cause without ever echoing untrusted exception text.
+
+    An allowlist, not a denylist: redaction that tries to strip secrets out of
+    arbitrary text is a guess, and a guess that is wrong once puts a bearer in
+    the transcript permanently. `type(exc) is RuntimeError` rather than
+    isinstance, so a subclass carrying a coincidentally-matching message
+    cannot pass.
+    """
+    # Main's generalized selector uses a typed taxonomy shared with the
+    # semantic rail. Translate only its three closed transport reasons.
+    if type(exc) is SelectorError:
+        reason = {
+            "nonzero": "selector returned nonzero",
+            "invalid_json": "selector returned malformed JSON",
+            "not_ok": "selector response was not ok",
+        }.get(exc.reason)
+        if reason is not None:
+            return reason
+    if type(exc) is RuntimeError and str(exc) in SELECTOR_REASONS:
+        return str(exc)
+    return f"unexpected {type(exc).__name__}"
+
+
+def _failed(base: str, exc: BaseException) -> dict:
+    """The fixed non-blocking failure line, plus the one safe word for why."""
+    return _context(f"{base} Cause: {_failure_reason(exc)}.")
 
 
 def scheduled_rule_ids() -> list[str]:
@@ -470,34 +511,8 @@ def _semantic_adviser(situation: str, session_id: str | None = None) -> list[dic
     return module.advise(situation, session_id=session_id, deadline=deadline)
 
 
-def _build_adviser(situation: str) -> dict:
-    path = REPO / "ops/jev_build_advisory.py"
-    spec = importlib.util.spec_from_file_location("jev_build_advisory_live", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("build advisory unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.advise(situation)
-
-
-def _build_unavailable(error: Exception | None = None) -> dict:
-    path = REPO / "ops/jev_build_advisory.py"
-    spec = importlib.util.spec_from_file_location("jev_build_advisory_unavailable", path)
-    if spec is None or spec.loader is None:
-        return {
-            "schema": "jev-build-advisory-unavailable/v1",
-            "status": "unavailable",
-            "reason": "unknown",
-            "effect": "visible_advisory_abstention",
-            "instruction": "Jev build-time intake was unavailable; qualified judgment remains explicit and uncredited.",
-        }
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.unavailable(module.failure_reason(error) if error else "unknown")
-
-
 def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
-                      packs: list[str], ids: list[str], build_receipt: dict) -> dict:
+                      packs: list[str], ids: list[str]) -> dict:
     identity, delivery, rules = _validate_generalized_selector(response, packs, ids)
     client = _client(payload)
     probabilities = {row["id"]: float(row["probability"])
@@ -531,7 +546,6 @@ def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
         "rules": rules,
         "probabilities": probabilities,
         "model_provenance": model_provenance,
-        "build_receipt": build_receipt,
         "rule_delivery": {
             "mode": delivery["mode"],
             "declared_packs": packs,
@@ -542,51 +556,14 @@ def _semantic_receipt(payload: dict, response: dict, selected: list[dict],
     return row
 
 
-def _build_receipt(payload: dict, advisory: dict, status: str,
-                   failure_stage: str | None = None,
-                   failure_reason: str | None = None) -> dict:
-    client = _client(payload)
-    row = {
-        "schema": BUILD_RECEIPT_SCHEMA,
-        "client": client,
-        "session_id": payload["session_id"],
-        "turn_id": payload.get("turn_id") if client == "codex" else None,
-        "prompt_sha256": digest(payload["prompt"]),
-        "adviser_digest": semantic_selector_digest(REPO),
-        "configuration_digest": digest({
-            relative: file_sha256(REPO / relative)
-            for relative in ("ops/config/hooks.json", "ops/config/codex-hooks.json")
-        }),
-        "source_digest": source_sha256(REPO),
-        "semantic_rule_delivery": status,
-        "advisory": advisory,
-    }
-    if status == "failed":
-        row["failure_stage"] = failure_stage
-        row["failure_reason"] = failure_reason
-    row["receipt_id"] = receipt_id(row)
-    if not validate_build_receipt(row, repo=REPO):
-        raise RuntimeError("build receipt failed local validation")
-    return row
-
-
 def _process_prompt(payload: dict, runner: Callable,
-                    adviser: Callable[[str], list[dict]] | None,
-                    build_adviser: Callable[[str], dict] | None) -> dict | None:
+                    adviser: Callable[[str], list[dict]] | None) -> dict | None:
     prompt = payload.get("prompt")
     if (not _nonempty(payload.get("session_id")) or not _nonempty(prompt)
             or (_client(payload) == "codex" and not _nonempty(payload.get("turn_id")))):
         return None
     if len(prompt) > MESSAGE_LIMIT_CHARS:
-        receipt = _build_receipt(payload, _build_unavailable(),
-                                 "not_attempted_oversize")
-        return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
-    try:
-        build = (build_adviser or _build_adviser)(prompt)
-        if not isinstance(build, dict):
-            raise RuntimeError("build adviser returned malformed advice")
-    except Exception as exc:
-        build = _build_unavailable(exc)
+        return _context("RULE DELIVERY NOT ATTEMPTED: prompt exceeds the context limit.", "UserPromptSubmit")
     failure_stage = "semantic_adviser"
     try:
         selected = (adviser(prompt) if adviser is not None
@@ -601,8 +578,7 @@ def _process_prompt(payload: dict, runner: Callable,
                 candidate_ids.append(candidate_id)
         ids, packs = semantic_delivery(REPO, candidate_ids)
         if not ids:
-            receipt = _build_receipt(payload, build, "not_applicable")
-            return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
+            return None
         by_id = {row.get("id"): row for row in selected if isinstance(row, dict)}
         selected = [by_id[short] for short in ids]
         if any(row.get("probability") is None for row in selected):
@@ -612,9 +588,8 @@ def _process_prompt(payload: dict, runner: Callable,
         failure_stage = "selector_response"
         _validate_generalized_selector(response, packs, ids)
         failure_stage = "receipt_assembly"
-        build_receipt = _build_receipt(payload, build, "delivered")
         receipt = _semantic_receipt(
-            payload, response, selected, packs, ids, build_receipt)
+            payload, response, selected, packs, ids)
         return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
     except Exception as exc:
         if isinstance(exc, SelectorError):
@@ -625,8 +600,7 @@ def _process_prompt(payload: dict, runner: Callable,
             failure_reason = "invalid_data"
         else:
             failure_reason = "exception"
-        receipt = _build_receipt(payload, build, "failed", failure_stage, failure_reason)
-        return _context(canonical(receipt).decode("utf-8"), "UserPromptSubmit")
+        return _context(f"RULE DELIVERY FAILED: {failure_stage} ({failure_reason}); read the applicable rules before acting.", "UserPromptSubmit")
 
 
 # ---------------------------------------------------------------------------
@@ -764,14 +738,19 @@ def _route_delivery(payload: dict, rows: list[dict], routed: list[str],
         # notice names every id and records nothing for dedupe.
         return _context(rule_routes.notice_too_large(ids))
     rule_routes.record_delivered(payload["session_id"], tool_name, [r["id"] for r in full])
+    try:
+        from lib.rule_recall import log_delivery
+        log_delivery(Path(REPO) / "out/rule-route-delivery.jsonl", json.loads(text)["receipt_id"],
+                     [r["id"] for r in full])
+    except (OSError, ValueError):
+        pass
     return _context(text)
 
 
 def process(payload: dict, *, runner: Callable = subprocess.run,
-            adviser: Callable[[str], list[dict]] | None = None,
-            build_adviser: Callable[[str], dict] | None = None) -> dict | None:
+            adviser: Callable[[str], list[dict]] | None = None) -> dict | None:
     if payload.get("hook_event_name") == "UserPromptSubmit":
-        return _process_prompt(payload, runner, adviser, build_adviser)
+        return _process_prompt(payload, runner, adviser)
     if _matches(payload):
         # Keep the original receipt when it is visible in full. An oversized
         # receipt is not delivery: Claude persists it and shows a preview.
@@ -784,11 +763,10 @@ def process(payload: dict, *, runner: Callable = subprocess.run,
                 return _context(notice if rule_routes.within_cap(notice)
                                 else rule_routes.notice_too_large(ids))
             return _deduped_context(payload, row)
-        except Exception:
-            # Never surface provider/auth/network exception text: it may contain a
-            # bearer, URL, or local path.  The fixed category is enough for Stop to
-            # preserve the miss and for the operator to reproduce through the door.
-            return _context(FAILURE_CONTEXT)
+        except Exception as exc:
+            # Known selector failures retain their safe cause; arbitrary
+            # provider/auth/network exception text never reaches the transcript.
+            return _failed(FAILURE_CONTEXT, exc)
 
     # THE ROUTE AND GENERALIZED RAILS (WR-000019 slice S9). Only reached when
     # the original exact shape did not match, so a background
@@ -825,8 +803,8 @@ def _table_delivery(payload: dict, rows: list[dict], runner: Callable) -> dict |
         response = _run_generalized_selector(packs, ids, runner)
         return _deduped_context(payload,
                                 _generalized_receipt(payload, response, trigger_ids, packs, ids))
-    except Exception:
-        return _context(GENERALIZED_FAILURE_CONTEXT)
+    except Exception as exc:
+        return _failed(GENERALIZED_FAILURE_CONTEXT, exc)
 
 
 def _route_file_unreadable(payload: dict, rows: list[dict], runner: Callable,

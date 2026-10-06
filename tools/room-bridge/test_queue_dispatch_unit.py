@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 HERE = Path(__file__).resolve().parent
@@ -52,7 +53,7 @@ CATALOG: dict = {
             "enabled": True,
             "adapter": "hermes",
             "assignee": "default",
-            "effective_model": "Grok 4.6",
+            "effective_model": "Grok 4.7",
             "capabilities": ["read"],
         },
         "joe": {
@@ -144,7 +145,9 @@ class QueueDispatchTests(unittest.TestCase):
     def test_repository_catalog_keeps_profiles_mapped_and_ox_budget_gated(self):
         catalog = kanban_adapter.load_catalog()
         targets = catalog["targets"]
-        self.assertEqual(targets["grok"]["assignee"], "default")
+        self.assertEqual(targets["grok"]["assignee"], "desk:grok-desk")
+        self.assertEqual(targets["grok"]["adapter"], "desk")
+        self.assertEqual(targets["grok"]["desk"], "grok-desk")
         self.assertEqual(targets["kimi"]["assignee"], "designer")
         self.assertEqual(targets["deepseek"]["assignee"], "reviewer")
         self.assertEqual(targets["ox-alpha"]["assignee"], "builder")
@@ -548,19 +551,20 @@ class QueueDispatchTests(unittest.TestCase):
     def test_bridge_posts_flash_locals_synchronous_completion_to_the_room(self):
         """flash-local completes inline in queue_executor.start() rather than through
         the pending/handle_pending path (finding 1): pins that run_once actually posts
-        that completion, gated to flash-local only, instead of leaving it unposted.
+        that completion instead of leaving it unposted.
         As of PR #1254 round 2 (finding 3), the post happens INSIDE start(), via the
         post_completion hook, before Hermes is marked terminal — not after start()
         returns — so this pins the wiring that makes that possible instead of a
         post-hoc call."""
         source = inspect.getsource(bridge.run_once)
         self.assertIn('entry.get("kind") == "flash-local"', source)
-        self.assertIn("include_reply=is_flash_local", source)
-        self.assertIn("def post_flash_completion(completion: dict) -> None:", source)
+        self.assertIn('entry.get("kind") in {"flash-local", "grok-cli"}', source)
+        self.assertIn("include_reply=publishes_sync_reply", source)
+        self.assertIn("def post_sync_completion(completion: dict) -> None:", source)
         self.assertIn("completion, add_room_turn=add_room_turn, seat=post_seat)", source)
         self.assertIn("raise QueueCompletionPostFailed(str(exc)) from exc", source)
-        self.assertIn("post_completion=post_flash_completion if is_flash_local else None", source)
-        self.assertLess(source.index("def post_flash_completion"),
+        self.assertIn("post_completion=post_sync_completion if publishes_sync_reply else None", source)
+        self.assertLess(source.index("def post_sync_completion"),
                         source.index("queue_outcome = queue_executor.start"))
 
     def test_dead_socket_waits_without_claim_dispatch_or_retry_then_blocks_once(self):
@@ -820,7 +824,7 @@ class FlashReplyReachesTheRoomTests(unittest.TestCase):
                 )
         finally:
             flash_wire.run_turn = real_run_turn
-        self.assertEqual(calls, ["What is the answer?"])
+            self.assertEqual(calls, [desks.DESK_INSTRUCTION + "\n\nWhat is the answer?"])
         self.assertEqual(row["status"], "completed")
         self.assertEqual(row["result"], "42")
         self.assertEqual(row["kind"], "flash-local")
@@ -1301,13 +1305,101 @@ class FinalCompletionOnlyTests(unittest.TestCase):
             return real_complete(*args)
 
         adapter.complete = crashing_complete  # type: ignore[method-assign]
-        run = dict(dispatch_call=lambda _p: {"status": "completed", "result": self._good("Same answer.")},
-                   include_reply=True, retry_protocol_errors=True, post_completion=self._post(room))
-        with self.assertRaises(OSError):
-            controller.start("flash", **run)
-        self.assertEqual(controller.start("flash", **run)["outcome"], "done")
+        provider = mock.Mock(return_value={"status": "completed", "msg_id": "original-dispatch",
+                                          "result": self._good("Same answer.")})
+        with tempfile.TemporaryDirectory() as root:
+            run = dict(dispatch_call=provider, completion_dir=Path(root),
+                       include_reply=True, retry_protocol_errors=True, post_completion=self._post(room))
+            with self.assertRaises(OSError):
+                controller.start("flash", **run)
+            # Restart after Hermes stale-claim recovery; the provider would
+            # produce a fresh dispatch UUID if it were called again.
+            adapter.status["t_queue0001"] = "ready"
+            controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+            provider.return_value = {"status": "completed", "msg_id": "new-dispatch",
+                                     "result": self._good("Different answer.")}
+            self.assertEqual(controller.start("flash", **run)["outcome"], "done")
+        self.assertEqual(provider.call_count, 1)
         self.assertEqual(room.replays, ["queue-completion:t_queue0001"])
         self.assertEqual(len(room.completions()), 1)
+        self.assertEqual(room.completions()[0]["dispatch_msg_id"], "original-dispatch")
+
+    def test_recovery_replays_review_block_and_exhausted_protocol_terminal_intent(self):
+        for terminal_method, raw, expected in (
+                ("request_review", self._good("Review this."), "review"),
+                ("block", result(outcome="blocked", summary="Cannot proceed."), "blocked"),
+                ("block", "Final malformed reply.", "blocked")):
+            with self.subTest(method=terminal_method, raw=raw), tempfile.TemporaryDirectory() as root:
+                card = self._flash_task()
+                if terminal_method == "request_review":
+                    card["body"] = card["body"].replace('"done"', '"review"')
+                room = KeyReuseRoom()
+                adapter = RetryCountingAdapter([card], limit=1)
+                original = getattr(adapter, terminal_method)
+                setattr(adapter, terminal_method, mock.Mock(side_effect=OSError("transition failed")))
+                controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+                provider = mock.Mock(return_value={"status": "completed", "msg_id": "original",
+                                                  "result": raw})
+                kwargs = dict(dispatch_call=provider, include_reply=True, retry_protocol_errors=True,
+                              completion_dir=Path(root), post_completion=self._post(room))
+                with self.assertRaises(OSError):
+                    controller.start("flash", **kwargs)
+                setattr(adapter, terminal_method, original)
+                adapter.status[card["id"]] = "ready"
+                controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+                # Recovery must not reconsult a changed protocol retry budget.
+                adapter.retry_attempt = mock.Mock(side_effect=AssertionError("retry evidence denied"))
+                recovered = controller.start("flash", desk_live=False, **kwargs)
+                self.assertEqual(recovered["outcome"], expected)
+                self.assertEqual(adapter.status[card["id"]], expected)
+                self.assertEqual(provider.call_count, 1)
+                self.assertEqual(len(room.completions()), 1)
+                self.assertEqual(room.replays, ["queue-completion:t_queue0001"])
+
+    def test_uncertain_publication_replays_original_body_without_new_execution(self):
+        room = KeyReuseRoom()
+        adapter = RetryCountingAdapter([self._flash_task()])
+        provider = mock.Mock(return_value={"status": "completed", "msg_id": "original-dispatch",
+                                          "result": self._good("Original answer.")})
+        def uncertain_post(completion):
+            self._post(room)(completion)
+            raise RuntimeError("response lost after room accepted")
+        with tempfile.TemporaryDirectory() as root:
+            controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+            kwargs = dict(dispatch_call=provider, include_reply=True, completion_dir=Path(root))
+            with self.assertRaises(RuntimeError):
+                controller.start("flash", post_completion=uncertain_post, **kwargs)
+            self.assertEqual(adapter.status["t_queue0001"], "running")
+            adapter.status["t_queue0001"] = "ready"
+            controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+            self.assertEqual(controller.start("flash", post_completion=self._post(room), **kwargs)["outcome"], "done")
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(len(room.completions()), 1)
+        self.assertEqual(room.replays, ["queue-completion:t_queue0001"])
+
+    def test_corrupt_or_misbound_final_receipt_refuses_fresh_dispatch(self):
+        with tempfile.TemporaryDirectory() as root:
+            room = KeyReuseRoom()
+            card = self._flash_task()
+            adapter = RetryCountingAdapter([card])
+            adapter.complete = mock.Mock(side_effect=OSError("transition failed"))
+            controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+            provider = mock.Mock(return_value={"status": "completed", "msg_id": "original",
+                                              "result": self._good("Answer.")})
+            kwargs = dict(dispatch_call=provider, include_reply=True, completion_dir=Path(root),
+                          post_completion=self._post(room))
+            with self.assertRaises(OSError):
+                controller.start("flash", **kwargs)
+            path = next(Path(root).glob("*.json"))
+            original = path.read_text()
+            wrong = json.loads(original)
+            wrong["binding"]["source_msg_id"] = "another-source"
+            for contents in ("not JSON", json.dumps(wrong)):
+                path.write_text(contents)
+                controller = queue_dispatch.QueueDeskExecutor(catalog=self.FLASH_CATALOG, adapter=adapter)
+                with self.assertRaises(queue_dispatch.QueueDispatchError):
+                    controller.start("flash", **kwargs)
+            self.assertEqual(provider.call_count, 1)
 
     def test_bridge_cycles_protocol_error_then_success_finish_the_task(self):
         """The same defect end to end through run_once: a seatless flash-local desk,

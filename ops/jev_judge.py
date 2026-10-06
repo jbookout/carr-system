@@ -89,8 +89,11 @@ interface below:
 """
 
 import json
+import math
 import os
+import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,6 +102,13 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # append-only, so a threshold can be measured from real traffic rather than
 # argued for, and so an acting caller's decisions stay auditable afterward.
 SHADOW_LOG = os.path.join(REPO, "out", "jev-judge.jsonl")
+
+# Per-family, per-consequence-class entropy bands that route() acts inside.
+# A band enters this file only from a held-out calibration report
+# (ops/jev-calibration-report.py), in a reviewed commit; it is never pooled
+# across families or classes and never borrowed from outside CARR.
+BANDS_PATH = os.path.join(REPO, "ops", "config", "jev-calibrated-bands.v1.json")
+BANDS_SCHEMA = "carr.jev-calibrated-bands.v1"
 
 # Deliberately pessimistic defaults. THEY ARE PLACEHOLDERS: every caller is
 # expected to replace them with numbers measured on its own shadow log, because
@@ -118,6 +128,10 @@ class JudgeUnavailable(RuntimeError):
     is visible in the log rather than silently reducing coverage.
     """
 
+    def __init__(self, message, *, reason="inspection_error"):
+        super().__init__(message)
+        self.reason = reason
+
 
 def _client():
     """Import the vendor client lazily, so importing this module costs nothing."""
@@ -131,8 +145,16 @@ def _client():
     return module
 
 
+def _calling_module():
+    """The file name (no extension) of the code that called judge()."""
+    try:
+        return os.path.splitext(os.path.basename(sys._getframe(2).f_code.co_filename))[0]
+    except (AttributeError, ValueError):
+        return "unknown"
+
+
 def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
-          retries=None, deadline=None):
+          retries=None, deadline=None, model=None, caller=None):
     """Ask every question in `questions` about ONE subject, in one request.
 
     `subject` is a mapping describing the single thing being judged — a diff, a
@@ -153,6 +175,7 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
     retry-after is otherwise unbounded.
     """
     started = time.monotonic()
+    tsc = None
     try:
         tsc = client or _client()
         extra = {}
@@ -160,11 +183,19 @@ def judge(subject, questions, *, timeout=20.0, client=None, api_key=None,
             extra["retries"] = retries
         if deadline is not None:
             extra["deadline"] = deadline
+        if model is not None:
+            extra["model"] = model
         if hasattr(tsc, "JUDGE_CACHE_TTL_SECONDS"):
-            extra.update(caller="jev_judge", cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
+            # The call site is the module that asked, not this wrapper: every
+            # judge() caller used to log as "jev_judge", which hid 95% of paid
+            # calls behind one name. ops/config/jev-call-sites.v1.json keys on it.
+            extra.update(caller=caller or _calling_module(),
+                         cache_ttl_seconds=tsc.JUDGE_CACHE_TTL_SECONDS)
         answer = tsc.ask(subject, questions, timeout=timeout, api_key=api_key, **extra)
     except Exception as exc:  # deliberately broad: see JudgeUnavailable
-        raise JudgeUnavailable(f"{type(exc).__name__}: {exc}") from None
+        reason = (getattr(exc, "code", None) or "vendor_unavailable"
+                  if isinstance(exc, getattr(tsc, "TypeSafeError", ())) else "inspection_error")
+        raise JudgeUnavailable(f"{type(exc).__name__}: {exc}", reason=reason) from None
     answer["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     return answer
 
@@ -183,23 +214,39 @@ def read(answer, key, *, yes_at=YES_AT, no_at=NO_AT, min_confidence=MIN_CONFIDEN
 
 
 def record(kind, subject_ref, answer, existing_decision=None, *, note=None,
-           log_path=SHADOW_LOG, error=None):
-    """Append one shadow observation. Writes what Jev said BESIDE what we did.
+           log_path=SHADOW_LOG, error=None, family=None, consequence_class=None,
+           downstream_action=None, receipt_id=None):
+    """Append one observation. Writes what Jev said BESIDE what we did.
 
     `existing_decision` is what the mechanism in place actually decided, so the
     log answers the only question that matters before switching anything on:
     on real traffic, how often do they disagree, and who was right? Pass it even
     when it is None — a row with no comparison is still evidence about coverage.
 
+    CALIBRATION FIELDS. Each row gets a `judgment_id`, the handle an outcome
+    (a review verdict, a test result, a human correction) is later joined to
+    through ops/jev_calibration.py. `family` names the question family and
+    `consequence_class` what a wrong call costs; `downstream_action` is what the
+    caller then did (acted, routed to review, fell back). Each may be one value
+    for every question or a {question id: value} mapping. `calibration` keeps
+    the full distribution and entropy per question: the client's block when the
+    answer came through ask(), else one rebuilt from the answers alone.
+    `receipt_id` links a Worker ask-jev receipt when the call went that way.
+
     Never raises. A logging failure must not take down the caller it was added
     to observe; that would be the tail wagging the dog.
     """
     row = {
         "at": datetime.now(timezone.utc).isoformat(),
+        "judgment_id": str(uuid.uuid4()),
         "kind": kind,
         "subject_ref": subject_ref,
         "existing_decision": existing_decision,
         "note": note,
+        "family": family,
+        "consequence_class": consequence_class,
+        "downstream_action": downstream_action,
+        "receipt_id": receipt_id,
     }
     if error is not None:
         row["error"] = str(error)
@@ -209,6 +256,7 @@ def record(kind, subject_ref, answer, existing_decision=None, *, note=None,
         row["cache_hit"] = answer.get("cache_hit", False)
         row["elapsed_ms"] = answer.get("elapsed_ms")
         row["answers"] = answer.get("answers")
+        row["calibration"] = _calibration_of(answer)
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as handle:
@@ -216,6 +264,112 @@ def record(kind, subject_ref, answer, existing_decision=None, *, note=None,
     except OSError:
         pass
     return row
+
+
+def _calibration_of(answer):
+    """The client's calibration block, or one rebuilt from the answers alone."""
+    block = answer.get("calibration")
+    if isinstance(block, dict):
+        return block
+    try:
+        tsc = _client()
+        answers = answer.get("answers") if isinstance(answer.get("answers"), dict) else {}
+        return {
+            "schema": "carr.jev-calibration.v1",
+            "model_requested": None,
+            "model_answered": answer.get("model"),
+            "model_pinned": None,
+            "state_sha256": None,
+            "questions": {key: tsc.answer_distribution(None, value)
+                          for key, value in sorted(answers.items())},
+        }
+    except Exception:  # never let the log take the caller down
+        return None
+
+
+def load_bands(path=BANDS_PATH):
+    """The committed calibrated bands. A missing or unreadable file calibrates nothing."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            bands = json.load(handle)
+    except (OSError, ValueError):
+        return {"schema": BANDS_SCHEMA, "bands": {}}
+    return bands if isinstance(bands, dict) else {"schema": BANDS_SCHEMA, "bands": {}}
+
+
+def _band_is_valid(band):
+    limit = band.get("max_entropy_bits") if isinstance(band, dict) else None
+    model = band.get("model") if isinstance(band, dict) else None
+    return (not isinstance(limit, bool) and isinstance(limit, (int, float))
+            and math.isfinite(limit) and limit >= 0
+            and isinstance(model, str) and _client().model_is_pinned(model))
+
+
+def _distribution_matches(recorded, observed):
+    """The question may add offered zero-probability choices absent from the answer."""
+    if not isinstance(recorded, dict) or not isinstance(observed, dict):
+        return False
+    return (all(recorded.get(key) == value for key, value in observed.items())
+            and all(value == 0 for key, value in recorded.items() if key not in observed))
+
+
+def route(answer, key, *, family, consequence_class, bands=None, bands_path=BANDS_PATH):
+    """Act, or send to review: the decision is code's, from a measured band.
+
+    Returns {"route": "act"|"review", "reason", "entropy_bits",
+    "max_entropy_bits", "family", "consequence_class", "model"}. It acts only
+    when this family AND this consequence class have a calibrated band, the
+    band was measured on the model that answered, the answer has a full
+    distribution, and its entropy is inside the band. Everything else is
+    review, including every family nobody has calibrated yet. There is no
+    pooled fallback and no default cutoff: an uncalibrated judgment is not
+    acted on by itself.
+    """
+    bands = load_bands(bands_path) if bands is None else bands
+    model = answer.get("model") if isinstance(answer, dict) else None
+    tsc = _client()
+    raw = answer.get("answers", {}).get(key) if isinstance(answer, dict) and isinstance(answer.get("answers"), dict) else None
+    question = tsc.answer_distribution(None, raw) if isinstance(raw, dict) else None
+    entropy = question.get("entropy_bits") if isinstance(question, dict) else None
+    verdict = {"route": "review", "reason": None, "entropy_bits": entropy,
+               "max_entropy_bits": None, "family": family,
+               "consequence_class": consequence_class, "model": model}
+    table = bands.get("bands") if isinstance(bands, dict) and bands.get("schema") == BANDS_SCHEMA else None
+    if not isinstance(table, dict):
+        return {**verdict, "reason": "band_invalid"}
+    family_bands = table.get(family) if isinstance(table.get(family), dict) else None
+    band = family_bands.get(consequence_class) if family_bands else None
+    if "*" in (family, consequence_class) or "*" in table or (family_bands and "*" in family_bands):
+        return {**verdict, "reason": "band_invalid"}
+    if band is None:
+        return {**verdict, "reason": "uncalibrated"}
+    if not _band_is_valid(band):
+        return {**verdict, "reason": "band_invalid"}
+    verdict["max_entropy_bits"] = band["max_entropy_bits"]
+    if model != band["model"]:
+        return {**verdict, "reason": "model_mismatch"}
+    if not tsc.model_is_pinned(model):
+        return {**verdict, "reason": "model_unpinned"}
+    if not question or question.get("distribution_complete") is not True:
+        return {**verdict, "reason": "no_distribution"}
+    supplied = answer.get("calibration")
+    if supplied is not None:
+        recorded = supplied.get("questions", {}).get(key) if isinstance(supplied, dict) and isinstance(supplied.get("questions"), dict) else None
+        if (not isinstance(recorded, dict) or supplied.get("schema") != "carr.jev-calibration.v1"
+                or supplied.get("model_answered") != model
+                or supplied.get("model_pinned") is not True
+                or supplied.get("model_requested") != model
+                or not _distribution_matches(recorded.get("distribution"),
+                                             question.get("distribution"))
+                or any(recorded.get(field) != question.get(field) for field in
+                       ("type", "distribution_complete", "probability_sum",
+                        "entropy_bits", "top", "top_probability"))):
+            return {**verdict, "reason": "calibration_mismatch"}
+    if entropy is None:
+        return {**verdict, "reason": "no_distribution"}
+    if entropy > band["max_entropy_bits"]:
+        return {**verdict, "reason": "above_calibrated_band"}
+    return {**verdict, "route": "act", "reason": "within_calibrated_band"}
 
 
 def agreement(log_path=SHADOW_LOG, kind=None):
