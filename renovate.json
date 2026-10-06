@@ -46,7 +46,7 @@
     "enabled": true,
     "schedule": [],
     "groupName": null,
-    "addLabels": ["dependency-security"],
+    "labels": ["dependencies", "dependency-security"],
     "automerge": false,
     "platformAutomerge": false
   },
