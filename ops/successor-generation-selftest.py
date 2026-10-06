@@ -19,6 +19,8 @@ class Rendering(unittest.TestCase):
         measured = {**old_catalog, 'projection_version': 'scac-db-catalog-projection.v110'}
         measured['secdef_execute'] = {'count': 1243, 'digest': 'sha256:' + 'f'*64}
         sql = render_sql(template, predecessor, [], measured, 'sha256:' + 'a'*64, [])
+        self.assertIn('-- rollback: forward-only', sql.split('do $rehome_preflight$')[0])
+        self.assertIn('-- lock-review:', sql.split('do $rehome_preflight$')[0])
         self.assertIn("when 'scac-mutation-registry.v109' then '" + predecessor['digest'], sql)
         self.assertIn("when 'scac-mutation-registry.v110' then '" + json.dumps(measured, separators=(',', ':')) + "'::jsonb end;", sql)
         self.assertIn('observed_count<>1243', sql)

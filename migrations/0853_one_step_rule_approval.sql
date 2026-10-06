@@ -1,5 +1,7 @@
 -- Joe's approval is the single authority act. Delivery advice is kept distinct
 -- from installed deny controls; historical receipts remain immutable.
+-- rollback: forward-only — immutable admission and approval receipts require a corrective successor migration.
+-- lock-review: CHECK validation scans rule admission and approval metadata; replacement guards install in one transaction while historical receipts remain immutable.
 alter table ops.rule_admission drop constraint rule_admission_enforcement_status_check;
 alter table ops.rule_admission add constraint rule_admission_enforcement_status_check
   check (enforcement_status in ('hard_enforced','authority_enforced','blocked','delivered_advisory'));

@@ -26,19 +26,19 @@ test('one-step approval and the consolidated migration runner preserve v112 auth
 
 test('one-step approval generated successor preserves delivered registry history', () => {
   const sql = renderRuleApprovalRegistrySql(frozenInventory('scac-mutation-registry.v113'));
-  assert.equal(readFileSync(new URL('../../migrations/0852_one_step_rule_approval_scac_successor.sql', import.meta.url), 'utf8'), sql);
-  const domain = readFileSync(new URL('../../migrations/0851_one_step_rule_approval.sql', import.meta.url));
+  assert.equal(readFileSync(new URL('../../migrations/0854_one_step_rule_approval_scac_successor.sql', import.meta.url), 'utf8'), sql);
+  const domain = readFileSync(new URL('../../migrations/0853_one_step_rule_approval.sql', import.meta.url));
   assert.ok(sql.includes(createHash('sha256').update(domain).digest('hex')), 'exact approval implementation is pinned');
   assert.match(sql, /scac_mutation_registry_v112_seal_available\(\)/);
   assert.match(sql, /scac_mutation_registry_v113_seal_available\(\)/);
 });
 
 test('approval domain and registry changes require one complete atomic migration group', () => {
-  const pair = ['0851_one_step_rule_approval.sql', '0852_one_step_rule_approval_scac_successor.sql'];
+  const pair = ['0853_one_step_rule_approval.sql', '0854_one_step_rule_approval_scac_successor.sql'];
   assert.ok(registryChain.atomic_groups.some(group => JSON.stringify(group) === JSON.stringify(pair)));
   assert.ok(registryChain.strict_atomic_groups.some(group => JSON.stringify(group) === JSON.stringify(pair)));
   const migrations = readdirSync(new URL('../../migrations/', import.meta.url)).filter(name => name.endsWith('.sql')).sort();
-  const domainIndex = migrations.indexOf('0851_one_step_rule_approval.sql');
-  assert.equal(migrations[domainIndex + 1], '0852_one_step_rule_approval_scac_successor.sql',
+  const domainIndex = migrations.indexOf('0853_one_step_rule_approval.sql');
+  assert.equal(migrations[domainIndex + 1], '0854_one_step_rule_approval_scac_successor.sql',
     'the runner must encounter the complete authority group without an intervening migration');
 });

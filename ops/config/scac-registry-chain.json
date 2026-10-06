@@ -5613,25 +5613,25 @@
           "digest": "sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"
         }
       },
-      "commit": "52044064c07a8124138869342a22be9a3520139d",
+      "commit": "430172b5475961d0932533ba9dc8d6c5d0b26bae",
       "source_count": 1145,
       "entry_count": 2722,
-      "migration": "migrations/0852_one_step_rule_approval_scac_successor.sql",
+      "migration": "migrations/0854_one_step_rule_approval_scac_successor.sql",
       "entry_set_digest": "sha256:97146113e273d0671889bde505642eb8dba2987e3de8876b4c4195dbaa3e3880",
       "atomic_pair": [
-        "0851_one_step_rule_approval.sql",
-        "0852_one_step_rule_approval_scac_successor.sql"
+        "0853_one_step_rule_approval.sql",
+        "0854_one_step_rule_approval_scac_successor.sql"
       ],
       "strict_atomic": true,
       "dependencies": [
         "0846_leads_scac_successor.sql",
-        "0851_one_step_rule_approval.sql"
+        "0853_one_step_rule_approval.sql"
       ],
       "snapshot": {
         "include_current_entry_set": true,
         "catalog_function": "ops.scac_mutation_catalog_v113_current()"
       },
-      "migration_sha256": "39d7330aab873fd93ebab761a47055c2398d2dfb9dafddc106584c1c3900140b"
+      "migration_sha256": "2fa56832e69eedd8c3a48295e0f203feed1a41edddb892990b28e150ae86f03e"
     }
   ],
   "atomic_groups": [
@@ -5837,8 +5837,8 @@
       "0846_leads_scac_successor.sql"
     ],
     [
-      "0851_one_step_rule_approval.sql",
-      "0852_one_step_rule_approval_scac_successor.sql"
+      "0853_one_step_rule_approval.sql",
+      "0854_one_step_rule_approval_scac_successor.sql"
     ]
   ],
   "strict_atomic_groups": [
@@ -5995,8 +5995,8 @@
       "0846_leads_scac_successor.sql"
     ],
     [
-      "0851_one_step_rule_approval.sql",
-      "0852_one_step_rule_approval_scac_successor.sql"
+      "0853_one_step_rule_approval.sql",
+      "0854_one_step_rule_approval_scac_successor.sql"
     ]
   ],
   "inactive_atomic_groups": [
