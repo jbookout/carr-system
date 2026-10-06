@@ -1,3 +1,5 @@
+import INGEST_TRANSPORT from "./ingest-transport.v1.json" with { type: "json" };
+
 // CARR MCP server — Worker entrypoint.
 //
 // The Worker's fetch IS an OAuthProvider (Cloudflare's workers-oauth-provider).
@@ -79,18 +81,20 @@
 // (mcpApiHandler's/protectedApiHandler's own actor-unresolved 401) is recorded
 // at its own call site below, since a 401 is invisible to a >=500 check.
 
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { OAuthProvider, getOAuthApi } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch, dispatchEngineeringController, canonicalOwnershipExecutionHost } from "./mcp.js";
 import { engineeringControllerActorForToken } from "./authenticated-canonical-ownership.js";
-import { handleAuthorize, handleCallback } from "./google-oidc.js";
+import { handleAuthorize, handleCallback, handleConsent } from "./google-oidc.js";
+export { OAuthConsentState } from "./oauth-consent-state.js";
+import { sharedOAuthFetch, mcpOriginRefusal, isSharedOAuthPath } from "./oauth-policy.js";
 import { agentActorForToken, authenticatedIdentity, continuityActorForTokenMaps,
          serveReviewRequest,
          hermesActorForTokenMaps, hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
 import { createProgram6RoutineController } from "./program6-routine-controller.js";
-import { appendRoomTurn, DEFAULT_ROOM, OBSERVATORY_ROOM, readRoomQueue, readRoomTurns } from "./partner-room.js";
+import { appendRoomTurn, DEFAULT_ROOM, OBSERVATORY_ROOM, readRoomLatest, readRoomQueue, readRoomTurns } from "./partner-room.js";
 import { createCaptureHandler } from "./capture.js";
 import { TOOLS } from "./tools.js";
 import { buildRelease } from "./release.js";
@@ -169,7 +173,7 @@ async function ingest(request, env) {
   const source = Object.keys(tokens).find((s) => tokens[s] && tokens[s] === token);
   if (!source) return json({ error: "unauthorized" }, 401);
   const len = parseInt(request.headers.get("content-length") || "0", 10);
-  if (len > 1048576) return json({ error: "payload_too_large" }, 413);
+  if (len > INGEST_TRANSPORT.max_body_bytes) return json({ error: "payload_too_large" }, 413);
   let payload;
   try {
     payload = await request.json();
@@ -208,6 +212,7 @@ const defaultHandler = {
     if (url.pathname === "/ingest" && request.method === "POST") return ingest(request, env);
     if (url.pathname === "/authorize") return handleAuthorize(request, env);
     if (url.pathname === "/callback") return handleCallback(request, env);
+    if (url.pathname === "/consent") return handleConsent(request, env);
     return json({ service: "carr-mcp", surfaces: ["/healthz", "/health", "/release", "/ingest", "/mcp", "/pipeline/changes", "/authorize", "/callback"] }, 404);
   },
 };
@@ -584,7 +589,7 @@ function continuityActorFor(request, env) {
 
 // ---------- the provider ----------
 
-const oauthProvider = new OAuthProvider({
+const oauthOptions = {
   apiRoute: ["/mcp", "/doc/mcp", "/pipeline/changes"],
   apiHandler: protectedApiHandler,
   defaultHandler,
@@ -620,7 +625,8 @@ const oauthProvider = new OAuthProvider({
   onError({ code, description, status }) {
     console.warn(`OAuth error response: ${status} ${code} - ${description}`);
   },
-});
+};
+const oauthProvider = new OAuthProvider(oauthOptions);
 
 // Same verb and cursor implementations as the bearer-token surface; only the
 // authentication adapter differs. The cookie session already resolved to the
@@ -651,6 +657,11 @@ const dealroomHandler = createDealroomHandler({
     const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
     return readRoomTurns(client, { room: OBSERVATORY_ROOM, ...params });
   },
+  roomLatestFn: (env, params) => {
+    const sql = neon(env.DATABASE_URL_READER);
+    const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
+    return readRoomLatest(client, { room: OBSERVATORY_ROOM, ...params });
+  },
   queueReadFn: (env, params) => {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, values = []) => ({ rows: await sql.query(text, values) }) };
@@ -675,6 +686,11 @@ const dealroomHandler = createDealroomHandler({
 // owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
+  // Validate before machine-token, browser-cookie and provider routes alike.
+  if (isSharedOAuthPath(url.pathname)) {
+    const refused = mcpOriginRefusal(request, env);
+    if (refused) return refused;
+  }
   // The confidential reports host is an isolated leaf. Unknown paths close as
   // report-surface 404s and can never alias MCP, OAuth, capture, or Deal Room.
   if (isReportsHostRequest(request)) return reportsHandler.fetch(request, env, ctx);
@@ -714,7 +730,9 @@ async function routeRequest(request, env, ctx) {
     if (localActor) return dispatch(request, env, ctx, localActor);
   }
   if (isDealroomRequest(request, env)) return dealroomHandler.fetch(request, env, ctx);
-  return oauthProvider.fetch(request, env, ctx);
+  return sharedOAuthFetch(oauthProvider, request, {
+    ...env, OAUTH_PROVIDER: getOAuthApi(oauthOptions, env),
+  }, ctx);
 }
 
 // Top-level export. wrapWithCorrelation covers every route above in one

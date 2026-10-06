@@ -41,6 +41,10 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py verify-codex-continuity
     ops/config-as-code.py install-codex-continuity-mcp --apply
     ops/config-as-code.py verify-codex-continuity-mcp
+    ops/config-as-code.py install-progress-board [--repo CANONICAL] --apply
+    ops/config-as-code.py install-flash-on-demand [--apply]
+    ops/config-as-code.py verify-progress-board [--repo CANONICAL]
+    ops/config-as-code.py check-launchd-main-paths
     ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
@@ -66,10 +70,14 @@ from lib.machine_prerequisites import machine_prerequisites, prerequisite_failur
 from lib import claude_continuity_config as continuity_config
 from lib import machine_role
 from lib import launchd_calendar
+from lib import launchd_hold
 
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
 REPO_HERE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LAUNCHD_DEPENDENCY_CHECKOUTS = (
+    "/opt/homebrew", "/usr/local/Homebrew", "/home/linuxbrew/.linuxbrew/Homebrew",
+)
 
 
 def _canonical_repo(here):
@@ -221,113 +229,10 @@ CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
 TOKENS = [(tok, real) for tok, real in
           (("{{VAULT}}", VAULT), ("{{REPO}}", REPO), ("{{HOME}}", HOME)) if real]
 
-# RUNS ON EXACTLY ONE MACHINE. Not a statement about Joe; a statement about what
-# the job writes. Each of these mutates state that is SHARED between the two
-# machines, so a second copy is either duplicated work or a two-writer conflict.
-# Widened 2026-08-10 during the Dell migration audit, when the set held only the
-# video pipeline and the other five would have been installed on his Mac:
-#
-#   videopipeline       — Joe's Movies folder; Dell has no video pipeline.
-#   nightly-record-layer— pushes the corpus to the shared vault and mirrors
-#                         doctrine to a path hardcoded to Joe's Google Drive
-#                         (bin/nightly.sh:154), which cannot resolve on another
-#                         machine. The cadence engine inside it IS idempotent,
-#                         so the risk is the vault writes, not double-spawning.
-#   rules-refresh       — writes the shared compiled-rules renders, and the cost
-#                         ruling in its own plist is decisive: Neon free is
-#                         100 CU-h/month at ~5 min per wake, so a second Mac
-#                         waking it hourly doubles the burn and can SUSPEND the
-#                         database for the rest of the month.
-#   local-briefs        — maintains Joe's local review queue. Legacy brief files
-#                         are explicit recovery only; a second scheduler would
-#                         duplicate the same owner-specific maintenance.
-#   partner-ping        — writes the shared record. One pinger is the point.
-#   cutover-watch       — writes the shared record (a loop update on #532) and
-#                         holds its own sentinel of what it last reported under
-#                         out/cutover-watch/, which is per-machine and would
-#                         make two Macs disagree about what is "new" — the
-#                         same partner-ping shape (one watcher, one shared
-#                         record) with the added risk of two update-loop calls
-#                         racing on the same loop's base_version.
-#
-# What the second machine still needs from the nightly is the record-derived
-# fetch allowlist, which is per-machine and gitignored. That is why
-# com.carr.fetch-allowlist.plist exists as its own job rather than being
-# inherited from the nightly chain.
-PRIMARY_ONLY = {
-    "com.carr.videopipeline.plist",
-    # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
-    # DELL's migration packet from Joe's Mac and was built to remove itself once
-    # his A15 closed. A15 is closed, the watcher unloaded and deleted its own
-    # plist as designed, and bin/preflight-watch.sh is retired with this entry —
-    # which had been naming a plist that exists in neither ops/launchd/ nor
-    # ~/Library/LaunchAgents. A lifecycle that completes should leave nothing
-    # behind pointing at it (rule def3e84e, artifact tombstones: nothing
-    # silently rots).
-    "com.carr.nightly-record-layer.plist",
-    "com.carr.rules-refresh.plist",
-    "com.carr.local-briefs.plist",
-    "com.carr.partner-ping.plist",
-    "com.carr.cutover-watch.plist",
-    # Joe 2026-09-26: the Mac Studio is the hub and the MacBook is a thin client
-    # into it, so work that acts on shared state runs on the primary alone.
-    # room-bridge: both Macs carried the same Model Room desks and raced for
-    # each turn; it also wakes the engineering controller, whose one Worker
-    # token lives on the primary.  release-pipeline and control-plane-tick
-    # would release and enqueue twice.  The cadence sweep would escalate twice.
-    # nightly-exports-daytime-retry is the safety net for nightly-record-layer,
-    # which is already primary-only.  timebomb-audit scans the same tracked
-    # source on every Mac.  Device-bound jobs (dictation, call mode, capture,
-    # keymap, local servers, spool flush, fleet sync) stay on every machine.
-    "com.carr.room-bridge.plist",
-    "com.carr.release-pipeline.plist",
-    "com.carr.control-plane-tick.plist",
-    "com.carr.delivery-cadence-a05-sweep.plist",
-    "com.carr.nightly-exports-daytime-retry.plist",
-    "com.carr.timebomb-audit.plist",
-    # WR-000178: the Studio's Tailscale stayed stopped ~6h after the 2026-09-30
-    # reboot and cut SSH to the MacBook. The hub is the node that must come up.
-    "com.carr.tailscale-up.plist",
-}
+from lib.launchd_scope import PRIMARY_ONLY, SECONDARY_ONLY
 
 
-# The mirror image: jobs only the SECOND machine needs, because the primary
-# already gets the same effect from a chain the second machine must not run.
-SECONDARY_ONLY = {"com.carr.fetch-allowlist.plist"}
 
-
-# Versioned definitions that deliberately must not become live merely because
-# config-as-code reconciles the rest of the machine.  These adapters have their
-# own evidence/approval cutover gates; installing one early would turn a source
-# artifact into an active schedule before those gates pass.
-DEFINITION_ONLY: dict[str, str] = {
-    # com.carr.control-plane-tick.plist held here until 2026-08-26: its gate was
-    # "accepted shadow/canary evidence and cutover approval". Joe approved the
-    # cutover that evening (decision f4af0c87, "Yes I approve cutover") with the
-    # first accepted shadow receipt on record; the wrapper pins --mode shadow,
-    # so installing activates evidence production only — legacy schedules keep
-    # running until each workflow's replacement is accepted at its own tier.
-    "com.carr.repo-hygiene-janitor.plist":
-        "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
-        "gate is a separately reviewed live-effect packet, so the definition is "
-        "written down and left uninstalled until that packet is approved",
-    # com.carr.gate-zero-canary.plist was held here from 2026-09-11 to
-    # 2026-09-12 with the reason "starting a schedule is Joe's act, so the
-    # definition is written down and left uninstalled until he takes it off this
-    # list deliberately". THAT ACT IS TAKEN. Joe's blanket approval (decision
-    # idempotency 5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84, "I approve everything")
-    # together with his 2026-09-13 ruling that the orchestrator runs release and
-    # activation commands itself is the deliberate removal the reason asked for,
-    # so the canary reconciles like any other agent and the next `install
-    # --apply` loads it. What this buys is the only question Gate Zero's fourth
-    # predecessor actually asks: a hand dispatch through bin/run-scheduled.sh
-    # proves the WRAPPER mints a receipt, and only launchd firing on its own
-    # proves the SCHEDULER does -- which is what `step:scheduler-active-receipt`
-    # reads. ops/config-as-code-selftest.py now asserts this release, the way it
-    # already asserts the 2026-08-26 control-plane tick cutover, so putting the
-    # canary back on the list is a change a test refuses rather than a silent
-    # revert.
-}
 
 # A LaunchAgent that invokes this installer cannot unload its own label and
 # still return to bin/run-scheduled.sh: launchd terminates the wrapper process
@@ -825,14 +730,35 @@ def codex_permissions_source():
 
 
 def canonical_codex_permissions(raw):
-    """Render a live CARR-owned Codex permission slice in portable source form."""
-    default = re.search(r'^default_permissions\s*=\s*"[^"]+"\s*$', raw, re.M)
-    marker = re.search(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n(.*?)'
-                       + re.escape(CODEX_PERMISSIONS_END), raw, re.S)
-    if not default or not marker:
+    """Read reserved semantic paths, independent of comments and TOML syntax."""
+    import tomllib
+    import tomlkit
+    try:
+        source = codex_permissions_source()
+        if source is None:
+            return None
+        default_line, body = source
+        expected = tomllib.loads(default_line + "\n" + body)
+        parsed = tomllib.loads(portable(raw))
+        default = parsed.get('default_permissions')
+        permissions = parsed.get('permissions')
+        if not isinstance(default, str) or default not in expected['permissions'] \
+                or not isinstance(permissions, dict):
+            return None
+        profiles = {}
+        for name in expected['permissions']:
+            profile = permissions.get(name)
+            if not isinstance(profile, dict):
+                return None
+            profiles[name] = profile
+        observed = {'default_permissions': default, 'permissions': profiles}
+        # Equal semantics render in the source's form. Changed values remain
+        # visible to drift checks and pull; unrelated settings stay outside it.
+        if observed == expected:
+            return default_line + "\n\n" + body
+        return tomlkit.dumps(observed)
+    except (tomllib.TOMLDecodeError, ValueError, TypeError, AttributeError):
         return None
-    rendered = default.group(0).strip() + "\n\n" + marker.group(1).strip() + "\n"
-    return portable(rendered)
 
 
 def live_codex_permissions():
@@ -841,22 +767,110 @@ def live_codex_permissions():
     return None if raw is None else canonical_codex_permissions(raw)
 
 
-def install_codex_permissions(raw, default_line, body):
-    """Replace only the managed CARR slice of Codex's user-owned config.toml."""
-    default_re = re.compile(r'^default_permissions\s*=\s*"[^"]+"\s*\n?', re.M)
-    if default_re.search(raw):
-        planned = default_re.sub(default_line + "\n", raw, count=1)
-    else:
-        first_table = re.search(r'^\[', raw, re.M)
-        at = first_table.start() if first_table else len(raw)
-        planned = raw[:at] + default_line + "\n" + raw[at:]
+def codex_permission_syntax(raw):
+    """Locate real headers and marker comments, excluding strings and arrays.
 
-    managed = CODEX_PERMISSIONS_BEGIN + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END
-    marker_re = re.compile(re.escape(CODEX_PERMISSIONS_BEGIN) + r'\n.*?'
-                           + re.escape(CODEX_PERMISSIONS_END), re.S)
-    if marker_re.search(planned):
-        return marker_re.sub(managed, planned, count=1)
-    return planned.rstrip() + "\n\n" + managed + "\n"
+    Recovery removes standalone reserved tables, including old duplicates.
+    TOML Kit owns key/value interpretation after that recovery.
+    """
+    import tomllib
+    headers, markers = [], []
+    multiline = None
+    depth = 0
+    offset = 0
+    tokens = re.compile(r'''"""|''' + "'''" + r'''|"(?:\\.|[^"\\])*"|'[^']*'|#[^\n]*|[\[\]{}]''')
+    for line in raw.splitlines(keepends=True):
+        if multiline is None and depth == 0:
+            if line.strip() in (CODEX_PERMISSIONS_BEGIN, CODEX_PERMISSIONS_END):
+                markers.append((offset, offset + len(line), line.strip()))
+            if re.match(r'^\s*\[', line):
+                try:
+                    table = tomllib.loads(line + '\n__carr_slice__ = true\n')
+                except tomllib.TOMLDecodeError:
+                    pass  # An array continuation is not a table boundary.
+                else:
+                    permissions = table.get('permissions', {})
+                    owned = bool(set(permissions) & {'carr_unattended', 'carr_drive_readonly'})
+                    headers.append((offset, owned))
+        cursor = 0
+        while cursor < len(line):
+            if multiline is not None:
+                end = line.find(multiline, cursor)
+                if end < 0:
+                    break
+                # An escaped quote cannot close a multiline basic string.
+                escapes = len(line[:end]) - len(line[:end].rstrip('\\'))
+                cursor = end + 3
+                if multiline == '"""' and escapes % 2:
+                    continue
+                # One or two content quotes may precede the closing delimiter.
+                while cursor < min(end + 5, len(line)) and line[cursor] == multiline[0]:
+                    cursor += 1
+                multiline = None
+            else:
+                token = tokens.search(line, cursor)
+                if token is None:
+                    break
+                cursor = token.end()
+                value = token.group()
+                if value in ('"""', "'''"):
+                    multiline = value
+                elif value.startswith('#'):
+                    break
+                elif value in ('[', '{'):
+                    depth += 1
+                elif value in (']', '}'):
+                    depth -= 1
+        offset += len(line)
+    spans = [(start, headers[i + 1][0] if i + 1 < len(headers) else len(raw))
+             for i, (start, owned) in enumerate(headers) if owned]
+    return spans, markers
+
+
+def install_codex_permissions(raw, default_line, body):
+    """Repair reserved semantic paths; preserve every unrelated TOML value."""
+    import tomllib
+    import tomlkit
+    from tomlkit.items import InlineTable
+
+    expected = tomllib.loads(default_line + "\n" + body)
+    spans, markers = codex_permission_syntax(raw)
+    # Marker ownership covers comment lines only, never enclosed user data.
+    spans.extend((start, end) for start, end, _ in markers)
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    pieces, cursor = [], 0
+    for start, end in merged:
+        pieces.append(raw[cursor:start])
+        cursor = end
+    pieces.append(raw[cursor:])
+    document = tomlkit.parse("".join(pieces))
+    document['default_permissions'] = expected['default_permissions']
+    permissions = document.get('permissions')
+    if permissions is not None:
+        for name in expected['permissions']:
+            permissions.pop(name, None)
+        if not permissions:
+            del document['permissions']
+        elif isinstance(permissions, InlineTable):
+            # Inline parents are sealed in TOML; open the retained siblings so
+            # canonical profile headers can be declared alongside them.
+            retained = tomlkit.table()
+            for name, value in permissions.items():
+                retained.add(name, value)
+            document['permissions'] = retained
+    planned = (tomlkit.dumps(document).rstrip() + "\n\n" + CODEX_PERMISSIONS_BEGIN
+               + "\n" + body.rstrip() + "\n" + CODEX_PERMISSIONS_END + "\n")
+    parsed = tomllib.loads(planned)
+    if parsed.get('default_permissions') != expected['default_permissions'] or any(
+            parsed.get('permissions', {}).get(name) != profile
+            for name, profile in expected['permissions'].items()):
+        raise ValueError('Codex permission repair did not produce the required profiles/default')
+    return planned
 
 
 def codex_configuration_state():
@@ -1403,9 +1417,16 @@ def is_definition_only_task(text):
     return bool(text) and "This definition is disabled" in text
 
 
-def pairs():
+def launchd_off_reason(filename, body, holds=None):
+    label = launchd_calendar.plist_label(body or "") or filename.removesuffix(".plist")
+    return launchd_hold.off_reason(label, HOME, holds=holds)
+
+
+
+def pairs(holds=None):
     """(label, live_text, repo_path) for every tracked item. live_text is
     already portable; repo contents are compared verbatim against it."""
+    holds = launchd_hold.read_holds(HOME) if holds is None else holds
     out = []
 
     hooks = live_hooks_block()
@@ -1443,14 +1464,14 @@ def pairs():
         # must not be waved through merely because its body matches the repo —
         # matching bytes are exactly what an unauthorized install would have.
         # It is reported separately, by presence, in cmd_check.
-        if f in DEFINITION_ONLY:
+        if launchd_off_reason(f, read(launchd_repo_path(f)), holds):
             continue
         out.append((f"launchd {f}", portable(read(os.path.join(LAUNCHD_SRC, f))),
                     launchd_repo_path(f)))
     return out
 
 
-def definition_only_installed_plists():
+def definition_only_installed_plists(holds=None):
     """DEFINITION_ONLY agents that are on the machine and must not be.
 
     Body equality is deliberately not consulted: the failure being detected is
@@ -1458,7 +1479,23 @@ def definition_only_installed_plists():
     all, and an install performed from this very repo is the likeliest way for
     that to happen.
     """
-    return [f for f in carr_plists() if f in DEFINITION_ONLY]
+    holds = launchd_hold.read_holds(HOME) if holds is None else holds
+    installed = []
+    for filename in carr_plists():
+        label = launchd_calendar.plist_label(read(launchd_repo_path(filename)) or "") or filename.removesuffix(".plist")
+        if label not in holds and launchd_hold.off_reason(label, holds={}):
+            installed.append(filename)
+    return installed
+
+
+def definition_only_labels(templates_dir):
+    labels = []
+    for filename in sorted(os.listdir(templates_dir)) if os.path.isdir(templates_dir) else []:
+        source = LAUNCHD_ALT_REPO.get(filename, os.path.join(templates_dir, filename))
+        label = launchd_calendar.plist_label(read(source) or "") or filename.removesuffix(".plist")
+        if launchd_hold.off_reason(label, holds={}):
+            labels.append(label)
+    return labels
 
 
 def pending_launchd_reloads():
@@ -1504,10 +1541,103 @@ def refused_launchd_templates(repo=None):
     return out
 
 
+def _nearest_git_metadata(directory):
+    """The closest directory at or above `directory` holding a .git entry, or None.
+    Any lstat failure other than absence propagates, so unreadable metadata fails closed."""
+    while True:
+        try:
+            os.lstat(os.path.join(directory, ".git"))
+            return directory
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+def launchd_path_refusal(body):
+    """Verify runtime checkouts for installation and installed-path audits."""
+    try:
+        definition = plistlib.loads(body.encode("utf-8"))
+    except (ValueError, plistlib.InvalidFileException) as exc:
+        return f"invalid LaunchAgent: {exc}"
+    if not isinstance(definition, dict):
+        return "invalid LaunchAgent: expected a dictionary"
+    arguments = definition.get("ProgramArguments") or []
+    if not isinstance(arguments, list):
+        return "invalid LaunchAgent: ProgramArguments must be an array"
+    working_directory = definition.get("WorkingDirectory") or "/"
+    if not isinstance(working_directory, str) or not os.path.isabs(working_directory):
+        return "invalid LaunchAgent: WorkingDirectory must be absolute"
+    paths = [working_directory, definition.get("Program"), *arguments]
+    for path in paths:
+        if not isinstance(path, str) or not path or path.startswith("-"):
+            continue
+        resolved = os.path.realpath(os.path.join(working_directory, path))
+        directory = resolved if os.path.isdir(resolved) else os.path.dirname(resolved)
+        # A declared script may not exist yet; inspect its closest existing
+        # ancestor so a missing file cannot hide a feature checkout.
+        while not os.path.isdir(directory) and directory != os.path.dirname(directory):
+            directory = os.path.dirname(directory)
+        try:
+            # Git skips metadata it cannot read (a corrupt HEAD, say) and
+            # either reports no repository or discovers an enclosing one, so
+            # its answer only counts when it names the nearest metadata.
+            nearest = _nearest_git_metadata(directory)
+            top = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"],
+                                 capture_output=True, text=True, env=_git_env(), timeout=15)
+            if top.returncode:
+                if nearest is None and top.returncode == 128 and top.stderr.strip() == "fatal: not a git repository (or any of the parent directories): .git":
+                    continue
+                return f"cannot verify repository identity for {path}: {top.stderr.strip()}"
+            checkout = top.stdout.strip()
+            if nearest is None or os.path.realpath(checkout) != os.path.realpath(nearest):
+                return (f"cannot verify repository identity for {path}: Git selected {checkout} "
+                        f"but the nearest metadata is at {nearest}")
+            dirs = subprocess.run(["git", "-C", checkout, "rev-parse", "--path-format=absolute",
+                                   "--git-dir", "--git-common-dir"],
+                                  capture_output=True, text=True, env=_git_env(), timeout=15)
+            identities = dirs.stdout.strip().splitlines()
+            if dirs.returncode or len(identities) != 2:
+                return f"cannot verify main/worktree identity for {path}"
+            # Only named package-manager checkouts may use release branches.
+            # Standalone session clones have the same Git directory shape.
+            if identities[0] == identities[1] and os.path.realpath(checkout) in {
+                    os.path.realpath(root) for root in LAUNCHD_DEPENDENCY_CHECKOUTS}:
+                continue
+            branch = subprocess.run(["git", "-C", checkout, "symbolic-ref", "--short", "HEAD"],
+                                    capture_output=True, text=True, env=_git_env(), timeout=15)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"cannot verify main checkout for {path}: {exc}"
+        if identities[0] != identities[1] or branch.returncode or branch.stdout.strip() != "main":
+            return (f"runtime path {path} selects {branch.stdout.strip() or 'detached HEAD'}; "
+                    "point the LaunchAgent at the canonical main checkout and reinstall")
+    return None
+
+
+def cmd_check_launchd_main_paths():
+    """Read installed CARR agents without changing or reloading any plist."""
+    names = carr_plists()
+    board = "local.carr-progress-board.plist"
+    if os.path.isfile(os.path.join(LAUNCHD_SRC, board)):
+        names.append(board)
+    failures = []
+    for name in names:
+        refusal = launchd_path_refusal(read(os.path.join(LAUNCHD_SRC, name)) or "")
+        if refusal:
+            failures.append((name, refusal))
+    for name, refusal in failures:
+        print(f"launchd main-path check: REFUSED {name}: {refusal}")
+    if not failures:
+        print("launchd main-path check: runtime paths verified")
+    return 1 if failures else 0
+
+
 def launchd_template_refusal(source_text):
     """The first reason install must not render this template, or None."""
     problems = launchd_calendar.audit_template(source_text or "")
-    return problems[0] if problems else None
+    return problems[0] if problems else launchd_path_refusal(concrete(source_text or ""))
 
 
 def cmd_check():
@@ -1515,12 +1645,19 @@ def cmd_check():
     # whole judgement; the core.hooksPath line is appended after it because it
     # is an observation about a no-touch setting, so it changes neither the exit
     # code nor the first line the health row reads.
-    verdict = _cmd_check()
+    try:
+        holds = launchd_hold.read_holds(HOME)
+    except (OSError, ValueError) as exc:
+        print(f"config-as-code: HOLD INVALID — {exc}")
+        return 1
+    verdict = _cmd_check(holds)
+    for hold in holds.values():
+        print(hold.describe())
     print(git_hooks_path_report())
     return verdict
 
 
-def _cmd_check():
+def _cmd_check(holds):
     # SEVERITY IS NOT COSMETIC HERE, and the 2026-08-08 incident is why.
     # A tracked item MISSING from the machine means a protection that was
     # supposed to be running is not running. A tracked item merely DIFFERENT
@@ -1546,7 +1683,7 @@ def _cmd_check():
         return 1
 
     try:
-        configured_pairs = pairs()
+        configured_pairs = pairs(holds)
     except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"config-as-code: CLAUDE CONTINUITY INVALID — {exc}")
         return 1
@@ -1579,20 +1716,22 @@ def _cmd_check():
     # evidence against it.
     disallowed += [
         (f"launchd {name} (DEFINITION ONLY, MUST NOT BE INSTALLED)",
-         f"installed in {LAUNCHD_SRC}; {DEFINITION_ONLY[name]}")
-        for name in definition_only_installed_plists()
+         f"installed in {LAUNCHD_SRC}; {launchd_off_reason(name, read(launchd_repo_path(name)), holds)}")
+        for name in definition_only_installed_plists(holds)
     ]
     # A template launchd would load and then never fire. Reported whatever the
     # machine holds, because the machine matching it is exactly the failure.
     refused = [
         (f"launchd template {rel} (SCHEDULE REFUSED)", problem)
         for rel, problem in refused_launchd_templates()
+        if not launchd_off_reason(os.path.basename(rel), read(os.path.join(REPO_HERE, rel)), holds)
     ]
     pending_reloads = [
         (f"launchd {name} (PENDING RELOAD)",
          "disk bytes do not prove the new definition is loaded; retry installation "
          "from an external process and verify launchd registration")
         for name in pending_launchd_reloads()
+        if not launchd_off_reason(name, read(launchd_repo_path(name)), holds)
     ]
     drift = missing + untracked + different + disallowed + refused + pending_reloads
     if not drift and not unversioned:
@@ -1659,6 +1798,12 @@ def _cmd_check():
 
 
 def cmd_pull(apply):
+    try:
+        holds = launchd_hold.read_holds(HOME)
+    except (OSError, ValueError) as exc:
+        print(f"config-as-code: HOLD INVALID — {exc}")
+        return 1
+
     if codex_configuration_state() == "partial":
         print(f"ERROR: partial Codex configuration — {CODEX_HOOKS_SRC} exists but "
               f"{CODEX_CONFIG} does not; refusing to omit it from the captured baseline.")
@@ -1669,7 +1814,7 @@ def cmd_pull(apply):
               + ", ".join(disallowed) + "; refusing to capture them into the repo.")
         return 1
     try:
-        configured_pairs = pairs()
+        configured_pairs = pairs(holds)
     except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: Claude continuity configuration is invalid ({exc}); refusing to capture it.")
         return 1
@@ -1734,7 +1879,21 @@ SMOKE_LABEL_PREFIX = "com.carr.handoff-smoke-"
 SELF_RELOAD_SCRIPT = r"""
 pg="$1"; launchctl="$2"; domain="$3"; label="$4"; staged="$5"; dest="$6"; log="$7"; wait_max="$8"
 expected="$9"
+hold_python="${10:-}"; hold_guard="${11:-}"
+hold_source="${12:-}"
 exec >>"$log" 2>&1
+guard_hold() {
+  if [ -n "$hold_guard" ]; then
+    "$hold_python" "$hold_guard" "$label" "$launchctl" "$domain" "$dest" "$hold_source"
+    hold_status=$?
+    if [ "$hold_status" -eq 0 ]; then exit 0; fi
+    if [ "$hold_status" -ne 3 ]; then exit 1; fi
+  fi
+}
+bootstrap_current() {
+  guard_hold
+  "$launchctl" bootstrap "$domain" "$dest"
+}
 installed_sha() {
   if [ ! -e "$dest" ]; then echo absent
   elif [ -x /usr/bin/shasum ]; then /usr/bin/shasum -a 256 "$dest" | cut -d' ' -f1
@@ -1755,6 +1914,7 @@ while kill -0 -"$pg" 2>/dev/null; do
   fi
   sleep 1
 done
+guard_hold
 # The installed plist must still be the one this body was staged against.
 # Anything newer (a later install, a hand edit) wins; the staged body is stale.
 found=$(installed_sha)
@@ -1767,22 +1927,22 @@ cp -p "$dest" "$staged.previous" || { echo "self-reload $label: cannot back up $
 found=$(installed_sha)
 if [ "$found" != "$expected" ]; then
   echo "self-reload $label: REFUSED, $dest changed during bootout (expected $expected, found $found); loading what is installed, not the stale staged body"
-  if "$launchctl" bootstrap "$domain" "$dest"; then exit 1; fi
+  if bootstrap_current; then exit 1; fi
   echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
   exit 1
 fi
 mv -f "$staged" "$dest" || {
   echo "self-reload $label: cannot move the staged body into place"
-  "$launchctl" bootstrap "$domain" "$dest" || echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
+  bootstrap_current || echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
   exit 1
 }
-if "$launchctl" bootstrap "$domain" "$dest"; then
+if bootstrap_current; then
   echo "self-reload $label: loaded the new definition"
   exit 0
 fi
 echo "self-reload $label: BOOTSTRAP FAILED; restoring the previous body"
 mv -f "$staged.previous" "$dest"
-if "$launchctl" bootstrap "$domain" "$dest"; then
+if bootstrap_current; then
   echo "self-reload $label: restored the previous definition"
 else
   echo "self-reload $label: RESTORE FAILED, $label is unloaded; fix by hand: launchctl bootstrap $domain $dest"
@@ -1812,7 +1972,8 @@ def hand_off_self_reload(filename, dest, body, label, launchctl=LAUNCHCTL_BIN):
         subprocess.Popen(
             [SELF_RELOAD_SHELL, "-c", SELF_RELOAD_SCRIPT, "carr-self-reload",
              str(os.getpgrp()), launchctl, f"gui/{os.getuid()}", label, staged, dest,
-             log, str(SELF_RELOAD_WAIT_SECONDS), expected],
+             log, str(SELF_RELOAD_WAIT_SECONDS), expected, sys.executable,
+             os.path.join(REPO_HERE, "lib", "launchd_hold.py"), launchd_repo_path(filename)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, close_fds=True)
     except OSError as exc:
@@ -1852,6 +2013,14 @@ def install_launchd_plist(filename, dest, body, body_matches):
     a pending marker survives interrupted or failed reloads until launchd is
     observed absent before load and registered at the installed path after it.
     """
+    try:
+        if launchd_off_reason(filename, body):
+            label = launchd_calendar.plist_label(body) or filename.removesuffix(".plist")
+            launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME)
+            return "held"
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"  HOLD REFUSED: {exc}")
+        return "failed"
     try:
         label = plistlib.loads(body.encode("utf-8")).get("Label", "")
     except (AttributeError, plistlib.InvalidFileException, ValueError):
@@ -1909,8 +2078,14 @@ def install_launchd_plist(filename, dest, body, body_matches):
         print(f"      UNLOAD FAILED ({detail if state == 'failed' else 'job remains loaded'}); "
               "pending reload retained")
         return "failed"
-    r = subprocess.run(["launchctl", "load", "-w", dest],
-                       capture_output=True, text=True, check=False)
+    try:
+        r = launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"      HOLD REFUSED after unload: {exc}; pending reload retained")
+        print(f"      fix by hand: repair launchd-hold, then run install --apply for {label}")
+        return "failed"
+    if r.held:
+        return "held"
     if r.returncode == 0:
         state, detail = launchd_registration(label)
         if (state == "loaded" and detail == dest
@@ -1924,6 +2099,78 @@ def install_launchd_plist(filename, dest, body, body_matches):
     print(f"      LOAD FAILED ({(r.stderr or r.stdout).strip()[:80]}) "
           "— pending reload retained; migration will remain incomplete")
     return "failed"
+
+
+def cmd_install_progress_board(apply=False, repo=None):
+    """Migrate the existing board agent to the repository wrapper, then read
+    launchd's arguments back. This does not create a new schedule or label.
+    Runtime and state belong to the canonical main checkout maintained by
+    bin/fleet-sync.sh. --repo may name that checkout explicitly, but cannot
+    select a feature tree even for pre-merge verification.
+    """
+    label = "local.carr-progress-board"
+    try:
+        if launchd_hold.off_reason(label, HOME):
+            if apply:
+                launchd_hold.activate(label, ["launchctl", "load", "-w", label], home=HOME)
+            else:
+                print(launchd_hold.off_reason(label, HOME))
+            return 0
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"progress-board: HOLD REFUSED: {exc}")
+        return 1
+    runtime_repo = os.path.abspath(os.path.expanduser(repo)) if repo else REPO
+    if os.path.realpath(runtime_repo) != os.path.realpath(REPO):
+        print("progress-board: runtime must use the canonical main checkout; "
+              "feature checkout installation is refused")
+        return 1
+    wrapper = os.path.join(runtime_repo, "ops", "progress-board-render.sh")
+    python = os.path.join(runtime_repo, ".venv", "bin", "python")
+    if not os.path.isfile(wrapper) or not os.access(python, os.X_OK):
+        print("progress-board: selected checkout wrapper or repository interpreter unavailable; "
+              "select a repository checkout containing the wrapper and interpreter")
+        return 1
+    label = "local.carr-progress-board"
+    dest = os.path.join(HOME, "Library", "LaunchAgents", label + ".plist")
+    try:
+        with open(dest, "rb") as handle:
+            current = plistlib.load(handle)
+        if not isinstance(current, dict) or current.get("Label") != label:
+            raise ValueError("unexpected board agent label")
+    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+        print(f"progress-board: existing agent unavailable: {exc}; no schedule created")
+        return 1
+    desired = dict(current)
+    desired["ProgramArguments"] = ["/bin/bash", wrapper]
+    desired["WorkingDirectory"] = runtime_repo
+    desired["EnvironmentVariables"] = dict(current.get("EnvironmentVariables", {}))
+    desired["EnvironmentVariables"]["PROGRESS_BOARD_ROOT"] = os.path.join(REPO, "out")
+    refusal = launchd_path_refusal(plistlib.dumps(desired).decode("utf-8"))
+    if refusal:
+        print(f"progress-board: REFUSED {refusal}")
+        return 1
+    def registered_arguments():
+        observed = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                                  capture_output=True, text=True, check=False, timeout=15)
+        args = re.search(r"(?ms)^\s*arguments = \{\n(.*?)^\s*\}", observed.stdout or "")
+        return ([line.strip() for line in args.group(1).splitlines()]
+                if observed.returncode == 0 and args else [])
+
+    matches = desired == current and registered_arguments() == desired["ProgramArguments"]
+    if apply:
+        outcome = install_launchd_plist(os.path.basename(dest), dest,
+                                       plistlib.dumps(desired).decode("utf-8"), matches)
+        if outcome not in {"loaded", "kept"}:
+            return 1
+    elif not matches:
+        print("progress-board: existing agent needs migration: "
+              "ops/config-as-code.py install-progress-board --apply")
+        return 1
+    if registered_arguments() != desired["ProgramArguments"]:
+        print("progress-board: launchd arguments unverified; migration is incomplete")
+        return 1
+    print(f"progress-board: verified registered repository wrapper: {wrapper}")
+    return 0
 
 
 def write_claude_settings(path, document, before, sink=None):
@@ -2036,6 +2283,11 @@ def git_hooks_path_report() -> str:
 
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
+    try:
+        held_labels = launchd_hold.reconcile_off(HOME, apply, definition_labels=definition_only_labels(LAUNCHD_REPO))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"  HOLD REFUSED: {exc}")
+        return 1
     settings_existed = os.path.exists(SETTINGS)
     raw = read(SETTINGS) if settings_existed else "{}"
     if not settings_existed:
@@ -2191,8 +2443,8 @@ def cmd_install(apply):
     if apply:
         os.makedirs(LAUNCHD_SRC, exist_ok=True)
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
-        if f in DEFINITION_ONLY:
-            print(f"  SKIP  {f} (definition only: {DEFINITION_ONLY[f]})")
+        source = read(launchd_repo_path(f))
+        if (launchd_calendar.plist_label(source or "") or f.removesuffix(".plist")) in held_labels:
             continue
         if f in PRIMARY_ONLY and not IS_PRIMARY:
             live = os.path.join(LAUNCHD_SRC, f)
@@ -2452,15 +2704,16 @@ def launchd_calendar_reinstall_plan(templates_dir, agents_dir):
         dest = os.path.join(agents_dir, name)
         row = {"name": name, "dest": dest, "action": "skip", "why": ""}
         rows.append(row)
+        off_reason = launchd_off_reason(name, source)
+        if off_reason:
+            row.update(action="hold", why=off_reason, label=launchd_calendar.plist_label(source))
+            continue
         if launchd_calendar.MARKER not in source:
             row["why"] = "not a converted interval schedule"
             continue
         refusal = launchd_template_refusal(source)
         if refusal:
             row.update(action="fail", why=f"template refused: {refusal}")
-            continue
-        if name in DEFINITION_ONLY:
-            row["why"] = "definition only"
             continue
         if name in PRIMARY_ONLY and not IS_PRIMARY:
             row["why"] = "primary-only job on a secondary (install retires it)"
@@ -2490,6 +2743,14 @@ def launchd_calendar_reinstall_plan(templates_dir, agents_dir):
 
 
 def _launchctl(launchctl, *args):
+    if args[0] in {"bootstrap", "kickstart"}:
+        if args[0] == "bootstrap":
+            label = launchd_calendar.plist_label(read(args[-1]) or "")
+            domain = args[1]
+        else:
+            domain, label = args[-1].rsplit("/", 1)
+        return launchd_hold.activate(label, [launchctl, *args], home=HOME,
+                                     launchctl=launchctl, domain=domain)
     return subprocess.run([launchctl, *args], capture_output=True, text=True, check=False)
 
 
@@ -2524,56 +2785,50 @@ class AgentLeftUnloaded(RuntimeError):
 
 
 def _restore_calendar_agent(row, launchctl, domain):
-    """Put the previous body back and load it. True only when it is loaded again."""
     dest, label = row["dest"], row["label"]
     try:
         _atomic_write(dest, row["previous"])
-    except OSError as exc:
-        print(f"      RESTORE FAILED, {label} is unloaded: could not rewrite {dest}: {exc}")
-        print(f"      fix by hand: put the previous body back, then "
-              f"`launchctl bootstrap {domain} {dest}`")
+        back = _launchctl(launchctl, "bootstrap", domain, dest)
+        if back.returncode:
+            raise RuntimeError(_launchctl_detail(back))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"      RESTORE FAILED, {label} is unloaded ({exc})")
+        print(f"      fix by hand: repair launchd-hold if invalid, then `launchctl bootstrap {domain} {dest}`")
         return False
-    back = _launchctl(launchctl, "bootstrap", domain, dest)
-    if back.returncode != 0:
-        print(f"      RESTORE FAILED, {label} is unloaded ({_launchctl_detail(back)})")
-        print(f"      fix by hand: `launchctl bootstrap {domain} {dest}`")
-        return False
-    print(f"      restored the previous body; {label} is loaded as it was")
+    print(f"      {'held off' if getattr(back, 'held', False) else 'restored the previous body'}; {label}")
     return True
 
 
 def reinstall_calendar_agent(row, launchctl, domain, kickstart):
-    """Stage the new body, then bootout, bootstrap and verify; restore on failure.
-
-    The write happens FIRST and atomically: a write that cannot happen (a
-    read-only plist, a full disk) raises before launchd is touched, so the job
-    stays loaded exactly as it was. Only then is the old job booted out."""
     dest, label = row["dest"], row["label"]
     target = f"{domain}/{label}"
+    # Refuse invalid holds before touching the installed definition.
+    if launchd_hold.off_reason(label, HOME):
+        _launchctl(launchctl, "bootstrap", domain, dest)
+        return True
     _atomic_write(dest, row["body"])
-    _launchctl(launchctl, "bootout", target)   # fails when not loaded; fine
-    booted = _launchctl(launchctl, "bootstrap", domain, dest)
-    if booted.returncode != 0:
-        print(f"      BOOTSTRAP FAILED: {_launchctl_detail(booted)} — restoring the previous body")
+    _launchctl(launchctl, "bootout", target)
+    try:
+        booted = _launchctl(launchctl, "bootstrap", domain, dest)
+        if booted.returncode:
+            raise RuntimeError(f"BOOTSTRAP FAILED: {_launchctl_detail(booted)}")
+        if getattr(booted, "held", False):
+            return True
+        shown = _launchctl(launchctl, "print", target)
+        if shown.returncode:
+            _launchctl(launchctl, "bootout", target)
+            raise RuntimeError(f"PRINT FAILED after a successful bootstrap: {_launchctl_detail(shown)}")
+        if kickstart:
+            kicked = _launchctl(launchctl, "kickstart", target)
+            if kicked.returncode:
+                print(f"      kickstart failed: {_launchctl_detail(kicked)}")
+                return False
+        return True
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"      {exc} — restoring the previous body")
         if not _restore_calendar_agent(row, launchctl, domain):
-            raise AgentLeftUnloaded(label)
+            raise AgentLeftUnloaded(label) from exc
         return False
-    shown = _launchctl(launchctl, "print", target)
-    if shown.returncode != 0:
-        # launchd accepted the NEW definition; it must be booted out before the
-        # old file goes back, or launchd keeps running what the disk no longer says.
-        print(f"      PRINT FAILED after a successful bootstrap: {_launchctl_detail(shown)}"
-              " — booting the new definition out and restoring the previous body")
-        _launchctl(launchctl, "bootout", target)
-        if not _restore_calendar_agent(row, launchctl, domain):
-            raise AgentLeftUnloaded(label)
-        return False
-    if kickstart:
-        kicked = _launchctl(launchctl, "kickstart", target)
-        if kicked.returncode != 0:
-            print(f"      kickstart failed: {_launchctl_detail(kicked)}")
-            return False
-    return True
 
 
 def _option(argv, flag, default):
@@ -2592,7 +2847,13 @@ def cmd_reinstall_launchd_calendar(argv):
     launchctl = _option(argv, "--launchctl", "/bin/launchctl")
     domain = f"gui/{os.getuid()}"
 
-    rows = launchd_calendar_reinstall_plan(templates_dir, agents_dir)
+    try:
+        launchd_hold.reconcile_off(HOME, apply, launchctl, domain,
+            definition_labels=definition_only_labels(templates_dir))
+        rows = launchd_calendar_reinstall_plan(templates_dir, agents_dir)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"reinstall-launchd-calendar: HOLD REFUSED: {exc}; no agents reinstalled")
+        return 1
     failures = [r for r in rows if r["action"] == "fail"]
     todo = [r for r in rows if r["action"] == "reinstall"]
     for row in rows:
@@ -2787,6 +3048,23 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode == "install-flash-on-demand":
+        import argparse
+        from tools import flash_install
+        parser = argparse.ArgumentParser(prog=f"config-as-code.py {mode}")
+        parser.add_argument("--apply", action="store_true")
+        options = parser.parse_args(sys.argv[2:])
+        return flash_install.configure(REPO_HERE, apply=options.apply)
+    if mode == "check-launchd-main-paths":
+        return cmd_check_launchd_main_paths()
+    if mode in {"install-progress-board", "verify-progress-board"}:
+        import argparse
+        parser = argparse.ArgumentParser(prog=f"config-as-code.py {mode}")
+        parser.add_argument("--repo", help="repository checkout to run; defaults to canonical checkout")
+        parser.add_argument("--apply", action="store_true")
+        options = parser.parse_args(sys.argv[2:])
+        return cmd_install_progress_board(options.apply if mode == "install-progress-board" else False,
+                                          repo=options.repo)
     if mode == "reinstall-launchd-calendar":
         return cmd_reinstall_launchd_calendar(sys.argv[2:])
     if mode == "launchd-handoff-smoke":
