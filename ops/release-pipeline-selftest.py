@@ -729,9 +729,11 @@ class Batching(Base):
         with mock.patch.object(rp.time, "sleep", side_effect=AssertionError("real sleep in offline fixture")):
             pipe = self.fx.pipeline(FakeRunner())
             pipe.http = mock.Mock(return_value={"git_sha": {"value": self.fx.base}})
-            served = pipe._await_live(pipe.cfg["worker"], lambda row: row["git_sha"]["value"],
-                                      "unserved-source", attempts=3)
-        self.assertEqual(served, self.fx.base)
+            matched, last, _, _ = pipe.await_live(pipe.cfg["worker"], "offline-poll",
+                                                  lambda row: row["git_sha"]["value"] == "unserved-source",
+                                                  attempts=3)
+        self.assertFalse(matched)
+        self.assertEqual(last["git_sha"]["value"], self.fx.base)
         self.assertEqual(pipe.http.call_count, 3)
 
     def test_many_merges_ship_once_at_the_latest_sha(self):
