@@ -171,8 +171,9 @@ def python_errors(source):
                     expression(node.subject, env, prior)
                     branches = []
                     exhaustive = False
+                    fallthrough_seen = set(prior)
                     for case in node.cases:
-                        branch_env, branch_seen = dict(env), set(prior)
+                        branch_env, branch_seen = dict(env), set(fallthrough_seen)
                         for pattern in ast.walk(case.pattern):
                             name = (pattern.name if isinstance(pattern, (ast.MatchAs, ast.MatchStar))
                                     else pattern.rest if isinstance(pattern, ast.MatchMapping) else None)
@@ -180,11 +181,14 @@ def python_errors(source):
                                 branch_env.pop(name, None)
                         if case.guard is not None:
                             expression(case.guard, branch_env, branch_seen)
+                            # A false guard continues to the next case after
+                            # its calls ran; a selected case body cannot.
+                            fallthrough_seen.update(branch_seen)
                         walk(case.body, branch_env, branch_seen)
                         branches.append((branch_env, branch_seen))
                         exhaustive |= case.guard is None and irrefutable(case.pattern)
                     if not exhaustive:
-                        branches.append((dict(env), set(prior)))
+                        branches.append((dict(env), fallthrough_seen))
                     merge(env, prior, branches)
                 elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
                     expression(node.iter if hasattr(node, 'iter') else node.test, env, prior)

@@ -14,6 +14,51 @@ def load(name):
     return module
 
 class Conformance(unittest.TestCase):
+    def test_failed_match_guard_keeps_calls_for_later_cases(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(state, qa, qb):
+ match state:
+  case _ if E(R(state, qa, caller='fixture', version='v1')) and False:
+   pass
+  case _:
+   E(R(state, qb, caller='fixture', version='v1'))
+"""
+        self.assertEqual(checker.python_errors(source),
+                         ['7: fanout: combine all questions for this state'])
+        next_guard = source.replace('  case _:\n',
+            "  case _ if E(R(state, qb, caller='fixture', version='v1')):\n").replace(
+            "   E(R(state, qb, caller='fixture', version='v1'))", '   pass')
+        self.assertEqual(checker.python_errors(next_guard),
+                         ['6: fanout: combine all questions for this state'])
+        distinct = source.replace('def run(state, qa, qb):', 'def run(state, other, qa, qb):').replace(
+            'R(state, qb,', 'R(other, qb,')
+        self.assertEqual(checker.python_errors(distinct), [])
+
+    def test_failed_match_guard_keeps_calls_after_unmatched_case(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(state, qa, qb):
+ match state:
+  case _ if E(R(state, qa, caller='fixture', version='v1')) and False:
+   pass
+ E(R(state, qb, caller='fixture', version='v1'))
+"""
+        self.assertEqual(checker.python_errors(source),
+                         ['6: fanout: combine all questions for this state'])
+
+    def test_match_case_bodies_do_not_flow_into_later_cases(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(state, qa, qb):
+ match state:
+  case True:
+   E(R(state, qa, caller='fixture', version='v1'))
+  case _ if E(R(state, qb, caller='fixture', version='v1')):
+   pass
+"""
+        self.assertEqual(checker.python_errors(source), [])
+
     def test_literal_state_reassignments_preserve_equivalence(self):
         checker = load('check-jev-conformance')
         for literal in ("{'text': 'same', 'nested': [1, None]}",
