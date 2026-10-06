@@ -120,6 +120,15 @@ def _task(transcript):
         return ""
 
 
+def _joe_facing(result):
+    """Whether a notable result belongs on the Stop line Joe reads.
+
+    A bare needs_review names nothing to do; Joe saw one after nearly every reply
+    (2026-10-05). It stays in the receipt and in PostToolUse context for the session.
+    """
+    return _notable(result) and str(result.get("verdict", "")) != "needs_review"
+
+
 def _notable(result):
     """Whether a check's result is worth an advisory line in advise mode."""
     if not isinstance(result, dict):
@@ -527,7 +536,9 @@ def main():
         return 0
     if MODE != "advise":
         return 0
-    lines = _quiet_unavailable([r for r in run.results if _notable(r)], payload.get("session_id"))
+    # Stop lines reach Joe's screen, so they keep only results that name something to do.
+    keep = _notable if event == "PostToolUse" else _joe_facing
+    lines = _quiet_unavailable([r for r in run.results if keep(r)], payload.get("session_id"))
     if not lines:
         return 0
     text = "\n".join(lines[:4])
