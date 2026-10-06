@@ -748,6 +748,33 @@ def authority_family_coverage():
     return ok
 
 
+def prose_request_prints_no_advisory():
+    """A plain-prose request with no acceptance contract shows Joe nothing.
+
+    2026-10-05, Joe: "why do i keep seeing these jev messages ... Stop says: Semantic
+    requirement acceptance needs review." The no-contract branch returned that line on
+    nearly every turn; it named no requirement, bound no action and decided nothing,
+    so it was noise on his screen. Only an evaluated explicit contract may announce.
+    """
+    records = [user("check the queue and tell me how the PRs are going"),
+               tool("Bash"), assistant("Ten PRs are in review.")]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
+        for row in completed_fixture(records):
+            fh.write(json.dumps(row) + "\n")
+        path = fh.name
+    try:
+        payload = {"transcript_path": path, "session_id": f"selftest-prose-{os.getpid()}",
+                   "stop_hook_active": False, "cwd": REPO}
+        result = subprocess.run([os.sys.executable, os.path.join(REPO, "hooks", "completion-evidence-gate.py")],
+                                input=json.dumps(payload), text=True, capture_output=True, timeout=20,
+                                env={**os.environ, "CARR_STOP_LATCH_STATE": latch_state})
+    finally:
+        os.unlink(path)
+    ok = "Semantic requirement acceptance" not in result.stdout
+    print(f"{'PASS' if ok else 'FAIL'}  prose request prints no advisory: {result.stdout.strip()[:120]!r}")
+    return ok
+
+
 def real_hook_case(kind, non_carr=False):
     if kind == "codex":
         records = [
@@ -1119,6 +1146,7 @@ def main():
     outcomes.append(r03_notification_classification())
     outcomes.append(doc_conversation_write_door_classification())
     outcomes.append(latch_cases())
+    outcomes.append(prose_request_prints_no_advisory())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
 

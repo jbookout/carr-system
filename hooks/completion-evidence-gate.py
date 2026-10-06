@@ -1441,7 +1441,11 @@ def main():
                 "completion-evidence-gate", reason_class, tokens))
 
         if not blocked:
-            if isinstance(jev, dict) and jev.get("advisory"):
+            # Only an evaluated explicit acceptance contract ("criteria") may announce.
+            # The prose branch's "Semantic requirement acceptance needs review." named no
+            # requirement and bound no action, and reached Joe's screen on nearly every
+            # turn (Joe 2026-10-05: "why do i keep seeing these jev messages").
+            if isinstance(jev, dict) and jev.get("advisory") and jev.get("criteria"):
                 print(json.dumps({"systemMessage": jev["advisory"]}))
             return 0
 
