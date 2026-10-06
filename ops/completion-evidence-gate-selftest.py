@@ -817,7 +817,7 @@ def latch_cases():
 
     def fires(records, session):
         payload = {
-            "session_id": session, "stop_hook_active": False, "cwd": REPO,
+            "session_id": session, "stop_hook_active": False, "cwd": str(sandbox.repo),
         }
         expect("event cwd belongs to copied hook checkout",
                payload["cwd"] == str(sandbox.repo), True)
@@ -1037,7 +1037,7 @@ def native_context_orders():
                     argv[0] = os.sys.executable
                 payload = ({"transcriptPath": path, "sessionId": "selftest"} if kind == "codex" else
                            {"transcript_path": path, "session_id": "selftest"})
-                payload.update(cwd=REPO, hook_event_name="Stop", stop_hook_active=False)
+                payload.update(cwd=str(sandbox.repo), hook_event_name="Stop", stop_hook_active=False)
                 scope_ok = payload["cwd"] == str(sandbox.repo)
                 outcomes.append(scope_ok)
                 print(f"{'PASS' if scope_ok else 'FAIL'}  {kind} configured Stop cwd belongs to copied hook checkout")
