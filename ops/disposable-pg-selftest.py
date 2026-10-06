@@ -17,7 +17,7 @@ class Lifecycle(unittest.TestCase):
     def test_sigterm_stops_postmaster_and_removes_owned_directory(self):
         with fixture.postgres_fixture_group():
             child = subprocess.Popen([sys.executable, '-u', '-c', textwrap.dedent('''
-    import importlib.util, pathlib, signal, sys
+    import importlib.util, pathlib, sys, time
     sys.path.insert(0, sys.argv[1])
     from lib.disposable_pg_fixture import DisposablePostgres
     spec = importlib.util.spec_from_file_location('local_pg', pathlib.Path(sys.argv[1]) / 'ops/local-pg-ci.py')
@@ -28,7 +28,8 @@ class Lifecycle(unittest.TestCase):
         pg.run([b.initdb, '-D', data, '-U', 'fixture', '--auth=trust', '--no-locale'], check=True, capture_output=True, timeout=60)
         pg.run([b.pg_ctl, '-D', data, '-l', pg.root/'pg.log', '-o', f"-k {pg.root} -h ''", '-w', 'start'], check=True, capture_output=True, timeout=60)
         print(str(pg.root), flush=True)
-        signal.pause()
+        while True:
+            time.sleep(0.05)
     '''), str(ROOT)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 self.assertTrue(select.select([child.stdout], [], [], 90)[0], 'cluster startup timed out')
