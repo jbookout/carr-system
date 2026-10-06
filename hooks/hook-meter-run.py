@@ -647,6 +647,13 @@ def main():
         hook_meter.emit(REPO, record)
     except Exception:
         pass
+    try:
+        # The decision ledger (gate_ledger.py): every block, hold and reopen,
+        # and the automatic "wrong" label. After the verdict, like the meter.
+        import gate_ledger
+        gate_ledger.observe(REPO, record, raw, captured_out, captured_err)
+    except Exception:
+        pass
 
     return code
 

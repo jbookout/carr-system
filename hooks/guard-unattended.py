@@ -56,7 +56,7 @@ from urllib.parse import urlsplit
 # for the reason its own docstring gives: two copies of "what counts as inert"
 # drift silently, because each copy still passes its own tests.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cmd_text import strip_inert_text  # noqa: E402
+from cmd_text import runs, strip_data_heredocs, strip_inert_text  # noqa: E402
 # Shared with hooks/record-home-gate.py, which refuses the FILE-TOOL spelling of
 # the same write. One memory, so a record refused through either door is
 # recognised at the other (rule 76a53dfe).
@@ -749,6 +749,22 @@ PROSE_SAFE_LABELS = frozenset({
     "recursive/forced delete", "secure delete",
 })
 
+# THE SANCTIONED ROUTE FOR TAKING IN A KEY (2026-10-05). A command never names
+# a key path (rule 9ff56260); an allowlisted intake script finds the downloaded
+# key and installs it mode 600 itself. The refusal names these scripts, because
+# a refusal with no route is how a session ends up hunting for a workaround —
+# the orchestrator's `ls ~/Downloads/*.pem` that day was exactly that hunt.
+# ops/guard-selftest.py runs every entry here and requires it to be allowed.
+SECRET_INTAKE_SCRIPTS = (
+    ("bin/github-app-key-intake.sh", "the GitHub App key"),
+)
+RULE_ROUTES = {
+    "private key material": (
+        "Never name a key path in a command. To take in a downloaded key, run its "
+        "allowlisted intake script, which finds and installs the key itself: "
+        + "; ".join(f"{path} ({what})" for path, what in SECRET_INTAKE_SCRIPTS) + "."),
+}
+
 
 def is_sql_context(cmd):
     """True when the command could actually reach a database."""
@@ -1157,25 +1173,30 @@ def delegation_control_plane_write(cmd):
     return None
 
 
+_METERED_DISPATCH = (
+    (re.compile(r"\bwrangler(?:@\S*)?\s+(?:deploy|versions\s+(?:upload|deploy))\b", re.I),
+     "direct Cloudflare release bypasses bin/deploy-worker.sh"),
+    (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
+     "direct Neon branch create bypasses neon-disposable-branch admission"),
+    (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
+     "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
+)
+
+
 def direct_metered_dispatch(cmd):
     """Refuse paid dispatches that bypass their reviewed budget wrapper.
 
     The wrapper itself is not an escape flag.  The guard sees only the command
     issued by the session; reviewed scripts perform their own in-process
-    admission before reaching the vendor.  Inert PR bodies and documentation
-    are stripped so describing a command is never mistaken for running it.
+    admission before reaching the vendor.
+
+    cmd_text.runs() decides what the shell would run: a grep pattern or an
+    agent prompt that NAMES the command is data (two false refusals on
+    2026-10-05), while wrappers, bash -c, ssh, python -c, substitutions and
+    a heredoc fed to a shell are still read as commands.
     """
-    executable = strip_inert_text(cmd)
-    patterns = (
-        (re.compile(r"\b(?:npx\s+)?wrangler\s+(?:deploy|versions\s+(?:upload|deploy))\b", re.I),
-         "direct Cloudflare release bypasses bin/deploy-worker.sh"),
-        (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
-         "direct Neon branch create bypasses neon-disposable-branch admission"),
-        (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
-         "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
-    )
-    for pattern, reason in patterns:
-        if pattern.search(executable):
+    for pattern, reason in _METERED_DISPATCH:
+        if runs(cmd, pattern):
             return reason + " — blocked by the CARR metering gate"
     return None
 
@@ -1365,7 +1386,12 @@ def check(cmd, cwd=None):
             # before. See PROSE_SAFE_LABELS for what is deliberately excluded.
             if label in PROSE_SAFE_LABELS and not pat.search(strip_inert_text(cmd)):
                 continue
-            return f"{label} — blocked by the CARR unattended guard"
+            # Text written straight into a file by cat/tee reads no key; the
+            # key rule keeps every other carve-out off (see PROSE_SAFE_LABELS).
+            if label == "private key material" and not pat.search(strip_data_heredocs(cmd)):
+                continue
+            route = RULE_ROUTES.get(label)
+            return f"{label} — blocked by the CARR unattended guard" + (f". {route}" if route else "")
 
     if is_send_context(cmd):
         for host in hosts_in(cmd):

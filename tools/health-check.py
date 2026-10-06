@@ -1347,6 +1347,16 @@ def _branch_janitor_row():
     return health(REPO_ROOT)
 
 
+def _gate_precision_reader():
+    spec = importlib.util.spec_from_file_location(
+        "gate_verdict", os.path.join(REPO_ROOT, "tools", "gate_verdict.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("gate precision reader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
@@ -1905,6 +1915,29 @@ def _canonical_health():
             print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
             rc = _red("jev_call_receipt_integrity", _detail, hard_error=True)
 
+    if CANONICAL_SECTION == "all":
+        # Gate precision (2026-10-05). Every block, hold and reopen lands in
+        # out/gate-decisions.jsonl (hooks/gate_ledger.py); labels say which were
+        # wrong. A gate whose false alarms cross the threshold gets one
+        # deduplicated loop, closed again when it drops off this row.
+        try:
+            _gv = _gate_precision_reader()
+            _gp_line, _gp_noisy = _gv.health_row(_gv.default_ledger())
+            if _gp_noisy is None:
+                rc = _red("gate_precision_unreadable", _gp_line, hard_error=True)
+            if _gp_noisy is not None and not CANONICAL_FIXTURE and (_gp_noisy or os.path.exists(_gv.LOOP_STATE)):
+                _gp_loops = _gv.reconcile_loops(_gp_noisy, _gv.call_verb)
+                if "error" in _gp_loops.values():
+                    _gp_line += " · loop update FAILED, rerun health"
+                    rc = _red("gate_precision_reconciliation", _gp_line, hard_error=True)
+            print("  " + _gp_line)
+            if _gp_noisy:
+                rc = _red("gate_precision", _gp_line.split(" · ", 1)[0], count=len(_gp_noisy))
+        except Exception as e:
+            _detail = f"check failed ({type(e).__name__}: {e})"
+            print(f"  ⚠︎ {'gate precision':<18} {_detail} · on breach: restore "
+                  f"tools/gate_verdict.py or the ledger, then rerun health")
+            rc = _red("gate_precision_unreadable", _detail, hard_error=True)
     if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
         print("Branch retirement — local scheduled receipts")
         try:

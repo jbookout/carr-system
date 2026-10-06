@@ -457,6 +457,9 @@
     "hook_meter.py": {
       "role": "helper"
     },
+    "gate_ledger.py": {
+      "role": "helper"
+    },
     "grok_invocation.py": {
       "role": "helper"
     },

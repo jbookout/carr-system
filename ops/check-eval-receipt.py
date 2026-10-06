@@ -184,6 +184,31 @@ def surfaces_for(path: str, reg: dict[str, Any]) -> list[str]:
     return [s["id"] for s in reg["surfaces"] if any(glob_match(path, g) for g in s["globs"])]
 
 
+def context_emitter(text: str) -> bool:
+    """Reading hook output does not emit context; constructing it does."""
+    import ast
+    if not CONTEXT_EMITTER.search(text):
+        return False
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return True
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg and CONTEXT_EMITTER.search(node.arg):
+            return True
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if not CONTEXT_EMITTER.search(node.value):
+            continue
+        parent = parents.get(node)
+        if (isinstance(parent, ast.Call) and isinstance(parent.func, ast.Attribute)
+                and parent.func.attr == "get" and parent.args and parent.args[0] is node):
+            continue
+        return True
+    return False
+
+
 def unregistered_context_hooks(root: Path, reg: dict[str, Any]) -> list[str]:
     """Hooks that put text in front of a model but that no surface names."""
     missing = []
@@ -193,7 +218,7 @@ def unregistered_context_hooks(root: Path, reg: dict[str, Any]) -> list[str]:
             text = hook.read_text(errors="replace")
         except OSError:
             continue
-        if CONTEXT_EMITTER.search(text) and not surfaces_for(rel, reg):
+        if context_emitter(text) and not surfaces_for(rel, reg):
             missing.append(rel)
     return missing
 

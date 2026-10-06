@@ -749,9 +749,9 @@ guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:33015ce0899d	deny	recursive/f
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:56bed63903a1	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:66d774f88124	deny	force push — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:6dfb251d684c	deny	broad add (-A/--all/./:/) — blocked by the CARR unattended guard. Add explicit paths instead: `git add <path> [<path>...]`.
-guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:7ed14bfb5b26	deny	private key material — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:7ed14bfb5b26	deny	private key material — blocked by the CARR unattended guard. Never name a key path in a command. To take in a downloaded key, run its allowl
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:995d89a284a1	deny	recursive/forced delete — blocked by the CARR unattended guard
-guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard. Never name a key path in a command. To take in a downloaded key, run its allowl
 guard-unattended.py	PreToolUse[Bash|WebFetch]	scenarios:5c0000000005	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=423 announce=18

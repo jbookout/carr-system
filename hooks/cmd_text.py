@@ -108,11 +108,120 @@ _DASH_M_RE = re.compile(
     r"\s+(?:'[^']*'|\"[^\"]*\")")
 
 
-def strip_inert_text(cmd):
-    """Return `cmd` with heredoc bodies and quoted messages replaced.
+# Prefix words that run the command after them, each with the options that
+# consume the following word. An unlisted option-with-value leaves the value as
+# the head, which is not a data command, so a gap here fails closed.
+_WRAPPERS = {
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"},
+    "doas": {"-u", "-C"}, "env": {"-u", "-C", "-S"}, "nice": {"-n"},
+    "ionice": {"-c", "-n", "-p"}, "caffeinate": {"-t", "-w"}, "time": {"-f", "-o"},
+    "xargs": {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"},
+    "exec": {"-a"}, "stdbuf": set(), "setsid": set(), "nohup": set(), "command": set(),
+    "npx": set(), "bunx": set(), "yarn": set(), "pnpm": set(), "busybox": set(),
+}
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "ssh", "su", "eval", "source"})
+# POSIX `source`. Only as the command head: as an argument it is the cwd.
+_DOT = "."
+# Interpreters that run their standard input, or run code over it, when a pipe
+# feeds them. Unpiped, `python3 report.py` is not a reader, and a quoted
+# heredoc into one stays prose (pinned in ops/cmd-text-selftest.py).
+_STDIN_INTERPRETERS = re.compile(
+    r"^(?:python[\d.]*|perl|ruby|node|php|deno|bun|lua|osascript|Rscript|tclsh)$")
 
-    The replacement keeps the opener and the delimiter line, so anything AFTER
-    the heredoc is still scanned — only the body between the markers is inert.
+
+def _command_words(words):
+    """`words` from the command head on, past assignments and wrappers."""
+    words = list(words)
+    while words:
+        word = words[0]
+        name = word.rsplit("/", 1)[-1]
+        if re.match(r"^\w+=", word) or word in {"if", "then", "elif", "else", "do", "!", "{"}:
+            words.pop(0)
+        elif name in _WRAPPERS:
+            words.pop(0)
+            while words and words[0].startswith("-"):
+                if words.pop(0) in _WRAPPERS[name] and words:
+                    words.pop(0)
+            if words and words[0] in {"exec", "dlx"}:
+                words.pop(0)
+        elif word == "timeout" and len(words) > 1:
+            words = words[2:]
+        else:
+            return words
+    return []
+
+
+def _command_head(words):
+    return next(iter(_command_words(words)), "")
+
+
+def _segments(tokens):
+    """Each simple command's tokens, with whether a pipe feeds its stdin."""
+    segment, piped = [], False
+    for token in tokens + [";"]:
+        if token in SHELL_BOUNDARIES:
+            yield segment, piped
+            segment, piped = [], token in {"|", "|&"}
+        else:
+            segment.append(token)
+
+
+def feeds_shell(line):
+    """Identify command words after lexing, so quoted pipes remain data.
+
+    Behind a wrapper, any bare shell word counts: `sudo -u x bash` and an
+    option this module has never seen both still feed a shell. An
+    interpreter counts once a pipe feeds it.
+    """
+    try:
+        tokens = shell_tokens(line)
+    except ValueError:
+        return True
+    for segment, piped in _segments(tokens):
+        names = [word.rsplit("/", 1)[-1] for word in segment]
+        head = _command_head(segment).rsplit("/", 1)[-1]
+        if head in _SHELLS or head == _DOT or (
+                names and names[0] in _WRAPPERS and _SHELLS.intersection(names)):
+            return True
+        if piped and _STDIN_INTERPRETERS.match(head):
+            return True
+    return False
+
+
+# Global git options that consume the following word.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                "--config-env", "--exec-path"})
+# `git config` forms that only read or remove. Any other form may store an
+# alias, pager, editor, helper or hook path, which git later runs.
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch",
+                               "--get-color", "--get-colorbool", "--list", "-l",
+                               "--unset", "--unset-all", "get", "list", "unset"})
+
+
+def _sets_git_config(cmd):
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        return True
+    for segment, _ in _segments(tokens):
+        words = _command_words(segment)
+        if not words or words[0].rsplit("/", 1)[-1] != "git":
+            continue
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            if rest.pop(0) in _GIT_VALUE_OPTIONS and rest:
+                rest.pop(0)
+        if rest[:1] == ["config"] and not _GIT_CONFIG_READS.intersection(rest[1:]):
+            return True
+    return False
+
+
+def _rewrite_heredocs(cmd, replace_body):
+    """Rewrite each terminated heredoc body through `replace_body`.
+
+    `replace_body(opener_line, quoted, body)` returns the text to put in place
+    of the body, or None to leave it as it is. The opener and delimiter lines
+    always stay, so everything after the heredoc is still scanned.
     """
     out = cmd
     for m in _HEREDOC_RE.finditer(cmd):
@@ -126,9 +235,26 @@ def strip_inert_text(cmd):
         if end is None:
             continue  # unterminated — scan the whole thing rather than guess
         body = "\n".join(lines[start + 1:end])
-        if not m.group(1) and ("$(" in body or "`" in body):
-            continue  # unquoted heredocs execute substitutions
-        out = "\n".join(lines[:start + 1] + lines[end:])
+        replacement = replace_body(lines[start], bool(m.group(1)), body)
+        if replacement is None:
+            continue
+        out = "\n".join(lines[:start + 1] + ([replacement] if replacement else []) + lines[end:])
+    return out
+
+
+def strip_inert_text(cmd):
+    """Return `cmd` with heredoc bodies and quoted messages replaced.
+
+    The replacement keeps the opener and the delimiter line, so anything AFTER
+    the heredoc is still scanned — only the body between the markers is inert.
+    """
+    def inert_body(opener, quoted, body):
+        if feeds_shell(opener):
+            return None
+        if not quoted and ("$(" in body or "`" in body):
+            return None  # unquoted heredocs execute substitutions
+        return ""
+    out = _rewrite_heredocs(cmd, inert_body)
     def scrub(match):
         argument = match.group(0)
         quoted = argument.split(None, 1)[1]
@@ -136,3 +262,202 @@ def strip_inert_text(cmd):
             return argument
         return "-m <message>"
     return _DASH_M_RE.sub(scrub, out)
+
+
+# ── WHAT THE SHELL WILL RUN AS A COMMAND (2026-10-05) ────────────────────────
+#
+# strip_inert_text() knows prose FLAGS. It does not know that a grep pattern or
+# an agent prompt is data too, so on 2026-10-05 a Grok prompt asking whether
+# `wrangler deploy` has a successor, and a `git grep` for that string, were each
+# refused as a Cloudflare release. executable_text() returns the text in which a
+# command-shaped rule should look for a command word:
+#
+#   * a quoted argument to a DATA command (one that treats its arguments as
+#     bytes: grep, git, gh, echo, an agent CLI taking a prompt) is dropped,
+#     except the $(...) and `...` substitutions inside double quotes, which run;
+#   * a quoted argument to ANY OTHER command — bash -c, ssh, python -c, a tool
+#     this list has never heard of — is unwrapped onto its own line, so a
+#     command inside it still starts at a command position;
+#   * a heredoc body fed to a shell stays; a quoted one fed to anything else is
+#     dropped; an unquoted one keeps only its substitutions.
+#
+# runs() is what a rule calls. A match in that text counts unless its segment is
+# headed by a data command carrying no executable option, so a wrapper or an
+# option this module has never seen keeps the match. Requiring a recognised
+# command position instead failed open on `nice -n 5` and `sudo -u x` (PR 1578).
+#
+# It FAILS CLOSED like the rest of this module: an unterminated quote leaves the
+# remainder raw, and only commands named below make their arguments inert.
+DATA_COMMANDS = frozenset({
+    "grep", "egrep", "fgrep", "rg", "ag", "ack", "git", "gh", "echo", "printf",
+    "jq", "yq", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "ls",
+    "test", "[", "mkdir", "touch", "diff", "cmp", "tee", "date", "basename",
+    "dirname", "realpath", "grok", "claude", "codex",
+})
+# Wrappers whose prompt argument is handed to an agent, not to this shell.
+DATA_COMMAND_SUFFIXES = ("grok-run.sh",)
+# Options that make a data command run one of its arguments: git config
+# (alias.*, core.pager, core.sshCommand, ...), a search preprocessor, a sort
+# compressor. Their presence makes every argument executable.
+_EXECUTABLE_OPTION_RE = re.compile(
+    r"(?:^|\s)(?:-c\s*\S+=|--config-env[=\s]|--pre[=\s]|--compress-program[=\s])")
+
+_BOUNDARY_RE = re.compile(r"(?:[;&|(\n`]|\$\()")
+_SEGMENT_RE = re.compile(r"[;&|(){}\n`]|\$\(")
+def _substitution_end(text, start):
+    depth, i = 1, start + 2
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"":
+            end = _closing_quote(text, i)
+            if end is None:
+                return len(text)
+            i = end + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if not depth:
+                return i
+        i += 1
+    return len(text)
+
+
+def _substitutions(text):
+    found = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text.startswith("$(", i):
+            end = _substitution_end(text, i)
+            found.append(text[i + 2:end])
+            i = end + 1
+        elif text[i] == "`":
+            end = i + 1
+            while end < len(text) and text[end] != "`":
+                end += 2 if text[end] == "\\" else 1
+            found.append(text[i + 1:end])
+            i = end + 1
+        else:
+            i += 1
+    return found
+
+
+def _command_word(text_so_far):
+    tail = _BOUNDARY_RE.split(text_so_far)[-1]
+    try:
+        return _command_head(shell_tokens(tail))
+    except ValueError:
+        return ""
+
+
+def _is_data_command(word):
+    return (word.rsplit("/", 1)[-1] in DATA_COMMANDS
+            or word.endswith(DATA_COMMAND_SUFFIXES))
+
+
+def _closing_quote(text, start):
+    quote = text[start]
+    i = start + 1
+    while i < len(text):
+        if quote == '"' and text[i] == "\\":
+            i += 2
+            continue
+        if quote == '"' and text.startswith("$(", i):
+            i = _substitution_end(text, i) + 1
+            continue
+        if text[i] == quote:
+            return i
+        i += 1
+    return None
+
+
+def _unwrap_quotes(text, executable_args=False):
+    out = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if c in "'\"":
+            end = _closing_quote(text, i)
+            if end is None:
+                out.append(text[i:])     # unterminated: scan the rest raw
+                break
+            inner = text[i + 1:end]
+            if re.search(r"(?<![\w.])\w+=$", "".join(out)):
+                kept = _substitutions(inner) if c == '"' else []
+                out.append("x" + "".join("\n" + k + "\n" for k in kept))
+            elif not executable_args and _is_data_command(_command_word("".join(out))):
+                kept = _substitutions(inner) if c == '"' else []
+                out.append(" " + "".join("\n" + k for k in kept) + ("\n_" if kept else ""))
+            else:
+                # The trailing `_` ends the unwrapped text without opening a
+                # new command position for the words that follow the quote.
+                out.append("\n" + inner.lstrip("!") + "\n_")
+            i = end + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def executable_text(cmd):
+    """`cmd` reduced to what the shell will run as commands. See above."""
+    def substitutions_only(opener, quoted, body):
+        if feeds_shell(opener):
+            return None
+        return "\n".join(_substitutions(body))
+    return _unwrap_quotes(_rewrite_heredocs(strip_inert_text(cmd), substitutions_only),
+                          _executes_arguments(cmd))
+
+
+def _executes_arguments(cmd):
+    return feeds_shell(cmd) or bool(_EXECUTABLE_OPTION_RE.search(cmd)) or _sets_git_config(cmd)
+
+
+def runs(cmd, pattern):
+    """True when the shell would run text matching `pattern`.
+
+    Fails closed: a match counts unless its segment is headed by a data command
+    that executes none of its arguments. An unknown wrapper, an option this
+    module has not modelled, or text piped into a shell all keep the match.
+    """
+    # The shell drops an escaping backslash: `wrangler\ deploy` is one word
+    # inside an alias value and the same command once that alias runs.
+    text = re.sub(r"\\(.)", r"\1", executable_text(cmd), flags=re.S)
+    if _executes_arguments(cmd):
+        return bool(pattern.search(text))
+    for segment in _SEGMENT_RE.split(text):
+        if not pattern.search(segment):
+            continue
+        try:
+            words = _command_words(shell_tokens(segment))
+        except ValueError:
+            return True
+        if not words or not _is_data_command(words[0]) or pattern.match(" ".join(words)):
+            return True
+    return False
+
+
+# A quoted heredoc whose only reader is `cat > file` or `tee file` is text being
+# written to disk. Naming a key's file pattern in that text reads no key — the
+# 2026-10-05 builder brief that was refused for exactly that.
+_DATA_SINK_OPENER = re.compile(
+    r"(?:^|&&|;|\|\|)\s*(?:cat\s*>>?\s*\S+\s*<<-?\s*(['\"])\w+\1"
+    r"|cat\s*<<-?\s*(['\"])\w+\2\s*>>?\s*\S+"
+    r"|tee(?:\s+-a)?\s+\S+(?:\s*>\s*/dev/null)?\s*<<-?\s*(['\"])\w+\3)\s*$")
+
+
+def strip_data_heredocs(cmd):
+    """`cmd` without the bodies of quoted heredocs written straight to a file."""
+    def data_body(opener, quoted, body):
+        return "" if quoted and _DATA_SINK_OPENER.search(opener) else None
+    return _rewrite_heredocs(cmd, data_body)
