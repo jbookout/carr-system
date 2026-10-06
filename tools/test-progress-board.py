@@ -1362,6 +1362,20 @@ class PublishAndAnswers(BoardCase):
                                   ("local", "needs-joe"),
                                   ("build", "all-repos"), ("publish", "all-repos")])
 
+    def test_scheduled_render_reads_github_in_one_pass(self):
+        passes = []
+        args = type("Args", (), {"project": "carr-v5", "publish": False})()
+        with patch.object(BOARD, "GitHubReadPass", object), \
+             patch.object(BOARD, "render", lambda project, *, discover: passes.append(BOARD.GITHUB_PASS)), \
+             patch.object(BOARD, "build_all_repos", lambda: passes.append(BOARD.GITHUB_PASS)), \
+             patch.object(BOARD, "publish_board", lambda project: None), \
+             patch.object(BOARD, "poll_board_answers", lambda project: None), \
+             patch.object(BOARD, "publish_needs_joe_local", lambda: None):
+            BOARD.command_render(args)
+        self.assertEqual(len(passes), 2)
+        self.assertIsNotNone(passes[0])
+        self.assertIs(passes[0], passes[1])
+
     def test_system_board_failure_is_logged_and_last_known_state_published(self):
         events = []
         args = type("Args", (), {"project": "carr-v5", "publish": False})()

@@ -727,6 +727,9 @@ class GitHubReadPass:
         self.saved: dict[str, dict[str, Any]] = {}
         self.reconcile()
         self.results: dict[str, tuple[dict[str, Any] | None, str | None]] = {}
+        # One listing per repository per pass: V1 discovery and the all-repos
+        # board read the same rows in the scheduled render.
+        self.repositories: dict[tuple[str, str], tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
         # Legacy boards share identities too. Seed all their terminal facts
         # before the first open card in any one board can rediscover that PR.
         for path in board_dir().glob("*.json"):
@@ -1479,6 +1482,9 @@ def read_repository(repo: str, since: str) -> tuple[list[dict[str, Any]], list[d
     """REST discovery plus shared hydration. Only authenticated merged facts
     are immutable; closed-unmerged identities can reopen."""
     assert GITHUB_PASS is not None
+    listed = GITHUB_PASS.repositories.get((repo, since))
+    if listed is not None:
+        return listed
     cursor_path = board_dir() / ".github-discovery.json"
     cursor = read_json_file(cursor_path).get(repo) or since + "T00:00:00Z"
     # GitHub timestamps have second resolution. Overlap the cursor by one
@@ -1529,7 +1535,12 @@ def read_repository(repo: str, since: str) -> tuple[list[dict[str, Any]], list[d
         cursors = read_json_file(cursor_path)
         cursors[repo] = max(str(cursors.get(repo) or ""), started)
         atomic_write(cursor_path, json.dumps(cursors, sort_keys=True) + "\n")
+    GITHUB_PASS.repositories[(repo, since)] = open_prs, merged_prs
     return open_prs, merged_prs
+
+
+def recent_merge_since() -> str:
+    return (now_utc() - RECENT_MERGED).date().isoformat()
 
 
 def read_json_file(path: Path) -> dict[str, Any]:
@@ -1551,7 +1562,7 @@ def build_all_repos() -> dict[str, Any]:
     assert GITHUB_PASS is not None
     GITHUB_PASS.seed((unlocked.get("tasks") or {}).values())
     prior_repos = [str(row.get("repo")) for row in unlocked.get("repos") or [] if isinstance(row, dict)]
-    since = (now_utc() - RECENT_MERGED).date().isoformat()
+    since = recent_merge_since()
     reads: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]] | str] = {}
     for repo in list_repositories(prior_repos):
         try:
@@ -2260,17 +2271,16 @@ def poll_board_answers(project: str) -> dict[str, int]:
 
 @with_github_read_pass
 def discover_v1() -> dict[tuple[str, int], tuple[dict[str, Any] | None, str | None]]:
+    """V1 slices among the open and recently merged PRs of every repository
+    whose release completes a delivery target, from the all-repos listing."""
+    assert GITHUB_PASS is not None
+    since = recent_merge_since()
     discovered = {}
-    since = (now_utc() - STALE_AFTER).isoformat(timespec="seconds")
-    for repo in CORE_REPOS[:2]:
-        candidates = rest_rows(f"repos/{repo}/pulls?state=open&sort=updated&direction=desc")
-        candidates += [row for row in rest_rows(f"repos/{repo}/issues?state=closed&since={since}")
-                       if row.get("pull_request")]
-        for row in candidates:
-            if v1_metadata(row) and isinstance(row.get("number"), int):
-                key = repo, row["number"]
-                assert GITHUB_PASS is not None
-                discovered[key] = GITHUB_PASS.read(key[1], repo, row)
+    for repo in AUTOMATIC_DELIVERY_TARGETS:
+        open_prs, merged_prs = read_repository(repo, since)
+        for info in (*open_prs, *merged_prs):
+            if v1_metadata(info):
+                discovered[repo, info["number"]] = GITHUB_PASS.result(info, repo)
     return discovered
 
 
