@@ -103,17 +103,6 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 MAX_FIELD = 300
 INVOCATION_REPO_ENV = "CARR_HOOK_INVOCATION_REPO"
 
-def bounded_grok_read_only():
-    # Kept for callers that only skip the runner's read-only child.
-    # Missing optional plumbing must keep every gate running.
-    sys.path.insert(0, REPO)
-    try:
-        from hooks.grok_invocation import bounded_grok_read_only as probe
-    except ImportError:
-        return False
-    return probe()
-
-
 def grok_session():
     # Joe 2026-10-06: no context gate blocks his own model subscriptions. Any
     # Grok session (read-only or writable) skips the context hooks below.
