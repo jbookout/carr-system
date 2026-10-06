@@ -4,12 +4,15 @@ import os
 import fcntl
 import subprocess
 import sys
+import uuid
 from http.client import HTTPException
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.error import HTTPError
 from urllib.request import urlopen
 from jev_outage_health import call_verb
+
+MONITOR_SOURCE = "uptime-monitor:availability:v1"
 
 STATUS_URL = "https://uptime.doctorcre.com/healthz"
 ACTION = (
@@ -24,7 +27,7 @@ def reconcile_monitor(fault, healthy, state_path=None, verb=None):
     """Keep monitor failure separate from the Worker's one loop per production incident."""
     repo = Path(__file__).resolve().parents[1]
     path = Path(state_path or os.environ.get("CARR_UPTIME_RESPONSE_STATE", repo / "out/uptime-monitor-response.json"))
-    verb = verb or (lambda name, payload: call_verb(name, payload, repo=repo))
+    verb = verb or call_verb
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.with_suffix(".lock").open("a") as lock:
@@ -39,37 +42,45 @@ def reconcile_monitor(fault, healthy, state_path=None, verb=None):
                 temporary.replace(path)
 
             if fault and not state:
-                state = {"key": "uptime-monitor:availability:v1"}
+                state = {"key": str(uuid.uuid4())}
                 save()
             if not state:
                 return "none"
+            if not isinstance(state.get("key"), str) or not state["key"]:
+                return "error"
+            if state["key"].startswith("uptime-monitor:"):
+                state["key"] = str(uuid.uuid4())
+                save()
             while True:
                 if not state.get("loop_id"):
                     response = verb("add-loop", {
                         "idempotency_key": state["key"], "kind": "open_loop", "owner": "claude",
-                        "domain": "system", "body": f"DoctorCRE uptime monitoring unavailable. {ACTION}", "marker": "none",
+                        "domain": "system", "source_note": MONITOR_SOURCE, "body": f"DoctorCRE uptime monitoring unavailable. {ACTION}", "marker": "none",
                         "blocker": "other_lane", "blocker_detail": "The orchestrator must restore carr-uptime scheduling, route, credentials, or notification delivery; this health reader has no deployment authority",
                     })
                     if response.get("ok") is not True or not isinstance(response.get("loop_id"), str):
                         return "error"
                     state["loop_id"] = response["loop_id"]
                     save()
-                    if not healthy and not response.get("replayed"):
+                    if not healthy and not response.get("replayed") and not response.get("deduplicated"):
                         return "open"
                 loop = verb("read-loop", {"loop_id": state["loop_id"]})
                 if loop.get("loop_id") != state["loop_id"] or type(loop.get("version")) is not int:
                     return "error"
                 if loop.get("status") in ("done", "dropped"):
                     if fault:
-                        state = {"key": f"uptime-monitor:after:{loop['loop_id']}"}
+                        state = {"key": str(uuid.uuid4())}
                         save()
                         continue
                     return "clear"
                 if loop.get("status") != "open":
                     return "error"
                 if healthy:
+                    if not state.get("close_key"):
+                        state["close_key"] = str(uuid.uuid4())
+                        save()
                     response = verb("close-loop", {
-                        "idempotency_key": state["key"] + ":close", "loop_id": state["loop_id"],
+                        "idempotency_key": state["close_key"], "loop_id": state["loop_id"],
                         "base_version": loop["version"], "resolution": "done",
                         "outcome": "Uptime monitor recovered. Fresh status proves three passing JSON probes and no pending alerts or incident loops.",
                     })

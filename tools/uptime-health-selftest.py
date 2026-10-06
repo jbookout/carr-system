@@ -44,35 +44,65 @@ class UptimeHealthTests(unittest.TestCase):
         loops = {}
         replay = {}
 
-        def verb(name, payload):
-            if name == "add-loop":
-                key = payload["idempotency_key"]
-                if key in replay:
-                    self.assertEqual(payload, replay[key][0])
-                    return {**replay[key][1], "replayed": True}
-                loop_id = f"loop-{len(loops) + 1}"
-                loops[loop_id] = {"loop_id": loop_id, "status": "open", "version": 1}
-                result = {"ok": True, "loop_id": loop_id}
-                replay[key] = (payload.copy(), result)
-                return result
-            if name == "read-loop":
-                return loops[payload["loop_id"]].copy()
-            loops[payload["loop_id"]]["status"] = "done"
-            return {"ok": True}
+        def reader(principal):
+            def verb(name, payload):
+                if name == "add-loop":
+                    key = payload["idempotency_key"]
+                    manifest = (principal, payload.copy())
+                    if key in replay:
+                        if manifest != replay[key][0]:
+                            return {"ok": False, "error": "key_reuse"}
+                        return {**replay[key][1], "replayed": True}
+                    existing = next((value for value in loops.values()
+                                     if value["status"] == "open" and value.get("source_note") == payload.get("source_note")), None)
+                    if existing and payload.get("source_note"):
+                        result = {"ok": True, "loop_id": existing["loop_id"], "deduplicated": True}
+                    else:
+                        loop_id = f"loop-{len(loops) + 1}"
+                        loops[loop_id] = {"loop_id": loop_id,
+                                          "status": "open", "version": 1, "source_note": payload.get("source_note")}
+                        result = {"ok": True, "loop_id": loop_id}
+                    replay[key] = (manifest, result)
+                    return result
+                if name == "read-loop":
+                    return loops[payload["loop_id"]].copy()
+                self.assertEqual(name, "close-loop")
+                loops[payload["loop_id"]]["status"] = "done"
+                return {"ok": True}
+            return verb
 
-        for path in paths:
+        readers = [reader("machine-a"), reader("machine-b")]
+        for path, verb in zip(paths, readers):
             self.assertEqual(module.reconcile_monitor(True, False, path, verb), "open")
         self.assertEqual(len(loops), 1)
         loops["loop-1"]["status"] = "dropped"
-        for path in paths:
+        for path, verb in zip(paths, readers):
             self.assertEqual(module.reconcile_monitor(False, True, path, verb), "clear")
-        for path in paths:
+        for path, verb in zip(paths, readers):
             self.assertEqual(module.reconcile_monitor(True, False, path, verb), "open")
         self.assertEqual(len(loops), 2)
         self.assertEqual(loops["loop-1"]["status"], "dropped")
         fresh = root / "new-machine.json"
-        self.assertEqual(module.reconcile_monitor(True, False, fresh, verb), "open")
+        self.assertEqual(module.reconcile_monitor(True, False, fresh, reader("machine-c")), "open")
+        self.assertEqual(module.reconcile_monitor(False, True, fresh, reader("machine-c")), "clear")
+        self.assertEqual(loops["loop-2"]["status"], "done")
         self.assertEqual(len(loops), 2)
+
+    def test_default_record_adapter_uses_supported_call_signature(self):
+        root = Path(__file__).resolve().parents[1] / "out/_to_delete" / f"uptime-adapter-{uuid.uuid4()}.json"
+        from unittest.mock import patch
+        def call(name, payload):
+            return {"ok": True, "loop_id": "fixture"}
+        with patch.object(module, "call_verb", side_effect=call):
+            self.assertEqual(module.reconcile_monitor(True, False, root), "open")
+
+    def test_invalid_saved_retry_key_reports_error(self):
+        state = Path(__file__).resolve().parents[1] / "out/_to_delete" / f"uptime-state-{uuid.uuid4()}.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        for key in (None, 4, [], {}):
+            state.write_text(json.dumps({"key": key}))
+            with self.subTest(key=key):
+                self.assertEqual(module.reconcile_monitor(True, False, state, lambda *_: self.fail("invalid state must not call records")), "error")
 
     def test_partial_protocol_read_reports_bound_failure(self):
         def partial():
