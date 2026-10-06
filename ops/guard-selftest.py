@@ -74,8 +74,19 @@ def direct_exec(cmd, workdir=REPO, cwd=REPO):
 CASES: list[tuple] = []
 
 
-def case(name, payload, expect):
-    CASES.append((name, payload, expect))
+def case(name, payload, expect, mention=None):
+    """`mention`, when given, must appear in the refusal text: a denial that
+    names no sanctioned route sends the session looking for a workaround."""
+    CASES.append((name, payload, expect, mention))
+
+case("quoted echo pipeline remains executable", bash("echo 'wrangler deploy' | bash"), DENY)
+case("quoted printf pipeline remains executable", bash("printf '%s' 'gh workflow run ci.yml' | sh"), DENY)
+case("inert echo before separate shell", bash("echo 'wrangler deploy'; bash -c 'true'"), ALLOW)
+case("inert echo before conditional shell", bash("echo 'wrangler deploy' && bash -c 'true'"), ALLOW)
+case("quoted echo multistage shell input", bash("echo 'wrangler deploy' | cat | bash"), DENY)
+case("quoted Python pipeline remains executable", bash("echo 'import os; os.system(\"wrangler deploy\")' | python3"), DENY)
+case("quoted Node pipeline remains executable", bash("printf '%s' 'require(\"child_process\").execSync(\"wrangler deploy\")' | node"), DENY)
+
 
 
 # ── 1. KNOWN_HOSTS: the code list still works, including today's additions ────
@@ -290,6 +301,100 @@ case("direct GitHub workflow dispatch is metering-refused",
      bash("gh workflow run ci.yml"), DENY)
 case("prose describing a metered dispatch remains inert",
      bash('gh pr create --body "npx wrangler deploy is refused"'), ALLOW)
+
+# ── 8b. Deploy commands count only in EXECUTABLE position (2026-10-05) ───────
+# Both allows below were real refusals that day: an orchestrator asking Grok
+# about Cloudflare's new CLI, and a reviewer grepping for the deploy string.
+# Neither could run a deploy; both were blocked as if they had.
+case("a Grok prompt that names the deploy command is not a deploy", bash(
+    'cd ~/carr-system && bin/grok-run.sh --effort medium --timeout-seconds 400 '
+    '--prompt "Find Cloudflare\'s announcement of the cf CLI; say whether '
+    '\'wrangler deploy\' and \'wrangler versions upload/deploy\' have cf '
+    'equivalents. Do not write files." > $TMPDIR/grok-cf.txt 2>$TMPDIR/grok-cf.err'),
+    ALLOW)
+case("a quoted grep pattern for the deploy command is not a deploy", bash(
+    'git grep -ln "wrangler deploy\\|wrangler versions upload" -- bin ops tools'), ALLOW)
+case("a quoted prompt file written for --prompt-file is not a deploy", bash(
+    "cat > $TMPDIR/p.txt <<'EOF'\nCompare `wrangler deploy` with cf deploy.\nEOF\n"
+    "bin/grok-run.sh --prompt-file $TMPDIR/p.txt"), ALLOW)
+case("an unquoted mention after a data command is not a deploy",
+     bash("echo use bin/deploy-worker.sh, never wrangler deploy"), ALLOW)
+case("deploy behind cd and npx is still refused",
+     bash("cd mcp-server && npx wrangler deploy --env staging"), DENY)
+case("deploy behind an env assignment is still refused",
+     bash("CLOUDFLARE_ACCOUNT_ID=x npx wrangler deploy"), DENY)
+case("deploy by absolute path is still refused",
+     bash("/opt/homebrew/bin/wrangler deploy"), DENY)
+case("deploy inside bash -c is still refused", bash("bash -c 'wrangler deploy'"), DENY)
+case("deploy over ssh is still refused",
+     bash("ssh macbook 'cd ~/carr-system/mcp-server && npx wrangler deploy'"), DENY)
+case("deploy in a substitution inside a quoted prompt is still refused",
+     bash('bin/grok-run.sh --prompt "result: $(npx wrangler versions upload)"'), DENY)
+case("deploy in a backtick inside an unquoted heredoc is still refused",
+     bash("cat > $TMPDIR/p.txt <<EOF\nresult: `npx wrangler deploy`\nEOF"), DENY)
+case("deploy in a heredoc fed to bash is still refused",
+     bash("bash <<'EOF'\ncd mcp-server\nnpx wrangler deploy\nEOF"), DENY)
+case("deploy via python os.system is still refused",
+     bash("python3 -c \"import os; os.system('npx wrangler deploy')\""), DENY)
+case("workflow dispatch inside a quoted grep is not a dispatch",
+     bash('grep -rn "gh workflow run" .github'), ALLOW)
+
+# ── 8c. A heredoc bash executes is not prose (found 2026-10-05) ──────────────
+# The prose carve-out stripped EVERY quoted heredoc body, including one handed
+# to a shell — so this destructive command was allowed.
+case("a destructive command in a heredoc fed to bash is refused",
+     bash("bash <<'EOF'\nrm -rf /Users/booko/carr-system/lib\nEOF"), DENY)
+case("a destructive command in a heredoc piped to sh is refused",
+     bash("cat <<'EOF' | sh\nrm -rf /Users/booko/carr-system/lib\nEOF"), DENY)
+case("a destructive command quoted in a PR body heredoc stays inert",
+     bash("gh pr create --body-file - <<'EOF'\nnever run rm -rf lib\nEOF"), ALLOW)
+
+# ── 8d. Key intake runs through its script, never by naming a key path ──────
+# 2026-10-05: the orchestrator located a downloaded GitHub App key by hand and
+# was refused (right), with a refusal that named no sanctioned route (wrong);
+# the builder brief it then wrote, which merely named the key's file pattern,
+# was refused too (wrong — writing text into a file reads no key).
+INTAKE = "bin/github-app-key-intake.sh"
+
+
+def _allowlisted_intake_scripts():
+    """The guard's own allowlist, read as data (its verdicts are still taken
+    from the spawned process below, never from an import)."""
+    import ast
+    tree = ast.parse(open(GUARD, encoding="utf-8").read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "SECRET_INTAKE_SCRIPTS" for t in node.targets):
+            return [path for path, _ in ast.literal_eval(node.value)]
+    return []
+
+
+_INTAKES = _allowlisted_intake_scripts()
+if INTAKE not in _INTAKES:
+    raise SystemExit(f"guard-selftest: {INTAKE} is missing from SECRET_INTAKE_SCRIPTS")
+for _script in _INTAKES:
+    case(f"allowlisted intake {_script} runs", bash(f"./{_script}"), ALLOW)
+    case(f"allowlisted intake {_script} runs under bash", bash(f"bash {_script}"), ALLOW)
+    case(f"allowlisted intake {_script} runs from the repo root",
+         bash(f"cd ~/carr-system && {_script} && echo done"), ALLOW)
+case("listing downloaded keys by hand is refused and names the intake script",
+     bash("ls -1t ~/Downloads/*.pem 2>/dev/null | head -3"), DENY, mention=INTAKE)
+case("a builder brief that names the key file pattern is not a key read", bash(
+    "O=/Users/booko/carr-system/out/orch; mkdir -p $O/ghapp; cat > $O/ghapp/brief.md <<'EOF'\n"
+    "Its private key was downloaded to Joe's ~/Downloads as the newest file matching "
+    "carr-watchdog-jbookout*.private-key.pem. Never print key material.\nEOF"), ALLOW)
+case("reading an installed key is still refused",
+     bash("cat ~/.config/carr/github-app.pem"), DENY)
+case("intake followed by a key read is still refused",
+     bash(f"{INTAKE}; cat ~/.ssh/id_rsa"), DENY)
+case("an intake-named script outside the allowlist cannot name a key",
+     bash("bin/evil-key-intake.sh ~/.ssh/id_rsa"), DENY)
+case("a key path on the heredoc opener line is still refused",
+     bash("cat ~/.config/carr/age-key.txt > $TMPDIR/k <<'EOF'\nhello\nEOF"), DENY)
+case("a key read inside a python heredoc is still refused",
+     bash("python3 - <<'PY'\nprint(open('/Users/x/.ssh/id_ed25519').read())\nPY"), DENY)
+case("a key read inside a heredoc piped to bash is still refused",
+     bash("cat <<'EOF' | bash\ncat ~/.ssh/id_rsa\nEOF"), DENY)
 
 # ── 9. Codex local-function alias: CARR only, no Life AI spillover ──────────
 case("Codex CARR destructive shell", codex_exec(
@@ -665,10 +770,10 @@ for _cmd in (
 def main():
     verbose = "-v" in sys.argv[1:]
     fails = []
-    for name, payload, expect in CASES:
+    for name, payload, expect, mention in CASES:
         rc, err = run(payload)
         got = DENY if rc == 2 else ALLOW if rc == 0 else rc
-        ok = got == expect
+        ok = got == expect and (mention is None or mention in err)
         if verbose or not ok:
             word = {ALLOW: "ALLOW", DENY: "DENY"}
             print(f"  {'ok  ' if ok else 'FAIL'} [{word.get(expect, expect)}] {name}"

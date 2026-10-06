@@ -75,7 +75,8 @@ export function progressBoardSummary(row) {
   const counts = new Map();
   for (const task of tasks) {
     if (!task || typeof task !== "object" || Array.isArray(task)) continue;
-    const status = typeof task.status === "string" && task.status.trim() ? task.status : "queued";
+    const value = task.activity_status === "stale" ? "stale" : task.status;
+    const status = typeof value === "string" && value.trim() ? value : "queued";
     counts.set(status, (counts.get(status) ?? 0) + 1);
   }
   return {

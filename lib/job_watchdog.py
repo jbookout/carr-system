@@ -21,6 +21,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 # Each evidence source and the finding kinds detect derives from it. detect refuses
 # a kind its source does not declare, and an unreadable source blinds exactly these.
 EVIDENCE = {
+    "scheduled_jobs": frozenset({"scheduled_job_drift"}),
     "jobs": frozenset({"job_failed", "job_dead", "job_hang", "job_silent", "job_over_limit"}),
     "prs": frozenset({"pr_blocked_review", "pr_ci_red", "pr_conflict", "pr_draft_idle", "pr_ready"}),
     "merge_queue": frozenset({"pr_ready"}),
@@ -144,6 +145,10 @@ def detect(facts, config, now):
             raise ValueError(f"{kind} is not declared as derived from {source} in EVIDENCE")
         found.append(finding(kind, subject, reason, config, **fields))
     t = config["thresholds"]
+    for row in facts.get("scheduled_jobs", []):
+        emit("scheduled_jobs", "scheduled_job_drift", row["label"], row["detail"],
+             key=row["key"], next_action=row["fix"] +
+             "; verify python3 ops/scheduled-jobs-check.py; auto-clear on next complete scan without this finding")
     jobs = facts.get("jobs", [])
     for job in jobs:
         subject = job["id"]
@@ -211,8 +216,9 @@ def detect(facts, config, now):
         if log["type"] == "release" and now - epoch(log["mtime"]) >= t["pipeline_stale_seconds"]:
             emit(source, "pipeline_stale", log["path"], "release log stopped updating")
     for branch in facts.get("branches", []):
-        if branch["name"].startswith("claude/") and now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
-            emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "claude branch idle for configured limit")
+        if branch["name"] not in {"main", "master", "develop"} and not branch.get("open_pr") and \
+                now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
+            emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "branch idle for configured limit")
     for error in facts.get("errors", []):
         found.append(finding(error["kind"], error["source"], error["reason"], config, blinds=error["blinds"]))
     for f in found:
@@ -308,9 +314,8 @@ def process_group_alive(pgid):
         return True
 
 
-def board_task(root, config, card, executor, status, note, project=None, pr=None, repo=None, needs_joe=False, health=None,
-               expected_task=None, reason=None, next_action=None):
-    project = project or config["board"]
+def board_task(root, config, card, executor, status, note):
+    project = config["board"]
     board = root / "out/boards" / (project + ".json")
     env = dict(os.environ, PROGRESS_BOARD_ROOT=str(root / "out"))
     with locked(root / "out/watchdog/board.lock"):
@@ -324,20 +329,14 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
         prior = json.loads(board.read_text()).get("tasks", {}).get(card, {})
         argv = [sys.executable, str(SOURCE / "tools/progress_board.py"), "task", project, card,
                 "--title", prior.get("title", card), "--executor", prior.get("executor", executor) if executor == "orchestrator" else executor, "--status", status,
-                "--health", health or ("blocked" if status == "blocked" else "healthy"), "--note", note]
-        argv.extend(["--lane", config["needs_joe_lane"] if needs_joe else "status"])
-        if expected_task is not None:
-            argv.extend(["--expected-task", json.dumps(expected_task)])
+                "--health", "blocked" if status == "blocked" else "healthy", "--note", note,
+                "--lane", "status"]
         if status == "blocked":
-            argv.extend(["--reason", reason or note,
-                         "--next-action", next_action or config["next_actions"]["job_failed"]])
-        if pr is not None:
-            argv.extend(["--pr", str(pr), "--repo", repo])
+            argv.extend(["--reason", note, "--next-action", config["next_actions"]["job_failed"]])
         result = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                 timeout=config["thresholds"]["command_timeout_seconds"])
         if result.returncode:
             raise RuntimeError(result.stderr)
-        return prior
 
 
 def run_job(root, config, card, executor, minutes, argv):
@@ -408,9 +407,10 @@ def reconcile(root, config, found, effects, now, complete=True):
     extras = []
     for key, f in current.items():
         prior = previous.get(key, {})
-        row = {**f, "first_seen": prior.get("first_seen", stamp(now)), "cleared_at": None}
-        if prior.get("cleared_at"):
-            row["board_recovery"] = None
+        first_seen = prior.get("first_seen", stamp(now))
+        if f["kind"] == "scheduled_job_drift" and prior.get("cleared_at"):
+            first_seen = stamp(now)
+        row = {**f, "first_seen": first_seen, "cleared_at": None}
         if not prior or prior.get("cleared_at") or prior.get("reason") != f["reason"]:
             append(findings_path, row)
         # Failed reporting is retried with the SAME record-layer idempotency key.
@@ -472,14 +472,14 @@ def reconcile(root, config, found, effects, now, complete=True):
     if complete:
         for key, prior in previous.items():
             if key not in current and not prior.get("cleared_at") and prior.get("kind") not in blinded:
-                if prior.get("board_recovery"):
+                if prior.get("kind") == "scheduled_job_drift" and prior.get("loop_id"):
                     try:
                         effects.clear(prior, list(current.values()))
                     except Exception as exc:
-                        error = finding("board_error", key, str(exc), config)
+                        error = finding("record_error", key, str(exc), config)
                         current[error["key"]] = error
                         append(findings_path, {**error, "first_seen": stamp(now), "cleared_at": None})
-                        continue  # Keep the original open so board recovery is retried.
+                        continue
                 append(findings_path, {**prior, "cleared_at": stamp(now)})
     return list(current.values())
 
@@ -640,6 +640,14 @@ def collect(root, config, now=None):
             facts["jobs"].append(job)
     except Exception as exc:
         error("job registry", exc, "jobs")
+    if sys.platform == "darwin":
+        try:
+            import scheduled_jobs
+            facts["scheduled_jobs"] = scheduled_jobs.check(now=now)
+            if any(row["code"] == "evidence_unavailable" for row in facts["scheduled_jobs"]):
+                error("scheduled job evidence", RuntimeError("incomplete scheduled-job observation"), "scheduled_jobs")
+        except Exception as exc:
+            error("scheduled jobs", exc, "scheduled_jobs")
     queue = path_at(root, config["paths"]["merge_queue"])
     if queue.exists():
         try:
@@ -650,6 +658,13 @@ def collect(root, config, now=None):
     # head and updated_at, bounded by an age limit for changes that bump neither.
     cache_path = path_at(root, config["paths"]["pr_cache"])
     cache = read_pr_cache(cache_path)
+    dates_path = root / "out/watchdog/branch-dates.json"
+    try:
+        dates = json.loads(dates_path.read_text())
+        if not isinstance(dates, dict):
+            dates = {}
+    except (OSError, ValueError):
+        dates = {}
     t = config["thresholds"]
     for repo in config["repositories"]:
         if limited:
@@ -686,10 +701,31 @@ def collect(root, config, now=None):
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
                 for branch in page:
-                    if branch["name"].startswith("claude/"):
-                        commit = json.loads(command(["gh", "api", f"repos/{repo}/commits/{branch['commit']['sha']}"], config))
+                    if branch["name"] not in {"main", "master", "develop"}:
+                        sha = branch["commit"]["sha"]
+                        key = repo + ":" + sha
+                        date = dates.get(key)
+                        try:
+                            if not isinstance(date, str) or not math.isfinite(epoch(date)):
+                                raise ValueError("invalid cached commit date")
+                        except (AttributeError, TypeError, ValueError):
+                            date = None
+                        if date is None:
+                            # Commit dates are immutable. Prefer already fetched objects;
+                            # still list remote refs every scan so retirement clears facts.
+                            try:
+                                checkout = Path(config["repository_roots"][repo]).expanduser()
+                                date = command(["git", "show", "-s", "--format=%cI", sha], config, checkout).strip()
+                                epoch(date)
+                            except Exception:
+                                commit = json.loads(command(["gh", "api", f"repos/{repo}/commits/{sha}"], config))
+                                date = commit["commit"]["committer"]["date"]
+                                epoch(date)
+                            dates[key] = date
                         facts["branches"].append({"repo": repo, "name": branch["name"],
-                                                  "updated": commit["commit"]["committer"]["date"]})
+                                                  "updated": date,
+                            "open_pr": any(p["repo"] == repo and p.get("headRefName") == branch["name"]
+                                           for p in facts["prs"])})
         except Exception as exc:
             error(repo + " branches", exc, "branches")
     logs = [(p, "queue") for p in config["paths"]["queue_logs"]] + [(config["paths"]["release_log"], "release")]
@@ -707,6 +743,10 @@ def collect(root, config, now=None):
         staged = cache_path.with_suffix(".tmp")
         staged.write_text(json.dumps(cache, separators=(",", ":")))
         staged.replace(cache_path)
+        dates_path.parent.mkdir(parents=True, exist_ok=True)
+        staged = dates_path.with_suffix(".tmp")
+        staged.write_text(json.dumps(dates, separators=(",", ":")))
+        staged.replace(dates_path)
     except OSError:
         pass  # A lost cache only costs the next scan a full collection.
     facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in [*missing.values(), *limited.values()])
@@ -723,35 +763,13 @@ class Effects:
         self.root, self.config = root, config
         self.children = []
 
-    def card(self, f):
-        return f.get("card") or "wd-" + hashlib.sha256(f["subject"].encode()).hexdigest()[:16]
-
-    def show_finding(self, f, expected_task=None):
-        return board_task(self.root, self.config, self.card(f), "orchestrator", "blocked",
-                          f["reason"] + "\nNext action: " + f["next_action"],
-                          pr=f.get("pr"), repo=f.get("repo"), needs_joe=bool(f.get("needs_joe")),
-                          expected_task=expected_task, reason=f["reason"], next_action=f["next_action"])
-
     def report(self, f):
         c = self.config
-        card = self.card(f)
-        before = self.show_finding(f)
-        # Sibling findings share the original state, not each other's blocked overlay.
-        for prior in read_latest(path_at(self.root, c["paths"]["findings"])).values():
-            recovery = prior.get("board_recovery")
-            if recovery and recovery["card"] == card and not prior.get("cleared_at"):
-                before = recovery["before"]
-                break
-        recovery = {"card": card, "before": before,
-                    "note": f["reason"] + "\nNext action: " + f["next_action"],
-                    "lane": c["needs_joe_lane"] if f.get("needs_joe") else None}
-        # Persist ownership even if the later record-layer write fails.
-        append(path_at(self.root, c["paths"]["findings"]),
-               {"key": f["key"], "board_recovery": recovery})
         if c["actions"]["file_defects"] and f["kind"] != "pr_ready":
-            digest_key = hashlib.sha256(f["key"].encode()).hexdigest()
+            episode_key = f["key"] + (":" + f["first_seen"] if f["kind"] == "scheduled_job_drift" else "")
+            digest_key = hashlib.sha256(episode_key.encode()).hexdigest()
             payload = {"idempotency_key": "job-watchdog:" + digest_key,
-                       "kind": "open_loop", "owner": "orchestrator", "domain": "system",
+                       "kind": "open_loop", "owner": "claude", "domain": "system",
                        "body": f["reason"] + "\nNext action: " + f["next_action"],
                        "source_note": "job watchdog: " + f["subject"],
                        "marker": "decision" if f.get("needs_joe") and f["needs_joe"] != "credentials" else "none",
@@ -766,24 +784,26 @@ class Effects:
             response = json.loads(result[start:])
             if response.get("ok") is not True or not response.get("loop_id"):
                 raise RuntimeError("record layer refused watchdog defect: " + str(response))
-        return {"board_recovery": recovery}
+            if f["kind"] == "scheduled_job_drift":
+                return {"loop_id": response["loop_id"]}
 
     def clear(self, f, active):
-        recovery = f["board_recovery"]
-        card = recovery["card"]
-        owned = {"status": "blocked", "health": "blocked", "note": recovery["note"],
-                 "lane": recovery["lane"]}
-        siblings = [row for row in active if self.card(row) == card]
-        if siblings:
-            self.show_finding(siblings[-1], expected_task=owned)
-            return
-        before = recovery["before"]
-        board_task(self.root, self.config, card, before.get("executor", "orchestrator"),
-                   before.get("status", "done"),
-                   before.get("note", "Watchdog finding recovered; evidence source is healthy."),
-                   needs_joe=before.get("lane") == self.config["needs_joe_lane"],
-                   health=before.get("health", "healthy"), expected_task=owned,
-                   reason=before.get("blocked_reason"), next_action=before.get("next_action"))
+        if f["kind"] == "scheduled_job_drift" and f.get("loop_id"):
+            result = command([str(SOURCE / "run.sh"), "call", "read-loop",
+                              json.dumps({"loop_id": f["loop_id"]})], self.config)
+            current = json.loads(result[result.find("{"):]).get("loop", {})
+            if current.get("loop_id") != f["loop_id"] or type(current.get("version")) is not int or current["version"] < 1:
+                raise RuntimeError("scheduled-job loop readback failed")
+            if current["status"] == "open":
+                payload = {"loop_id": f["loop_id"], "base_version": current["version"],
+                           "idempotency_key": "scheduled-jobs-clear:" + f["loop_id"],
+                           "resolution": "done", "outcome":
+                           "A complete scheduled-job scan no longer finds " + f["key"] +
+                           "; checked live machine evidence against ops/config/scheduled-jobs.v1.json."}
+                result = command([str(SOURCE / "run.sh"), "call", "close-loop", json.dumps(payload)], self.config)
+                closed = json.loads(result[result.find("{"):])
+                if closed.get("ok") is not True:
+                    raise RuntimeError("scheduled-job loop closure failed")
 
     def launch(self, f, argv, cwd, *, job_id, restart_count=0, root_id=None):
         c = self.config
@@ -899,6 +919,38 @@ def digest(root, config):
     return "\n".join(lines)
 
 
+def schedule_reaper(root, config, effects, now):
+    policy = config.get("branch_janitor")
+    if not policy:
+        return
+    canonical = config.get("repository_roots", {}).get("jbookout/carr-system")
+    if not canonical or Path(root).resolve() != Path(canonical).expanduser().resolve():
+        return  # A fixture or session checkout must never schedule the live fleet.
+    ledger = root / "out/orch/branch-janitor-schedule.jsonl"
+    previous = read_latest(ledger).get("schedule", {})
+    if now - previous.get("at", 0) < policy["interval_seconds"]:
+        return
+    pid = previous.get("wrapper_pid")
+    identity = process_identity(pid, config) if pid else None
+    if identity and identity == previous.get("process_identity"):
+        return
+    # Read back a possibly interrupted launch before starting another wrapper.
+    jobs = read_latest(path_at(root, config["paths"]["registry"]))
+    active = next((j for j in jobs.values() if j.get("card") == "branch-janitor" and
+                   "exit_code" not in j and j.get("process_identity") and
+                   process_identity(j.get("pid"), config) == j["process_identity"]), None)
+    if active:
+        return
+    job_id = "branch-janitor-" + uuid.uuid4().hex[:12]
+    append(ledger, {"key": "schedule", "at": now, "status": "intent", "job_id": job_id})
+    result = effects.launch({"card": "branch-janitor", "executor": "deterministic reaper",
+                             "limit": policy["limit_seconds"]},
+        [sys.executable, str(SOURCE / "hooks/worktree-self-plumb.py"), "--reap", "--fleet",
+         "--repo", str(root)], root, job_id=job_id)
+    append(ledger, {"key": "schedule", "at": now, "status": "started", **result,
+                    "process_identity": process_identity(result["wrapper_pid"], config)})
+
+
 def scan(root, config, config_path=None):
     try:
         with locked(path_at(root, config["paths"]["scan_lock"]), blocking=False):
@@ -909,6 +961,11 @@ def scan(root, config, config_path=None):
                             "previous_status": prior_runs.get("scan", {}).get("status")})
             effects = Effects(root, config)
             effects.config_path = Path(config_path or SOURCE / "ops/config/job-watchdog.json").resolve()
+            try:
+                schedule_reaper(root, config, effects, now)
+            except Exception as exc:
+                append(root / "out/orch/branch-janitor-schedule.jsonl",
+                       {"key": "schedule_error", "at": now, "error": type(exc).__name__})
             facts = collect(root, config, now)
             found = reconcile(root, config, detect(facts, config, now), effects, now)
             append(ledger, {"key": "scan", "status": "completed", "at": stamp(),

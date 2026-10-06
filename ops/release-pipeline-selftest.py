@@ -25,6 +25,7 @@ What is pinned, one test class each:
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -720,12 +721,29 @@ class HealthCompleteMarkerDoesNotDrift(unittest.TestCase):
                                 "— has it been renamed or reshaped?")
         health_check_marker = m.group(1) + m.group(2)
         self.assertEqual(rp.HEALTH_COMPLETE_MARKER, health_check_marker)
-        # And both print call sites in tools/health-check.py actually use
-        # the constant, not a re-typed literal that could drift from it on
-        # its own.
-        self.assertEqual(health_check_src.count("print(_HEALTH_COMPLETION_MARKER)"), 2,
-                         "tools/health-check.py should print the marker constant, by name, "
-                         "from exactly two places (the REFUSED early-return and the normal end)")
+        # Every completed canonical exit must print the shared constant.
+        # Section-specific exits, including builds, may add return paths.
+        tree = ast.parse(health_check_src)
+        canonical = next(node for node in tree.body
+                         if isinstance(node, ast.FunctionDef) and node.name == "_canonical_health")
+        returns = {node.lineno for node in ast.walk(canonical) if isinstance(node, ast.Return)}
+        self.assertTrue(returns, "canonical health has no completion exits")
+        checked = set()
+        for node in ast.walk(canonical):
+            for _, statements in ast.iter_fields(node):
+                if not isinstance(statements, list):
+                    continue
+                for index, statement in enumerate(statements):
+                    if not isinstance(statement, ast.Return):
+                        continue
+                    self.assertGreater(index, 0, "completion exit has no marker")
+                    marker = statements[index - 1]
+                    self.assertEqual(ast.dump(marker, include_attributes=False),
+                                     ast.dump(ast.parse("print(_HEALTH_COMPLETION_MARKER)").body[0],
+                                              include_attributes=False),
+                                     f"canonical exit at line {statement.lineno} must print the shared marker")
+                    checked.add(statement.lineno)
+        self.assertEqual(checked, returns)
 
 
 class HealthGate(Base):

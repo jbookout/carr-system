@@ -91,12 +91,25 @@ import copy
 import json
 import tempfile
 import unittest
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HEALTH_CHECK_PATH = Path(__file__).resolve().parent / "health-check.py"
 SOURCE = HEALTH_CHECK_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE, filename=str(HEALTH_CHECK_PATH))
+sys.path.insert(0, str(HEALTH_CHECK_PATH.parent.parent / "lib"))
+
+
+def setUpModule():
+    from unittest.mock import patch
+    global scheduled_machine
+    scheduled_machine = patch("scheduled_jobs.check", return_value=[])
+    scheduled_machine.start()
+
+
+def tearDownModule():
+    scheduled_machine.stop()
 
 # The two names a finding-recording call inside tools/health-check.py may
 # appear under: the low-level `_canonical_finding` itself (still called
@@ -119,8 +132,9 @@ STRUCTURAL_KEYS = {
     "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
+    "gate_precision_unreadable",
 }
-ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity"}
+ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity", "scheduled_jobs_evidence_unavailable"}
 
 
 def _find_function(name: str) -> ast.FunctionDef:
@@ -583,9 +597,42 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
                   _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
+                  _build_duration_row=lambda: ("OK build duration fixture", 0),
+                  _runtime_error_row=lambda: "OK runtime errors fixture",
+                  _gate_precision_row=lambda: ("OK gate precision fixture", []),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
         return ns
+
+    def test_gate_precision_uses_isolated_reader_and_writer_seam(self):
+        import contextlib, io
+        from unittest.mock import Mock
+        ns = self.all_namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_gate_precision_row"] = Mock(return_value=("WARN gate precision fixture", [{"gate": "fixture"}]))
+        # Refuse dynamic imports before they can reach a machine ledger or writer.
+        ns["importlib"] = Mock()
+        ns["importlib"].util.spec_from_file_location.side_effect = RuntimeError("production import forbidden")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        ns["_gate_precision_row"].assert_called_once_with()
+        ns["importlib"].util.spec_from_file_location.assert_not_called()
+        self.assertEqual([f["key"] for f in ns["_FINDINGS"]], ["gate_precision"])
+
+    def test_cli_fixture_incident_rows_do_not_import_production_adapters(self):
+        from unittest.mock import Mock
+        import builtins, sys
+        for name, args in (("_gate_precision_row", []), ("_claude_continuity_spool_row", [False])):
+            with self.subTest(name=name):
+                ns = {"CANONICAL_FIXTURE": "fixture.json", "REPO_ROOT": str(HEALTH_CHECK_PATH.parent.parent),
+                      "sys": sys, "__builtins__": {**vars(builtins), "__import__": Mock(side_effect=RuntimeError("production import forbidden"))},
+                      "importlib": Mock()}
+                ns["importlib"].util.spec_from_file_location.side_effect = RuntimeError("production import forbidden")
+                exec(compile(ast.Module(body=[_find_function(name)], type_ignores=[]), str(HEALTH_CHECK_PATH), "exec"), ns)
+                result = ns[name](*args)
+                self.assertTrue(result[0].startswith("--"))
+                ns["__builtins__"]["__import__"].assert_not_called()
+                ns["importlib"].util.spec_from_file_location.assert_not_called()
 
     def grok_reader_failure(self, mode):
         """Exercise the shipped reader with failed import or actual lock storage."""
@@ -678,10 +725,12 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         ns = self.namespace()
         snap = {"exports": {}, "jobs": [], "job_definitions": [], "controls": {}}
         ns.update(CANONICAL_SECTION="all", _canonical_snapshot=lambda: snap,
+                  _branch_janitor_row=lambda: ("OK branch janitor fixture", False),
                   _canonical_now=lambda snap: datetime.now(timezone.utc),
                   _canonical_contradiction_alarm=lambda: 0,
                   _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
                   _tailscale_row=lambda: ("OK fixture node", False),
+                  _claude_continuity_spool_row=lambda drain: ("OK claude continuity spool — fixture", 0),
                   _health_sub=Mock(classify_loose_status=Mock(return_value={
                       "actionable_tracked": [], "actionable_untracked": [],
                       "expected_patched_submodules": [], "managed_artifacts": []}),
@@ -704,6 +753,19 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                 self.assertIn("HEALTH_COMPLETE", out.getvalue())
                 self.assertEqual([row["key"] for row in ns["_FINDINGS"]],
                                  [] if line.startswith("OK") else ["jev_paid_cap"])
+
+    def test_a_growing_continuity_spool_is_its_own_finding(self):
+        import io, contextlib
+        ns = self.all_namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        drains = []
+        ns["_claude_continuity_spool_row"] = lambda drain: (
+            drains.append(drain) or ("WARN claude continuity spool — 12 unsent", 1))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertIn("HEALTH_COMPLETE", out.getvalue())
+        self.assertEqual([row["key"] for row in ns["_FINDINGS"]], ["claude_continuity_spool"])
+        self.assertEqual(drains, [False], "manual health reports; only the nightly section drains")
 
     def test_canonical_health_records_cap_failures_and_finishes(self):
         import io, contextlib

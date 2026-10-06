@@ -106,8 +106,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "claude-continuity-spool", "builds"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|claude-continuity-spool|builds")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -183,6 +183,29 @@ def _grok_session_row():
                 "owner orchestrator · remediation restore the Grok reader/lock storage · "
                 "verify rerun health · auto-clear on successful read", 1)
 
+
+def _claude_continuity_spool_row(drain):
+    """Optionally drain the continuity spool, then report what is left."""
+    if CANONICAL_FIXTURE:
+        return "-- claude continuity spool fixture supplies no local receipt state", 0
+    sys.path.insert(0, REPO_ROOT)
+    from datetime import datetime as _dt, timezone as _tz
+    from lib import claude_continuity_spool as continuity_spool
+    try:
+        drained = continuity_spool.drain() if drain else None
+    except (OSError, ValueError) as exc:
+        return (f"UNAVAILABLE claude continuity spool — drain {type(exc).__name__} · "
+                f"{continuity_spool.ACTION}"), 1
+    line = continuity_spool.health_row(run_verb=continuity_spool.run_verb,
+                                       state_path=continuity_spool.loop_state_path(),
+                                       now=_dt.now(_tz.utc), drained=drained)
+    return line, int(not line.startswith("OK"))
+
+
+if CANONICAL_SECTION == "claude-continuity-spool":
+    _spool_line, _spool_rc = _claude_continuity_spool_row(drain=True)
+    print(_spool_line)
+    sys.exit(_spool_rc)
 
 if CANONICAL_SECTION == "jev-spend":
     try:
@@ -1327,10 +1350,63 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+def _build_duration_row():
+    checker = os.path.join(REPO_ROOT, 'ops', 'build-duration-check.py')
+    args = [sys.executable, checker, '--health']
+    if CANONICAL_SECTION == 'builds' and CANONICAL_FIXTURE:
+        args.extend(['--fixture', CANONICAL_FIXTURE])
+    result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+    lines = result.stdout.strip().splitlines()
+    if result.returncode not in (0, 1) or not lines:
+        return ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled checker; "
+                "verify ops/build-duration-check.py --health; auto-clear after fresh complete scan", 1)
+    return lines[0], result.returncode
+def _branch_janitor_row():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+    from branch_retirement import health
+    return health(REPO_ROOT)
+
+
+def _runtime_error_row():
+    runtime_spec = importlib.util.spec_from_file_location(
+        'runtime_error_health', os.path.join(REPO_ROOT, 'ops', 'runtime_error_health.py'))
+    runtime_health = importlib.util.module_from_spec(runtime_spec)
+    runtime_spec.loader.exec_module(runtime_health)
+    return runtime_health.health_row(REPO_ROOT)
+
+
+def _gate_precision_row():
+    if CANONICAL_FIXTURE:
+        return "-- gate precision fixture supplies no local decision ledger", []
+    spec = importlib.util.spec_from_file_location(
+        "gate_verdict", os.path.join(REPO_ROOT, "tools", "gate_verdict.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    line, noisy = module.health_row(module.default_ledger())
+    if not CANONICAL_FIXTURE and (noisy or os.path.exists(module.LOOP_STATE)):
+        if "error" in module.reconcile_loops(noisy, module.call_verb).values():
+            line += " · loop update FAILED, rerun health"
+    return line, noisy
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    build_rc = 0
+    if CANONICAL_SECTION in ('all', 'builds'):
+        try:
+            build_line, build_rc = _build_duration_row()
+        except (OSError, subprocess.TimeoutExpired):
+            build_line, build_rc = ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled "
+                                   "checker; verify ops/build-duration-check.py --health; "
+                                   "auto-clear after fresh complete scan", 1)
+        print('  ' + build_line)
+        if build_rc:
+            rc = _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)
+        if CANONICAL_SECTION == 'builds':
+            print(_HEALTH_COMPLETION_MARKER)
+            return rc
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)
@@ -1419,6 +1495,33 @@ def _canonical_health():
                       f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
+        sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+        import scheduled_jobs as _scheduled_jobs
+        if CANONICAL_FIXTURE and "scheduled_jobs" not in snap:
+            print("  -- scheduled jobs NOT IN FIXTURE")
+        elif sys.platform != "darwin" and not CANONICAL_FIXTURE:
+            print("  -- scheduled jobs launchd check applies to macOS")
+        else:
+            try:
+                _scheduled_rows = _scheduled_jobs.check(
+                    snapshot=snap.get("scheduled_jobs") if CANONICAL_FIXTURE else None,
+                    now=_canonical_now(snap).timestamp())
+                for _job_row, _line in zip(_scheduled_rows, _scheduled_jobs.render(_scheduled_rows)):
+                    print("  " + _line)
+                    rc = _red("scheduled_jobs_" + _job_row["code"], _line,
+                              subject=_job_row["label"],
+                              hard_error=_job_row["code"] == "evidence_unavailable",
+                              time_rolling=_job_row["code"] == "stale_log")
+                if not _scheduled_rows:
+                    print("  OK scheduled jobs match manifest; canonical main is current")
+            except Exception as exc:
+                _detail = (f"scheduled job check unreadable ({type(exc).__name__}) · on breach: "
+                           "job-watchdog.py scan files/updates loop scheduled_jobs:checker:evidence_unavailable · "
+                           "owner orchestrator · fix: restore the manifest and machine evidence reader · "
+                           "verify: python3 ops/scheduled-jobs-check.py · auto-clear: next complete scan")
+                print("  WARN " + _detail)
+                rc = _red("scheduled_jobs_evidence_unavailable", _detail,
+                          subject="checker", hard_error=True)
         for headless_row in _headless_rows():
             print("  " + headless_row["line"])
             if headless_row["status"] == "WARN":
@@ -1625,6 +1728,16 @@ def _canonical_health():
             rc = _red("grok_session", _grok_line,
                       hard_error=_grok_line.startswith("UNAVAILABLE"), time_rolling=True)
 
+    if CANONICAL_SECTION == "all":
+        # Report only; the nightly claude-continuity-spool section drains.
+        try:
+            _spool_line, _spool_rc = _claude_continuity_spool_row(drain=False)
+        except Exception as exc:
+            _spool_line, _spool_rc = (f"UNAVAILABLE claude continuity spool — {type(exc).__name__}", 1)
+        print("  " + _spool_line)
+        if _spool_rc:
+            rc = _red("claude_continuity_spool", _spool_line, time_rolling=True)
+
     if CANONICAL_SECTION in ("all", "credentials"):
         # The source log is canonical across worktrees. The row carries its
         # response action on both OK and WARN, and the helper owns one loop.
@@ -1635,6 +1748,11 @@ def _canonical_health():
             print(f"  UNAVAILABLE jev spend — {type(exc).__name__}; "
                   "on breach: open/update one dedup loop · owner orchestrator · "
                   "remediation find caller in jev usage log · auto-clear when below threshold")
+        runtime_row = _runtime_error_row()
+        print('  ' + runtime_row)
+        if runtime_row.startswith(('WARN', 'UNAVAILABLE')):
+            rc = _red('runtime_errors', runtime_row, hard_error=runtime_row.startswith('UNAVAILABLE'))
+
         # ── credential health (added 2026-09-24) ────────────────────────────
         # Daily liveness lane for every credential CARR needs to run
         # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer
@@ -1847,6 +1965,34 @@ def _canonical_health():
             _detail = f"check failed ({type(e).__name__}: {e})"
             print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
             rc = _red("jev_call_receipt_integrity", _detail, hard_error=True)
+
+    if CANONICAL_SECTION == "all":
+        # Gate precision (2026-10-05). Every block, hold and reopen lands in
+        # out/gate-decisions.jsonl (hooks/gate_ledger.py); labels say which were
+        # wrong. A gate whose false alarms cross the threshold gets one
+        # deduplicated loop, closed again when it drops off this row.
+        try:
+            _gp_line, _gp_noisy = _gate_precision_row()
+            print("  " + _gp_line)
+            if _gp_noisy:
+                rc = _red("gate_precision", _gp_line.split(" · ", 1)[0], count=len(_gp_noisy))
+        except Exception as e:
+            _detail = f"check failed ({type(e).__name__}: {e})"
+            print(f"  ⚠︎ {'gate precision':<18} {_detail} · on breach: restore "
+                  f"tools/gate_verdict.py or the ledger, then rerun health")
+            rc = _red("gate_precision_unreadable", _detail, hard_error=True)
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        print("Branch retirement — local scheduled receipts")
+        try:
+            line, failed = _branch_janitor_row()
+            print("  " + line)
+            if failed:
+                rc = _red("branch_janitor", line, subject="three-repo-retirement")
+        except Exception as exc:
+            line = (f"branch janitor unavailable ({type(exc).__name__}) · on breach: owner orchestrator "
+                    "· restore lib/branch_retirement.py · verify health · auto-clear after successful readback")
+            print("  WARN " + line)
+            rc = _red("branch_janitor", line, subject="three-repo-retirement")
 
     if CANONICAL_SECTION in ("all", "tailscale"):
         try:

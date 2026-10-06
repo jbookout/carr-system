@@ -1,0 +1,185 @@
+{
+  "schema": "model-fit/v1",
+  "revision": "seed-2026-10-05",
+  "score_note": "Scores are initial ordinal judgments, not measured success probabilities. Every cell inherits its model seed_source. Zero scores stay prohibited when learning. Tier floors remain in model-floors.json; min_fit bounds numerical calibration separately.",
+  "task_routes": {
+    "design/UI": "escalate",
+    "non-trivial build": "code",
+    "mechanical build": "script",
+    "review": "escalate",
+    "review-fix": "code",
+    "research": "escalate",
+    "x-retrieval": "direct"
+  },
+  "default_floors": {
+    "design/UI": "opus",
+    "non-trivial build": "opus",
+    "mechanical build": "haiku",
+    "review": "opus",
+    "review-fix": "sonnet",
+    "research": "opus",
+    "x-retrieval": "haiku"
+  },
+  "budget": {
+    "claude_weekly_reserve_pct": 25,
+    "cutoff_pct": 90,
+    "max_age_seconds": 1800
+  },
+  "learning": {
+    "min_samples": 5,
+    "max_step": 0.05,
+    "rate": 0.2
+  },
+  "models": {
+    "opus-5.5": {
+      "family": "claude",
+      "pool": "claude",
+      "tier": "opus",
+      "effort": "high",
+      "fit": {
+        "design/UI": 0.98,
+        "non-trivial build": 0.95,
+        "mechanical build": 0.75,
+        "review": 0.94,
+        "review-fix": 0.93,
+        "research": 0.95,
+        "x-retrieval": 0.7
+      },
+      "min_fit": {
+        "design/UI": 0.6,
+        "non-trivial build": 0.6,
+        "mechanical build": 0.6,
+        "review": 0.6,
+        "review-fix": 0.6,
+        "research": 0.6,
+        "x-retrieval": 0.6
+      },
+      "seed_source": "Joe memory calibration supplied in the 2026-10-05 Platform Engineer brief: design/UI to Opus; research, reviews and non-trivial builds to Sol high or Opus."
+    },
+    "sonnet-5.5": {
+      "family": "claude",
+      "pool": "claude",
+      "tier": "sonnet",
+      "effort": "high",
+      "fit": {
+        "design/UI": 0.65,
+        "non-trivial build": 0.7,
+        "mechanical build": 0.9,
+        "review": 0.65,
+        "review-fix": 0.86,
+        "research": 0.6,
+        "x-retrieval": 0.55
+      },
+      "min_fit": {
+        "design/UI": 0.6,
+        "non-trivial build": 0.6,
+        "mechanical build": 0.6,
+        "review": 0.6,
+        "review-fix": 0.6,
+        "research": 0.6,
+        "x-retrieval": 0.55
+      },
+      "seed_source": "Same 2026-10-05 brief: Sonnet for well-scoped work with a checkable done-condition. Critical tasks retain the default opus-equivalent floor."
+    },
+    "gpt-6.1-sol": {
+      "family": "openai",
+      "pool": "codex",
+      "tier": "opus",
+      "effort": "high",
+      "fit": {
+        "design/UI": 0.78,
+        "non-trivial build": 0.97,
+        "mechanical build": 0.85,
+        "review": 0.97,
+        "review-fix": 0.95,
+        "research": 0.96,
+        "x-retrieval": 0.75
+      },
+      "min_fit": {
+        "design/UI": 0.6,
+        "non-trivial build": 0.6,
+        "mechanical build": 0.6,
+        "review": 0.6,
+        "review-fix": 0.6,
+        "research": 0.6,
+        "x-retrieval": 0.6
+      },
+      "seed_source": "Same 2026-10-05 brief: Sol high for research, reviews and non-trivial builds. ops/config/model-routes.v1.json code.then already selects sol high."
+    },
+    "gpt-5.6-luna": {
+      "family": "openai",
+      "pool": "codex",
+      "tier": "haiku",
+      "effort": "low",
+      "fit": {
+        "design/UI": 0,
+        "non-trivial build": 0,
+        "mechanical build": 0.93,
+        "review": 0,
+        "review-fix": 0,
+        "research": 0,
+        "x-retrieval": 0
+      },
+      "min_fit": {
+        "design/UI": 0,
+        "non-trivial build": 0,
+        "mechanical build": 0.6,
+        "review": 0,
+        "review-fix": 0,
+        "research": 0,
+        "x-retrieval": 0
+      },
+      "seed_source": "Same 2026-10-05 brief: Luna mechanical only; explicitly prohibited for research and reviews."
+    },
+    "grok-4.7": {
+      "family": "xai",
+      "pool": "grok",
+      "tier": "haiku",
+      "effort": "high",
+      "fit": {
+        "design/UI": 0,
+        "non-trivial build": 0,
+        "mechanical build": 0.86,
+        "review": 0,
+        "review-fix": 0,
+        "research": 0,
+        "x-retrieval": 0.96
+      },
+      "min_fit": {
+        "design/UI": 0,
+        "non-trivial build": 0,
+        "mechanical build": 0.6,
+        "review": 0,
+        "review-fix": 0,
+        "research": 0,
+        "x-retrieval": 0.6
+      },
+      "seed_source": "Same 2026-10-05 brief: Grok mechanical only for orchestration work. X retrieval is the explicit exception, STORE personal rule 57d13061, Grok-first public X retrieval."
+    },
+    "flash-next": {
+      "family": "local",
+      "pool": "flash",
+      "tier": "haiku",
+      "effort": "low",
+      "fit": {
+        "design/UI": 0,
+        "non-trivial build": 0,
+        "mechanical build": 0.82,
+        "review": 0,
+        "review-fix": 0,
+        "research": 0,
+        "x-retrieval": 0
+      },
+      "min_fit": {
+        "design/UI": 0,
+        "non-trivial build": 0,
+        "mechanical build": 0.6,
+        "review": 0,
+        "review-fix": 0,
+        "research": 0,
+        "x-retrieval": 0
+      },
+      "seed_source": "Same 2026-10-05 brief: Flash mechanical only. Existing model-routes script/direct support this bounded role."
+    }
+  }
+}
