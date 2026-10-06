@@ -86,3 +86,16 @@ test("lead-board contract does not expose contact, notes, or raw-source fields",
     for (const field of forbidden) assert.equal(Object.hasOwn(lead, field), false, field);
   }
 });
+
+test("archived leads stay visible but leave nurture and conversion metrics",async()=>{
+  const db=new LeadBoardFake(),query=db.query.bind(db);
+  db.query=async sql=>{
+    const r=await query(sql);
+    if(sql.includes("from v_lead_board\n"))return {rows:[{...SAFE_LEAD,converted:true},{...SAFE_LEAD,id:"archived-example",stage:"archived",converted:true}]};
+    return r;
+  };
+  const result=await TOOLS["lead-board"].handler(db);
+  assert.deepEqual(result.metrics,{nurture_count:1,conversion_denominator:1,converted_count:1});
+  assert.equal(result.leads.length,2);
+  assert.ok(db.queries.some(sql=>sql.includes("'reason',m.reason") && sql.includes("'evidence_ref',m.evidence_ref")));
+});

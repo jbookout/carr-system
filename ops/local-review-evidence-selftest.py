@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class CheckArtifacts(unittest.TestCase):
     def test_eval_caller_and_inherited_probe_receive_identical_body_arguments(self):
+        self.enterContext(patch.dict(os.environ, CARR_PR_BODY_FILE='outside-fixture-body'))
         with tempfile.TemporaryDirectory(prefix="review-floor-caller-") as td:
             root = Path(td)
             for folder in ["ops", "hooks"]:
@@ -37,12 +38,14 @@ class CheckArtifacts(unittest.TestCase):
                 "import sys\nfrom pathlib import Path\nPath('probe-args').write_text(' '.join(sys.argv[1:]))\nraise SystemExit(1)\n")
             body = root / "body"
             body.write_text("no-eval: fixture: invalid\n")
+            env = fixture_env()
+            env.pop('CARR_PR_BODY_FILE', None)
             for supplied in [False, True]:
                 with self.subTest(supplied=supplied):
                     argv = ["bash", str(root / "ops/ci.sh"), "--strict", "--only", "gates"]
                     if supplied:
                         argv += ["--pr-body-file", str(body)]
-                    run = subprocess.run(argv, cwd=root, env=fixture_env(), capture_output=True, text=True)
+                    run = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True)
                     self.assertNotIn("unbound variable", run.stdout + run.stderr)
                     self.assertTrue((root / "eval-args").exists())
                     if supplied:

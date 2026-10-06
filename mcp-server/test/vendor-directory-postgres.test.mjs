@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
 import { TOOLS } from '../src/tools.js';
 import { parseBusinessQuery, readBusinessList, readBusinessRecord } from '../src/workspace-business-read.js';
 function disposableClient(dsn) {
@@ -35,6 +36,33 @@ test('refusal output never discloses database userinfo or the full URL', () => {
 test('W5 database proof accepts both loopback names and refuses external hosts', () => {
   for (const host of ['127.0.0.1','localhost']) assert.ok(disposableClient(`postgres://demo@${host}:5432/demo`));
   for (const host of ['example.com','localhost.example.com','127.0.0.1.example.com','postgres']) assert.throws(()=>disposableClient(`postgres://demo@${host}:5432/demo`));
+});
+
+test('vendor contract migration set has no duplicate constraint installations', async () => {
+ const folder=new URL('../../migrations/',import.meta.url),owners=new Map();
+ for(const name of (await readdir(folder)).filter(name=>name.endsWith('_vendor_relationship_contract.sql')).sort()) {
+  for(const [,constraint] of (await readFile(new URL(name,folder),'utf8')).matchAll(/alter table public\.vendor add constraint ([a-z_]+)/g)) {
+   assert.ok(!owners.has(constraint),`${constraint} is installed by both ${owners.get(constraint)} and ${name}`);
+   owners.set(constraint,name);
+  }
+ }
+ assert.deepEqual([...owners.keys()].sort(),['vendor_deal_evidence_array','vendor_trust_override_shape']);
+});
+
+test('W5 PostgreSQL: vendor contract migrations install together on an empty schema', async t => {
+ const dsn=process.env.DATABASE_URL;
+ if(!dsn){assert.notEqual(process.env.CARR_VENDOR_DIRECTORY_DB_REQUIRED,'1');t.skip('disposable PostgreSQL required');return;}
+ const db=disposableClient(dsn);await db.connect();
+ const schema='vendor_contract_'+randomUUID().replaceAll('-','');
+ try {
+  await db.query('begin');await db.query(`create schema ${schema}`);
+  await db.query(`create table ${schema}.vendor(id uuid);create table ${schema}.activity(id uuid,vendor_id uuid,occurred_at timestamptz);create table ${schema}.party_link(id uuid);create table ${schema}.deal(id uuid)`);
+  const folder=new URL('../../migrations/',import.meta.url);
+  const migrations=(await readdir(folder)).filter(name=>name.endsWith('_vendor_relationship_contract.sql')).sort();
+  assert.ok(migrations.length,'vendor schema installation must be present');
+  for(const name of migrations)await db.query((await readFile(new URL(name,folder),'utf8')).replaceAll('public.',schema+'.'));
+  assert.deepEqual((await db.query('select conname from pg_constraint where connamespace=$1::regnamespace order by conname',[schema])).rows.map(row=>row.conname),['vendor_deal_evidence_array','vendor_trust_override_shape']);
+ } finally {await db.query('rollback');await db.end();}
 });
 
 test('W5 PostgreSQL: sourced stats, partner override, audit, replay, CAS and reader grants', async t => {

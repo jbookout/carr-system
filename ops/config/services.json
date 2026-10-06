@@ -509,7 +509,7 @@
     {
       "key": "release-pipeline",
       "name": "Scripted release pipeline (Worker + DoctorCRE app)",
-      "purpose": "Decisions 17ef11fa/b729859d: release is script-triggered. Every 15 minutes compares each lane's origin/main with the last SHA it released and, when the batch touches release paths, runs the sanctioned manual release sequence unattended from a detached worktree at the exact SHA (staging replacement, staging app writer, migrate-prod, deploy-worker upload/staging/promote, live readback, health; npm run release:production for the app). Stops on any nonzero exit, records the step and log, never retries that SHA, and enqueues a repo-write Model Room diagnosis session to fix forward by PR. Kill switch: ops/config/release-pipeline.v1.json enabled, or ~/.config/carr/release-pipeline.off. See ops/release-pipeline.py.",
+      "purpose": "Decisions 17ef11fa/b729859d: release is script-triggered. Every 15 minutes compares each lane's origin/main with the last SHA it released and, when the batch touches release paths, runs the sanctioned manual release sequence unattended from a detached worktree at the exact SHA (staging replacement, staging app writer, migrate-prod, deploy-worker upload/staging/promote, live readback, health; credential-free node scripts/prepare-release.mjs, then provider-only node scripts/release-production.mjs for the app). Stops on any nonzero exit, records the step and log, never retries that SHA, and enqueues a repo-write Model Room diagnosis session to fix forward by PR. Kill switch: ops/config/release-pipeline.v1.json enabled, or ~/.config/carr/release-pipeline.off. See ops/release-pipeline.py.",
       "family": "Local Mac edge",
       "criticality": "high",
       "owner_actor": "joe",

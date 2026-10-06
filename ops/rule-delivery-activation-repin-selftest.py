@@ -30,18 +30,21 @@ def main():
     spec.loader.exec_module(module)
     binaries = module.find_postgres_binaries()
     env = module.scrub_cloud_environment(os.environ)
+    env['LC_ALL'] = 'C'
     schema = (ROOT / "db/schema.sql").read_text()
     with postgres_fixture_group(), tempfile.TemporaryDirectory(prefix="carr-activation-repin-") as temp:
         root = Path(temp)
         data, socket = root / "data", root / "socket"
         socket.mkdir()
-        subprocess.run([binaries.initdb, "-D", data, "-A", "trust", "-U", "fixture"],
+        subprocess.run([binaries.initdb, "-D", data, "-A", "trust", "-U", "fixture",
+                        "--encoding=UTF8", "--no-locale"],
                        check=True, capture_output=True, env=env, timeout=20)
         try:
             subprocess.run([binaries.pg_ctl, "-D", data, "-l", root / "pg.log", "-o",
                             f"-k {socket} -c listen_addresses=''", "-w", "start"],
                            check=True, capture_output=True, env=env, timeout=20)
             with psycopg.connect(host=str(socket), user="fixture", dbname="postgres", autocommit=True) as conn:
+                assert conn.execute("show server_encoding").fetchone() == ('UTF8',)
                 conn.execute("create schema ops")
                 for name in ("rule_delivery_activation_target", "rule_delivery_policy"):
                     conn.execute(re.search(rf"CREATE TABLE ops\.{name}\b.*?;", schema, re.S)[0])

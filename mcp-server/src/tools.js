@@ -1,4 +1,8 @@
+import { invoiceTrackerTools } from "./invoice-tracker.js";
+import { isCalendarDate } from "./calendar-date.js";
+import { bindReferralDeal } from "./relationship-network.js";
 import { trustedOverride, dealEvidenceEntries, requireRelationshipPartner, mergeRelationshipFields } from "./vendor-relationship.js";
+import { readLeadWorkspace, LEAD_WORKSPACE_SCHEMA, validateStageReview, lockLeadLifecycle } from "./lead-workspace.js";
 // CARR MCP tool registry — Wave 1 verbs (tool-contracts-2026-07-30.md §2).
 // Every write runs the envelope: idempotency replay via tool_call, actor from
 // the verified token (never the payload), base_version conflicts ask and never
@@ -33,6 +37,7 @@ import { claudeContinuityTools } from "./claude-continuity.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { resourceObservationTools } from "./resource-observation.v5.js";
+import { invoiceAutomation } from "./invoice-automation.js";
 import { leadAutomationTools } from "./lead-automation.js";
 import { jevCallReceiptTools } from "./jev-call-receipt.js";
 import { workflowCutoverTools } from "./workflow-cutover.v5.js";
@@ -336,12 +341,12 @@ async function withEnvelope(client, actor, verb, args, fn) {
     },
     args: { ...args, idempotency_key: undefined },
   });
-  // Shape and lead writes need same-key serialization before their replay read:
+  // Versioned writes need same-key serialization before their replay read:
   // otherwise two first calls can both see no tool_call row, and the loser
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move"].includes(verb) || verb === "teach" || verb === "approve-rule" || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "record-commission-receipt" || ["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move", "undo-lead-move", "record-deal-invoice", "undo-invoice-close"].includes(verb) || verb === "teach" || verb === "approve-rule" || verb === "claim-lead" || verb === "link-lead-client" || (verb === "update-lead" && args.stage_review) || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -3288,8 +3293,9 @@ export const TOOLS = {
   "lead-board": {
     write: false,
     description: "The complete, safe worked-lead board. All leads surface, including weak, suppressed, and terminal rows: qualification is the human's job and this read is never pre-qualified or silently truncated. Returns the authoritative base_version needed by update-lead, ordered stage vocabulary including empty stages, score/confidence/freshness signals, and no phone, email, address, notes, or raw source detail.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    handler: async (c) => {
+    inputSchema: LEAD_WORKSPACE_SCHEMA,
+    handler: async (c, _actor, args = {}) => {
+      if (args.workspace === "leads") return readLeadWorkspace(c, args);
       const stages = (await c.query(
         `select slug,label,sort
            from v_lead_board_stage
@@ -3299,10 +3305,19 @@ export const TOOLS = {
                 (select party_id from lead where lead.id=v_lead_board.id) as party_id,
                 stage_label,stage_sort,score,segment,suppressed,est_lease_event,
                 event_confidence,last_touch,next_action_date,owner,owner_label,
-                base_version,created_at,updated_at
+                base_version,created_at,updated_at,
+                (stage <> 'archived') as conversion_eligible,
+                (select client_id is not null from lead where lead.id=v_lead_board.id) as converted,
+                coalesce((select jsonb_agg(jsonb_build_object('move_id',m.id,'from_stage',m.from_stage,
+                  'to_stage',m.to_stage,'reason',m.reason,'evidence_ref',m.evidence_ref,'status',m.status,
+                  'created_at',m.created_at,'undone_at',m.undone_at,'undone_by',a.display_name) order by m.created_at,m.id)
+                  from lead_stage_move m left join actor a on a.id=m.undone_by where m.lead_id=v_lead_board.id),'[]') as stage_moves
            from v_lead_board
           order by stage_sort,suppressed,score desc nulls last,name,registry_ref`)).rows;
-      return { generated_at: new Date().toISOString(), stages, leads };
+      const eligible=leads.filter(l=>l.stage!=="archived");
+      return { generated_at: new Date().toISOString(), stages, leads,
+        metrics:{nurture_count:eligible.filter(l=>l.stage==="nurture_drip" && !l.suppressed).length,
+          conversion_denominator:eligible.length,converted_count:eligible.filter(l=>l.converted).length} };
     },
   },
 
@@ -3886,9 +3901,6 @@ export const TOOLS = {
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
       // A real calendar date: the pattern, then a round trip, so 2026-13-45 or
       // 2026-02-30 is refused here instead of failing later as a raw cast error.
-      const isCalendarDate = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-        !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) &&
-        new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
       if (keys.includes("invoiced_on") && args.fields.invoiced_on !== null &&
           !isCalendarDate(args.fields.invoiced_on))
         throw new ToolError({ error: "invalid_invoiced_on",
@@ -3907,7 +3919,7 @@ export const TOOLS = {
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] },
-            recorded_at_after_lock: k === "phase", idempotency_key: args.idempotency_key });
+            recorded_at_after_lock: k === "phase" || k === "invoiced_on", idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys,
                ...(guard.rebased ? { rebased: true, rebase_receipt: guard.rebase_receipt } : {}) };
     }),
@@ -4754,15 +4766,70 @@ export const TOOLS = {
   // do_not_contact -> do_not_contact) — there was no way to move a lead FORWARD
   // through its own funnel, or to correct one an import or a stuck drip left
   // behind. update-lead is that writer.
+  "claim-lead": {
+    write: true, humanOnly: true,
+    description: "Claim an unowned New lead for the authenticated human. Preserves stage, checks the current version and exact lifecycle links, and records the ownership change.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      idempotency_key: { type: "string" }, expected_actor: { type: "string", minLength: 1 }, lead: { type: "string" }, base_version: { type: "integer" }
+    }, required: ["idempotency_key","lead","base_version","expected_actor"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "claim-lead", args, async () => {
+      if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
+      if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_confirmation_required" });
+      const subject = await resolveSubject(c, args.lead);
+      if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead" });
+      await versionGuard(c, "lead", subject.id, args.base_version);
+      const { current: row } = await lockLeadLifecycle(c, subject.id);
+      if (!row || !row.live_party || row.stage !== "new" || !row.contact_eligible || row.owner_id || row.client_id || row.is_client || row.linked_client)
+        throw new ToolError({ error: "lead_not_claimable" });
+      const owner = (await c.query("select id,slug,display_name from actor where slug=$1 and active", [partnerAuthoritySlugForActor(actor)])).rows[0];
+      if (!owner) throw new ToolError({ error: "human_owner_unavailable" });
+      await c.query("update lead set owner_id=$1,owner_label=$2,updated_by=$3 where id=$4", [owner.id, owner.display_name, actor.id, subject.id]);
+      await writeEvent(c, actor, "claim-lead", "lead", subject.id, { field: "owner_id", old: { owner_id: null },
+        new: { owner_id: owner.id }, idempotency_key: args.idempotency_key });
+      return { ok: true, lead_id: subject.id, owner: owner.slug };
+    }),
+  },
+
+  "link-lead-client": {
+    write: true, humanOnly: true,
+    description: "Confirm one lead belongs to an existing client, by exact IDs and an explicit human choice. Records the client pointer without merging parties or creating a client/deal. Refuses suppression, stale versions and an already linked lead.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
+      idempotency_key: { type: "string" }, expected_actor: { type: "string", minLength: 1 }, lead: { type: "string" }, base_version: { type: "integer" },
+      client_id: { type: "string" }, confirmed: { type: "boolean", const: true }
+    }, required: ["idempotency_key","lead","base_version","client_id","confirmed","expected_actor"] },
+    handler: async (c, actor, args) => withEnvelope(c, actor, "link-lead-client", args, async () => {
+      if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
+      if (!canExercisePartnerAuthority(actor) || args.confirmed !== true) throw new ToolError({ error: "human_confirmation_required" });
+      const subject = await resolveSubject(c, args.lead);
+      if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead" });
+      await versionGuard(c, "lead", subject.id, args.base_version);
+      const { current, target } = await lockLeadLifecycle(c, subject.id, args.client_id);
+      if (!current || !current.live_party || current.is_client || !current.contact_eligible || current.client_id || current.linked_client)
+        throw new ToolError({ error: "lead_not_linkable" });
+      if (!target) throw new ToolError({ error: "client_not_found" });
+      await c.query("update lead set client_id=$1,updated_by=$2 where id=$3", [target.id, actor.id, subject.id]);
+      await writeEvent(c, actor, "link-lead-client", "lead", subject.id, { field: "client_id",
+        old: { client_id: null }, new: { client_id: target.id }, idempotency_key: args.idempotency_key });
+      return { ok: true, lead_id: subject.id, client_id: target.id };
+    }),
+  },
+
   "update-lead": {
     write: true,
     description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. do_not_contact is inseparable from suppressed=true, and only a human may clear an existing suppression instruction. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
     inputSchema: { type: "object", properties: {
-      idempotency_key: { type: "string" }, lead: { type: "string" },
+      idempotency_key: { type: "string" }, expected_actor: { type: "string", minLength: 1 }, lead: { type: "string" },
       base_version: { type: "integer" },
+      stage_review: { type: "object", additionalProperties: false, properties: { reason: { type: "string", minLength: 1, maxLength: 1000 }, evidence_ids: { type: "array", items: { type: "string" }, maxItems: 20 }, undo_event_id: { type: "string" }, human_quote: { type: "string", maxLength: 1000 } }, required: ["reason", "evidence_ids"] },
       fields: { type: "object", description: "subset of: stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
       required: ["idempotency_key","lead","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
+      const reviewed = Object.hasOwn(args, "stage_review") ? validateStageReview(args.stage_review, args.fields, ToolError) : null;
+      if (reviewed?.undo_event_id) {
+        if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_confirmation_required" });
+        if (!reviewed.human_quote?.trim()) throw new ToolError({ error: "undo_human_quote_required" });
+      }
+      if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
       const s = await resolveSubject(c, args.lead);
       if (s.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: s });
       await versionGuard(c, "lead", s.id, args.base_version);
@@ -4788,6 +4855,8 @@ export const TOOLS = {
       const current = (await c.query("select stage,suppressed from lead where id=$1", [s.id])).rows[0];
       const nextStage = keys.includes("stage") ? args.fields.stage : current.stage;
       const nextSuppressed = keys.includes("suppressed") ? args.fields.suppressed : current.suppressed;
+      if (keys.includes("stage") && (current.stage === "archived" || nextStage === "archived") && !canExercisePartnerAuthority(actor))
+        throw new ToolError({error:"archive_requires_partner"});
       if (nextStage === "do_not_contact" && nextSuppressed !== true) {
         throw new ToolError({ error: "do_not_contact_requires_suppression",
           hint: "do_not_contact is a standing instruction, not only a funnel label; pass stage='do_not_contact' and suppressed=true together" });
@@ -4800,13 +4869,32 @@ export const TOOLS = {
         throw new ToolError({ error: "suppression_clear_requires_human",
           hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
+      let stageReview = null;
+      if (reviewed) {
+        const ids = reviewed.evidence_ids;
+        const evidence = ids.length ? (await c.query(
+          "select id,occurred_at,kind,connected from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [s.id, ids])).rows : [];
+        if (evidence.length !== ids.length) throw new ToolError({ error: "stage_evidence_mismatch" });
+        if (args.fields.stage === "engaged" && evidence.some(row => ["call","text"].includes(row.kind) && row.connected !== true))
+          throw new ToolError({ error: "stage_evidence_not_contact" });
+        if (reviewed.undo_event_id) {
+          const last = (await c.query(`select * from v_lead_stage_transition
+            where lead_id=$1 order by mutation_order desc limit 1`, [s.id])).rows[0];
+          if (!last || !last.automatic || last.event_id !== reviewed.undo_event_id.toLowerCase() || last.prior_stage !== args.fields.stage || last.stage !== current.stage)
+            throw new ToolError({ error: "undo_changed" });
+        }
+        stageReview = { ...reviewed, evidence_ids: ids,
+          evidence_date: evidence.map(row => new Date(row.occurred_at).toISOString()).sort().at(-1) || null };
+      }
       const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
       await c.query(`update lead set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
         [actor.id, ...keys.map(k => args.fields[k]), s.id]);
       for (const k of keys)
         await writeEvent(c, actor, "update-lead", "lead", s.id,
-          { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
+          { recorded_at_after_lock: k === "stage", field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k], ...(k === "stage" && stageReview ? { stage_review: stageReview } : {}) },
+            ...(k === "stage" && stageReview ? { cause: stageReview.undo_event_id ? "human_correction" : undefined,
+              human_quote: stageReview.human_quote, agent_rationale: stageReview.reason } : {}), idempotency_key: args.idempotency_key });
       return { ok: true, updated: keys };
     }),
   },
@@ -5252,6 +5340,7 @@ export const TOOLS = {
       idempotency_key: { type: "string" }, from_party: { type: "string" }, to_party: { type: "string" },
       kind: { type: "string", description: "a slug from party_link_kind: knows, works_with, can_introduce, intro_requested, introduced, referred" },
       via_party: { type: "string", description: "WHO made the connection — the broker in the middle. A ref (V-/C-/L-/T-/P-) or a party uuid. Omit ONLY for a genuinely direct edge with no third party; for 'a vendor sent us this client' the vendor goes HERE, not on an end. Refused if it resolves to either end, because a broker cannot be one of the two people being connected." },
+      deal_id: { type: "string", description: "Exact referred deal UUID; referral/referred only, destination must be its live client party, note required. Several deals may attach to one relationship." },
       occurred_on: { type: "string", description: "YYYY-MM-DD — when it happened. An offer and a completed introduction are different events and the gap between them is the follow-up." },
       note: { type: "string" } }, required: ["idempotency_key","from_party","to_party","kind"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "link-parties", args, async () => {
@@ -5275,7 +5364,8 @@ export const TOOLS = {
         // by the schema, so an empty string there still falls through to the
         // resolver and surfaces as a named subject_not_found rather than a null.
         if (!raw && side === "via_party") { ends[side] = null; continue; }
-        if (UUID_RE.test(raw)) { ends[side] = raw; continue; }
+        // PostgreSQL returns uuids lowercase; compare stored and resolved ends in one spelling.
+        if (UUID_RE.test(raw)) { ends[side] = raw.toLowerCase(); continue; }
         const s = await resolveSubject(c, raw);          // throws subject_not_found, named
         let pid = s.type === "party" ? s.id : null;
         if (!pid) {
@@ -5310,6 +5400,15 @@ export const TOOLS = {
             hint: "occurred_on is a calendar date, YYYY-MM-DD" });
       }
 
+      // The referrer is the relationship's broker as stored after this call (a
+      // direct relationship credits its from end); the audit names the same party.
+      const attachDeal = async (linkId, broker) => {
+        let bound;
+        try { bound = await bindReferralDeal(c, actor, args, ends, kind,
+          { id: linkId, referred_by: broker || ends.from_party, occurred_on: occurredOn }); }
+        catch (error) { throw new ToolError({error:error.code || 'referral_deal_invalid'}); }
+        if (bound) await writeEvent(c,actor,'link-parties','party',bound.referred_by,{new:{link_id:linkId,deal_id:bound.deal_id,referred_by:bound.referred_by,kind:'referred'},idempotency_key:args.idempotency_key});
+      };
       // Upsert against 0020's unique index. Before it, two taps wrote two identical
       // edges and nothing complained. `do nothing` returns no row on conflict, so
       // the existing edge is read back and returned — the caller gets the edge it
@@ -5322,10 +5421,14 @@ export const TOOLS = {
         [ends.from_party, ends.to_party, kind, args.note || null,
          ends.via_party, occurredOn, actor.id]);
       if (!ins.rows.length) {
+        // Locked: a concurrent caller naming another broker waits here and then
+        // sees this call's backfill, instead of validating against a stale row.
         const cur = await c.query(
-          "select id, via_party, occurred_on from party_link where from_party=$1 and to_party=$2 and kind=$3",
+          "select id, via_party, occurred_on from party_link where from_party=$1 and to_party=$2 and kind=$3 for update",
           [ends.from_party, ends.to_party, kind]);
         const row = cur.rows[0];
+        if (args.deal_id && row.via_party && row.via_party !== ends.via_party) throw new ToolError({error:"referral_broker_mismatch"});
+        await attachDeal(row.id, row.via_party || ends.via_party);
         // BACKFILL, not overwrite. Every edge written between 0051 and 2026-08-10
         // carries a null broker, because this verb had no via_party to pass — the
         // schema was ternary and the only writer was binary. Those edges are the
@@ -5357,6 +5460,7 @@ export const TOOLS = {
         { new: { kind, to: ends.to_party, via: ends.via_party, occurred_on: occurredOn,
                  from_input: args.from_party, to_input: args.to_party },
           idempotency_key: args.idempotency_key });
+      await attachDeal(ins.rows[0].id, ends.via_party);
       return { ok: true, link_id: ins.rows[0].id, existing: false };
     }),
   },
@@ -8778,6 +8882,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "resource-observation": "mcp-server/src/resource-observation.v5.js",
   "jev-call-receipt": "mcp-server/src/jev-call-receipt.js",
   "lead-automation": "mcp-server/src/lead-automation.js",
+  "invoice-automation": "mcp-server/src/invoice-automation.js",
   "workflow-cutover": "mcp-server/src/workflow-cutover.v5.js",
   "memory": "mcp-server/src/memory.js",
   "codex-continuity": "mcp-server/src/codex-continuity.js",
@@ -8811,6 +8916,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "schedule-board": "mcp-server/src/schedule-board.js",
   "doc-suggestions": "mcp-server/src/doc-suggestions.js",
   "whats-new": "mcp-server/src/whats-new.js",
+  "invoice-tracker": "mcp-server/src/invoice-tracker.js",
 });
 
 function bindToolSource(tool, source) {
@@ -8838,6 +8944,8 @@ function registerTools(additions, source) {
   for (const tool of Object.values(additions)) bindToolSource(tool, source);
   Object.assign(TOOLS, additions);
 }
+
+registerTools(invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }), "invoice-tracker");
 
 // Deal Room contract. Durable writes use the same envelope and event helper as
 // the rest of this registry; the one explicit exception is the ephemeral lease.
@@ -9915,7 +10023,11 @@ registerTools(resourceObservationTools({ withEnvelope, ToolError }), "resource-o
 // server-timestamped receipt (migration 0587) before returning the answers, so
 // Jev gates credit only rows the gated model could not forge locally. See
 // src/jev-call-receipt.js.
-registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError }), "lead-automation");
+const invoices=invoiceAutomation({withEnvelope,writeEvent,ToolError,lockDealField,
+  updateDeal:(c,actor,args)=>TOOLS["update-deal"].handler(c,actor,args),
+  invoicingMailbox:process.env.CARR_INVOICING_MAILBOX});
+registerTools(invoices.tools,"invoice-automation");
+registerTools(leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoices }), "lead-automation");
 registerTools(jevCallReceiptTools({ withEnvelope, ToolError }), "jev-call-receipt");
 // DoctorCRE V5-R02: workflow cutover, caller migration and retirement
 // readiness. Composes accept-workflow / disable-legacy-schedule rather than

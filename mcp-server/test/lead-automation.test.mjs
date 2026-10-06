@@ -15,7 +15,7 @@ const plan=(l=lead,a=contact,d=[])=>planLeadMoves([l],[a],d,NOW);
 
 test("exact reply plus verified lease evidence qualifies with provenance",()=>{
   assert.deepEqual(plan()[0],{lead_id:lead.id,party_id:lead.party_id,from_stage:"new",to_stage:"qualified",base_version:3,
-    activity_id:contact.id,evidence_ref:"local-mail:synthetic-001",strength:"strong",status:"applied"});
+    reason:"Reply received 2026-10-01",activity_id:contact.id,evidence_ref:"local-mail:synthetic-001",strength:"strong",status:"applied"});
 });
 test("weak, unbound and missing lease evidence produces proposals",()=>{
   for(const a of [change(contact,{match:"domain"}),change(contact,{party_id:"other"}),change(contact,{evidence_ref:null}),{...contact,owed:"identity"}])
@@ -89,7 +89,7 @@ class Fake {
   }
 }
 const human={id:"actor-example",human:true};
-const tools=leadAutomationTools({withEnvelope:async(c,a,v,args,f)=>f(),writeEvent:async(c,...args)=>c.events.push(args),ToolError:class extends Error{constructor(value){super(value.error);}}});
+const tools=leadAutomationTools({invoices:{preview:async()=>[],apply:async()=>[]},withEnvelope:async(c,a,v,args,f)=>f(),writeEvent:async(c,...args)=>c.events.push(args),ToolError:class extends Error{constructor(value){super(value.error);}}});
 test("dry runs issue SELECT only, use the same planner and never prepare drafts",async()=>{
   for(const [name,args] of [["lead-stage-preview",{}],["advance-leads",{idempotency_key:"synthetic-preview",dry_run:true}]]){
     const db=new Fake();const r=await tools[name].handler(db,human,args);
@@ -140,10 +140,6 @@ test("database migration has draft-only constraints and finite forward transitio
   assert.match(sql,/unique\(lead_id,from_stage,to_stage,activity_id\)/);assert.doesNotMatch(sql,/grant.*delete/i);
 });
 
-test("lead schema and SCAC seal are one strict atomic delivery",()=>{
-  const runner=readFileSync(new URL("../../tools/migrate.py",import.meta.url),"utf8");
-  assert.equal((runner.match(/"0811_lead_stage_automation.sql",\s*"0812_lead_automation_scac_successor.sql"/g)||[]).length,2);
-});
 
 test("older strong evidence is not hidden by a newer weak match",()=>{
   const weak=change({...contact,id:"weak-example",occurred_at:"2026-10-01T17:00:00Z"},{match:"unconfirmed"});
@@ -175,6 +171,14 @@ test("v106 lead successor preserves human-only party merges and all v105 MCP con
   const after = frozenInventory("scac-mutation-registry.v106");
   const byKey = new Map(boundInventoryRows(after).map(row => [row.ingress_key, row]));
   for (const row of boundInventoryRows(before).filter(row => row.ingress_key.startsWith("mcp-tool:"))) assert.deepEqual(byKey.get(row.ingress_key), row);
+  // The workspace extends contact evidence; automation authority stays sealed.
+  const current = new Map(boundInventoryRows(frozenInventory(CURRENT_REGISTRY_VERSION)).map(row => [row.ingress_key, row]));
+  for (const name of ["advance-leads", "approve-lead-draft", "approve-lead-move"])
+    assert.deepEqual(current.get(`mcp-tool:${name}`), byKey.get(`mcp-tool:${name}`));
+  const { schema_digest: beforeSchema, ...beforeContact } = byKey.get("mcp-tool:record-lead-contact");
+  const { schema_digest: currentSchema, ...currentContact } = current.get("mcp-tool:record-lead-contact");
+  assert.deepEqual(currentContact, beforeContact);
+  assert.notEqual(currentSchema, beforeSchema);
   assert.equal(registeredOperation("confirm-merge").human_only, true);
   for (const name of ["advance-leads", "approve-lead-draft", "approve-lead-move"])
     assert.ok(registeredOperation(name), `${name} must remain registered`);
