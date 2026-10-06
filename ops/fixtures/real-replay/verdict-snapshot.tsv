@@ -743,15 +743,54 @@ gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdbcf60040f0	announce	G
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdd65a0f0747	announce	GATE CHANGE ANNOUNCED — peer-broadcast-gate.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d9316125677c	announce	GATE CHANGE ANNOUNCED — guard-unattended.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:fa39d0ae0973	announce	GATE CHANGE ANNOUNCED — executor-tier-gate.py is enforcement, and edit just changed it.
-guard-unattended.py	PreToolUse[Bash|WebFetch]	(all)	counts	allow=312 deny=10
-guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:2f83845bddfc	deny	recursive/forced delete — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	(all)	counts	allow=273 deny=49
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:0b1cdb58cbdd	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:1505174f4be8	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:20ded25d783b	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:21399f331680	deny	shell eval indirection — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:257cd07fce05	deny	shell eval indirection — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:2b6003a031c6	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:2f83845bddfc	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:2fa91027c12b	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:2fd61ea1d823	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:321e8a37a343	deny	shell eval indirection — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:33015ce0899d	deny	recursive/forced delete — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:3caa8ea3b1f1	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:3d27655dae45	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:3df9eca02e1b	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:41420779739a	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:44f79fe67590	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:4945346f6fa6	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:49bbd94c5b08	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:4c75adf4f357	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:4d7e766f3dd1	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:4dc1f662384c	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:532dbbcbbb21	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:56bed63903a1	deny	recursive/forced delete — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:56d717124c34	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:66d774f88124	deny	force push — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:6dfb251d684c	deny	broad add (-A/--all/./:/) — blocked by the CARR unattended guard. Add explicit paths instead: `git add <path> [<path>...]`.
-guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:7ed14bfb5b26	deny	private key material — blocked by the CARR unattended guard
-guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:995d89a284a1	deny	recursive/forced delete — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:7ed14bfb5b26	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:808b3836ecb8	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:82b17638914e	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:995d89a284a1	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:9e247f99f183	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:a37cd816a19f	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:a3fec644c17b	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:b0de9bb63c62	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:b3a6c8bf4e02	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:b8a99e8c17cf	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:c7377afe2f60	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:ccebfb39d681	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:df456cf2d103	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:df95e15f3028	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e2b455bfab25	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:e3c7b98b9e56	deny	private key material — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:ecc799702da2	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:ee99a999a224	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:f7a2a43449a2	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:fccf9ae553aa	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
+guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:fcdf98f8ca35	deny	unresolved shell command (ValueError) — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	scenarios:5c0000000005	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	tool_calls:f53afacc66e2	deny	WebFetch to a non-standard port (#) on a host outside KNOWN_HOSTS — blocked by the CARR guard.
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	(all)	counts	allow=423 announce=18

@@ -35,6 +35,8 @@ Every run appends one row to out/flash-runs.jsonl, the real-use record the week
 of tracking reads (`flash-run stats`).
 
 OTHER SUBCOMMANDS
+  flash-run ask "<question>" [--json-object]  one tool-free flash-local desk answer;
+                                            no coding attempt, test execution or patch
   flash-run plan <file>        route each step of a plan local/escalate (#18)
   flash-run scorecard          the standing model scorecard (#25)
   flash-run stats              summarize out/flash-runs.jsonl
@@ -64,6 +66,7 @@ import flashlib
 OUT = os.path.join(REPO, "out")
 RUNS_LOG = os.path.join(OUT, "flash-runs.jsonl")
 EXAMPLES_LOG = os.path.join(OUT, "flash-examples.jsonl")
+ASKS_LOG = os.path.join(OUT, "flash-asks.jsonl")
 HANDOFF_DIR = os.path.join(OUT, "flash-handoffs")
 FLASH = os.environ.get("FLASH_BIN") or shutil.which("flash") or os.path.expanduser("~/.local/bin/flash")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", "out", "dist",
@@ -993,9 +996,72 @@ def cmd_note(a):
     return 0
 
 
+def ask_turn(task, *, max_tokens=4096, opener=None):
+    """Use the Model Room's flash-local direct protocol, including thinking off."""
+    import urllib.parse
+    spec = importlib.util.spec_from_file_location("flash_wire", os.path.join(REPO, "tools", "room-bridge", "flash_wire.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("flash-local desk")
+    wire = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wire)
+    # This CLI is local inference. Refuse accidental remote URLs and ports.
+    target = urllib.parse.urlsplit(wire.FLASH_URL)
+    if (target.scheme != "http" or target.hostname not in ("127.0.0.1", "::1", "localhost")
+            or target.port != 8000 or target.username is not None or target.password is not None
+            or target.path not in ("", "/") or target.query or target.fragment):
+        raise ValueError("ask requires the local flash-local desk on port 8000")
+    if opener is None:
+        import urllib.request
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open
+    return wire.run_turn(task, max_tokens=max_tokens, opener=opener)
+
+
+def cmd_ask(a):
+    task = a.question
+    if a.json_object:
+        task += "\nReturn exactly one JSON object, without markdown or commentary."
+    started = time.monotonic()
+    try:
+        reply = ask_turn(task, max_tokens=a.max_tokens)
+        if reply.get("status") != "completed":
+            raise ValueError(reply.get("detail") or "no answer")
+        if reply.get("finish") != "stop":
+            raise ValueError("incomplete answer: " + str(reply.get("finish")))
+        answer = reply["result"]
+        if a.json_object:
+            def reject_constant(value):
+                raise ValueError("invalid JSON constant: " + value)
+            value = json.loads(answer, parse_constant=reject_constant)
+            if not isinstance(value, dict):
+                raise ValueError("answer is not a JSON object")
+            # A valid numeric spelling such as 1e999 can overflow on parsing.
+            answer = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    except (ValueError, KeyError, OSError) as exc:
+        print(f"flash-run ask: {exc}", file=sys.stderr)
+        return 5
+    _append(ASKS_LOG, {"at": _now(), "kind": "ask", "desk": "flash-local",
+                       "elapsed_s": round(time.monotonic() - started, 3), "json_object": a.json_object})
+    print(answer)
+    return 0
+
+
+def positive_tokens(value):
+    tokens = int(value)
+    if not 1 <= tokens <= 32768:
+        raise argparse.ArgumentTypeError("max-tokens must be between 1 and 32768")
+    return tokens
+
+
 def main(argv):
     p = argparse.ArgumentParser(prog="flash-run", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd")
+    ask = sub.add_parser("ask", help="one tool-free question through the flash-local desk (no coding)")
+    ask.add_argument("question")
+    ask.add_argument("--json-object", action="store_true", help="require a complete JSON object; invalid answers fail")
+    ask.add_argument("--max-tokens", type=positive_tokens, default=4096)
     r = sub.add_parser("run", help="run one task (default)")
     r.add_argument("task")
     r.add_argument("--cwd", default=".")
@@ -1031,7 +1097,7 @@ def main(argv):
     n.add_argument("--fix", default="")
     n.add_argument("--kind", default="manual")
     n.add_argument("--task", default="")
-    known = {"run", "plan", "scorecard", "stats", "note", "-h", "--help"}
+    known = {"run", "ask", "plan", "scorecard", "stats", "note", "-h", "--help"}
     if argv and argv[0] not in known:
         argv = ["run", *argv]
     a = p.parse_args(argv)
@@ -1041,7 +1107,7 @@ def main(argv):
     if a.cmd == "run" and not os.path.exists(FLASH):
         _say(f"the flash launcher is missing ({FLASH})")
         return 2
-    return {"run": cmd_run, "plan": cmd_plan, "scorecard": cmd_scorecard,
+    return {"run": cmd_run, "ask": cmd_ask, "plan": cmd_plan, "scorecard": cmd_scorecard,
             "stats": cmd_stats, "note": cmd_note}[a.cmd](a)
 
 

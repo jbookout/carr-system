@@ -125,9 +125,11 @@ BASH_CASES = [
     # python. These five are the regression test for that finding: the path is
     # named anywhere in the command, the write is named anywhere in the command,
     # and that pairing is what must announce.
+    # Interpreter stdin is refused before the edit announcement under the
+    # fail-closed static-resolution contract. Literal -c writes still announce.
     ("sh-py-heredoc-var",
      f'python3 - <<\'PY\'\npath = "{REPO}/hooks/gate-integrity.py"\n'
-     'open(path, "w").write("x")\nPY', ANNOUNCE),
+     'open(path, "w").write("x")\nPY', DENY),
     ("sh-py-c-var",
      f'python3 -c \'p = "{REPO}/hooks/lint-gate.py"; open(p, "w").write(1)\'',
      ANNOUNCE),
@@ -151,7 +153,7 @@ BASH_CASES = [
      f'python3 {REPO}/hooks/gate-integrity.py --bless lint-gate.py', ALLOW),
     ("sh-py-heredoc-selftest",
      f'python3 - <<\'PY\'\np = "{REPO}/ops/guard-selftest.py"\n'
-     'open(p, "w").write("x")\nPY', ALLOW),
+     'open(p, "w").write("x")\nPY', DENY),
 
     # a stronger rule must still win — this is destructive, not a gate tweak
     ("sh-destructive",    f'rm -rf {HOME}/Documents/carr-gate-selftest-target', DENY),
