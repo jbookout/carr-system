@@ -76,5 +76,54 @@
       }
     ]
   },
-  "claims": []
+  "claims": [],
+  "pecos_fixture": {
+    "catalog": {
+      "datasetSeries": [
+        {
+          "title": "Medicare Fee-For-Service Public Provider Enrollment",
+          "last": {
+            "@id": "https://data.cms.gov/data-api/v1/dataset/2457ea29-fc82-48b0-86ec-3b0755de7515"
+          }
+        }
+      ],
+      "dataset": [
+        {
+          "@id": "https://data.cms.gov/data-api/v1/dataset/2457ea29-fc82-48b0-86ec-3b0755de7515",
+          "distribution": [
+            {
+              "downloadURL": "https://data.cms.gov/data-api/v1/dataset/2457ea29-fc82-48b0-86ec-3b0755de7515/data"
+            }
+          ]
+        }
+      ]
+    },
+    "rows": [
+      {
+        "NPI": "1000000005",
+        "ENRLMT_ID": "I2026093000001",
+        "FIRST_NAME": "Example",
+        "LAST_NAME": "Enrollment",
+        "PROVIDER_TYPE_DESC": "PRACTITIONER - GENERAL PRACTICE",
+        "STATE_CD": "FL"
+      }
+    ],
+    "registry": {
+      "1000000005": {
+        "results": [
+          {
+            "number": 1000000005,
+            "addresses": [
+              {
+                "address_purpose": "LOCATION",
+                "city": "Milton",
+                "state": "FL",
+                "postal_code": "32570"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
 }

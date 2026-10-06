@@ -98,6 +98,8 @@ SAFE_ZONES = (
 
 # Hosts this system legitimately talks to.
 KNOWN_HOSTS = (
+    # CMS publishes the credential-free quarterly PECOS catalog and data API.
+    "data.cms.gov",
     # api.doctorcre.com is the SAME Worker as api.practicecre.com — both are custom
     # domains on carr-mcp. It became the PRIMARY name on Joe's 2026-08-01 domain
     # ruling, which reached wrangler.toml and the Worker routes but never reached

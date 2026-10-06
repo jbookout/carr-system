@@ -16,6 +16,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.routines import lead_signals as leads
+from tools.routines import radar_inputs as radar
 
 FIXTURE = json.loads((ROOT / "ops/fixtures/routines/leads.json").read_text())
 NOW = datetime.fromisoformat(FIXTURE["as_of"])
@@ -35,6 +36,56 @@ def context(fixture=None, dry_run=True):
 
 
 class LeadTests(unittest.TestCase):
+    def test_pecos_quarter_gate_catches_missed_quarters(self):
+        self.assertFalse(radar.refresh_due(NOW, {"quarter": "2026Q4"}))
+        self.assertTrue(radar.refresh_due(NOW, {"quarter": "2026Q2"}))
+        self.assertTrue(radar.refresh_due(NOW.replace(month=11), {"quarter": "2026Q3"}))
+
+    def test_pecos_catalog_and_enrollment_parsers(self):
+        public = FIXTURE["pecos_fixture"]
+        self.assertTrue(radar.dataset_api(public["catalog"])[0].endswith("/data"))
+        parsed = radar.enrollment_rows(public["rows"])
+        self.assertEqual(parsed["1000000005|I2026093000001"]["date"], "2026-09-30")
+        with self.assertRaises(ValueError):
+            radar.dataset_api({})
+        with self.assertRaises(ValueError):
+            radar.enrollment_rows([{"STATE_CD": "FL", "NPI": "bad"}])
+
+    def test_pecos_baseline_bootstrap_and_new_enrollment_diff(self):
+        public = FIXTURE["pecos_fixture"]
+        fetch = lambda _: (_ for _ in ()).throw(AssertionError("fixture attempted network"))
+        rows, state, health = radar.pull_pecos(fetch, NOW, {}, fixture=public)
+        self.assertEqual(rows, [])
+        self.assertTrue(health["bootstrap"])
+        self.assertEqual(state["baseline_count"], 1)
+        rows, _, health = radar.pull_pecos(fetch, NOW, {"baseline_initialized": True, "keys": []}, fixture=public)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["city"], "Milton")
+        self.assertEqual(health["new_enrollments"], 1)
+        rows, _, _ = radar.pull_pecos(fetch, NOW, state, fixture=public)
+        self.assertEqual(rows, [])
+
+    def test_consumed_candidates_exit_without_repeat_effects(self):
+        fixture = copy.deepcopy(FIXTURE)
+        first = leads.prepare(context(fixture))
+        fixture["consumed_keys"] = [r["source_key"] for r in first["candidates"]]
+        ctx = context(fixture)
+        repeated = leads.prepare(ctx)
+        self.assertFalse(repeated["work"])
+        self.assertEqual(repeated["candidates"], [])
+        self.assertEqual(ctx.calls, [])
+
+    def test_quarterly_refresh_dry_run_performs_no_writes(self):
+        fixture = copy.deepcopy(FIXTURE)
+        fixture["pecos"] = fixture["pecos_fixture"]
+        fixture["pecos_state"] = {"baseline_initialized": True, "keys": [], "quarter": "2026Q3"}
+        ctx = context(fixture)
+        plan = leads.prepare(ctx)
+        result = leads.execute(ctx, plan)
+        self.assertEqual(result["candidate_count"], 5)
+        self.assertEqual(ctx.calls, [])
+        health = next(h for h in result["lane_health"] if h["pool"] == "pecos.json")
+        self.assertEqual(health["territory_candidates"], 1)
     def test_pool_writer_paths_are_bound_to_repository(self):
         sys.path.insert(0, str(ROOT / "pipelines/radar"))
         try:

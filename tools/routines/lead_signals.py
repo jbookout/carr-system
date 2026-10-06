@@ -20,6 +20,15 @@ COUNTIES = {"ESCAMBIA", "SANTA ROSA", "OKALOOSA", "WALTON", "BAY", "LEON", "MOBI
 CITIES = {"PENSACOLA", "MILTON", "PACE", "GULF BREEZE", "CANTONMENT", "NAVARRE", "JAY", "CENTURY", "TALLAHASSEE", "PANAMA CITY", "LYNN HAVEN", "DESTIN", "FORT WALTON BEACH", "CRESTVIEW", "NICEVILLE", "SANTA ROSA BEACH", "MARY ESTHER", "SHALIMAR", "FREEPORT", "DEFUNIAK SPRINGS", "MOBILE", "DAPHNE", "FAIRHOPE", "SPANISH FORT", "GULF SHORES", "FOLEY", "BONIFAY", "CHIPLEY", "PANAMA CITY BEACH", "DOTHAN", "ENTERPRISE"}
 POOLS = {"tips.json": "human-tip", "deeds.json": "deed", "pecos.json": "pecos-enroll", "nppes-moves.json": "nppes-move", "jobs.json": "job-post", "licenses-pool.json": "new-license", "domains.json": "domain"}
 WEIGHTS = {"nppes-org": 4, "nppes-person": 1, "human-tip": 4, "deed": 3, "pecos-enroll": 3, "nppes-move": 2, "job-post": 2, "new-license": 1, "domain": 1, "record-pool": 1}
+MISSING_INPUT = {
+    "tips.json": "Human tips are captured from the relationship channel; no public pull exists.",
+    "deeds.json": "County deed portals require a verified source-specific reader; the tax-roll parser only accepts downloaded NAL/SDF files.",
+    "pecos.json": "The public quarterly PECOS pull has not bootstrapped its enrollment baseline yet.",
+    "nppes-moves.json": "Address movement requires a previous exact-NPI address baseline; the new-enumeration weekly file alone cannot establish a move.",
+    "jobs.json": "Indeed/LinkedIn source browsing has no implemented public feed or deterministic reader in the existing radar scripts.",
+    "licenses-pool.json": "Existing FL DOH converters need a downloaded licensure/transport file; the current source path requires the approved portal session.",
+    "domains.json": "ICANN CZDS requires the approved account and TLD access; no credential-free domain feed is configured.",
+}
 
 
 def _text(value):
@@ -196,6 +205,7 @@ def _fetch(url):
 
 
 def prepare(ctx):
+    from . import radar_inputs
     fixture = ctx.fixture
     as_of = ctx.now.date()
     if fixture is not None:
@@ -224,10 +234,13 @@ def prepare(ctx):
     for filename, signal in POOLS.items():
         if filename in pools:
             rows.extend(parse_pool(pools[filename], signal, f"repo:radar/upstream/{filename}"))
-            lane_health.append({"pool": filename, "state": "read", "rows": len(pools[filename])})
+            lane_health.append({"pool": filename, "state": "retained_input", "rows": len(pools[filename]),
+                                "freshness": "Not a new pull; previously delivered candidate keys are skipped."})
         else:
-            lane_health.append({"pool": filename, "state": "unavailable", "reason": "No retained repo input or implemented public pull"})
-    proposed = candidates(rows)
+            lane_health.append({"pool": filename, "state": "unavailable", "reason": MISSING_INPUT[filename]})
+    consumed_path = ROOT / "out/routines/radar/consumed-candidates.json"
+    consumed = set(fixture.get("consumed_keys", [])) if fixture is not None else set(json.loads(consumed_path.read_text()) if consumed_path.exists() else [])
+    proposed = [r for r in candidates(rows) if r["source_key"] not in consumed]
     for row in proposed:
         row["existing_candidates"] = [
             {"pool_id": c.get("pool_id"), "name": c.get("display_name"), "org_name": c.get("org_name"), "city": c.get("city")}
@@ -235,14 +248,45 @@ def prepare(ctx):
             if _text(c.get("display_name")).casefold() == row["name"].casefold()
             and _text(c.get("city")).casefold() == _text(row.get("city")).casefold()
         ]
-    return {"work": bool(proposed), "candidates": proposed, "lane_health": lane_health,
+    refresh_state = fixture.get("pecos_state", {}) if fixture is not None else radar_inputs.load_state()
+    # Fixture previews exercise public refresh only when its inputs are supplied.
+    refresh_pecos = radar_inputs.refresh_due(ctx.now, refresh_state) and (fixture is None or "pecos" in fixture)
+    return {"work": bool(proposed) or refresh_pecos, "candidates": proposed, "lane_health": lane_health,
+            "refresh_pecos": refresh_pecos, "pecos_state": refresh_state, "consumed_keys": sorted(consumed),
             "model_calls": 0, "judgment_steps": ["Pre-space/address classification", "Corporate ownership and license interpretation", "Network path and outreach hook"]}
 
 
 def execute(ctx, plan):
+    from . import radar_inputs
+    if plan.get("refresh_pecos"):
+        public_fixture = ctx.fixture.get("pecos") if ctx.fixture is not None else None
+        refreshed, state, health = radar_inputs.pull_pecos(_fetch, ctx.now, plan["pecos_state"], fixture=public_fixture)
+        fresh = candidates(parse_pool(refreshed, "pecos-enroll", radar_inputs.PUBLICATION))
+        combined = {r["source_key"]: r for r in plan["candidates"]}
+        for row in fresh:
+            if row["source_key"] not in plan.get("consumed_keys", []):
+                combined[row["source_key"]] = row
+        plan["candidates"] = list(combined.values())
+        plan["lane_health"] = [h for h in plan["lane_health"] if h["pool"] != "pecos.json"] + [health]
+        if not ctx.dry_run:
+            radar_inputs.save_refresh(refreshed, state)
+            plan["refresh_pecos"] = False
+            plan["pecos_state"] = {}
+            if hasattr(ctx, "save"):
+                ctx.save()
     if ctx.dry_run:
         return {"dry_run": True, "candidate_count": len(plan["candidates"]), "candidates": plan["candidates"], "lane_health": plan["lane_health"], "model_calls": 0}
     created, reviews = [], []
+    consumed = set(plan.get("consumed_keys", []))
+    def remember(key):
+        consumed.add(key)
+        if ctx.fixture is not None:
+            return
+        path = ROOT / "out/routines/radar/consumed-candidates.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(sorted(consumed)))
+        temporary.replace(path)
     for row in plan["candidates"]:
         key = row["source_key"]
         if row.get("existing_candidates"):
@@ -250,6 +294,7 @@ def execute(ctx, plan):
                 json.dumps({"candidate": row["name"], "sources": row["sources"],
                             "matches": row["existing_candidates"], "fix": "Confirm which candidate this new signal belongs to; a name and city are not an automatic person match."})[:2000],
                 "lead-signals:candidate-review:" + key))
+            remember(key)
             continue
         sources = [{"url": url, "observed_at": ctx.now.isoformat()} for url in row["sources"] if url.startswith("https://")]
         if not sources:
@@ -259,6 +304,7 @@ def execute(ctx, plan):
                 json.dumps({"candidate": row["name"], "source_key": key, "sources": row["sources"],
                             "estimated_score": row["score"], "fix": "Resolve this retained radar signal to primary-source evidence before identity intake."})[:2000],
                 "lead-signals:source-review:" + key))
+            remember(key)
             continue
         evidence = {"sources": sources, "field_evidence": {field: [0] for field in ("name", "company", "phone", "specialty", "market")}, "discrepancies": []}
         party = ctx.write("add-party", {"name": row["name"], "kind": row["kind"], "city": _text(row.get("city")), "state": _text(row.get("state")), "phone": _text(row.get("phone")), "specialty": _text(row.get("specialty")), "research_evidence": evidence}, "lead-signals:party:" + key)
@@ -267,7 +313,9 @@ def execute(ctx, plan):
                 json.dumps({"candidate": row["name"], "source_key": key, "sources": row["sources"],
                             "matches": party.get("candidates", []), "fix": "Confirm the correct identity on this review; the routine did not merge or force-create a party."})[:2000],
                 "lead-signals:identity-review:" + key))
+            remember(key)
             continue
         lead = ctx.write("new-lead", {"party_id": party["party_id"], "stage": "new", "source_type": "lead-signals-weekly", "source_detail": json.dumps({"source_key": key, "npi": row.get("npi"), "sources": row["sources"], "estimated": True}), "score": row["score"], "score_basis": row["score_basis"]}, "lead-signals:lead:" + key)
         created.append(lead)
+        remember(key)
     return {"created": created, "reviews": reviews, "candidate_count": len(plan["candidates"]), "lane_health": plan["lane_health"], "model_calls": 0}
