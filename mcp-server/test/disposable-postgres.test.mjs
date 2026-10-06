@@ -21,3 +21,10 @@ test('verb fixture owns isolated connections and rolls back refused transactions
     assert.equal((await c.query("select to_regclass('synthetic') as table_name")).rows[0].table_name, null);
   });
 });
+
+test('a copied event table keeps its canonical mutation-order identity', async () => {
+  await withPostgresFixture({ tables: ['public.event'] }, async ({ c }) => {
+    const { rows } = await c.query("select is_identity, identity_generation from information_schema.columns where table_name = 'event' and column_name = 'mutation_order'");
+    assert.deepEqual(rows, [{ is_identity: 'YES', identity_generation: 'ALWAYS' }]);
+  });
+});

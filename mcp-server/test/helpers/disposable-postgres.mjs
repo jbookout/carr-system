@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { restoreEventIdentity } from './snapshot-schema.mjs';
 
 const supervisors = new Set();
 const endSupervisors = () => { for (const child of supervisors) child.stdin.end(); };
@@ -143,6 +144,7 @@ export async function withPostgresFixture({ tables = [], setup = '' }, run) {
         if (!sql) throw new Error(`canonical fixture table missing: ${name}`);
         await c.query(sql);
       }
+      if (tables.includes('public.event')) await restoreEventIdentity(c, schema);
     }
     if (setup) await c.query(setup);
     await run({ ...fixture, c });
