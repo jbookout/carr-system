@@ -167,6 +167,25 @@ class CorrectionAuditTests(unittest.TestCase):
         self.assertIn('You ignored the scope.', saved)
         self.assertIn('Change the password policy to require MFA. Keep the approved scope.', saved)
 
+    def test_complete_multiword_passphrases_and_sentence_boundaries(self):
+        for value in ('cobalt otter meadow lantern', '"cobalt otter meadow lantern"', "'cobalt otter meadow lantern'", '`cobalt otter meadow lantern`'):
+            text = 'Set the passphrase to ' + value + '. Keep the correction.'
+            redacted = sweep.redact_evidence({'text': text})['text']
+            for word in ('cobalt', 'otter', 'meadow', 'lantern'):
+                self.assertNotIn(word, redacted)
+            self.assertIn('Keep the correction.', redacted)
+
+    def test_internal_credential_punctuation_is_not_a_sentence_boundary(self):
+        for value in ('cobalt.otter meadow.lantern', 'cobalt!otter meadow?lantern',
+                      'cobalt;otter meadow.lantern'):
+            for boundary in ('. ', '! ', '? ', '; ', '\n'):
+                redacted = sweep.redact_evidence({
+                    'text': 'Set the passphrase to ' + value + boundary + 'Keep the correction.'
+                })['text']
+                for word in ('cobalt', 'otter', 'meadow', 'lantern'):
+                    self.assertNotIn(word, redacted)
+                self.assertIn('Keep the correction.', redacted)
+
 
 if __name__ == '__main__':
     unittest.main()

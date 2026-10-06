@@ -156,6 +156,8 @@ with (
     result = mod.run_local_ci(
         repo=REPO, ci_class="migration", port=55432, runner=FakeRunner()
     )
+check("discovered binaries reach the scrubbed Linux child PATH",
+      all(env.get("PATH", "").split(os.pathsep)[0] == "/fake" for env in child_envs))
 check("successful lane returns zero", result == 0)
 check("initdb is first PostgreSQL operation", events[0][0] == "/fake/initdb")
 check("server binds loopback", "-h 127.0.0.1 -p 55432" in events[1])

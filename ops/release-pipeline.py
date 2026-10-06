@@ -65,12 +65,13 @@ POST-RELEASE PROOF. A release is not done when production serves its SHA; it is
 done when the live system works. ops/release-smoke.py runs read-only journeys
 against production (sign-in gate, deal board, Leads, invoices, progress board,
 Dr. CRE chat's read path, the verb registry against the released SHA, and in
-the app lane the app's own browser journeys). It runs once BEFORE the lane's
+the app lane its version-bound synthetic browser journeys). Live signed-in
+pages remain unexercised. It runs once BEFORE the lane's
 first production change (the baseline) and once AFTER the live readback. A
 journey that fails after the release is retried once; one that passes on the
 retry is recorded as flaky and the release ships. A journey that still fails
-and passed in the baseline is the release's regression (release-identity and
-verb-registry are never excused by the baseline). A regression marks the
+and passed in the baseline is the release's regression (release-identity,
+verb-registry and browser proof are never excused by the baseline). A regression marks the
 release FAILED at step `post-release-smoke`, rolls the lane back to the version
 that served before it (Worker: bin/deploy-worker.sh --promote-version <prior>
 --recovery-strategy rollback, per runbooks/rollback-worker.md; app: node
@@ -79,7 +80,7 @@ production, and files one CARR loop naming the journey and its evidence. A
 release that applied a database or Durable Object migration is never rolled
 back (the runbook's forward-fix-only case); an unreadable smoke fails the
 release but never rolls back, because it proves nothing about production.
-Evidence: out/release-smoke/<sha>/{baseline,post,retry}/. Per-lane
+Evidence: out/release-smoke/<sha>/<phase>-<invocation>/. Per-lane
 `post_release_smoke: false` turns the stage off.
 
 CONTROLLER FRESHNESS. launchd runs this file from the canonical checkout,
@@ -241,7 +242,8 @@ CREDENTIAL_INVENTORY_PATH = REPO / "ops/config/credential-inventory.v1.json"
 # The code and config this tick executes from the canonical checkout; each must
 # equal origin/main before any lane releases (see CONTROLLER FRESHNESS above).
 CONTROLLER_PATHS = ("ops/release-pipeline.py", "ops/config/release-pipeline.v1.json",
-                    "lib/secret_redaction.py")
+                    "lib/secret_redaction.py", "ops/release-smoke.py",
+                    "ops/doctorcre-production-smoke.py")
 CONTROLLER_STALE = "controller_stale"
 
 
@@ -314,8 +316,10 @@ SCHEMA_SNAPSHOT_PREFIX = "release/schema-snapshot-"
 
 # Journeys a baseline failure never excuses: after a release the lane must serve
 # its own SHA and every verb that SHA carries, whatever production did before.
-SMOKE_ALWAYS_ATTRIBUTED = frozenset({"release-identity", "verb-registry"})
+# Required browser proof must also exist for the release's source revision.
+SMOKE_ALWAYS_ATTRIBUTED = frozenset({"release-identity", "verb-registry", "browser-journeys"})
 SMOKE_OUT = Path("out") / "release-smoke"
+SMOKE_JOURNEYS = (*runpy.run_path(str(REPO / "ops/release-smoke.py"))["JOURNEYS"], "browser-journeys")
 
 
 class Runner:
@@ -2488,10 +2492,12 @@ class Pipeline:
                   app_dir: Path | None = None, only: list[str] | None = None) -> dict | None:
         """One ops/release-smoke.py run, logged like a step, never raising: the
         caller reads its summary.json. None when no summary was written."""
-        out = self.repo / SMOKE_OUT / sha / name
+        invocation = uuid.uuid4().hex
+        phase = "baseline" if name == "baseline" else "post"
+        out = self.repo / SMOKE_OUT / sha / f"{name}-{invocation}"
         venv = self.repo / ".venv" / "bin" / "python"
         argv = [str(venv) if venv.exists() else sys.executable, "ops/release-smoke.py",
-                "--lane", lane, "--sha", sha, "--phase", "baseline" if name == "baseline" else "post",
+                "--lane", lane, "--sha", sha, "--phase", phase, "--invocation-id", invocation,
                 "--out", str(out), "--credential-dir", str(expand(self.cfg.get("credential_dir", "~/.config/carr")))]
         if worker_dir is not None:
             argv += ["--worker-dir", str(worker_dir)]
@@ -2507,12 +2513,27 @@ class Pipeline:
         log = self.run_dir / f"{n:02d}-{step}.log"
         self.out(f"  -> {step}: {' '.join(argv)}")
         self.executed.append(step)
-        self.runner.run(argv, cwd=self.repo, log=log, env=self.env, timeout=1800)
+        result = self.runner.run(argv, cwd=self.repo, log=log, env=self.env, timeout=1800)
         try:
             summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
-        if not isinstance(summary, dict) or not isinstance(summary.get("failed"), list):
+        if not isinstance(summary, dict):
+            return None
+        expected = set(only) if only else set(SMOKE_JOURNEYS)
+        if (summary.get("schema") != "carr-release-smoke.v1" or summary.get("invocation_id") != invocation
+                or summary.get("lane") != lane or summary.get("sha") != sha or summary.get("phase") != phase
+                or not isinstance(summary.get("probes"), list) or not isinstance(summary.get("failed"), list)):
+            return None
+        probes = summary["probes"]
+        if (not all(isinstance(p, dict) and p.get("id") in expected and p.get("status") in ("pass", "fail", "skip") for p in probes)
+                or len(probes) != len(expected) or {p["id"] for p in probes} != expected
+                or any(p["status"] == "skip" and (p["id"] != "browser-journeys" or lane == "app"
+                                                 or app_dir is not None) for p in probes)):
+            return None
+        failed = [p["id"] for p in probes if p["status"] == "fail"]
+        if (summary["failed"] != failed or summary.get("ok") is not (not failed)
+                or result.rc != (1 if failed else 0)):
             return None
         summary["path"], summary["log"] = str(out / "summary.json"), str(log)
         return summary
@@ -2633,7 +2654,7 @@ class Pipeline:
                 "(ops/release-pipeline.py step post-release-smoke). The release is marked FAILED and "
                 "is never retried; a fix-forward merge releases next.\n"
                 + "\n".join(lines) + f"\n{production}\nEvidence: {outcome['evidence_dir']} "
-                "(baseline/, post/, retry/: summary.json, probes.jsonl, browser screenshots and traces).")
+                "(each invocation: summary.json, probes.jsonl, synthetic browser screenshots and traces).")
         args = {"kind": "open_loop", "owner": "Claude", "domain": "system", "marker": "none",
                 "blocker": "other_lane",
                 "blocker_detail": f"The release-fix lane fixes {lane} release {sha[:12]} forward through a PR",

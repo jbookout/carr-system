@@ -90,6 +90,22 @@ class FlakeTests(unittest.TestCase):
         event['head_repository']['full_name'] = 'someone/fork'
         self.assertEqual(module.candidate_rows('jbookout/carr-system', event, 1, {'job.txt': checkout + line}), [])
 
+    def test_mixed_node_outcomes_belong_only_to_the_named_suite(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('ci_flakes_mixed', COLLECTOR)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sha = 'a' * 40
+        text = f'git log -1 --format=%H\n{sha}\n2026-10-05T00:00:01Z ok 1 a.test.mjs\n2026-10-05T00:00:02Z not ok 2 b.test.mjs\n'
+        tests = ['mcp-server/test/a.test.mjs', 'mcp-server/test/b.test.mjs']
+        run = {'id': 1, 'name': 'CI', 'created_at': '2026-10-05T00:00:00Z'}
+        rows = module.observations_from_logs('jbookout/carr-system', run, 1, {'job.txt': text}, tests)
+        self.assertEqual({r['test']: r['result'] for r in rows}, dict(zip(tests, ['pass', 'fail'])))
+        self.assertEqual(module.failed_tests({'job.txt': text}, tests), [tests[1]])
+        later = module.observations_from_logs('jbookout/carr-system', run, 2,
+            {'job.txt': f'git log -1 --format=%H\n{sha}\nOK unit all passed\n'}, tests)
+        self.assertEqual([r['test'] for r in module.analyze(rows + later)], [tests[1]])
+
 
 if __name__ == '__main__':
     unittest.main()

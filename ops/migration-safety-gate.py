@@ -159,7 +159,7 @@ def rollback_ok(header: list[str]) -> bool:
 
 NAME = r'((?:"[^"]+"|[a-z_][a-z0-9_$]*)(?:\.(?:"[^"]+"|[a-z_][a-z0-9_$]*))?)'
 CREATE_TABLE = re.compile(
-    r"\bcreate (?:(?:global |local )?(?:temp|temporary|unlogged) )?table (?:if not exists )?" + NAME)
+    r"^create (?:(?:global |local )?(?:temp|temporary|unlogged) )?table (?!if not exists )" + NAME)
 ALTER_TABLE = re.compile(r"\balter table (?:if exists )?(?:only )?" + NAME + r"(.*)$")
 CREATE_INDEX = re.compile(
     r"\bcreate (?:unique )?index (?!concurrently)(?:if not exists )?(?:\S+ )?on (?:only )?" + NAME)
@@ -181,6 +181,20 @@ def created_tables(stmts: list[str]) -> set[str]:
     return {bare(m.group(1)) for s in stmts for m in CREATE_TABLE.finditer(s)}
 
 
+def outer_where(tail: str) -> bool:
+    depth = 0
+    for token in re.findall(r'"[^"]*"|[a-z_][a-z0-9_$]*|[()]', tail):
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        elif depth == 0 and token == "returning":
+            return False
+        elif depth == 0 and token == "where":
+            return True
+    return False
+
+
 def classify(stmt: str, created: set[str]) -> list[tuple[str, str]]:
     """[(kind, reason)] for one normalised statement."""
     hits: list[tuple[str, str]] = []
@@ -192,7 +206,7 @@ def classify(stmt: str, created: set[str]) -> list[tuple[str, str]]:
             and not re.search(r"\b(?:grant|revoke)\b", stmt)):
         hits.append(("destructive", "truncate"))
     m = re.search(r"\bdelete from (?:only )?\S+(.*)$", stmt)
-    if m and not re.search(r"\bwhere\b", m.group(1)):
+    if m and not outer_where(m.group(1)):
         hits.append(("destructive", "delete without where"))
     if re.search(r"\bvacuum (?:\([^)]*full[^)]*\)|full)\b", stmt):
         hits.append(("long-lock", "vacuum full"))
@@ -227,6 +241,9 @@ def classify(stmt: str, created: set[str]) -> list[tuple[str, str]]:
             if (re.search(r"\bnot null\b", col) and not re.search(r"\bdefault\b", col)
                     and not re.search(r"\bgenerated\b", col)):
                 hits.append(("destructive", f"not null column without default on {table}"))
+            if (re.search(r"\b(?:references|check|unique|primary key)\b", col)
+                    and "not valid" not in col):
+                hits.append(("long-lock", f"validated column constraint on {table}"))
             if VOLATILE_DEFAULT.search(col) or re.search(r"^\S+ (?:small|big)?serial\b", col):
                 hits.append(("long-lock", f"table rewrite (volatile default) on {table}"))
         if (re.match(r"^add (?:constraint \S+ )?(?:foreign key|check|unique|primary key)\b", clause)
@@ -243,13 +260,14 @@ def findings(sql: str) -> list[Finding]:
                            "header has no '-- rollback: <how>' or "
                            "'-- rollback: forward-only — <reason>' line"))
     stmts = statements(sql)
-    created = created_tables(stmts)
+    created: set[str] = set()
     marked = {
         "destructive": any(EXPAND_CONTRACT.match(line) for line in header),
         "long-lock": any(LOCK_REVIEW.match(line) for line in header),
     }
     seen: set[tuple[str, str]] = set()
     for stmt in stmts:
+        created.update(created_tables([stmt]))
         for kind, reason in classify(stmt, created):
             if marked[kind] or (kind, reason) in seen:
                 continue

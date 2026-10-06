@@ -248,6 +248,7 @@ def run_local_ci(
     integration_started = False
     clean_env = scrub_cloud_environment(os.environ)
     clean_env["LC_ALL"] = "C"
+    clean_env["PATH"] = f"{binaries.initdb.parent}{os.pathsep}{clean_env.get('PATH', '')}"
     dsn = f"postgres://carr_ci@127.0.0.1:{port}/carr_ci"
     start_attempted = False
     exit_code = 0

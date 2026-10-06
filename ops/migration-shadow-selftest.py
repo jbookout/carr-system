@@ -74,6 +74,52 @@ check("a structural difference is a difference and is shown as a diff",
 check("a snapshot with no ledger is never a match",
       shadow.differences(snapshot(T, R1), T) != [])
 
+seed = "insert into ops.scac_mutation_registry_version select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_version, '[{\"registry_version\": \"v1\", \"sealed_at\": \"2026-01-01T00:00:00Z\", \"digest\": \"abc\"}]'::jsonb);\n"
+entry = "insert into ops.scac_mutation_registry_entry select r.* from jsonb_populate_record(null::ops.scac_mutation_registry_entry, p.entry || '{\"registered_at\": \"2026-01-01T00:00:00Z\", \"registry_version\": \"v1\"}'::jsonb) r;\n"
+control = "insert into ops.enforcement_control_catalog (control_key,installed,verified_at,updated_at) values ('synthetic','t','2026-01-01T00:00:00Z'::timestamptz,'2026-01-01T00:00:00Z'::timestamptz);\n"
+for name, row in (("seal", seed), ("registration", entry), ("control verification", control)):
+    check(name + " timestamps are deterministic", shadow.differences(snapshot(row, R1), snapshot(row.replace('2026-01-01', '2026-02-02'), R1)) == [])
+check("seed content remains bound", bool(shadow.differences(snapshot(seed, R1), snapshot(seed.replace('abc', 'xyz'), R1))))
+check("unadmitted timestamps remain bound", bool(shadow.differences(snapshot("select '2026-01-01';\n", R1), snapshot("select '2026-02-02';\n", R1))))
+
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as tmp:
+    work = pathlib.Path(tmp)
+    def fake_run(command, env, label, log):
+        if label == "bin/schema-snapshot.sh":
+            (work / 'candidate.sql').write_text(snapshot(T, R1))
+        return ''
+    def fake_process(command, **kwargs):
+        if command[0] == 'git':
+            return subprocess.CompletedProcess(command, 0, snapshot(T, R1), '')
+        return subprocess.CompletedProcess(command, 1, '', '')
+    with patch.object(shadow, 'run', side_effect=fake_run), patch.object(shadow.subprocess, 'run', side_effect=fake_process), patch.object(shadow, 'free_port', return_value=55701):
+        try:
+            shadow.shadow('HEAD', pathlib.Path('/synthetic/bin'), work)
+        except shadow.StepFailed:
+            check("failed shutdown fails the shadow result", True)
+        else:
+            check("failed shutdown fails the shadow result", False)
+
+with tempfile.TemporaryDirectory() as tmp:
+    bins = pathlib.Path(tmp)
+    for name in ('initdb', 'pg_ctl', 'createdb', 'psql'):
+        path = bins / name
+        path.write_text('#!/bin/sh\necho "initdb (PostgreSQL) 18.6"\n')
+        path.chmod(0o755)
+    with patch.dict(shadow.os.environ, {'PATH': str(bins)}, clear=True), patch.object(shadow, 'PG_BIN_CANDIDATES', ()):
+        check("client-only PG18 installation is unavailable", shadow.find_pg18(None) is None)
+    (bins / 'postgres').write_text('synthetic server')
+    with patch.dict(shadow.os.environ, {'PATH': str(bins)}, clear=True), patch.object(shadow, 'PG_BIN_CANDIDATES', ()):
+        check("PG18 discovery follows the scrubbed child PATH", shadow.find_pg18(None) == bins.resolve())
+    older = bins / 'older'
+    older.mkdir()
+    initdb = older / 'initdb'
+    initdb.write_text('#!/bin/sh\necho "initdb (PostgreSQL) 17.9"\n')
+    initdb.chmod(0o755)
+    with patch.dict(shadow.os.environ, {'PATH': str(older) + shadow.os.pathsep + str(bins)}, clear=True), patch.object(shadow, 'PG_BIN_CANDIDATES', ()):
+        check("PG17 earlier on PATH cannot hide PG18", shadow.find_pg18(None) == bins.resolve())
+
 print("applied set")
 check("newly applied migrations are the after-ledger minus the before-ledger, in order",
       shadow.newly_applied(snapshot(T, R1[:1]), snapshot(T, R1)) == ["0002_b.sql"])

@@ -27,9 +27,10 @@ THE JOURNEYS (JOURNEYS, in this order):
                     (--worker-dir); before the release, the missing ones are
                     reported as the verbs this release adds
 browser-journeys runs only when --app-dir holds an installed doctorcre-app
-checkout. It runs that repository's production journeys
-(smoke/production/*.e2e.ts, e2e.production.config.ts) and copies their
-screenshots and traces into the evidence folder.
+checkout. It runs the committed browser-product-proof.v1 producer against
+that source revision's synthetic application build. Live signed-in browser
+behavior is not proven by this fixture contract. Screenshots and traces
+are copied into the evidence folder.
 
 NOT EXERCISED, and it needs an identity: the probe actor is accepted only on
 /mcp, so no journey here renders a signed-in app page. NOT_EXERCISED lists them,
@@ -58,6 +59,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -116,22 +118,30 @@ def _json(reply: Any) -> Any:
 
 def _release_identity(ctx: dict) -> tuple[list[str], dict]:
     failures: list[str] = []
-    worker = _json(ctx["http"](ctx["api"] + "/release"))
-    app = _json(ctx["http"](ctx["app"] + "/app-release"))
-    worker_sha = ((worker or {}).get("git_sha") or {}).get("value") if isinstance(worker, dict) else None
+    worker_reply = ctx["http"](ctx["api"] + "/release")
+    app_reply = ctx["http"](ctx["app"] + "/app-release")
+    worker, app = _json(worker_reply), _json(app_reply)
+    worker_sha = ((worker.get("git_sha") or {}).get("value")
+                  if isinstance(worker, dict) and isinstance(worker.get("git_sha"), dict) else None)
     app_sha = app.get("source_commit") if isinstance(app, dict) else None
-    if not isinstance(worker, dict):
-        failures.append("/release did not answer JSON")
-    if not isinstance(app, dict):
-        failures.append("/app-release did not answer JSON")
-    if ctx["phase"] == "post":
-        live = worker_sha if ctx["lane"] == "worker" else app_sha
-        if live != ctx["sha"]:
-            failures.append(f"{ctx['lane']} serves {live!r}, expected the released {ctx['sha']}")
-    version = (worker or {}).get("worker_version") if isinstance(worker, dict) else None
-    return failures, {"worker_sha": worker_sha, "app_sha": app_sha,
-                      "worker_version_id": (version or {}).get("id") if isinstance(version, dict) else None,
-                      "app_provider_version_id": app.get("provider_version_id") if isinstance(app, dict) else None}
+    valid_sha = lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+    worker_valid = (worker_reply.status == 200 and isinstance(worker, dict) and worker.get("ok") is True
+                    and (worker.get("env") or {}).get("value") == "production" and valid_sha(worker_sha))
+    app_valid = (app_reply.status == 200 and isinstance(app, dict) and app.get("service") == "doctorcre-app"
+                and app.get("environment") == "production" and valid_sha(app_sha))
+    if not worker_valid:
+        failures.append("worker_identity_unavailable_or_invalid")
+    if not app_valid:
+        failures.append("app_identity_unavailable_or_invalid")
+    if ctx["phase"] == "post" and (worker_sha if ctx["lane"] == "worker" else app_sha) != ctx["sha"]:
+        failures.append("released_source_mismatch")
+    version = worker.get("worker_version") if isinstance(worker, dict) else None
+    version_id = version.get("id") if isinstance(version, dict) else None
+    provider = app.get("provider_version_id") if isinstance(app, dict) else None
+    safe_version = lambda value: value if isinstance(value, str) and re.fullmatch(r"[0-9a-f-]{36}", value) else None
+    return failures, {"worker_sha": worker_sha if valid_sha(worker_sha) else None,
+                      "app_sha": app_sha if valid_sha(app_sha) else None,
+                      "worker_version_id": safe_version(version_id), "app_provider_version_id": safe_version(provider)}
 
 
 def _sign_in_gate(ctx: dict) -> tuple[list[str], dict]:
@@ -141,44 +151,64 @@ def _sign_in_gate(ctx: dict) -> tuple[list[str], dict]:
     for page in GATED_PAGES:
         reply = ctx["http"](ctx["app"] + page)
         location = reply.headers.get("Location", "")
-        pages[page] = {"status": reply.status, "location": location}
+        pages[page] = {"status": reply.status}
         target = urllib.parse.urlparse(urllib.parse.urljoin(ctx["app"] + "/", location))
         return_to = urllib.parse.parse_qs(target.query).get("return_to", [None])[0]
         if reply.status not in (301, 302, 303, 307, 308):
             failures.append(f"{page} answered HTTP {reply.status}, expected a sign-in redirect")
         elif (target.scheme, target.hostname, target.path, return_to) != (
                 expected.scheme, expected.hostname, "/auth/login", page):
-            failures.append(f"{page} redirected to {location!r}, expected its own /auth/login?return_to={page}")
+            failures.append(f"{page} redirected outside its expected sign-in route")
     status = ctx["http"](ctx["app"] + "/status")
-    pages["/status"] = {"status": status.status, "content_type": status.headers.get("Content-Type", "")}
+    pages["/status"] = {"status": status.status, "html": "text/html" in status.headers.get("Content-Type", "")}
     if status.status != 200 or "text/html" not in status.headers.get("Content-Type", ""):
         failures.append(f"/status answered HTTP {status.status}, expected the ungated status page")
     return failures, {"pages": pages}
 
 
+READ_CONTRACTS: dict[str, dict[str, type]] = {
+    "deal-board": {"deals": list},
+    "lead-board": {"leads": list, "stages": list, "metrics": dict, "generated_at": str},
+    "read-invoice-tracker": {"entries": list, "schema_version": str, "actor": str, "observed_at": str},
+    "list-progress-boards": {"ok": bool, "schema": str, "boards": list},
+    "list-doc-conversations": {"ok": bool, "conversations": list},
+}
+
+
 def _read_verb(verb: str) -> Callable[[dict], tuple[list[str], dict]]:
     def journey(ctx: dict) -> tuple[list[str], dict]:
         ok, answer = ctx["mcp"](verb, {})
+        evidence = {"verb": verb}
         if not ok:
-            return [f"{verb} failed: {str(answer)[:300]}"], {"verb": verb}
-        if isinstance(answer, dict) and answer.get("ok") is False:
-            return [f"{verb} answered ok:false ({str(answer.get('error'))[:200]})"], {"verb": verb}
-        return [], {"verb": verb, "shape": _shape(answer)}
+            return ["mcp_read_failed"], evidence
+        contract = READ_CONTRACTS[verb]
+        if (not isinstance(answer, dict) or answer.get("ok") is False
+                or any(type(answer.get(key)) is not kind for key, kind in contract.items())):
+            return ["read_contract_invalid"], evidence
+        if ((verb in ("list-progress-boards", "list-doc-conversations") and answer["ok"] is not True)
+                or (verb == "read-invoice-tracker" and answer["schema_version"] != "invoice-tracker.v1")
+                or (verb == "list-progress-boards" and answer["schema"] != "progress-board-directory.v1")):
+            return ["read_contract_invalid"], evidence
+        evidence["shape"] = _shape({key: answer[key] for key in contract})
+        return [], evidence
     return journey
 
 
 def _verb_registry(ctx: dict) -> tuple[list[str], dict]:
     ok, answer = ctx["mcp"]("list-verbs", {"names_only": True})
     if not ok:
-        return [f"list-verbs failed: {str(answer)[:300]}"], {}
-    names = {v.get("name") for v in (answer or {}).get("verbs", []) if isinstance(v, dict)} \
-        if isinstance(answer, dict) else set()
+        return ["registry_read_failed"], {}
+    if (not isinstance(answer, dict) or answer.get("ok") is not True or not isinstance(answer.get("verbs"), list)
+            or any(not isinstance(v, dict) or not isinstance(v.get("name"), str)
+                   or not re.fullmatch(r"[a-z][a-z0-9-]*", v["name"]) for v in answer["verbs"])):
+        return ["registry_contract_invalid"], {}
+    names = {v["name"] for v in answer["verbs"]}
     evidence: dict[str, Any] = {"live_count": len(names)}
     if not names:
         return ["list-verbs listed no verbs"], evidence
     expected = ctx["expected_verbs"]
     if ctx["expected_verbs_error"]:
-        return [ctx["expected_verbs_error"]], evidence
+        return ["released_registry_unavailable"], evidence
     if expected is None:
         evidence["expected"] = "not checked: no released Worker registry was given"
         return [], evidence
@@ -212,25 +242,34 @@ def run_smoke(*, lane: str, sha: str, phase: str, api: str, app: str,
         started = time.monotonic()
         try:
             failures, evidence = CHECKS[journey](ctx)
-        except Exception as exc:  # noqa: BLE001 — a crashed journey is a failed journey, with its cause
-            failures, evidence = [f"{type(exc).__name__}: {str(exc)[:300]}"], {}
+        except Exception:  # noqa: BLE001 — classify failure without persisting response values
+            failures, evidence = ["journey_exception"], {}
         probes.append({"id": journey, "status": "fail" if failures else "pass",
                        "ms": int((time.monotonic() - started) * 1000),
                        "detail": "; ".join(failures), "evidence": evidence})
     if only is None or BROWSER in only:
         started = time.monotonic()
         if browser is None:
-            probes.append({"id": BROWSER, "status": "skip", "ms": 0, "evidence": {},
+            probes.append({"id": BROWSER, "status": "fail" if lane == "app" else "skip", "ms": 0, "evidence": {},
                            "detail": "no installed doctorcre-app checkout was given (--app-dir)"})
         else:
             try:
                 outcome = browser()
-                failed = [t["title"] for t in outcome.get("tests", []) if t.get("status") not in ("passed", "flaky")]
-                if not outcome.get("tests"):
-                    failed = ["the browser run reported no journeys"]
-                detail = "; ".join(failed)
-            except Exception as exc:  # noqa: BLE001
-                outcome, detail = {}, f"{type(exc).__name__}: {str(exc)[:300]}"
+                tests = outcome.get("tests") if isinstance(outcome, dict) else None
+                required = outcome.get("required") if isinstance(outcome, dict) else None
+                complete = (isinstance(tests, list) and bool(tests) and isinstance(required, list)
+                            and bool(required) and {t.get("id") for t in tests} == set(required or []))
+                passed = complete and all(t.get("status") == "passed" for t in tests or [])
+                exit_code = outcome.get("exit")
+                exit_code = exit_code if type(exit_code) is int and 0 <= exit_code <= 255 else None
+                source = outcome.get("source_commit")
+                source = source if isinstance(source, str) and re.fullmatch(r"[0-9a-f]{40}", source) else None
+                detail = "" if exit_code == 0 and passed else "browser_proof_failed_or_incomplete"
+                outcome = {"exit": exit_code, "source_commit": source, "test_count": len(tests or []),
+                           "scope": "synthetic application journeys",
+                           "artifacts": ["browser/checkpoint.png", "browser/video.webm", "browser/trace.zip"] if complete and passed else []}
+            except Exception:  # noqa: BLE001
+                outcome, detail = {}, "browser_runner_unavailable_or_failed"
             probes.append({"id": BROWSER, "status": "fail" if detail else "pass",
                            "ms": int((time.monotonic() - started) * 1000), "detail": detail, "evidence": outcome})
     failed_ids = [p["id"] for p in probes if p["status"] == "fail"]
@@ -266,19 +305,23 @@ class McpProbe:
             return False, f"HTTP {error.code} from /mcp"
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
             return False, f"{type(error).__name__} reading /mcp"
-        if not isinstance(envelope, dict) or "error" in envelope:
-            return False, self._clean(json.dumps((envelope or {}).get("error"))[:300])
-        result = envelope.get("result") or {}
-        text = "".join(c.get("text", "") for c in result.get("content", []) if isinstance(c, dict))
-        if result.get("isError"):
-            return False, self._clean(text[:300])
+        if (not isinstance(envelope, dict) or envelope.get("jsonrpc") != "2.0"
+                or type(envelope.get("id")) is not int or envelope["id"] != self.next_id or "error" in envelope):
+            return False, "mcp_rpc_invalid"
+        result = envelope.get("result")
+        if not isinstance(result, dict) or result.get("isError"):
+            return False, "mcp_tool_failed"
+        content = result.get("content")
+        if (not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict)
+                or content[0].get("type") != "text" or not isinstance(content[0].get("text"), str)):
+            return False, "mcp_content_invalid"
         try:
-            return True, json.loads(text)
+            answer = json.loads(content[0]["text"])
         except ValueError:
-            return True, text
-
-    def _clean(self, text: str) -> str:
-        return text.replace(self.token, "[probe token]") if self.token else text
+            return False, "mcp_content_invalid"
+        if not isinstance(answer, dict):
+            return False, "mcp_content_invalid"
+        return True, answer
 
 
 def probe_token(credential_dir: Path) -> str | None:
@@ -306,45 +349,61 @@ def released_verbs(worker_dir: Path) -> list[str]:
     proc = subprocess.run(["node", "--input-type=module", "-e", script, url], cwd=str(worker_dir),
                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
-        raise RuntimeError(f"the released registry did not import: {proc.stderr.strip()[:300]}")
+        raise RuntimeError("released_registry_import_failed")
     names = json.loads(proc.stdout)
     if not names:
         raise RuntimeError("the released registry exported no verbs")
     return names
 
 
-BROWSER_OUTPUT = ".e2e/production-smoke"   # e2e writes only inside its project root
+def browser_runner(app_dir: Path, out: Path, *, expected_sha: str | None = None) -> Callable[[], dict]:
+    """Run the application's committed browser-product-proof.v1 producer.
 
-
-def browser_runner(app_dir: Path, out: Path, app_url: str) -> Callable[[], dict] | None:
-    """The doctorcre-app production journeys, or None when app_dir holds no
-    installed runner. Its report, screenshots and traces are copied to
-    <out>/browser; the outcome names each journey's artifacts there."""
-    cli = app_dir / "node_modules" / "e2e" / "dist" / "cli" / "bin.js"
-    if not cli.is_file() or not (app_dir / "e2e.production.config.ts").is_file():
-        return None
-
+    This contract exercises its synthetic fixture build, including native
+    journeys and continuity. Live authenticated pages remain unexercised.
+    A configured checkout with no producer fails; it never becomes a skip.
+    """
     def run() -> dict:
+        contract_paths = ("scripts/browser-product-proof.mjs", "e2e.config.ts",
+                          "tests/journeys/required-coverage.json", "node_modules/e2e/dist/cli/bin.js")
+        if not all((app_dir / path).is_file() for path in contract_paths):
+            raise RuntimeError("application_browser_contract_unavailable")
+        source = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=app_dir, text=True).strip()
+        if not re.fullmatch(r"[0-9a-f]{40}", source) or (expected_sha is not None and source != expected_sha):
+            raise RuntimeError("application_browser_source_mismatch")
+        coverage = json.loads((app_dir / "tests/journeys/required-coverage.json").read_text())
+        required = [row["file"] + "::" + urllib.parse.quote(row["title"], safe="~()*!.'-") for row in coverage["tests"]]
+        if not required or len(required) != len(set(required)):
+            raise RuntimeError("application_browser_coverage_invalid")
+        proof = app_dir / ".e2e/proof"
+        packet_path, native_path = proof / "packet.json", proof / "native-report.json"
+        for path in (packet_path, native_path):
+            path.unlink(missing_ok=True)
         env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR", "LANG") if os.environ.get(k)}
-        env.update({"CI": "1", "E2E_TELEMETRY_DISABLED": "1", "DOCTORCRE_SMOKE_URL": app_url})
-        proc = subprocess.run(["node", str(cli), "run", "smoke/production", "--config", "e2e.production.config.ts",
-                               "--output", BROWSER_OUTPUT, "--reporter", "list,junit"], cwd=str(app_dir), env=env,
-                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=900)
+        env.update({"CI": "1", "E2E_TELEMETRY_DISABLED": "1"})
+        proc = subprocess.run(["node", "scripts/browser-product-proof.mjs"], cwd=app_dir, env=env,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1800)
+        if proc.returncode:
+            raise RuntimeError("application_browser_process_failed")
+        packet = json.loads(packet_path.read_text())
+        report = json.loads(native_path.read_text())
+        binding, native = packet.get("binding", {}), report.get("run", {})
+        if (packet.get("schema") != "browser-product-proof.v1" or binding.get("sourceCommit") != source
+                or binding.get("repo") != "jbookout/doctorcre-app" or not binding.get("runId")
+                or native.get("id") != binding["runId"] or native.get("vcs", {}).get("commit") != source
+                or native.get("vcs", {}).get("dirty") is not False or native.get("exitCode") != 0
+                or native.get("status") != "passed"):
+            raise RuntimeError("application_browser_report_invalid")
+        selected = {row.get("testId"): row for row in native.get("results", []) if row.get("selected")}
+        tests = [{"id": key, "status": "passed" if key in selected and selected[key].get("status") == "passed"
+                  and len(selected[key].get("attempts", [])) == 1 else "failed"} for key in required]
         dest = out / "browser"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(app_dir / BROWSER_OUTPUT, dest, dirs_exist_ok=True)
-        (dest / "run.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
-        report = json.loads((dest / "report.json").read_text(encoding="utf-8"))
-        tests = []
-        for row in report.get("run", {}).get("results", []):
-            if not row.get("selected", True):
-                continue
-            artifacts = [str(dest / "artifacts" / a["path"]) for attempt in row.get("attempts", [])
-                         for a in attempt.get("artifacts", []) if a.get("path")]
-            tests.append({"title": " ".join(row.get("titlePath") or [row.get("id", "?")]),
-                          "status": row.get("status"), "artifacts": artifacts,
-                          "ms": sum(a.get("durationMs") or 0 for a in row.get("attempts", []))})
-        return {"exit": proc.returncode, "report": str(dest / "report.json"), "tests": tests}
+        dest.mkdir(parents=True, exist_ok=True)
+        artifacts = []
+        for name in ("checkpoint.png", "video.webm", "trace.zip"):
+            shutil.copyfile(proof / name, dest / name)
+            artifacts.append(str(dest / name))
+        return {"exit": 0, "source_commit": source, "required": required, "tests": tests, "artifacts": artifacts}
     return run
 
 
@@ -361,6 +420,7 @@ def main(argv: list[str] | None = None, *, http: Callable[..., Any] = read,
     parser.add_argument("--credential-dir", default="~/.config/carr")
     parser.add_argument("--worker-dir", help="the released Worker's mcp-server/ (installed), for verb-registry")
     parser.add_argument("--app-dir", help="an installed doctorcre-app checkout, for browser-journeys")
+    parser.add_argument("--invocation-id", default=None)
     parser.add_argument("--only", help="comma-separated journey ids (a retry)")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[0-9a-f]{40}", args.sha):
@@ -381,12 +441,13 @@ def main(argv: list[str] | None = None, *, http: Callable[..., Any] = read,
             expected = released_verbs(Path(args.worker_dir))
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
             expected_error = str(error)
-    browser = browser_runner(Path(args.app_dir), out, args.app) if args.app_dir else None
+    browser = browser_runner(Path(args.app_dir), out, expected_sha=args.sha if args.lane == "app" else None) if args.app_dir else None
     only = [j.strip() for j in args.only.split(",") if j.strip()] if args.only else None
 
     summary = run_smoke(lane=args.lane, sha=args.sha, phase=args.phase, api=args.api, app=args.app,
                         http=http, mcp=mcp, expected_verbs=expected, browser=browser, only=only,
                         expected_verbs_error=expected_error)
+    summary["invocation_id"] = args.invocation_id or str(uuid.uuid4())
     (out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with (out / "probes.jsonl").open("w", encoding="utf-8") as fh:
         for row in summary["probes"]:

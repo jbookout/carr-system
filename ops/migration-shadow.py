@@ -13,9 +13,9 @@ THE RUN, all on a throwaway loopback cluster this script creates and removes:
   3. tools/migrate.py --apply: every migration not in that ledger applies, in
      order, exactly as the release pipeline would apply it to production.
   4. bin/schema-snapshot.sh --from-disposable-local dumps the result.
-  5. Compare with the committed db/schema.sql. Only the time each migration
-     happened to apply (and the operational work-request sequence value the
-     snapshot tooling already admits) is ignored; structure, ledger membership
+  5. Compare with the committed db/schema.sql. Normalize ledger apply times,
+     the admitted work-request sequence, control verification/update times and
+     SCAC seal/registration times. Structure, seed content, ledger membership
      and checksums must match.
 
 A mismatch means the reference schema is stale or was not produced from the
@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import importlib.util
+import json
 import os
 import pathlib
 import re
@@ -74,6 +75,36 @@ WORK_REQUEST_SEQUENCE_VALUE = re.compile(
 
 # ── comparison ─────────────────────────────────────────────────────────────
 
+SEED_TIME_FIELDS = {
+    "ops.scac_mutation_registry_version": "sealed_at",
+    "ops.scac_mutation_registry_entry": "registered_at",
+}
+SQL_JSON = re.compile(r"'((?:[^']|'')*)'::jsonb")
+
+
+def normalize_seed_times(snapshot: str) -> str:
+    lines = []
+    for line in snapshot.splitlines():
+        table = next((t for t in SEED_TIME_FIELDS if line.startswith("insert into " + t + " ")), None)
+        if table:
+            def normalize(match):
+                value = json.loads(match[1].replace("''", "'"))
+                rows = value if isinstance(value, list) else [value]
+                field = SEED_TIME_FIELDS[table]
+                for row in rows:
+                    if isinstance(row, dict) and isinstance(row.get(field), str):
+                        row[field] = "<operational-time>"
+                return "'" + json.dumps(value, ensure_ascii=False).replace("'", "''") + "'::jsonb"
+            line = SQL_JSON.sub(normalize, line)
+        elif line.startswith("insert into ops.enforcement_control_catalog "):
+            # Only the two trailing operational fields in this admitted seed.
+            if re.search(r",verified_at,updated_at\) values ", line):
+                line = re.sub(r"'[^']+'::timestamptz(?=,'[^']+'::timestamptz\)|\))",
+                              "'<operational-time>'::timestamptz", line)
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
 def _structure(snapshot: str) -> str | None:
     """The snapshot with its ledger rows removed and the admitted sequence value
     normalised. None when there is no complete ledger section."""
@@ -84,6 +115,7 @@ def _structure(snapshot: str) -> str | None:
     if end < 0:
         return None
     text = snapshot[:m.end()] + "\n<ledger rows>" + snapshot[end:]
+    text = normalize_seed_times(text)
     return WORK_REQUEST_SEQUENCE_VALUE.sub(
         "select pg_catalog.setval('ops.work_request_ref_seq', <current>, true);", text)
 
@@ -125,14 +157,18 @@ class StepFailed(RuntimeError):
     pass
 
 
+class ShutdownFailed(StepFailed):
+    pass
+
+
 def find_pg18(explicit: str | None) -> pathlib.Path | None:
     dirs = [explicit] if explicit else (
         [os.environ["CARR_SHADOW_PG_BIN_DIR"]] if os.environ.get("CARR_SHADOW_PG_BIN_DIR")
-        else list(PG_BIN_CANDIDATES))
+        else [*PG_BIN_CANDIDATES, *os.environ.get("PATH", "").split(os.pathsep)])
     for d in dirs:
-        path = pathlib.Path(d)
+        path = pathlib.Path(d).resolve()
         initdb = path / "initdb"
-        if not all((path / b).is_file() for b in ("initdb", "pg_ctl", "psql", "createdb")):
+        if not all((path / b).is_file() for b in ("initdb", "postgres", "pg_ctl", "psql", "createdb")):
             continue
         version = subprocess.run([initdb, "--version"], capture_output=True, text=True).stdout
         if f"PostgreSQL) {PG_MAJOR}." in version:
@@ -197,8 +233,15 @@ def shadow(base: str, bindir: pathlib.Path, work: pathlib.Path) -> tuple[str, st
         run([REPO / "bin/schema-snapshot.sh", "--from-disposable-local", dsn,
              "--output-candidate", candidate], env, "bin/schema-snapshot.sh", log)
     finally:
-        subprocess.run([bindir / "pg_ctl", "-D", data, "-m", "fast", "-w", "stop"],
-                       env=env, capture_output=True)
+        try:
+            stopped = subprocess.run([bindir / "pg_ctl", "-D", data, "-m", "fast", "-w", "stop"],
+                                     env=env, capture_output=True, timeout=60)
+            status = subprocess.run([bindir / "pg_ctl", "-D", data, "status"],
+                                    env=env, capture_output=True, timeout=30)
+        except (subprocess.TimeoutExpired, OSError):
+            raise ShutdownFailed(f"shutdown unavailable or timed out; cluster retained at {work}") from None
+        if stopped.returncode or status.returncode != 3:
+            raise ShutdownFailed(f"shutdown not verified; cluster retained at {work}")
     text = candidate.read_text()
     return base_snapshot, text, newly_applied(base_snapshot, text)
 
@@ -224,11 +267,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"migration-shadow: cannot resolve the base: {exc.stderr.strip()}", file=sys.stderr)
         return 2
 
-    with tempfile.TemporaryDirectory(prefix="carr-migration-shadow.") as tmp:
-        work = pathlib.Path(tmp)
+    work = pathlib.Path(tempfile.mkdtemp(prefix="carr-migration-shadow."))
+    retain = False
+    try:
         try:
             _, candidate, applied = shadow(base, bindir, work)
         except (StepFailed, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            retain = isinstance(exc, ShutdownFailed)
             print(f"migration-shadow: FAILED against {base[:12]}'s production structure — {exc}",
                   file=sys.stderr)
             return 2
@@ -244,6 +289,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"migration-shadow: wrote {SNAPSHOT} from the shadow candidate")
             return 0
         diffs = differences((REPO / SNAPSHOT).read_text(), candidate)
+    finally:
+        if not retain:
+            shutil.rmtree(work)
     if not diffs:
         print(f"migration-shadow: OK — committed {SNAPSHOT} is exactly what the migrations produce")
         return 0

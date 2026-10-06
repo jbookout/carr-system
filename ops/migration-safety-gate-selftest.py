@@ -60,6 +60,20 @@ def kinds(sql: str) -> list[str]:
     return sorted({f.kind for f in msg.findings(sql)})
 
 
+check("conditional creation does not prove a new table", kinds(ROLLBACK +
+      "CREATE TABLE IF NOT EXISTS live(id int); ALTER TABLE live ALTER COLUMN payload TYPE varchar(1); CREATE INDEX x ON live(id);") == ["destructive", "long-lock"])
+check("later creation cannot exempt earlier alteration", "destructive" in kinds(ROLLBACK +
+      "ALTER TABLE live ALTER COLUMN payload TYPE varchar(1); CREATE TABLE live(id int);"))
+check("inner WHERE cannot bound DELETE", "destructive" in kinds(ROLLBACK +
+      "DELETE FROM live RETURNING (SELECT 1 WHERE true);"))
+check("USING subquery WHERE cannot bound DELETE", "destructive" in kinds(ROLLBACK +
+      "DELETE FROM live USING (SELECT 1 WHERE true) AS x RETURNING live.id;"))
+check("outer DELETE predicate remains bounded", kinds(ROLLBACK +
+      "DELETE FROM live WHERE id IN (SELECT id FROM old WHERE expired);" ) == [])
+for constraint in ("REFERENCES parent(id)", "UNIQUE", "PRIMARY KEY", "CHECK (pid > 0)"):
+    check("inline validated " + constraint, "long-lock" in kinds(ROLLBACK +
+          "ALTER TABLE live ADD COLUMN pid int DEFAULT 1 " + constraint + ";"))
+
 # ── header contract ────────────────────────────────────────────────────────
 print("header")
 check("a migration with no rollback note is refused",

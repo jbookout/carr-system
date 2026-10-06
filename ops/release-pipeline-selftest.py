@@ -172,12 +172,17 @@ class FakeRunner:
         failed = [f for f in failed if only is None or f in only]
         out = Path(argv[argv.index("--out") + 1])
         out.mkdir(parents=True, exist_ok=True)
-        probes = [{"id": f, "status": "fail", "ms": 3, "detail": f"{f} broke",
+        probes = [{"id": f, "status": "fail" if f in failed else "pass", "ms": 3,
+                   "detail": f"{f} broke" if f in failed else "",
                    "evidence": {"tests": [{"title": f, "status": "failed",
                                            "artifacts": [str(out / "browser/artifacts/a1/screenshots/x.png"),
-                                                         str(out / "browser/artifacts/a1/trace.zip")]}]}}
-                  for f in failed]
-        (out / "summary.json").write_text(json.dumps({"ok": not failed, "failed": failed, "probes": probes}))
+                                                         str(out / "browser/artifacts/a1/trace.zip")]}]} if f in failed else {}}
+                  for f in rp.SMOKE_JOURNEYS if only is None or f in only]
+        value = {"schema": "carr-release-smoke.v1", "lane": argv[argv.index('--lane') + 1],
+                 "sha": argv[argv.index('--sha') + 1], "phase": argv[argv.index('--phase') + 1],
+                 "invocation_id": argv[argv.index('--invocation-id') + 1],
+                 "ok": not failed, "failed": failed, "probes": probes}
+        (out / "summary.json").write_text(json.dumps(value))
         return rp.Result(1 if failed else 0, "release-smoke: done")
 
     def names(self) -> list[str]:
@@ -880,6 +885,37 @@ class PostReleaseProof(Base):
     def argv(self, runner, name):
         return next(a for n, a in runner.calls if n == name)
 
+
+    def test_crash_cannot_reuse_an_earlier_green_summary(self):
+        sha = self.fx.base
+        old = self.fx.repo / rp.SMOKE_OUT / sha / 'post'
+        old.mkdir(parents=True)
+        (old / 'summary.json').write_text(json.dumps({'failed': [], 'probes': []}))
+        pipe = self.fx.pipeline(FakeRunner(smoke={'smoke-post': None}))
+        self.assertIsNone(pipe.smoke_run('worker', sha, 'post'))
+
+    def test_smoke_summary_must_bind_source_and_required_probes(self):
+        class WrongRunner(FakeRunner):
+            def _smoke_output(inner, name, argv):
+                result = super()._smoke_output(name, argv)
+                path = Path(argv[argv.index('--out') + 1]) / 'summary.json'
+                value = json.loads(path.read_text())
+                value['sha'] = '0' * 40
+                path.write_text(json.dumps(value))
+                return result
+        self.assertIsNone(self.fx.pipeline(WrongRunner()).smoke_run('worker', self.fx.base, 'post'))
+
+    def test_app_summary_cannot_skip_required_browser_proof(self):
+        class SkippedRunner(FakeRunner):
+            def _smoke_output(inner, name, argv):
+                result = super()._smoke_output(name, argv)
+                path = Path(argv[argv.index('--out') + 1]) / 'summary.json'
+                value = json.loads(path.read_text())
+                next(p for p in value['probes'] if p['id'] == 'browser-journeys')['status'] = 'skip'
+                path.write_text(json.dumps(value))
+                return result
+        self.assertIsNone(self.fx.pipeline(SkippedRunner()).smoke_run('app', self.fx.base, 'post'))
+
     def test_pass_ships_with_baseline_before_any_apply_and_proof_after_promotion(self):
         sha = self.fx.commit({"mcp-server/src/a.js": "1"})
         runner = FakeRunner()
@@ -895,7 +931,8 @@ class PostReleaseProof(Base):
         self.assertEqual(post[post.index("--sha") + 1], sha)
         self.assertTrue(post[post.index("--worker-dir") + 1].endswith("mcp-server"))
         evidence = Path(post[post.index("--out") + 1])
-        self.assertEqual(evidence, self.fx.repo / "out" / "release-smoke" / sha / "post")
+        self.assertEqual(evidence.parent, self.fx.repo / "out" / "release-smoke" / sha)
+        self.assertTrue(evidence.name.startswith("post-"))
         rec = self.fx.records()[-1]
         self.assertEqual(rec["status"], "shipped")
         self.assertEqual(rec["post_release"]["regressions"], [])
@@ -1050,6 +1087,14 @@ class PostReleaseProof(Base):
             return res
         runner.run = run  # type: ignore[method-assign]
         return pipe.tick(["app"]), live
+
+    def test_missing_browser_proof_cannot_be_excused_by_the_baseline(self):
+        sha = self.fx.commit({"src/worker.js": "1"})
+        runner = FakeRunner(smoke={name: ["browser-journeys"] for name in
+                                  ("smoke-baseline", "smoke-post", "smoke-retry")})
+        rc, _ = self.app(runner, sha, [])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.fx.records()[-1]["post_release"]["regressions"], ["browser-journeys"])
 
     def test_app_pass_runs_the_browser_journeys_from_the_release_checkout(self):
         sha = self.fx.commit({"src/worker.js": "1"})
@@ -3249,6 +3294,17 @@ class ControllerFreshness(Base):
         self.fx.commit({"ops/release-pipeline.py": "v1\n"})
         live = {"sha": self.fx.base}
         self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"])
+
+
+    def test_smoke_helper_and_its_reader_are_bound_by_controller_freshness(self):
+        for path in ('ops/release-smoke.py', 'ops/doctorcre-production-smoke.py'):
+            with self.subTest(path=path):
+                self.fx.commit({path: 'verified source\n'})
+                (self.fx.repo / path).write_text('obsolete verification\n')
+                with self.assertRaises(rp.Blocked) as caught:
+                    self.fx.pipeline(FakeRunner()).controller_current(self.fx.state())
+                self.assertEqual(caught.exception.reason, rp.CONTROLLER_STALE)
+                (self.fx.repo / path).write_text('verified source\n')
 
     def push_from_elsewhere(self, files: dict[str, str]) -> str:
         other = self.fx.tmp / "other"

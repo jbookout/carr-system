@@ -26,6 +26,15 @@ def analyze(observations):
     return rows
 
 
+def node_outcomes(text):
+    outcomes = {}
+    for line in text.splitlines():
+        match = re.search(r'(?<!\w)(not ok|ok)\s+\d+\s+(?:-\s+)?(\S+\.test\.(?:mjs|js))(?=\s|$)', line)
+        if match:
+            outcomes[Path(match[2]).name] = ('fail' if match[1] == 'not ok' else 'pass', line)
+    return outcomes
+
+
 def observations_from_logs(repo, run, attempt, logs, tests):
     observations = []
     for filename, text in logs.items():
@@ -45,8 +54,9 @@ def observations_from_logs(repo, run, attempt, logs, tests):
                 if re.search(r'not run[^\n]*' + re.escape(base), text, re.I) or re.search(r'NOT RUN:[^\n]*' + re.escape(base), text):
                     passed = False
             else:
-                failed = 'not ok ' in text and base in text
-                passed = bool(re.search(r'\bOK\s+unit\s', text))
+                outcome = node_outcomes(text).get(base)
+                failed = outcome is not None and outcome[0] == 'fail'
+                passed = (outcome is not None and outcome[0] == 'pass') or bool(re.search(r'\bOK\s+unit\s', text))
             if failed or passed:
                 event_lines = [line for line in text.splitlines()
                     if (failed and 'FAIL' in line and base in line)
@@ -121,8 +131,8 @@ def failed_tests(logs, inventory):
             if re.search(r'\b(FAIL|TIMEOUT)\b', line):
                 for base in re.findall(r'([A-Za-z0-9_-]+(?:-selftest\.py|test[-_][A-Za-z0-9_-]+\.py|test[-_][A-Za-z0-9_-]+\.sh))', line):
                     tests.add(by_base.get(base, 'ops/' + base))
-        if 'not ok ' in clean:
-            for base in re.findall(r'([A-Za-z0-9_.-]+\.test\.(?:mjs|js))', clean):
+        for base, (outcome, _) in node_outcomes(clean).items():
+            if outcome == 'fail':
                 tests.add(by_base.get(base, 'mcp-server/test/' + base))
     return sorted(tests)
 

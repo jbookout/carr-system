@@ -49,7 +49,8 @@ PROSE_CREDENTIALS = re.compile(
     r'(?:password|passphrase|api[ _-]?key|access[ _-]?token)\s+(?:(?:to|as)\s+)?|'
     r'\b(?:password|passphrase|api[ _-]?key|access[ _-]?token)\s+(?:is|was)\s+)'
     r'(?!\b(?:policy|protection|requirements?|reset|field|to|as)\b)'
-    r'(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|`[^`\r\n]*`|[^\s]+)', re.I)
+    r'(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|`[^`\r\n]*`|'
+    r'[^\r\n]+?(?=[.!?;](?:\s|$)|[\r\n]|$))', re.I)
 
 
 def redact_text(text):
