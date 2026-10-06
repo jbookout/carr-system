@@ -111,7 +111,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def staging_fetch(path: str, *, method="GET", headers=None):
     if path not in {"/release", "/auth/e2e-session", "/auth/session"}:
         raise StagingRefusal("smoke request is outside the fixed staging routes")
-    request = urllib.request.Request("https://" + CARR_HOST + path, method=method, headers=headers or {})
+    request = urllib.request.Request("https://" + CARR_HOST + path, method=method,
+        headers={"user-agent": "Mozilla/5.0 (compatible; DoctorCRE-Staging-E2E/1.0)", **(headers or {})})
     try:
         with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
             return response.status, dict(response.headers.items()), json.load(response)

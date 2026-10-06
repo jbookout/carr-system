@@ -104,6 +104,13 @@ test("E2E exchange refuses production even with the secret and mislabeled hosts"
   assert.equal(env.OAUTH_KV.writes.length, 0);
 });
 
+test("E2E exchange accepts the zero-byte body supplied by normal HTTP POST clients", async () => {
+  const response = await exchange(handler(), environment(), { body: "", headers: { "content-length": "0" } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+  cookie(response);
+});
+
 test("E2E exchange has no caller-selected identity and refuses missing or wrong credentials", async () => {
   for (const authorization of ["", "Bearer wrong", "Basic synthetic", SECRET]) {
     const env = environment();

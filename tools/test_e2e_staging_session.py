@@ -92,6 +92,24 @@ class StagingSessionTests(unittest.TestCase):
         with self.assertRaises(MODULE.StagingRefusal):
             MODULE.smoke("b" * 40, SECRET, fetch=fetch)
 
+    def test_staging_fetch_identifies_the_browser_compatible_qa_client(self):
+        calls = []
+        class Response(io.BytesIO):
+            status = 200
+            headers = {"content-type": "application/json"}
+        class Opener:
+            def open(self, request, timeout):
+                calls.append(request)
+                if not request.get_header("User-agent", "").startswith("Mozilla/5.0"):
+                    raise MODULE.urllib.error.HTTPError(request.full_url, 403, "edge browser integrity", {}, None)
+                return Response(b'{"ok":true}')
+        with patch.object(MODULE.urllib.request, "build_opener", return_value=Opener()):
+            status, _, body = MODULE.staging_fetch("/auth/e2e-session", method="POST", headers={"authorization": "Bearer " + SECRET})
+        self.assertEqual((status, body), (200, {"ok": True}))
+        self.assertEqual(calls[0].full_url, "https://" + MODULE.CARR_HOST + "/auth/e2e-session")
+        self.assertIn("DoctorCRE-Staging-E2E", calls[0].get_header("User-agent"))
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer " + SECRET)
+
 
 if __name__ == "__main__":
     unittest.main()

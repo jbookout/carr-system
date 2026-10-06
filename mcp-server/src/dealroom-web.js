@@ -407,7 +407,7 @@ async function e2eSession(request, env, dependencies) {
   }
   const suppliedOrigin = request.headers.get("origin");
   if (suppliedOrigin && suppliedOrigin !== dealroomOrigin(env)) return json({ error: "forbidden" }, 403);
-  if (new URL(request.url).search || request.body !== null) return json({ error: "invalid_request" }, 400);
+  if (new URL(request.url).search || await request.text() !== "") return json({ error: "invalid_request" }, 400);
   // Staging's Joe row is synthetic. Keep its existing partner semantics and
   // record the E2E principal separately so no read model needs an identity alias.
   const props = dependencies.propsForSlugFn("joe", { via: "dealroom-cookie", client_id: "dealroom-pwa" });
