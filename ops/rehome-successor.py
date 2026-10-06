@@ -142,10 +142,10 @@ def prepare(repo, base, approved, main, conflict_paths):
             if REGISTRY_JS.fullmatch(path) and is_owned_file(path, None, file_at(repo, approved, path)) and file_at(repo, main, path) is None:
                 (staging / path).rename(staging / '.git' / ('superseded-' + Path(path).name))
                 regenerated.add(path)
-        for path in ('bin/schema-snapshot.sh', 'ops/schema-snapshot-registry-seed-selftest.py', 'mcp-server/test/siep-11-mutation-registry.test.mjs', 'ops/config/scac-registry-source-inventory-fixtures.v1.json', 'ops/config/scac-registry-full-entry-set-seals.json'):
+        for path in ('bin/schema-snapshot.sh', 'ops/schema-snapshot-registry-seed-selftest.py', 'mcp-server/test/siep-11-mutation-registry.test.mjs', *JSON_ARTIFACTS, 'mcp-server/src/scac-mutation-registry.current.generated.js'):
             if file_at(repo, main, path) is not None:
                 # Whole generated JSON and pure bookkeeping can be rebuilt.
-                if path.endswith('.json') or domain_bytes(path, file_at(repo, base, path)) == domain_bytes(path, file_at(repo, approved, path)):
+                if path in JSON_ARTIFACTS or REGISTRY_JS.fullmatch(path) or domain_bytes(path, file_at(repo, base, path)) == domain_bytes(path, file_at(repo, approved, path)):
                     git(staging, 'restore', '--source', main, '--staged', '--worktree', '--', path)
                     regenerated.add(path)
         changed = git(staging, 'diff', '--name-only').decode().splitlines()

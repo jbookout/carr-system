@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import { registryChain, appendSuccessor } from '../../ops/registry-chain.mjs';
 
 test('append owns the successor seal, runtime projection and atomic migration pair', () => {
@@ -34,4 +35,25 @@ test('append handles the complete source set through the same interface', async 
   assert.ok(result.sql.length > 1024*1024, 'exercise the complete SQL seed across the compiler adapter');
   assert.equal(result.current.source_count, rows.length);
   assert.equal(result.fixture.patches.at(-1).expected_count, rows.length);
+});
+
+test('historical renderer migration aliases derive from the manifest pins', () => {
+  const row = registryChain.versions[0];
+  const changed = '0'.repeat(64);
+  const result = execFileSync(process.execPath, ['--input-type=module', '-e', `
+import fs from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
+const read = fs.readFileSync;
+fs.readFileSync = (path, ...args) => {
+  const bytes = read(path, ...args);
+  if (!String(path).endsWith('scac-registry-chain.json')) return bytes;
+  const chain = JSON.parse(bytes);
+  chain.versions[0].migration_sha256 = ${JSON.stringify(changed)};
+  return JSON.stringify(chain);
+};
+syncBuiltinESMExports();
+const {HISTORICAL_REGISTRY_ARTIFACT_SHA256} = await import('./ops/scac-mutation-inventory.mjs');
+process.stdout.write(HISTORICAL_REGISTRY_ARTIFACT_SHA256[${JSON.stringify(row.migration)}]);
+`], {cwd: new URL('../../', import.meta.url), encoding: 'utf8'});
+  assert.equal(result, changed);
 });

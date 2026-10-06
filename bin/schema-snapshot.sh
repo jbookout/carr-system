@@ -2955,7 +2955,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     const keys=allKeys.slice(0,count);
     if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
         !Number.isInteger(count) || !Number.isInteger(current) ||
-        count<9 || count>=current || current<10 ||
+        count<9 || count>current || current<10 ||
         allKeys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;

@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {basename} from 'node:path';
-import {registryChain} from './registry-chain.mjs';
+import {registryChain, preservesRegistryChainHistory} from './registry-chain.mjs';
 import {historicalRows, materializeRegistry} from './registry-history.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object' ?
@@ -17,6 +17,11 @@ export function checkRegistryChain({chain=registryChain, before,
   for (const group of chain.atomic_groups) {
     if (!group.length || new Set(group).size !== group.length || group.some((name,i) => i && name <= group[i-1]))
       fail('atomic pair order drifted');
+  }
+  const historyPreserved = !before || (before.versions.length <= chain.versions.length &&
+    before.versions.every((row,index) => JSON.stringify(row)===JSON.stringify(chain.versions[index])));
+  if (before && historyPreserved && !preservesRegistryChainHistory(before, chain)) fail('policy preservation drifted');
+  for (const group of chain.atomic_groups) {
     if (!(chain.inactive_atomic_groups || []).some(item=>JSON.stringify(item.group)===JSON.stringify(group)))
       for (const name of group) readMigration('migrations/'+name);
   }
@@ -28,6 +33,10 @@ export function checkRegistryChain({chain=registryChain, before,
       fail('continuity drifted');
     const bytes = materializeRegistry(row.number, {chain});
     const rows = historicalRows(row.number);
+    const sourceSet = row.number === 1 ? null : 'sha256:'+hash(rows.map(digest).sort().join(','));
+    const catalog = row.number === 1 ? null : digest(row.catalog);
+    if (row.source_set_digest !== sourceSet) fail('source_set_digest drifted: '+row.version);
+    if (row.catalog_digest !== catalog) fail('catalog_digest drifted: '+row.version);
     if (rows.length !== row.source_count || row.entry_count !== rows.length +
       ['secdef_execute','relation_dml','column_dml'].reduce((n,key)=>n+row.catalog[key].count,0)) fail('count drifted: '+row.version);
     if (digest({schema_version:row.version,rows,db_catalog_baseline:row.catalog}) !== row.digest || !bytes.includes(row.digest.slice(7))) fail('digest drifted: '+row.version);
@@ -40,8 +49,7 @@ export function checkRegistryChain({chain=registryChain, before,
     if (row.strict_atomic && !chain.strict_atomic_groups.some(group=>JSON.stringify(group)===JSON.stringify(row.atomic_pair))) fail('strict atomic pair absent: '+row.version);
     predecessor = row.version;
   }
-  if (before && (before.versions.length > chain.versions.length || before.versions.some((row,index) => JSON.stringify(row)!==JSON.stringify(chain.versions[index]))))
-    fail('history preservation drifted');
+  if (!historyPreserved) fail('history preservation drifted');
   const current = chain.versions.at(-1);
   const runtime = readFileSync(new URL('../mcp-server/src/scac-mutation-registry.current.generated.js',import.meta.url),'utf8');
   if (hash(runtime)!==current.artifact_sha256) fail('current artifact pin drifted');

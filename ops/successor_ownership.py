@@ -76,14 +76,20 @@ def is_owned_file(path, before, after):
         if old is None or new is None:
             return False
         if path.endswith('scac-registry-chain.json'):
-            if old.get('schema') != new.get('schema') or new.get('versions', [])[:len(old.get('versions', []))] != old.get('versions'):
-                return False
             if len(new.get('versions', [])) != len(old.get('versions', [])) + 1:
                 return False
-            for key in ('atomic_groups', 'strict_atomic_groups'):
-                if new.get(key, [])[:len(old.get(key, []))] != old.get(key):
-                    return False
-            return True
+            from pathlib import Path
+            import subprocess
+            from git_env import scrubbed_env
+            script = """import fs from 'node:fs';
+import {preservesRegistryChainHistory} from './ops/registry-chain.mjs';
+const {before,after}=JSON.parse(fs.readFileSync(0,'utf8'));
+process.exit(preservesRegistryChainHistory(before,after)?0:1);
+"""
+            result = subprocess.run(['node', '--input-type=module', '-e', script],
+                input=json.dumps({'before': old, 'after': new}).encode(),
+                cwd=Path(__file__).resolve().parents[1], env=scrubbed_env(), capture_output=True, timeout=120)
+            return result.returncode == 0
         if path.endswith('full-entry-set-seals.json'):
             if any(key not in new or not _same_json(new[key], value) for key, value in old.items()):
                 return False

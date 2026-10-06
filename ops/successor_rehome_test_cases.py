@@ -13,6 +13,89 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SuccessorCommands(unittest.TestCase):
+    def test_generated_successor_rehome_uses_all_current_main_predecessor_inputs(self):
+        from unittest.mock import patch
+        subprocess.run(['git', 'clone', '--quiet', '--shared', str(ROOT), str(self.repo / 'source')],
+                       env=self.env, check=True, capture_output=True)
+        self.repo = self.repo / 'source'
+        self.git('config', 'user.name', 'Fixture')
+        self.git('config', 'user.email', 'fixture@example.invalid')
+        self.git('remote', 'set-url', 'origin', str(self.repo))
+        self.git('branch', 'main', 'HEAD')
+        self.git('switch', '-qc', 'feature')
+        self.base = self.head()
+        old = json.loads((self.repo / 'ops/config/scac-registry-chain.json').read_text())
+        current = old['versions'][-1]
+        tail = max(int(p.name[:4]) for p in (self.repo / 'migrations').glob('*.sql'))
+        domain = f'migrations/{tail+1:04d}_rehome_fixture.sql'
+        seal = f'migrations/{tail+2:04d}_rehome_fixture_scac_successor.sql'
+        self.write(domain, 'select 1;\n')
+        compiler = """import fs from 'node:fs';
+import {appendSuccessor,registryChain} from './ops/registry-chain.mjs';
+import {historicalRows} from './ops/registry-history.mjs';
+const row=registryChain.versions.at(-1);
+const result=appendSuccessor({rows:historicalRows(row.number),catalog:row.catalog,
+entrySetDigest:row.entry_set_digest,domainMigration:{filename:process.argv[1],
+sql:fs.readFileSync(process.argv[1],'utf8'),successor_filename:process.argv[2].split('/').at(-1)}});
+fs.writeFileSync(process.argv[2],result.sql);
+fs.writeFileSync('mcp-server/src/scac-mutation-registry.current.generated.js',result.runtime);
+for(const [path,value] of [['scac-registry-chain.json',result.chain],
+['scac-registry-source-inventory-fixtures.v1.json',result.fixture],
+['scac-registry-full-entry-set-seals.json',result.seals]])
+fs.writeFileSync('ops/config/'+path,JSON.stringify(value,null,2)+'\\n');
+"""
+        def compile_at(repo, domain_path, seal_path):
+            subprocess.run(['node', '--input-type=module', '-e', compiler, str(domain_path), str(seal_path)],
+                           cwd=repo, env=self.env, check=True, capture_output=True)
+        compile_at(self.repo, domain, seal)
+        inputs = ['ops/config/scac-registry-chain.json',
+                  'ops/config/scac-registry-source-inventory-fixtures.v1.json',
+                  'ops/config/scac-registry-full-entry-set-seals.json',
+                  'mcp-server/src/scac-mutation-registry.current.generated.js']
+        self.commit(domain, seal, *inputs)
+        approved = self.head()
+        self.advance_main()
+        self.git('fetch', '-q', 'origin', 'main')
+        module = self.module()
+        def regenerate(repo, plan, domains, successor, predecessor):
+            self.assertEqual(plan['registry_predecessor'], current['number'])
+            for path in inputs:
+                self.assertEqual((repo / path).read_bytes(), module.file_at(self.repo, self.main, path), path)
+            compile_at(repo, domains[0].relative_to(repo), successor.relative_to(repo))
+        with patch.object(module, 'regenerate', regenerate):
+            staging, rewritten = module.prepare(self.repo, self.base, approved, self.main, [])
+        chain = json.loads((staging / inputs[0]).read_text())
+        self.assertEqual(chain['versions'][:-1], old['versions'])
+        self.assertEqual(chain['versions'][-1]['number'], current['number'] + 1)
+        self.assertEqual(module.file_at(staging, 'HEAD', domain), module.file_at(self.repo, approved, domain))
+        self.assertTrue(set(inputs).issubset(rewritten))
+
+    def test_chain_ownership_preserves_policy_and_only_adds_successor_groups(self):
+        from registry_chain import registry_chain
+        from successor_ownership import is_owned_file
+        import copy
+        old = registry_chain()
+        new = copy.deepcopy(old)
+        current = dict(new['versions'][-1], number=len(old['versions'])+1,
+                       predecessor=old['versions'][-1]['version'],
+                       version=f"scac-mutation-registry.v{len(old['versions'])+1}",
+                       atomic_pair=['0900_fixture.sql', '0901_fixture_scac_successor.sql'], strict_atomic=True)
+        new['versions'].append(current)
+        new['atomic_groups'].append(current['atomic_pair'])
+        new['strict_atomic_groups'].append(current['atomic_pair'])
+        path = 'ops/config/scac-registry-chain.json'
+        owned = lambda value: is_owned_file(path, json.dumps(old).encode(), json.dumps(value).encode())
+        self.assertTrue(owned(new))
+        for mutate in [
+            lambda value: value['inactive_atomic_groups'].append({'group': old['atomic_groups'][-1], 'reason': 'unreviewed'}),
+            lambda value: value.update(unreviewed_policy=True),
+            lambda value: value['atomic_groups'].append(['9999_unrelated.sql']),
+            lambda value: value['strict_atomic_groups'].pop(),
+        ]:
+            changed = copy.deepcopy(new)
+            mutate(changed)
+            self.assertFalse(owned(changed))
+
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp(prefix="successor-rehome-test-"))
         self.env = fixture_env()

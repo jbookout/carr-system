@@ -1059,8 +1059,20 @@ test("the complete frontier renders when every generated target is absent", () =
     // byte-for-byte comparison below; this only confirms the renderer reported
     // the whole set rather than a subset.
     assert.match(stdout, new RegExp(`\\(${frontierPaths.length} artifacts\\)`));
-    for (const [target, expected] of Object.entries(frontier))
-      assert.equal(readRegistryArtifact(path.join(outputRoot, target), "utf8"), expected, target);
+    const verifyExports = () => {
+      for (const [target, expected] of Object.entries(frontier))
+        assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
+    };
+    verifyExports();
+    const historical = Object.keys(frontier).find(target => /registry\.v35\.generated\.js$/.test(target));
+    assert.ok(historical, 'exercise an exported historical runtime');
+    const exported = path.join(outputRoot, historical);
+    fs.writeFileSync(exported, 'corrupt historical output\n');
+    assert.throws(verifyExports, /AssertionError/);
+    fs.unlinkSync(exported);
+    assert.throws(verifyExports, /ENOENT/);
+    fs.writeFileSync(exported, frontier[historical]);
+    verifyExports();
   } finally {
     fs.rmSync(isolatedRoot, { recursive: true, force: true });
   }

@@ -23,3 +23,29 @@ for (const [name, mutate, reason] of [
 test('changed historical migration bytes are refused', () => {
   assert.throws(() => checkRegistryChain({readMigration: () => 'select changed;'}), /migration pin/);
 });
+
+for (const field of ['source_set_digest', 'catalog_digest']) {
+  for (const value of ['sha256:' + '0'.repeat(64), null, undefined]) {
+    test(`the common invariant refuses an incorrect or absent ${field}`, () => {
+      const chain = structuredClone(registryChain);
+      chain.versions.at(-1)[field] = value;
+      assert.throws(() => checkRegistryChain({chain}), new RegExp(field));
+    });
+  }
+  test(`v1 cannot acquire the absent ${field} export`, () => {
+    const chain = structuredClone(registryChain);
+    chain.versions[0][field] = 'sha256:' + '0'.repeat(64);
+    assert.throws(() => checkRegistryChain({chain}), new RegExp(field));
+  });
+}
+
+for (const mutate of [
+  chain => chain.inactive_atomic_groups.push({group: chain.atomic_groups.at(-1), reason: 'unreviewed'}),
+  chain => chain.unreviewed_policy = true,
+  chain => chain.atomic_groups.push(['9999_unrelated.sql']),
+  chain => chain.strict_atomic_groups.pop(),
+]) test('successor validation preserves exception policy and only admits derived groups', () => {
+  const chain = structuredClone(registryChain);
+  mutate(chain);
+  assert.throws(() => checkRegistryChain({chain, before: registryChain}), /policy preservation|atomic groups preservation/);
+});

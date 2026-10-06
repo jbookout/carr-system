@@ -18,6 +18,20 @@ export function registryVersion(version, chain = registryChain) {
   return found;
 }
 
+export function preservesRegistryChainHistory(before, after) {
+  const same = (left, right) => JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+  const policy = chain => Object.fromEntries(Object.entries(chain).filter(([key]) =>
+    !['versions', 'atomic_groups', 'strict_atomic_groups'].includes(key)));
+  if (!same(policy(before), policy(after)) || after.versions.length < before.versions.length ||
+      !same(after.versions.slice(0, before.versions.length), before.versions)) return false;
+  const appended = after.versions.slice(before.versions.length);
+  if (appended.some((row, i) => row.number !== before.versions.length + i + 1 ||
+      row.version !== `scac-mutation-registry.v${row.number}` ||
+      row.predecessor !== after.versions[row.number - 2]?.version)) return false;
+  return same(after.atomic_groups, [...before.atomic_groups, ...appended.filter(row => row.atomic_pair.length).map(row => row.atomic_pair)]) &&
+    same(after.strict_atomic_groups, [...before.strict_atomic_groups, ...appended.filter(row => row.strict_atomic).map(row => row.atomic_pair)]);
+}
+
 export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest, chain = registryChain }) {
   const predecessor = chain.versions.at(-1);
   const domains = Array.isArray(domainMigration) ? domainMigration : [domainMigration];
