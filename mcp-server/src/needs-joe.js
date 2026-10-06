@@ -9,21 +9,15 @@
 // PR state behind it) arrive as the `needs-joe-local` board snapshot, which
 // tools/needs_joe_local.py re-derives from scratch on every board run.
 //
-// What the system can decide itself is excluded and counted. "Human-only" is
-// not judged here: it is the existing classes, in one order --
-//   credential  the job watchdog's credential patterns, logins, biometrics
-//   money       the conduct gate's PROTECTED spend words
-//   outbound    the conduct gate's PROTECTED client/public words
-//   irreversible the conduct gate's PROTECTED destructive words
-//   ruling      loop marker 'decision' or blocker 'ruling', or a question
-//               only a human-only/authority-only verb can answer
-//   human_only  the filer's own blocker class, when no word above matches
-// Lead-outreach loops (domain 'prospecting') are excluded outright: leads live
-// on the Lead Board and never on a glanceable list (rule 17ffd587).
-// The regexes mirror hooks/conduct_patterns.py PROTECTED and
-// ops/config/job-watchdog.json needs_joe_patterns.credentials.
+// Only filer-flagged loops enter the list. Explicit rulings and human-only
+// blockers take precedence; text supplies a display class for other items.
+// These labels do not grant authority or replace the conduct gate. The parity
+// test covers its protected vocabulary and the watchdog's credential phrases;
+// extra terms here describe the locally filed asks, including credits and login.
+// Prospecting loops remain on the Lead Board.
 
 import { organizationTenantForActor } from "./identity.js";
+import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 
 export const NEEDS_JOE_LOCAL_BOARD = "needs-joe-local";
 const JOE = "joe";
@@ -31,9 +25,9 @@ const LOCAL_STALE_MS = 2 * 60 * 60 * 1000; // the board job runs every 15 minute
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const CLASSES = [
-  ["credential", /\b(credentials?|log ?ins?|sign(?:ed)?[- ]?(?:in|out)|authenticat\w*|oauth|tokens? expired|api keys?|passwords?|face ?id|touch ?id|biometric\w*|2fa|mfa|keychain|secrets?)\b|credential-health probe/i],
-  ["money", /\b(spend|pay|paid|payment|invoices?|budget|purchase|fees?|commission|pricing|subscription|subscribe|renews?|renewal|billing|credits)\b|[$£€]\s?\d|\b\d+\s?(usd|dollars?)\b/i],
-  ["outbound", /\b(client|prospect|landlord|listing agent|tenant|vendor|broker|doctor|practice owner|LOI|letter of intent|PSA|lease|proposal|RFP|send|email|publish|post|tweet|linkedin|facebook|instagram)\b/i],
+  ["credential", /\b(credentials?|log ?ins?|sign(?:ed)?[- ]?(?:in|out)|authenticat\w*|oauth|tokens? expired|not logged in|bad credentials|login required|api keys?|passwords?|face ?id|touch ?id|biometric\w*|2fa|mfa|keychain|secrets?)\b|credential-health probe/i],
+  ["money", /\b(spend|pay|paid|payment|invoices?|budget|purchase|fees?|commission|pricing|subscription|subscribe|renews?|renewal|billing|credits)\b|[$£€]\s?\d|\b\d+\s?(usd|dollars?)\b|\b(per|a)\s(month|year|seat|user)\b/i],
+  ["outbound", /\b(client|prospect|landlord|listing agent|tenant|vendor|broker|doctor|practice owner|LOI|letter of intent|PSA|lease|proposal|counter|RFP|send|email|publish|post|tweet|linkedin|facebook|instagram)\b/i],
   ["irreversible", /\b(delete|destroy|drop table|force[- ]push|revoke|irreversible)\b/i],
 ];
 
@@ -100,15 +94,13 @@ function loopItems(rows, now, exclude) {
       exclude("waiting_on_others");
       continue;
     }
-    // Only a loop its filer flagged as needing a person is a candidate; the
-    // words then pick the class. An unflagged loop is internal work even when
-    // its text mentions a credential or a client.
+    // Unflagged work remains internal even when its text mentions a client.
     const flagged = row.kind === "action_required" || row.marker === "decision"
       || ["human_only", "ruling", "capability"].includes(row.blocker_class);
-    const why = !flagged ? null : classifyHumanOnly(text)
-      ?? (row.marker === "decision" || row.blocker_class === "ruling" ? "ruling"
-        : row.blocker_class === "human_only" ? "human_only" : null);
-    if (!why) { exclude("internal"); continue; }
+    if (!flagged) { exclude("internal"); continue; }
+    const why = row.marker === "decision" || row.blocker_class === "ruling" ? "ruling"
+      : row.blocker_class === "human_only" ? "human_only"
+        : classifyHumanOnly(text) ?? "human_only";
     const tier = row.unblocks ? "work" : why === "credential" ? "capability" : "pending";
     out.push(item({
       key: `loop:${row.number}`,
@@ -182,6 +174,10 @@ async function source(sources, name, load) {
 // join the list and its other lanes are judged by the flag on the verb that
 // decides them.
 export async function readNeedsJoe(c, actor, governance, { now = Date.now() } = {}) {
+  if (partnerAuthoritySlugForActor(actor) !== JOE) return {
+    schema: "needs-joe.v1", state: "not_applicable", count: 0, items: [],
+    excluded: { count: 0, by_reason: {}, reasons: {} }, sources: {},
+  };
   const tenant = organizationTenantForActor(actor);
   const sources = {};
   const excluded = { count: 0, by_reason: {} };
@@ -206,7 +202,8 @@ export async function readNeedsJoe(c, actor, governance, { now = Date.now() } = 
       const rows = (await c.query(
         `select ref, title, blocker_detail, updated_at
            from ops.work_request
-          where state = 'needs_joe' and organization_tenant_id = $1
+          where state = 'needs_joe'
+            and (organization_tenant_id is null or organization_tenant_id = $1::text)
           order by updated_at /* needs-joe */`, [tenant])).rows;
       return { items: rows.map(row => {
         const why = classifyHumanOnly(row.blocker_detail) ?? "ruling";
