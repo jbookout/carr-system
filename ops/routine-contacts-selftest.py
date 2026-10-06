@@ -62,7 +62,7 @@ class ContactTests(unittest.TestCase):
         self.assertEqual(ctx.models, 1)
         self.assertEqual(outcome["processed"], 1)
         flags = [args for verb,args,_ in ctx.writes if verb == "record-finding"]
-        self.assertTrue(all(f["expires_on"] == "2027-04-03" for f in flags))
+        self.assertTrue(all(f["expires_on"] == "2027-04-03" for f in flags if f["kind"] != "contact_enrichment_attempt"))
         self.assertTrue(all(f["value"]["verified_at"] == ctx.now.isoformat() for f in flags))
         updates = [args for verb,args,_ in ctx.writes if verb == "update-party-contact"]
         self.assertEqual(updates[0]["fields"], {"email": "alex@example.com"})
@@ -119,8 +119,40 @@ class ContactTests(unittest.TestCase):
         ctx = Context(); row = ctx.fixture["model_response"]["records"][0]
         row["facts"] = []; row["corrections"] = []
         contacts.execute(ctx, contacts.prepare(ctx))
-        self.assertEqual(len(ctx.writes), 1)
+        self.assertEqual(len(ctx.writes), 2)
         self.assertFalse(ctx.writes[0][1]["found"])
+
+    def test_fresh_attempt_cooldown_does_not_consume_another_model(self):
+        ctx = Context(); ctx.fixture["queue"][0]["research_retry_after"] = "2026-11-04"
+        plan = contacts.prepare(ctx)
+        self.assertFalse(plan["work"])
+        contacts.execute(ctx, plan)
+        self.assertEqual((ctx.models, ctx.writes), (0, []))
+        ctx.fixture["queue"][0]["research_retry_after"] = "2026-10-05"
+        self.assertTrue(contacts.prepare(ctx)["work"])
+
+    def test_restart_preserves_observation_and_compare_swap_effect(self):
+        ctx = Context(); ctx.state = {"started_at": ctx.now.isoformat(), "effects": {}}
+        plan = contacts.prepare(ctx)
+        contacts.execute(ctx, plan)
+        first = list(ctx.writes)
+        for verb,args,key in first:
+            ctx.state["effects"][key] = {"verb": verb, "args": dict(args, idempotency_key="fixture-id")}
+        ctx.state.pop("completed_contact_refs")
+        ctx.now += dt.timedelta(days=1)
+        ctx.query = lambda sql,params=(): [{"version": 9, "contact_state": "active", "merged_into": None}]
+        ctx.writes = []
+        contacts.execute(ctx, plan)
+        self.assertEqual(ctx.writes, first)
+
+    def test_completed_contact_does_not_requery_or_rewrite_on_restart(self):
+        ctx = Context(); ctx.state = {"started_at": ctx.now.isoformat(), "effects": {}}
+        plan = contacts.prepare(ctx)
+        contacts.execute(ctx, plan)
+        ctx.writes = []
+        ctx.query = lambda *args: self.fail("completed contact must not requery")
+        contacts.execute(ctx, plan)
+        self.assertEqual(ctx.writes, [])
 
     def test_failed_writer_prevents_success(self):
         ctx = Context(); ctx.write = lambda *args: {"ok": False}

@@ -10,6 +10,7 @@ CONTACT_FIELDS = {"phone", "cell", "email", "title", "city", "county"}
 IDENTITY_FIELDS = {"name", "company", "org", "org_id", "npi", "specialty"}
 FACT_FIELDS = CONTACT_FIELDS | {"website", "social", "address", "license_status",
                               "entity_filing", "hours", "practitioners", "category_slug", "verticals"}
+RESEARCH_RETRY_DAYS = 30
 
 QUEUE_SQL = """
 with hydrated as (
@@ -27,12 +28,18 @@ with hydrated as (
  left join vendor v on q.subject_type='vendor' and v.id=q.subject_id
  where not coalesce(r.merged,false) and p.merged_into is null and p.deleted_at is null
    and p.contact_state <> 'do_not_contact'
+   and not exists (
+     select 1 from record_flag attempt
+      where attempt.subject_type='party' and attempt.subject_id=p.id
+        and attempt.kind='contact_enrichment_attempt'
+        and attempt.expires_on > current_date
+   )
 )
 select * from hydrated where person_rank=1 order by priority limit 40
 """
 
 
-def select_contacts(rows):
+def select_contacts(rows, now=None):
     selected, seen = [], set()
     for row in sorted(rows, key=lambda r: (int(r["priority"]), str(r.get("ref", "")))):
         if (row.get("subject_type") not in {"party", "vendor", "lead", "client"}
@@ -40,6 +47,9 @@ def select_contacts(rows):
                 or row.get("deleted_at") or not row.get("ref") or not row.get("party_id")):
             continue
         if row["party_id"] not in seen:
+            if now is not None and row.get("research_retry_after"):
+                if dt.date.fromisoformat(str(row["research_retry_after"])) > now.date():
+                    continue
             seen.add(row["party_id"])
             selected.append(row)
         if len(selected) == 40:
@@ -50,7 +60,7 @@ def select_contacts(rows):
 def prepare(ctx):
     fixture = ctx.fixture
     rows = fixture.get("queue", []) if fixture is not None else ctx.query(QUEUE_SQL)
-    selected = select_contacts(rows)
+    selected = select_contacts(rows, ctx.now)
     categories = (fixture.get("categories", []) if fixture is not None else
                   ctx.query("select slug,label from vendor_category order by sort,slug")) if selected else []
     return {"work": bool(selected), "inputs": {"records": selected, "categories": categories},
@@ -167,17 +177,26 @@ def execute(ctx, plan):
     rows = validate_response(response, plan["inputs"])
     records = {r["ref"]: r for r in plan["inputs"]["records"]}
     categories = {r["slug"] for r in plan["inputs"]["categories"]}
-    verified_at = ctx.now.isoformat()
-    expires_on = (ctx.now.date() + dt.timedelta(days=180)).isoformat()
+    state = getattr(ctx, "state", {})
+    observed = dt.datetime.fromisoformat(state["started_at"]) if state.get("started_at") else ctx.now
+    verified_at = observed.isoformat()
+    expires_on = (observed.date() + dt.timedelta(days=180)).isoformat()
     findings, reviews, updates = 0, 0, 0
 
     def write(verb, args, key):
         if not ctx.dry_run:
+            cached = state.get("effects", {}).get(key)
+            if cached:
+                if cached["verb"] != verb:
+                    raise RuntimeError("contact effect key changed its verb")
+                args = {k: v for k, v in cached["args"].items() if k != "idempotency_key"}
             reply = ctx.write(verb, args, key)
             if not isinstance(reply, dict) or reply.get("ok") is not True:
                 raise RuntimeError(f"{verb} did not acknowledge the effect")
 
     for row in rows:
+        if not ctx.dry_run and row["ref"] in state.get("completed_contact_refs", []):
+            continue
         original = records[row["ref"]]
         review = []
         contact_fields, vendor_fields = {}, {}
@@ -217,12 +236,14 @@ def execute(ctx, plan):
                        "source": " ".join(dict.fromkeys(url for fact in row["facts"]
                                                          if fact["field"] in contact_fields
                                                          for url in fact["citations"]))}
-            write("update-party-contact", payload, effect_key(row["ref"], "contact-update", payload)); updates += 1
+            write("update-party-contact", payload, effect_key(row["ref"], "contact-update",
+                  {"fields": contact_fields, "source": payload["source"], "observed_at": verified_at})); updates += 1
         if vendor_fields and not ctx.dry_run:
             current = ctx.query("select version from vendor where id=%s and merged_into is null", (original["subject_id"],))
             if len(current) != 1: raise RuntimeError("vendor eligibility changed during research")
             payload = {"vendor": row["ref"], "base_version": int(current[0]["version"]), "fields": vendor_fields}
-            write("update-vendor", payload, effect_key(row["ref"], "vendor-update", payload)); updates += 1
+            write("update-vendor", payload, effect_key(row["ref"], "vendor-update",
+                  {"fields": vendor_fields, "observed_at": verified_at})); updates += 1
         if review:
             title = f"Review contact research for {original['name']} ({row['ref']})"
             body = "\n".join(review)
@@ -230,6 +251,18 @@ def execute(ctx, plan):
                        "title": title[:200], "desired_outcome": body[:2000],
                        "acceptance_criteria": [{"id": "CONTACT-REVIEW", "text": "Confirm the sourced correction or new category, or reject it. Identity fields remain unchanged until review."}]}
             write("report-problem", payload, effect_key(row["ref"], "review", {"title": title, "body": body})); reviews += 1
+        payload = {"subject": row["ref"], "subject_kind": "party",
+                   "kind": "contact_enrichment_attempt", "internal": True,
+                   "value": {"verified_at": verified_at, "identity_ambiguous": row["ambiguous"],
+                             "review_pending": bool(review), "facts_recorded": len(row["facts"])},
+                   "source": "contact-enrichment-weekly code research receipt",
+                   "observed_at": verified_at,
+                   "expires_on": (observed.date() + dt.timedelta(days=RESEARCH_RETRY_DAYS)).isoformat()}
+        write("record-finding", payload, effect_key(row["ref"], "attempt", payload)); findings += 1
+        if not ctx.dry_run:
+            state.setdefault("completed_contact_refs", []).append(row["ref"])
+            if hasattr(ctx, "save"):
+                ctx.save()
     return {"processed": len(rows), "findings": findings, "reviews": reviews,
             "contact_updates": updates, "model_calls": 0 if ctx.dry_run else 1,
             "writes": 0 if ctx.dry_run else findings + reviews + updates}
