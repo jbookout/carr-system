@@ -108,20 +108,41 @@ _DASH_M_RE = re.compile(
     r"\s+(?:'[^']*'|\"[^\"]*\")")
 
 
-# A HEREDOC HANDED TO A SHELL IS A SCRIPT, NOT DATA (2026-10-05). The carve-out
-# above stripped every quoted heredoc body, so `bash <<'EOF'` around a
-# destructive command was allowed: the body was skipped as prose while bash ran
-# it. A heredoc whose opener line puts a shell, ssh or eval in command position
-# (directly, or at the end of a pipe) keeps its body in view.
-_SHELL_FEED_RE = re.compile(
-    r"(?:^|[|;&(]|&&|\|\|)\s*(?:\w+=\S*\s+)*"
-    r"(?:(?:sudo|env|exec|nohup|command|time)\s+(?:-\S+\s+)*)*"
-    r"(?:[\w./-]*/)?(?:bash|sh|zsh|dash|ksh|fish|ssh|eval|source)\b")
+def _command_head(words):
+    words = list(words)
+    while words:
+        word = words[0]
+        if re.match(r"^\w+=", word) or word in {"if", "then", "elif", "else", "do", "!", "{"}:
+            words.pop(0)
+        elif word.rsplit("/", 1)[-1] in {"sudo", "env", "exec", "nohup", "command", "time", "xargs", "npx", "bunx", "yarn", "pnpm"}:
+            words.pop(0)
+            while words and words[0].startswith("-"):
+                words.pop(0)
+            if words and words[0] in {"exec", "dlx"}:
+                words.pop(0)
+        elif word == "timeout" and len(words) > 1:
+            words = words[2:]
+        else:
+            return word
+    return ""
 
 
 def feeds_shell(line):
-    """True when this heredoc opener line hands its body to a shell."""
-    return bool(_SHELL_FEED_RE.search(line))
+    """Identify command words after lexing, so quoted pipes remain data."""
+    try:
+        tokens = shell_tokens(line)
+    except ValueError:
+        return True
+    segment = []
+    for token in tokens + [";"]:
+        if token in SHELL_BOUNDARIES:
+            word = _command_head(segment).rsplit("/", 1)[-1]
+            if word in {"bash", "sh", "zsh", "dash", "ksh", "fish", "ssh", "eval", "source"}:
+                return True
+            segment = []
+        else:
+            segment.append(token)
+    return False
 
 
 def _rewrite_heredocs(cmd, replace_body):
@@ -203,9 +224,9 @@ DATA_COMMAND_SUFFIXES = ("grok-run.sh",)
 # A command position: start of text, after a separator, quote or substitution
 # opener, past env assignments and the prefix words that run their argument.
 COMMAND_POSITION = (
-    r"(?:^|[|;&(){}\n`'\"]|\$\(|&&|\|\|)\s*(?:\w+=\S*\s+)*"
+    r"(?:^|[|;&(){}\n`'\"]|\$\(|&&|\|\|)\s*(?:(?:if|then|elif|else|do|!)\s+)*(?:\w+=\S*\s+)*"
     r"(?:(?:sudo|env|exec|nohup|command|time|xargs|npx|bunx|yarn|pnpm(?:\s+(?:exec|dlx))?"
-    r"|timeout\s+\S+)\s+(?:-\S+\s+)*)*(?:[\w./~-]*/)?")
+    r"|timeout\s+\S+)\s+(?:-\S+\s+|\w+=\S*\s+)*)*(?:[\w./~-]*/)?")
 
 _BOUNDARY_RE = re.compile(r"(?:[;&|(\n`]|\$\()")
 _PREFIX_RE = re.compile(
@@ -213,32 +234,56 @@ _PREFIX_RE = re.compile(
     r"\s+(?:-\S+\s+)*)*")
 
 
+def _substitution_end(text, start):
+    depth, i = 1, start + 2
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"":
+            end = _closing_quote(text, i)
+            if end is None:
+                return len(text)
+            i = end + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if not depth:
+                return i
+        i += 1
+    return len(text)
+
+
 def _substitutions(text):
-    """The commands inside $(...) and `...` in `text`, one per line."""
     found = []
     i = 0
     while i < len(text):
-        if text.startswith("$(", i):
-            depth, j = 1, i + 2
-            while j < len(text) and depth:
-                depth += {"(": 1, ")": -1}.get(text[j], 0)
-                j += 1
-            found.append(text[i + 2:j - 1] if not depth else text[i + 2:])
-            i = j
+        if text[i] == "\\":
+            i += 2
+        elif text.startswith("$(", i):
+            end = _substitution_end(text, i)
+            found.append(text[i + 2:end])
+            i = end + 1
         elif text[i] == "`":
-            j = text.find("`", i + 1)
-            found.append(text[i + 1:j] if j >= 0 else text[i + 1:])
-            i = len(text) if j < 0 else j + 1
+            end = i + 1
+            while end < len(text) and text[end] != "`":
+                end += 2 if text[end] == "\\" else 1
+            found.append(text[i + 1:end])
+            i = end + 1
         else:
             i += 1
     return found
 
 
 def _command_word(text_so_far):
-    """The executable of the simple command `text_so_far` ends inside."""
     tail = _BOUNDARY_RE.split(text_so_far)[-1]
-    words = _PREFIX_RE.sub("", tail).split()
-    return words[0] if words else ""
+    try:
+        return _command_head(shell_tokens(tail))
+    except ValueError:
+        return ""
 
 
 def _is_data_command(word):
@@ -253,13 +298,16 @@ def _closing_quote(text, start):
         if quote == '"' and text[i] == "\\":
             i += 2
             continue
+        if quote == '"' and text.startswith("$(", i):
+            i = _substitution_end(text, i) + 1
+            continue
         if text[i] == quote:
             return i
         i += 1
     return None
 
 
-def _unwrap_quotes(text):
+def _unwrap_quotes(text, executable_args=False):
     out = []
     i = 0
     while i < len(text):
@@ -274,13 +322,16 @@ def _unwrap_quotes(text):
                 out.append(text[i:])     # unterminated: scan the rest raw
                 break
             inner = text[i + 1:end]
-            if _is_data_command(_command_word("".join(out))):
+            if re.search(r"(?<![\w.])\w+=$", "".join(out)):
+                kept = _substitutions(inner) if c == '"' else []
+                out.append("x" + "".join("\n" + k + "\n" for k in kept))
+            elif not executable_args and _is_data_command(_command_word("".join(out))):
                 kept = _substitutions(inner) if c == '"' else []
                 out.append(" " + "".join("\n" + k for k in kept) + ("\n_" if kept else ""))
             else:
                 # The trailing `_` ends the unwrapped text without opening a
                 # new command position for the words that follow the quote.
-                out.append("\n" + inner + "\n_")
+                out.append("\n" + inner.lstrip("!") + "\n_")
             i = end + 1
             continue
         out.append(c)
@@ -294,7 +345,8 @@ def executable_text(cmd):
         if feeds_shell(opener):
             return None
         return "\n".join(_substitutions(body))
-    return _unwrap_quotes(_rewrite_heredocs(strip_inert_text(cmd), substitutions_only))
+    executable_args = feeds_shell(cmd) or bool(re.search(r"\balias\.[^=\s]+=", cmd))
+    return _unwrap_quotes(_rewrite_heredocs(strip_inert_text(cmd), substitutions_only), executable_args)
 
 
 # A quoted heredoc whose only reader is `cat > file` or `tee file` is text being

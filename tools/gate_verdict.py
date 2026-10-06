@@ -32,13 +32,16 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WINDOW_DAYS = 7
 NOISY_MIN_WRONG = 3
 NOISY_RATE = 0.25
-LOOP_STATE = os.path.join(REPO, "out", "gate-precision-loops.json")
+
 
 
 def default_ledger():
     sys.path.insert(0, os.path.join(REPO, "hooks"))
     import gate_ledger
     return gate_ledger.ledger_path(REPO, "live")
+
+
+LOOP_STATE = os.path.join(os.path.dirname(default_ledger()), "gate-precision-loops.json")
 
 
 def _epoch(ts):
@@ -57,9 +60,13 @@ def read(path):
         for line in fh:
             try:
                 row = json.loads(line)
-            except ValueError:
-                continue
+            except ValueError as exc:
+                raise ValueError("unreadable decision ledger") from exc
+            if not isinstance(row, dict) or row.get("type") not in {"decision", "verdict"}:
+                raise ValueError("invalid decision ledger record")
             if row.get("type") == "decision":
+                if not row.get("id") or not row.get("gate") or not _epoch(row.get("ts")):
+                    raise ValueError("incomplete decision ledger record")
                 decisions.append(row)
             elif row.get("type") == "verdict" and row.get("decision_id"):
                 held = verdicts.get(row["decision_id"])
@@ -111,9 +118,11 @@ def _fmt_rate(rate):
 
 def health_row(path, days=WINDOW_DAYS):
     """(the row, the noisy gates). A missing ledger is never an all-clear."""
-    if not os.path.exists(path):
-        return (f"-- {'gate precision':<18} no decision ledger yet ({path}) · {ACTION}", [])
-    stats = precision(path, days)
+    try:
+        stats = precision(path, days)
+    except (OSError, ValueError) as exc:
+        return (f"⚠︎ {'gate precision':<18} evidence unknown ({type(exc).__name__}); "
+                f"restore the decision ledger before reconciliation · {ACTION}", None)
     noisy = noisy_gates(stats)
     blocks = sum(g["blocks"] for g in stats.values())
     labelled = sum(g["labelled"] for g in stats.values())
@@ -141,49 +150,137 @@ def _loop_body(n):
             f"the gate precision health row stops naming the gate.")
 
 
-def reconcile_loops(noisy, verb, state_path=LOOP_STATE):
-    """Open one loop per newly noisy gate; close the loop of a gate that recovered."""
+def _save_state(path, state):
+    from pathlib import Path
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + f".{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, target)
+
+
+def _perform(state, gate, verb, path):
+    entry = state[gate]
+    intent = entry["intent"]
     try:
-        with open(state_path, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (FileNotFoundError, ValueError):
-        state = {}
-    outcome = {}
-    current = {n["gate"]: n for n in noisy}
-    for gate, n in current.items():
-        entry = state.setdefault(gate, {})
-        if entry.get("loop_id"):
-            outcome[gate] = "open"
-            continue
-        entry.setdefault("open_key", str(uuid.uuid4()))
-        response = verb("add-loop", {
-            "idempotency_key": entry["open_key"], "kind": "open_loop", "owner": "claude",
-            "domain": "system", "blocker": "other_lane",
+        response = verb(intent["verb"], intent["payload"])
+    except Exception:
+        return "error"
+    if not isinstance(response, dict) or response.get("ok") is not True:
+        if isinstance(response, dict) and response.get("error") in {"version_conflict", "loop_not_open"}:
+            entry.pop("intent")
+            _save_state(path, state)
+        return "error"
+    action = intent["verb"]
+    if action == "add-loop":
+        if not isinstance(response.get("loop_id"), str):
+            return "error"
+        entry["loop_id"] = response["loop_id"]
+        result = "opened"
+    elif action == "update-loop":
+        result = "updated"
+    else:
+        state.pop(gate)
+        _save_state(path, state)
+        return "closed"
+    entry.pop("intent")
+    _save_state(path, state)
+    return result
+
+
+def _intend(state, gate, name, payload, path):
+    state[gate]["intent"] = {"verb": name, "payload": {
+        "idempotency_key": str(uuid.uuid4()), **payload}}
+    _save_state(path, state)
+
+
+def reconcile_loops(noisy, verb, state_path=LOOP_STATE):
+    """Own the locked transition, including intent persistence before each write.
+
+    None means unreadable evidence and permits no external effects. Empty valid
+    evidence can prove recovery. Ambiguous calls retry the persisted payload.
+    """
+    import gate_ledger
+    if noisy is None:
+        return {"evidence": "error"}
+    with gate_ledger.locked(state_path):
+        try:
+            with open(state_path, encoding="utf-8") as handle:
+                state = json.load(handle)
+            if not isinstance(state, dict) or any(not isinstance(v, dict) for v in state.values()):
+                raise ValueError("invalid loop state")
+        except FileNotFoundError:
+            state = {}
+        except (OSError, ValueError):
+            return {"state": "error"}
+        current = {n["gate"]: n for n in noisy}
+        outcome = {}
+        for gate in sorted(set(state) | set(current)):
+            entry = state.setdefault(gate, {})
+            if entry.get("intent"):
+                result = _perform(state, gate, verb, state_path)
+                outcome[gate] = result
+                if result == "error":
+                    continue
+                entry = state.setdefault(gate, {})
+            elif entry.get("open_key") and not entry.get("loop_id"):
+                # Adopt an existing intent from the previous state format.
+                if gate not in current:
+                    outcome[gate] = "error"
+                    continue
+                _intend(state, gate, "add-loop", _open_payload(current[gate]), state_path)
+                entry["intent"]["payload"]["idempotency_key"] = entry["open_key"]
+                _save_state(state_path, state)
+                outcome[gate] = _perform(state, gate, verb, state_path)
+                if outcome[gate] == "error":
+                    continue
+            if entry.get("loop_id"):
+                try:
+                    remote = verb("read-loop", {"loop_id": entry["loop_id"]})
+                except Exception:
+                    remote = {}
+                if (not isinstance(remote, dict) or remote.get("error")
+                        or not isinstance(remote.get("version"), int) or not remote.get("status")):
+                    outcome[gate] = "error"
+                    continue
+                if remote["status"] != "open":
+                    if gate not in current:
+                        state.pop(gate)
+                        _save_state(state_path, state)
+                        outcome[gate] = "closed"
+                        continue
+                    entry.clear()
+                elif gate in current:
+                    body = _loop_body(current[gate])
+                    if remote.get("body") != body:
+                        _intend(state, gate, "update-loop", {"loop_id": entry["loop_id"],
+                                "base_version": remote["version"], "body": body}, state_path)
+                        outcome[gate] = _perform(state, gate, verb, state_path)
+                    else:
+                        outcome.setdefault(gate, "open")
+                    continue
+                else:
+                    _intend(state, gate, "close-loop", {"loop_id": entry["loop_id"],
+                            "base_version": remote["version"], "resolution": "done",
+                            "outcome": f"Gate {gate} dropped below the false-alarm threshold on a valid gate precision read."}, state_path)
+                    outcome[gate] = _perform(state, gate, verb, state_path)
+                    continue
+            if gate in current:
+                _intend(state, gate, "add-loop", _open_payload(current[gate]), state_path)
+                outcome[gate] = _perform(state, gate, verb, state_path)
+            elif gate in state:
+                state.pop(gate)
+                _save_state(state_path, state)
+        return outcome
+
+
+def _open_payload(n):
+    return {"kind": "open_loop", "owner": "claude", "domain": "system", "blocker": "other_lane",
             "blocker_detail": "the gates lane (an orchestrator-dispatched platform session) owns the fix",
-            "body": _loop_body(n)})
-        if response.get("ok") and isinstance(response.get("loop_id"), str):
-            entry["loop_id"] = response["loop_id"]
-            outcome[gate] = "opened"
-        else:
-            outcome[gate] = "error"
-    for gate in [g for g in state if g not in current]:
-        entry = state[gate]
-        if not entry.get("loop_id"):
-            state.pop(gate)
-            continue
-        entry.setdefault("close_key", str(uuid.uuid4()))
-        response = verb("close-loop", {
-            "idempotency_key": entry["close_key"], "loop_id": entry["loop_id"], "resolution": "done",
-            "outcome": f"Gate {gate} dropped below the false-alarm threshold on the gate precision row."})
-        if response.get("ok"):
-            state.pop(gate)
-            outcome[gate] = "closed"
-        else:
-            outcome[gate] = "error"
-    os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    with open(state_path, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=2, sort_keys=True)
-    return outcome
+            "body": _loop_body(n)}
 
 
 def call_verb(name, payload):
@@ -239,12 +336,7 @@ def _cmd_backfill(args, path):
     """Seed the ledger from the meter's telemetry, which already holds every
     live refusal's gate, session and headline (not its input, so no digest)."""
     sys.path.insert(0, os.path.join(REPO, "hooks"))
-    import hashlib
     import gate_ledger
-    try:
-        known = {d.get("id") for d in read(path)[0]}
-    except FileNotFoundError:
-        known = set()
     added = 0
     for source in args.telemetry:
         with open(source, encoding="utf-8") as fh:
@@ -257,24 +349,8 @@ def _cmd_backfill(args, path):
                     continue
                 if r.get("session") in args.skip_session:
                     continue
-                call = r.get("tool_use_id") or r.get("prompt_id") or ""
-                did = hashlib.sha256(
-                    f"backfill|{r.get('session')}|{call}|{r.get('hook')}|{r.get('ts')}".encode()
-                ).hexdigest()[:16]
-                if did in known:
-                    continue
-                known.add(did)
-                event = r.get("event")
-                with open(path, "a", encoding="utf-8") as out:
-                    out.write(json.dumps({
-                        "type": "decision", "id": did, "ts": r.get("ts"), "gate": r.get("hook"),
-                        "event": event, "tool": r.get("tool"),
-                        "kind": "reopen" if event in gate_ledger.STOP_EVENTS else gate_ledger.KIND[r["outcome"]],
-                        "rule": gate_ledger.rule_of(r.get("deny_class") or r.get("deny_headline")),
-                        "input_digest": None, "session": r.get("session"),
-                        "tool_use_id": r.get("tool_use_id"), "prompt_id": r.get("prompt_id"),
-                        "source": "live", "backfilled": True}) + "\n")
-                added += 1
+                _, wrote = gate_ledger.write_decision(path, r, backfilled=True)
+                added += int(wrote)
     print(f"backfilled {added} decision(s)")
     return 0
 

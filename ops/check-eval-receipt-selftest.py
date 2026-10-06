@@ -311,6 +311,16 @@ class Registry(unittest.TestCase):
             self.assertTrue(any(surface["id"] in cer.surfaces_for(p, REGISTRY) for p in tracked),
                             f"{surface['id']} matches no tracked file")
 
+    def test_context_reader_is_not_an_emitter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "hooks").mkdir()
+            (root / "hooks" / "reader.py").write_text('specific = data.get("hookSpecificOutput")\n')
+            self.assertEqual(cer.unregistered_context_hooks(root, REGISTRY), [])
+            (root / "hooks" / "reader.py").write_text(
+                'specific = data.get("hookSpecificOutput")\nprint({"hookSpecificOutput": specific})\n')
+            self.assertEqual(cer.unregistered_context_hooks(root, REGISTRY), ["hooks/reader.py"])
+
     def test_every_context_emitting_hook_is_registered(self):
         self.assertEqual(cer.unregistered_context_hooks(ROOT, REGISTRY), [])
 

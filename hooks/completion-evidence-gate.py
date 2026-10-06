@@ -386,26 +386,7 @@ def audit(row):
         pass
 
 
-def message(rec):
-    payload = rec.get("payload")
-    if isinstance(payload, dict) and payload.get("type") == "message":
-        return payload
-    value = rec.get("message")
-    return value if isinstance(value, dict) else rec
-
-
-def text(rec, roles):
-    msg = message(rec)
-    if (msg.get("role") or rec.get("type")) not in roles:
-        return ""
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(str(block.get("text", "")) for block in content
-                         if isinstance(block, dict) and block.get("type") in
-                         {"text", "input_text", "output_text"})
-    return ""
+from lib.transcript_read import message, text
 
 
 def has_carr_path_marker(value):

@@ -41,7 +41,7 @@ if verdict == "reopen":
 sys.exit(0)
 '''
 
-FAILS = []
+FAILS: list[str] = []
 VERBOSE = "-v" in sys.argv[1:]
 
 
@@ -101,7 +101,8 @@ def pre(session, tool_use_id, tool_input, tool="Bash"):
 
 
 def post(session, tool_use_id, tool_input, tool="Bash"):
-    return {**pre(session, tool_use_id, tool_input, tool), "hook_event_name": "PostToolUse"}
+    return {**pre(session, tool_use_id, tool_input, tool), "hook_event_name": "PostToolUse",
+            "tool_response": {"exit_code": 0, "success": True}}
 
 
 def stop(session, prompt_id, message, verdict="allow"):
@@ -154,12 +155,11 @@ check("a matching call that has only been ALLOWED is not yet a completion",
 lab.fire("other-fixture.py", post("S1", "t2", write, tool="Write"))
 verdicts = lab.rows("verdict")
 did = lab.rows("decision")[0]["id"] if lab.rows("decision") else None
-check("completing the same substance via Write auto-labels the block wrong",
-      len(verdicts) == 1 and verdicts[0].get("label") == "wrong"
-      and verdicts[0].get("by") == "auto" and verdicts[0].get("decision_id") == did, verdicts)
+check("cross-tool text overlap does not prove the refused operation succeeded",
+      verdicts == [], verdicts)
 lab.fire("other-fixture.py", post("S1", "t2", write, tool="Write"))
 check("a second hook on the same completion adds no second label",
-      len(lab.rows("verdict")) == 1, lab.rows("verdict"))
+      len(lab.rows("verdict")) == 0, lab.rows("verdict"))
 
 # ── 5. Not 'immediately': the session did other work first ──────────────────
 lab = Lab()
@@ -191,8 +191,8 @@ lab = Lab()
 lab.fire("stop-fixture.py", stop("S1", "p1", REPLY, verdict="reopen"))
 lab.fire("stop-fixture.py", stop("S1", "p1", REPLY, verdict="allow"))
 v = lab.rows("verdict")
-check("the same gate accepting the same reply after a reopen labels the reopen wrong",
-      len(v) == 1 and v[0].get("label") == "wrong", v)
+check("Stop admission does not prove a reply was delivered",
+      v == [], v)
 lab = Lab()
 lab.fire("stop-fixture.py", stop("S1", "p1", REPLY, verdict="reopen"))
 lab.fire("other-fixture.py", pre("S1", "t5", {"command": "python3 ops/guard-selftest.py"}))
@@ -234,6 +234,7 @@ finally:
 
 # ── 11. The verdict CLI and the precision report ────────────────────────────
 spec = importlib.util.spec_from_file_location("gate_verdict", os.path.join(REPO, "tools", "gate_verdict.py"))
+assert spec is not None and spec.loader is not None
 gv = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gv)
 
@@ -333,11 +334,22 @@ check("backfilled decisions carry the rule, never the command",
       {r["rule"] for r in got} == {"private key material", "bare_id"}
       and SECRET not in open(lab.ledger, encoding="utf-8").read(), got)
 
-calls = []
+calls: list[tuple[str, dict]] = []
+
+
+remote = {"status": "open", "version": 1, "body": ""}
 
 
 def fake_verb(name, payload):
     calls.append((name, payload))
+    if name == "read-loop":
+        return {"loop_id": "L-1", **remote}
+    if name in {"close-loop", "update-loop"}:
+        if payload.get("base_version") != remote["version"]:
+            return {"ok": False, "error": "missing_base_version"}
+        remote["version"] += 1
+    if name in {"add-loop", "update-loop"}:
+        remote["body"] = payload["body"]
     return {"ok": True, "loop_id": "L-1"} if name == "add-loop" else {"ok": True}
 
 
@@ -350,7 +362,7 @@ check("a newly noisy gate opens one loop owned by the orchestrator",
       first == {"noisy.py": "opened"} and calls[0][0] == "add-loop"
       and calls[0][1]["owner"] == "claude" and "deploy words" in calls[0][1]["body"], (first, calls))
 check("a gate still noisy keeps its loop without a second one",
-      again == {"noisy.py": "open"} and len(calls) == 1, (again, calls))
+      again == {"noisy.py": "open"} and sum(name == "add-loop" for name, _ in calls) == 1, (again, calls))
 cleared = gv.reconcile_loops([], fake_verb, state)
 check("a gate that recovered closes its loop",
       cleared == {"noisy.py": "closed"} and calls[-1][0] == "close-loop"

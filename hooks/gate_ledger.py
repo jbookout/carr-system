@@ -1,40 +1,11 @@
 #!/usr/bin/env python3
-"""gate_ledger.py — one line per gate decision, so a gate's precision is countable.
+"""Record refusals and label only matching successful next operations.
 
-WHY (2026-10-05, gap #4). One orchestrator session that day hit five false
-alarms: the unattended guard refused a Grok prompt for naming a deploy command
-and a builder brief for naming a key file; the completion-evidence and conduct
-Stop gates reopened replies that had no defect; the escalation gate refused a
-question about lifting a merge freeze. None of that was countable. The meter
-(hook-meter-run.py) saw every firing, but nothing said which refusals were
-WRONG, so no gate could be graded and the noisiest one could not be named.
-
-WHAT IT WRITES. hook-meter-run.py calls observe() after every gate it runs.
-
-  * Every block, hold (ask) or reopen appends a `decision` line: gate, rule,
-    input digest, session, time. The rule is the gate's own refusal headline cut
-    to its label (text after " — ", parenthesised and quoted detail removed), so
-    no command, prompt or reply text is stored. The digest is a sha256 of the
-    tool input or reply.
-  * A `verdict` line labels a decision right or wrong. tools/gate_verdict.py
-    writes human labels. This module writes one automatic label: WRONG, when the
-    same session, as its very next move, completes the same substance anyway —
-    a PostToolUse of a matching call, or the refusing gate itself accepting the
-    matching call or reply. If the session did anything else in between (ran a
-    check, changed course), the block shaped the work and stays unlabelled.
-
-HOW "SAME SUBSTANCE" IS DECIDED WITHOUT KEEPING TEXT. Word 3-grams of the call's
-content, each HMAC-keyed with the session id and kept as a hash in a per-session
-pending file for WINDOW_S seconds. Two calls match when nearly all the 3-grams
-of the shorter one appear in the longer one and their sizes are within 2x — so
-a heredoc wrapper around a brief matches a Write of that brief. Session-keyed
-hashes are comparable within the session and meaningless outside it.
-
-IT NEVER CHANGES A VERDICT. Everything here runs after the gate has decided,
-inside hook-meter-run's recording block, and every entry point swallows its own
-errors. Fixtures: ops/gate_ledger-selftest.py
+Evidence contains digests and labels; command, reply and prompt text stays local
+in the native transcript. Session transitions and ledger identity are locked.
 """
 import os
+from contextlib import contextmanager
 
 WINDOW_S = 600
 MATCH_CONTAINMENT = 0.8
@@ -114,16 +85,12 @@ def _last_reply(transcript_path):
                 row = json.loads(line)
             except Exception:
                 continue
-            msg = row.get("message") if isinstance(row, dict) else None
-            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            if not isinstance(row, dict):
                 continue
-            content = msg.get("content")
-            if isinstance(content, str):
-                return content
-            texts = [b.get("text", "") for b in content or []
-                     if isinstance(b, dict) and b.get("type") == "text"]
-            if texts:
-                return "\n".join(texts)
+            from lib.transcript_read import text
+            reply = text(row, {"assistant"})
+            if reply:
+                return reply
     except Exception:
         pass
     return ""
@@ -134,7 +101,7 @@ def substance(payload, event):
     import json
     if event in STOP_EVENTS:
         return (payload.get("last_assistant_message")
-                or _last_reply(payload.get("transcript_path") or ""))
+                or _last_reply(payload.get("transcript_path") or payload.get("transcriptPath") or ""))
     if event == "UserPromptSubmit":
         return payload.get("prompt") or ""
     ti = payload.get("tool_input")
@@ -238,76 +205,125 @@ def observe(repo, record, raw, captured_out="", captured_err=""):
         pass
 
 
+@contextmanager
+def locked(path):
+    import fcntl
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".lock", "a", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def decision_id(record):
+    import hashlib
+    call = record.get("tool_use_id")
+    if not call:
+        call = f"{record.get('prompt_id')}|{record.get('ts')}"
+    identity = f"{record.get('session')}|{call}|{record.get('event')}|{record.get('hook')}"
+    return hashlib.sha256(identity.encode()).hexdigest()[:16]
+
+
+def write_decision(ledger, record, input_digest=None, headline=None, backfilled=False):
+    import json
+    did = decision_id(record)
+    with locked(ledger):
+        if os.path.exists(ledger):
+            with open(ledger, encoding="utf-8") as handle:
+                for line in handle:
+                    row = json.loads(line)
+                    if row.get("type") == "decision" and row.get("id") == did:
+                        return did, False
+        event = record.get("event")
+        row = {"type": "decision", "id": did, "ts": record.get("ts"),
+               "gate": record.get("hook"), "event": event, "tool": record.get("tool"),
+               "kind": "reopen" if event in STOP_EVENTS else KIND[record["outcome"]],
+               "rule": rule_of(headline or record.get("deny_class") or record.get("deny_headline")),
+               "input_digest": input_digest, "session": record.get("session"),
+               "tool_use_id": record.get("tool_use_id"), "prompt_id": record.get("prompt_id"),
+               "source": record.get("source")}
+        if backfilled:
+            row["backfilled"] = True
+        _append(ledger, row)
+    return did, True
+
+
+def _operation(payload, tool):
+    import hashlib
+    import json
+    ti = payload.get("tool_input")
+    if not isinstance(ti, dict):
+        return None
+    if tool in {"Write", "Edit", "MultiEdit"}:
+        target = ti.get("file_path") or ti.get("path")
+        if not target:
+            return None
+        operation = {"tool": tool, "target": target}
+    else:
+        operation = {"tool": tool, "input": {k: v for k, v in ti.items() if k != "fixture_verdict"},
+                     "cwd": payload.get("cwd")}
+    return hashlib.sha256(json.dumps(operation, sort_keys=True).encode()).hexdigest()
+
+
+def _successful(payload, tool):
+    response = payload.get("tool_response")
+    if not isinstance(response, dict) or response.get("error") or response.get("isError"):
+        return False
+    if "exit_code" in response:
+        return response["exit_code"] == 0
+    return tool in {"Write", "Edit", "MultiEdit"} and response.get("success") is True
+
+
 def _observe(repo, record, raw, captured_out, captured_err):
     import time
     session = record.get("session")
-    event = record.get("event") or ""
-    outcome = record.get("outcome")
     if not session:
         return
     src = record.get("source")
     if not src:
-        try:
-            import hook_meter
-            src = hook_meter.source()
-        except Exception:
-            src = "unclassified"
+        import hook_meter
+        src = hook_meter.source()
     ledger = ledger_path(repo, src)
     pending_path = _pending_path(ledger, session)
-    deciding = outcome in KIND
-    if not deciding and not os.path.exists(pending_path):
-        return                                   # the hot path: nothing to do
+    with locked(pending_path):
+        _transition(ledger, pending_path, record, raw, captured_out, captured_err, src)
 
+
+def _transition(ledger, pending_path, record, raw, captured_out, captured_err, src):
+    import time
+    event = record.get("event") or ""
+    outcome = record.get("outcome")
     now = time.time()
     call = record.get("tool_use_id") or record.get("prompt_id") or ""
     payload = _payload(raw)
-    sig = shingles(substance(payload, event), session)
+    sig = shingles(substance(payload, event), record["session"])
+    operation = _operation(payload, record.get("tool"))
     pending = [p for p in _load_pending(pending_path) if now - p.get("ts", 0) <= _window()]
-
-    if deciding:
-        import hashlib
-        kind = "reopen" if event in STOP_EVENTS else KIND[outcome]
-        decision_id = hashlib.sha256(
-            f"{session}|{call}|{record.get('hook')}|{now}".encode()).hexdigest()[:16]
-        headline = record.get("deny_class") or _headline(captured_err, captured_out)
-        _append(ledger, {
-            "type": "decision", "id": decision_id,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-            "gate": record.get("hook"), "event": event or None, "tool": record.get("tool"),
-            "kind": kind, "rule": rule_of(headline), "input_digest": digest(payload, event),
-            "session": session, "tool_use_id": record.get("tool_use_id"),
-            "prompt_id": record.get("prompt_id"), "source": src,
-        })
-        pending = [p for p in pending if p.get("call") != call or p.get("hook") != record.get("hook")]
-        pending.append({"id": decision_id, "hook": record.get("hook"), "event": event,
-                        "call": call, "sig": sig, "ts": now})
-        _save_pending(pending_path, pending)
-        return
-
     keep = []
     for p in pending:
-        # Another hook on the refused tool call itself. A reopened Stop turn
-        # keeps its prompt_id, so for Stop a matching id is the NEXT attempt.
-        if call and p.get("call") == call and event not in STOP_EVENTS:
+        same_call = bool(call and call == p.get("call"))
+        matches = same_substance(sig, p.get("sig") or [])
+        if event not in STOP_EVENTS:
+            matches = matches and operation is not None and operation == p.get("operation")
+        if same_call and event not in STOP_EVENTS and event != "PostToolUse":
             keep.append(p)
             continue
-        if not same_substance(sig, p.get("sig") or []):
-            if event == "PreToolUse":
-                continue                         # the session moved on: not immediate
+        completed = (event == "PostToolUse" and _successful(payload, record.get("tool")))
+        if matches and completed:
+            _append(ledger, {"type": "verdict", "decision_id": p["id"], "label": "wrong", "by": "auto",
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                            "reason": "same session's next operation completed successfully with the same target and substance"})
+        elif matches and event != "PostToolUse":
+            # Admission is not completion. Remember the admitted retry's identity.
+            if call:
+                p["call"] = call
             keep.append(p)
-            continue
-        completed = (event == "PostToolUse"
-                     or (outcome == "allow" and record.get("hook") == p.get("hook")
-                         and (event in STOP_EVENTS) == (p.get("event") in STOP_EVENTS)))
-        if not completed:
+        elif event not in {"PreToolUse", "PostToolUse", "UserPromptSubmit", *STOP_EVENTS}:
             keep.append(p)
-            continue
-        how = ("completed through " + (record.get("tool") or "another call")
-               if event == "PostToolUse" else "accepted by the same gate")
-        _append(ledger, {
-            "type": "verdict", "decision_id": p["id"], "label": "wrong", "by": "auto",
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-            "reason": f"same session's next move {how} with the same substance "
-                      f"{int(now - p.get('ts', now))}s later",
-        })
+    if outcome in KIND:
+        record = {**record, "source": src, "ts": record.get("ts") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
+        did, added = write_decision(ledger, record, digest(payload, event),
+                                    record.get("deny_class") or _headline(captured_err, captured_out))
+        if added:
+            keep.append({"id": did, "hook": record.get("hook"), "event": event,
+                         "call": call, "sig": sig, "operation": operation, "ts": now})
     _save_pending(pending_path, keep)

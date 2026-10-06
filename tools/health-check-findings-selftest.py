@@ -119,7 +119,7 @@ STRUCTURAL_KEYS = {
     "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
-    "gate_precision_unreadable",
+    "gate_precision_unreadable", "gate_precision_reconciliation",
 }
 ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity"}
 
@@ -584,6 +584,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
                   _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
+                  flashlib=Mock(health_row=Mock(return_value="OK Flash stopped")),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
         return ns
@@ -679,6 +680,11 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         ns = self.namespace()
         snap = {"exports": {}, "jobs": [], "job_definitions": [], "controls": {}}
         ns.update(CANONICAL_SECTION="all", _canonical_snapshot=lambda: snap,
+                  _gate_precision_reader=lambda: Mock(
+                      health_row=Mock(return_value=("OK gate precision fixture", [])),
+                      default_ledger=Mock(return_value="/nonexistent-fixture-ledger"),
+                      LOOP_STATE="/nonexistent-fixture-state"),
+                  _branch_janitor_row=lambda: ("OK branch janitor fixture", False),
                   _canonical_now=lambda snap: datetime.now(timezone.utc),
                   _canonical_contradiction_alarm=lambda: 0,
                   _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
@@ -693,6 +699,38 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                      "_legacy_scheduled_definitions", "_calendar_prebrief_standing", "_calendar_prebrief_unknowns"):
             ns[name] = lambda *args: []
         return ns
+
+    def test_gate_reconciliation_failure_records_a_hard_error(self):
+        import contextlib, io
+        from unittest.mock import Mock
+        ns = self.all_namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        state = Path(self.enterContext(tempfile.TemporaryDirectory())) / "loops.json"
+        state.write_text("{}")
+        reader = Mock(health_row=Mock(return_value=("OK gate precision fixture", [])),
+                      default_ledger=Mock(return_value="fixture"), LOOP_STATE=str(state),
+                      reconcile_loops=Mock(return_value={"a.py": "error"}))
+        ns["_gate_precision_reader"] = lambda: reader
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        [finding] = ns["_FINDINGS"]
+        self.assertEqual(finding["key"], "gate_precision_reconciliation")
+        self.assertTrue(finding["hard_error"])
+        reader.reconcile_loops.assert_called_once()
+
+    def test_unknown_gate_evidence_records_error_without_reconciliation(self):
+        import contextlib, io
+        from unittest.mock import Mock
+        ns = self.all_namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        reader = Mock(health_row=Mock(return_value=("unknown ledger", None)),
+                      default_ledger=Mock(return_value="fixture"))
+        ns["_gate_precision_reader"] = lambda: reader
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        [finding] = ns["_FINDINGS"]
+        self.assertEqual(finding["key"], "gate_precision_unreadable")
+        reader.reconcile_loops.assert_not_called()
 
     def test_all_health_sections_report_cap_failure_with_other_checks_clean(self):
         import io, contextlib

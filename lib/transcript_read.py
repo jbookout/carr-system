@@ -55,3 +55,25 @@ def load_transcript(path, *, hook, session=None, log_path=None):
         except Exception:
             pass
     return records
+
+
+def message(record):
+    payload = record.get("payload")
+    if isinstance(payload, dict) and payload.get("type") == "message":
+        return payload
+    value = record.get("message")
+    return value if isinstance(value, dict) else record
+
+
+def text(record, roles):
+    msg = message(record)
+    if (msg.get("role") or record.get("type")) not in roles:
+        return ""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(str(block.get("text", "")) for block in content
+                         if isinstance(block, dict) and block.get("type") in
+                         {"text", "input_text", "output_text"})
+    return ""

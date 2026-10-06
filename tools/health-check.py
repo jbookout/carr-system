@@ -24,6 +24,8 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
 import jev_outage_health as _jev_outage
+import flashlib
+from lib.credential_file import read_env_file
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -1327,6 +1329,22 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+def _branch_janitor_row():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+    from branch_retirement import health
+    return health(REPO_ROOT)
+
+
+def _gate_precision_reader():
+    spec = importlib.util.spec_from_file_location(
+        "gate_verdict", os.path.join(REPO_ROOT, "tools", "gate_verdict.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("gate precision reader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
@@ -1360,6 +1378,11 @@ def _canonical_health():
         return 1
 
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        flash_line = flashlib.health_row()
+        print("  " + flash_line)
+        if flash_line.startswith("WARN"):
+            rc = _red("flash_residency", flash_line)
     for error in snap.get("errors", []):
         print(f"  ⚠︎ canonical source UNREADABLE — {error}")
         rc = _red("source_unreadable", str(error), hard_error=True)
@@ -1774,7 +1797,7 @@ def _canonical_health():
             _action = _jev_outage.action(_joh.get("reason"))
             _outcome = _jev_outage.reconcile(
                 _joh, _loop_state,
-                lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+                _jev_outage.call_verb)
             if _joh["status"] == "warn":
                 _last = (f"last success {_joh['age_hours']}h ago"
                          if _joh["age_hours"] is not None else "no usable call recorded")
@@ -1854,15 +1877,15 @@ def _canonical_health():
         # wrong. A gate whose false alarms cross the threshold gets one
         # deduplicated loop, closed again when it drops off this row.
         try:
-            _gv_spec = importlib.util.spec_from_file_location(
-                "gate_verdict", os.path.join(REPO_ROOT, "tools", "gate_verdict.py"))
-            _gv = importlib.util.module_from_spec(_gv_spec)
-            _gv_spec.loader.exec_module(_gv)
+            _gv = _gate_precision_reader()
             _gp_line, _gp_noisy = _gv.health_row(_gv.default_ledger())
-            if not CANONICAL_FIXTURE and (_gp_noisy or os.path.exists(_gv.LOOP_STATE)):
+            if _gp_noisy is None:
+                rc = _red("gate_precision_unreadable", _gp_line, hard_error=True)
+            if _gp_noisy is not None and not CANONICAL_FIXTURE and (_gp_noisy or os.path.exists(_gv.LOOP_STATE)):
                 _gp_loops = _gv.reconcile_loops(_gp_noisy, _gv.call_verb)
                 if "error" in _gp_loops.values():
                     _gp_line += " · loop update FAILED, rerun health"
+                    rc = _red("gate_precision_reconciliation", _gp_line, hard_error=True)
             print("  " + _gp_line)
             if _gp_noisy:
                 rc = _red("gate_precision", _gp_line.split(" · ", 1)[0], count=len(_gp_noisy))
@@ -1871,6 +1894,18 @@ def _canonical_health():
             print(f"  ⚠︎ {'gate precision':<18} {_detail} · on breach: restore "
                   f"tools/gate_verdict.py or the ledger, then rerun health")
             rc = _red("gate_precision_unreadable", _detail, hard_error=True)
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        print("Branch retirement — local scheduled receipts")
+        try:
+            line, failed = _branch_janitor_row()
+            print("  " + line)
+            if failed:
+                rc = _red("branch_janitor", line, subject="three-repo-retirement")
+        except Exception as exc:
+            line = (f"branch janitor unavailable ({type(exc).__name__}) · on breach: owner orchestrator "
+                    "· restore lib/branch_retirement.py · verify health · auto-clear after successful readback")
+            print("  WARN " + line)
+            rc = _red("branch_janitor", line, subject="three-repo-retirement")
 
     if CANONICAL_SECTION in ("all", "tailscale"):
         try:
@@ -2092,12 +2127,10 @@ GATES = {
 
 
 def _keys_in_env_file():
-    """Key names declared in db.env, parsed as text. Never sources, never stores values."""
+    """Key names whose value LOADS from db.env through lib/credential_file, the
+    reader every Python job uses. Never sources, never stores values."""
     try:
-        with open(DB_ENV) as fh:
-            return {ln.split("=", 1)[0].strip()
-                    for ln in fh
-                    if "=" in ln and not ln.lstrip().startswith("#") and ln.split("=", 1)[1].strip()}
+        return {name for name, value in read_env_file(DB_ENV).items() if value}
     except OSError:
         return set()
 
