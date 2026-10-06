@@ -27,6 +27,16 @@ class Rendering(unittest.TestCase):
         self.assertIn('create or replace function ops.scac_mutation_catalog_v110_current()', probe)
         self.assertIn('insert into ops.scac_mutation_registry_entry', probe)
 
+    def test_predecessor_catalog_order_matches_its_database_representation(self):
+        template = (ROOT / 'migrations/0840_relationship_scac_successor.sql').read_text()
+        catalog = json.loads(re.search(r"when 'scac-mutation-registry.v109' then '([^']+)'::jsonb end;", template)[1])
+        row = re.search(r"values \('scac-mutation-registry.v109',.*?'(sha256:[0-9a-f]{64})',(\d+),(\d+),", template)
+        predecessor = dict(number=109,digest=row[1],entry_count=int(row[2]),source_count=int(row[3]),catalog=catalog,entry_set='sha256:'+'a'*64)
+        measured = {**catalog,'projection_version':'scac-db-catalog-projection.v110'}
+        first = render_sql(template, predecessor, [], measured, 'sha256:'+'b'*64, [])
+        reordered = {**predecessor,'catalog':dict(reversed(list(catalog.items())))}
+        self.assertEqual(first, render_sql(template, reordered, [], measured, 'sha256:'+'b'*64, []))
+
     def test_category_counts_do_not_cascade_or_share_identity(self):
         template = (ROOT / 'migrations/0840_relationship_scac_successor.sql').read_text()
         catalog = json.loads(re.search(r"when 'scac-mutation-registry.v109' then '([^']+)'::jsonb end;", template)[1])
