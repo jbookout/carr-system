@@ -1976,10 +1976,14 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def activity_counts(tasks: dict[str, dict[str, Any]], at: datetime | None = None) -> dict[str, int]:
+def activity_status(task: dict[str, Any], at: datetime) -> str:
+    return "stale" if is_stale(task, at) else task.get("status", "queued")
+
+
+def activity_counts(tasks: dict[str, dict[str, Any]], at: datetime) -> dict[str, int]:
     counts = {status: 0 for status in (*STATUSES, "stale")}
     for task in tasks.values():
-        status = "stale" if is_stale(task, at) else task.get("status", "queued")
+        status = activity_status(task, at)
         counts[status] = counts.get(status, 0) + 1
     return counts
 
@@ -2015,9 +2019,9 @@ def board_snapshot(state: dict[str, Any], *, costs=None) -> dict[str, Any]:
     cost evidence. Full diagnostics stay local; the app receives bounded cards."""
     tasks = {}
     all_tasks = state.get("tasks") or {}
-    for task_id, task in all_tasks.items():
-        if is_retired(task):
-            continue
+    active = {task_id: task for task_id, task in all_tasks.items() if not is_retired(task)}
+    at = now_utc()
+    for task_id, task in active.items():
         provider, model, effort = task_identity(task)
         card = {key: value for key, value in task.items()
                 if key in SNAPSHOT_TASK_FIELDS and value is not None}
@@ -2026,7 +2030,7 @@ def board_snapshot(state: dict[str, Any], *, costs=None) -> dict[str, Any]:
             head = BLOCKER_EXCERPT_LIMIT // 2
             card["blocked_reason"] = reason[:head] + "…" + reason[-(BLOCKER_EXCERPT_LIMIT - head - 1):]
         tasks[task_id] = {**card, "provider": provider, "model": model, "effort": effort,
-                          "activity_status": "stale" if is_stale(task) else task.get("status", "queued")}
+                          "activity_status": activity_status(task, at)}
     decisions = [
         {"id": qid, "question": q.get("question"), "answer": q.get("answer"), "default": q.get("default"),
          "answered_at": q.get("answered_at") or q.get("updated_at")}
@@ -2038,9 +2042,11 @@ def board_snapshot(state: dict[str, Any], *, costs=None) -> dict[str, Any]:
         "project": state["project"],
         "title": state.get("title") or state["project"],
         "tasks": tasks,
-        "task_counts": activity_counts(tasks),
+        # Counted before fit_snapshot trims, so the totals cover every card,
+        # including those `omitted` drops from `tasks`. The directory relays these.
+        "task_counts": activity_counts(active, at),
         "milestones": milestone_groups(tasks),
-        "stale_policy": {"statuses": sorted(IN_FLIGHT), "after_days": 14, "exclude_from_active": True},
+        "stale_policy": {"statuses": sorted(IN_FLIGHT), "after_days": STALE_AFTER.days, "exclude_from_active": True},
         "history": {
             task_id: {"title": task.get("title", task_id), "status": task.get("status"),
                       "reason": retired_reason(task), "executor": task.get("executor", "unassigned"),
@@ -2054,7 +2060,7 @@ def board_snapshot(state: dict[str, Any], *, costs=None) -> dict[str, Any]:
         # When GitHub facts were last checked and verified, and what failed:
         # a card kept from before an outage is never shown as fresh.
         "github_sync": state.get("github_sync"),
-        "costs": costs if costs is not None else cost_snapshot_reader()(REPO_ROOT / "out" / "system-costs.json", now=now_utc()),
+        "costs": costs if costs is not None else cost_snapshot_reader()(REPO_ROOT / "out" / "system-costs.json", now=at),
         "omitted": {"live": 0, "merged": 0, "history": 0},
         "updated_at": state.get("updated_at"),
     })
@@ -2285,7 +2291,8 @@ def add_v1_cards(state: dict[str, Any], discovered: dict) -> bool:
 
 
 def reconcile_state(state: dict[str, Any], fetched: dict, at: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Pure cleanup plan. GitHub read failures preserve cards and fail the check."""
+    """Cleanup plan on a copy: drop watchdog cards, fold duplicate PR cards, then
+    apply the scheduled sync rule. GitHub read failures keep cards and fail the check."""
     result = copy.deepcopy(state)
     tasks = result.setdefault("tasks", {})
     removed = {key: tasks.pop(key) for key in list(tasks) if key.startswith("wd-")}
@@ -2309,57 +2316,23 @@ def reconcile_state(state: dict[str, Any], fetched: dict, at: str) -> tuple[dict
         removed[task_id] = tasks.pop(task_id)
         folds[task_id] = canonical
     add_v1_cards(result, fetched)
+    apply_sync(result, fetched)
     failures = [{"card": f"{repo}#{number}", "error": error or "No PR facts"}
                 for (repo, number), (info, error) in fetched.items() if info is None or error]
-    failed_keys = {key for key, (info, error) in fetched.items() if info is None or error}
-    open_blocked = set()
-    for task_id, task in tasks.items():
-        if task.get("pr") is None:
-            continue
-        key = pr_key(task)
-        info, error = fetched.get(key, (None, "PR not read"))
-        if info is None or error:
-            if key not in failed_keys:
-                failures.append({"card": task_id, "error": error or "No PR facts"})
-            continue
-        status, stage, phase = derived_pr_state(info, key[0])
-        if info["state"] == "OPEN" and status == "blocked":
-            open_blocked.add(key)
-        if task_stage(task) == "live" and info["state"] == "MERGED":
-            stage = "live"
-        before = (task.get("status"), task_stage(task))
-        for field in ("milestone", "milestone_source", "slice"):
-            task.pop(field, None)
-        task.update({"status": status, "stage": stage, "pr_phase": phase, **v1_metadata(info)})
-        if info.get("title"):
-            task["title"] = info["title"]
-        for field in ("health", "blocked_reason", "blocked_source", "blocked_head", "next_action", "manual_stage"):
-            task.pop(field, None)
-        if status == "blocked":
-            block = derived_block(info, phase)
-            if block:
-                task.update({"blocked_reason": block[0], "next_action": block[1], "blocked_source": "github"})
-        if info["state"] == "CLOSED":
-            task["reason"] = "PR closed without merging"
-        if info["state"] == "MERGED":
-            task["merged_at"] = info.get("mergedAt")
-            if merge_sha(info):
-                task["merge_sha"] = merge_sha(info)
-            if stage == "merged":
-                task["release_wait"] = "Waiting for verified release or operational receipt"
-        if before != (status, stage):
-            task["updated_at"] = at
-            record_stage(task, at, before[1])
-        normalize_task(task)
-    watchdog_left = sum(key.startswith("wd-") for key in tasks)
-    terminal_blocked = sum(task.get("status") == "blocked" and task.get("pr") is not None
-                           and (fetched.get(pr_key(task), (None, None))[0] or {}).get("state") in {"MERGED", "CLOSED"}
-                           for task in tasks.values())
-    blocked = sum(task.get("status") == "blocked" for task in tasks.values())
+    failures += [{"card": task_id, "error": "PR not read"} for task_id, task in tasks.items()
+                 if task.get("pr") is not None and pr_key(task) not in fetched]
+    # Only PR cards are checked: a blocked PR card must be an open PR that
+    # GitHub or a manual hold explains. Job and other non-PR cards may block.
+    unexplained = sorted(
+        task_id for task_id, task in tasks.items()
+        if task.get("pr") is not None and task.get("status") == "blocked"
+        and pr_key(task) in fetched and fetched[pr_key(task)][0] is not None
+        and not (fetched[pr_key(task)][0].get("state") == "OPEN"
+                 and task.get("blocked_source") in {"github", "manual"}))
     report = {"removed_watchdog": sum(key.startswith("wd-") for key in removed), "folded": len(folds),
-              "watchdog_left": watchdog_left, "terminal_blocked": terminal_blocked,
-              "blocked": blocked, "open_blocked_prs": len(open_blocked), "failures": failures}
-    report["check_passed"] = not failures and not watchdog_left and not terminal_blocked and blocked <= len(open_blocked)
+              "blocked": sum(task.get("status") == "blocked" for task in tasks.values()),
+              "unexplained_blocked_prs": unexplained, "failures": failures}
+    report["check_passed"] = not failures and not unexplained
     if removed:
         result.setdefault("reconcile_archive", []).append({"at": at, "tasks": removed, "folds": folds})
     return result, report
@@ -2391,12 +2364,15 @@ def command_reconcile(args: argparse.Namespace) -> None:
         report["check_passed"] = False
     print("APPLY" if args.apply else "DRY RUN (no board writes or publishes)")
     print("Status           Before  After")
-    before, after = activity_counts(initial.get("tasks") or {}), activity_counts(proposed["tasks"])
+    at = now_utc()
+    before, after = activity_counts(initial.get("tasks") or {}, at), activity_counts(proposed["tasks"], at)
     for status in (*STATUSES, "stale"):
         print(f"{status:16} {before[status]:6} {after[status]:6}")
     print(f"Removed watchdog cards: {report['removed_watchdog']}; folded duplicates: {report['folded']}")
-    print(f"After: wd-*={report['watchdog_left']}; closed/merged PRs in Blocked={report['terminal_blocked']}; "
-          f"Blocked={report['blocked']}; genuinely blocked open PRs={report['open_blocked_prs']}")
+    print(f"After: Blocked={report['blocked']}; blocked PR cards without an open GitHub or manual block="
+          f"{len(report['unexplained_blocked_prs'])}")
+    for task_id in report["unexplained_blocked_prs"]:
+        print(f"  {task_id}")
     print(f"GitHub read failures: {len(report['failures'])}")
     for failure in report["failures"]:
         print(f"  {failure['card']}: {failure['error']}")

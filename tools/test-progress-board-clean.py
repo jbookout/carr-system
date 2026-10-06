@@ -37,7 +37,8 @@ class CleanupTests(unittest.TestCase):
         original = copy.deepcopy(state)
         facts = {(REPO, 1): (pr(1, "MERGED"), None), (REPO, 2): (pr(2, "CLOSED"), None),
                  (REPO, 3): (pr(3, mergeable="CONFLICTING"), None)}
-        result, report = board.reconcile_state(state, facts, AT.isoformat())
+        with patch.object(board, "now_utc", return_value=AT):
+            result, report = board.reconcile_state(state, facts, AT.isoformat())
         self.assertEqual(state, original)
         self.assertEqual(set(result["tasks"]), {"pr-1", "pr-2", "pr-3"})
         self.assertEqual(result["tasks"]["pr-1"]["stage"], "merged")
@@ -45,9 +46,43 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(result["tasks"]["pr-1"]["evidence"], "preserve")
         self.assertIn("pr-2", board.board_snapshot(result)["history"])
         self.assertTrue(report["check_passed"])
-        self.assertEqual((report["blocked"], report["open_blocked_prs"]), (1, 1))
-        again, _ = board.reconcile_state(result, facts, AT.isoformat())
+        self.assertEqual((report["blocked"], report["unexplained_blocked_prs"]), (1, []))
+        with patch.object(board, "now_utc", return_value=AT):
+            again, _ = board.reconcile_state(result, facts, AT.isoformat())
         self.assertEqual(again, result)
+
+    def test_reconcile_applies_the_scheduled_sync_rule_to_every_pr_card(self):
+        curated = {"title": "Curated: invoices rework", "status": "blocked", "pr": 3, "pr_head": "a" * 40,
+                   "blocked_reason": "Waiting on credential", "blocked_source": "manual", "manual_stage": "review"}
+        tasks = {"pr-3": curated, "pr-4": {"title": "Old attempt", "status": "superseded", "pr": 4}}
+        facts = {(REPO, 3): (pr(3), None), (REPO, 4): (pr(4), None)}
+        expected = copy.deepcopy({"tasks": tasks})
+        with patch.object(board, "now_utc", return_value=AT), patch.dict(os.environ, {"PROGRESS_BOARD_SKIP_GH": "1"}):
+            board.apply_sync(expected, facts)
+            result, report = board.reconcile_state({"tasks": tasks}, facts, AT.isoformat())
+        self.assertEqual(result["tasks"], expected["tasks"])
+        self.assertEqual(result["tasks"]["pr-3"]["title"], "Curated: invoices rework")
+        self.assertEqual(result["tasks"]["pr-3"]["blocked_reason"], "Waiting on credential")
+        self.assertEqual(result["tasks"]["pr-3"]["manual_stage"], "review")
+        self.assertEqual(result["tasks"]["pr-4"]["status"], expected["tasks"]["pr-4"]["status"])
+        self.assertTrue(report["check_passed"])
+
+    def test_blocked_job_cards_do_not_fail_the_check(self):
+        _, report = board.reconcile_state({"tasks": {"nightly-job": {"status": "blocked"}}}, {}, AT.isoformat())
+        self.assertTrue(report["check_passed"])
+
+    def test_blocked_pr_card_must_be_an_open_github_blocked_pr(self):
+        tasks = {"pr-5": {"status": "blocked", "pr": 5, "blocked_reason": "stale", "blocked_source": "github"}}
+        with patch.dict(os.environ, {"PROGRESS_BOARD_SKIP_GH": "1"}):
+            _, report = board.reconcile_state({"tasks": tasks}, {(REPO, 5): (pr(5, mergeable="CONFLICTING"), None)},
+                                              AT.isoformat())
+        self.assertTrue(report["check_passed"])
+        manual = {"pr-6": {"status": "blocked", "pr": 6, "pr_head": "a" * 40, "blocked_reason": "Hold",
+                           "blocked_source": "manual"}}
+        with patch.dict(os.environ, {"PROGRESS_BOARD_SKIP_GH": "1"}):
+            _, report = board.reconcile_state({"tasks": manual}, {(REPO, 6): (pr(6), None)}, AT.isoformat())
+        self.assertEqual(report["unexplained_blocked_prs"], [])
+        self.assertTrue(report["check_passed"])
 
     def test_same_number_in_different_repositories_does_not_fold(self):
         state = {"tasks": {"pr-1": {"status": "review", "pr": 1},
@@ -103,6 +138,19 @@ class CleanupTests(unittest.TestCase):
             snapshot = board.board_snapshot({"project": "test", "tasks": tasks})
         self.assertEqual(snapshot["tasks"]["running"]["status"], "running")
         self.assertEqual(snapshot["tasks"]["running"]["activity_status"], "stale")
+
+    def test_counts_cover_trimmed_cards_and_follow_the_published_stale_rule(self):
+        state = {"project": "test", "tasks": {
+            "a": {"status": "done", "title": "x" * 4000, "updated_at": "2026-10-05T11:00:00Z"},
+            "b": {"status": "running", "updated_at": "2026-09-01T00:00:00Z"},
+        }}
+        with patch.object(board, "SNAPSHOT_BUDGET", 2500), patch.object(board, "now_utc", return_value=AT), \
+                patch.object(board, "STALE_AFTER", board.timedelta(days=60)):
+            snapshot = board.board_snapshot(state, costs={})
+        self.assertEqual(set(snapshot["tasks"]), {"b"})
+        self.assertEqual(snapshot["omitted"]["live"], 1)
+        self.assertEqual(snapshot["task_counts"], {**{s: 0 for s in (*board.STATUSES, "stale")}, "done": 1, "running": 1})
+        self.assertEqual(snapshot["stale_policy"]["after_days"], 60)
 
     def test_milestone_completion_remains_visible_under_payload_trimming(self):
         state = {"project": "test", "tasks": {
