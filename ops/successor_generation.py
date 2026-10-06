@@ -11,6 +11,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 
 from git_env import scrubbed_env
 from successor_ownership import validate_outputs, JSON_ARTIFACTS
@@ -179,7 +180,11 @@ def regenerate(repo, plan, domain_paths, successor_path, predecessor_path):
     validate_outputs(repo, [*JSON_ARTIFACTS, str(successor_path.relative_to(repo)),
         'mcp-server/src/scac-mutation-registry.current.generated.js', '.git/successor-runtime.json'])
     with disposable_database(repo) as (dsn, env, run):
-        run(["psql", dsn, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", repo / "db/schema.sql"])
+        snapshot = subprocess.check_output(["git", "show", f"{plan['base']}:db/schema.sql"], cwd=repo, env=scrubbed_env(), timeout=120)
+        with tempfile.NamedTemporaryFile(prefix="successor-base-", suffix=".sql") as baseline:
+            baseline.write(snapshot)
+            baseline.flush()
+            run(["psql", dsn, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", baseline.name])
         last_main = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", plan["base"], "--", "migrations"], cwd=repo, env=scrubbed_env()).decode().splitlines()
         last_main = sorted(Path(p).name for p in last_main if p.endswith(".sql"))[-1]
         python = ROOT / ".venv/bin/python"
