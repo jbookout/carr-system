@@ -155,6 +155,30 @@ def python_errors(source):
             return isinstance(pattern, ast.MatchOr) and any(
                 irrefutable(alternative) for alternative in pattern.patterns)
 
+        def alternatives(pattern):
+            while isinstance(pattern, ast.MatchAs) and pattern.pattern is not None:
+                pattern = pattern.pattern
+            if isinstance(pattern, ast.MatchOr):
+                return [leaf for option in pattern.patterns for leaf in alternatives(option)]
+            return [pattern]
+
+        def disjoint(left, right):
+            # Only identity patterns prove exclusion: once a singleton matched,
+            # value patterns compare against a builtin, never a custom __eq__.
+            def excludes(a, b):
+                if not isinstance(a, ast.MatchSingleton):
+                    return False
+                if isinstance(b, ast.MatchSingleton):
+                    return a.value is not b.value
+                if isinstance(b, ast.MatchValue):
+                    try:
+                        return a.value != ast.literal_eval(b.value)
+                    except (ValueError, TypeError):
+                        return False
+                return False
+            return all(excludes(a, b) or excludes(b, a)
+                       for a in alternatives(left) for b in alternatives(right))
+
         def walk(statements, env, prior):
             for node in statements:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -171,24 +195,28 @@ def python_errors(source):
                     expression(node.subject, env, prior)
                     branches = []
                     exhaustive = False
-                    fallthrough_seen = set(prior)
+                    # A false guard continues after its calls ran, but only to
+                    # cases its subject can still match; a selected body cannot.
+                    failed_guards = []
                     for case in node.cases:
-                        branch_env, branch_seen = dict(env), set(fallthrough_seen)
+                        branch_env = dict(env)
+                        branch_seen = set(prior).union(*(calls for pattern, calls in failed_guards
+                                                         if not disjoint(pattern, case.pattern)))
                         for pattern in ast.walk(case.pattern):
                             name = (pattern.name if isinstance(pattern, (ast.MatchAs, ast.MatchStar))
                                     else pattern.rest if isinstance(pattern, ast.MatchMapping) else None)
                             if name:
                                 branch_env.pop(name, None)
                         if case.guard is not None:
+                            before = set(branch_seen)
                             expression(case.guard, branch_env, branch_seen)
-                            # A false guard continues to the next case after
-                            # its calls ran; a selected case body cannot.
-                            fallthrough_seen.update(branch_seen)
+                            failed_guards.append((case.pattern, branch_seen - before))
                         walk(case.body, branch_env, branch_seen)
                         branches.append((branch_env, branch_seen))
                         exhaustive |= case.guard is None and irrefutable(case.pattern)
                     if not exhaustive:
-                        branches.append((dict(env), fallthrough_seen))
+                        branches.append((dict(env), set(prior).union(
+                            *(calls for _, calls in failed_guards))))
                     merge(env, prior, branches)
                 elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
                     expression(node.iter if hasattr(node, 'iter') else node.test, env, prior)

@@ -47,6 +47,27 @@ def run(state, qa, qb):
         self.assertEqual(checker.python_errors(source),
                          ['6: fanout: combine all questions for this state'])
 
+    def test_failed_guard_skips_mutually_exclusive_later_patterns(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(state, qa, qb, flag):
+ match flag:
+  case True if E(R(state, qa, caller='fixture', version='v1')) and False:
+   pass
+  case False:
+   E(R(state, qb, caller='fixture', version='v1'))
+"""
+        self.assertEqual(checker.python_errors(source), [])
+        # 1 == True, so a value pattern can still follow a failed True guard.
+        for pattern in ('1', '_', 'False | True', 'None | (True as x)'):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(checker.python_errors(source.replace('case False:', f'case {pattern}:')),
+                                 ['7: fanout: combine all questions for this state'])
+        unmatched = source.replace("  case False:\n   E(R(state, qb, caller='fixture', version='v1'))\n",
+                                   "  case False:\n   pass\n E(R(state, qb, caller='fixture', version='v1'))\n")
+        self.assertEqual(checker.python_errors(unmatched),
+                         ['8: fanout: combine all questions for this state'])
+
     def test_match_case_bodies_do_not_flow_into_later_cases(self):
         checker = load('check-jev-conformance')
         source = """from jev_semantic import JudgmentRequest as R, evaluate as E
