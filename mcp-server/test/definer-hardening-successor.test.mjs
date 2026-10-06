@@ -15,8 +15,8 @@ test('hardening extends published history and delivers metadata atomically', () 
   const before = JSON.parse(execFileSync('git', ['show', 'origin/main:ops/config/scac-registry-chain.json'], { encoding: 'utf8' }));
   assert.ok(preservesRegistryChainHistory(before, registryChain));
   assert.deepEqual(hardening.atomic_pair, [
-    '0847_dot_security_definer_hardening.sql', '0848_completion_tenant_security_barriers.sql',
-    '0849_dot_hardening_scac_successor.sql',
+    '0849_dot_security_definer_hardening.sql', '0850_completion_tenant_security_barriers.sql',
+    '0851_dot_hardening_scac_successor.sql',
   ]);
   assert.ok(registryChain.strict_atomic_groups.some(group => JSON.stringify(group) === JSON.stringify(hardening.atomic_pair)));
 });
