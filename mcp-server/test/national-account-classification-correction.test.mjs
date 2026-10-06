@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const repo = resolve(import.meta.dirname, '../..');
@@ -48,23 +49,27 @@ insert into national_account_owner values
 `;
 
 test('the reviewed correction leaves Musicologie as the only national account and fails closed on linked work', (t) => {
+  const unavailable = (reason) => {
+    assert.notEqual(process.env.CARR_NATIONAL_ACCOUNT_TEST_REQUIRED, '1', reason);
+    return t.skip(reason);
+  };
   const postgresPath = spawnSync('which', ['postgres'], { encoding: 'utf8' }).stdout?.trim();
-  if (!postgresPath) return t.skip('local PostgreSQL server unavailable');
+  if (!postgresPath) return unavailable('local PostgreSQL server unavailable');
   const pgBin = dirname(realpathSync(postgresPath));
   const bin = (name) => join(pgBin, name);
   if (!['initdb', 'pg_ctl', 'psql'].every((name) => existsSync(bin(name))))
-    return t.skip('matching local PostgreSQL tools unavailable');
+    return unavailable('matching local PostgreSQL tools unavailable');
 
   const name = migrationName();
   assert.ok(name, 'the correction migration must exist');
   const migration = join(migrations, name);
   assert.doesNotMatch(readFileSync(migration, 'utf8'), /^\s*(begin|commit)\s*;/im,
     'the migration runner owns the transaction');
-  const dir = mkdtempSync('/private/tmp/carr-na-test-');
+  const dir = mkdtempSync(join(tmpdir(), 'carr-na-test-'));
   const data = join(dir, 'data');
   const socket = join(dir, 'socket');
   const init = spawnSync(bin('initdb'), ['-D', data, '-A', 'trust', '-U', 'postgres'], { encoding: 'utf8' });
-  if (init.status !== 0) { rmSync(dir, { recursive: true, force: true }); return t.skip(init.stderr.trim()); }
+  if (init.status !== 0) { rmSync(dir, { recursive: true, force: true }); return unavailable(init.stderr.trim()); }
   mkdirSync(socket);
   const port = String(54000 + Math.floor(Math.random() * 1000));
   const env = { ...process.env, PGHOST: socket, PGPORT: port, PGUSER: 'postgres', PGDATABASE: 'postgres' };
