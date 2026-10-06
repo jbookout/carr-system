@@ -1340,6 +1340,12 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+def _branch_janitor_row():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+    from branch_retirement import health
+    return health(REPO_ROOT)
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
@@ -1878,6 +1884,19 @@ def _canonical_health():
             _detail = f"check failed ({type(e).__name__}: {e})"
             print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
             rc = _red("jev_call_receipt_integrity", _detail, hard_error=True)
+
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        print("Branch retirement — local scheduled receipts")
+        try:
+            line, failed = _branch_janitor_row()
+            print("  " + line)
+            if failed:
+                rc = _red("branch_janitor", line, subject="three-repo-retirement")
+        except Exception as exc:
+            line = (f"branch janitor unavailable ({type(exc).__name__}) · on breach: owner orchestrator "
+                    "· restore lib/branch_retirement.py · verify health · auto-clear after successful readback")
+            print("  WARN " + line)
+            rc = _red("branch_janitor", line, subject="three-repo-retirement")
 
     if CANONICAL_SECTION in ("all", "tailscale"):
         try:
@@ -3370,6 +3389,18 @@ except Exception as e:
 # --- the doctrine store (P4/P5, 2026-08-08; decisions 82a2fb62 + import door) -
 # Every row prints its bound action inline (rule 590b11e1: no metric without a
 # bound action, visible in the render itself). A failed read is never all-clear.
+print("\nrule delivery")
+try:
+    from ops.rule_recall_health import check_local as _check_rule_recall
+    _line = _check_rule_recall(REPO_ROOT)
+    print("  " + _line)
+    if not _line.startswith("OK"):
+        rc = 1
+except Exception as e:
+    from ops.rule_recall_health import ACTION as _recall_action
+    print(f"  UNAVAILABLE rule recall — {type(e).__name__}; warning retained · {_recall_action}")
+    rc = 1
+
 print("\ndoctrine store")
 try:
     _q = ("select "
