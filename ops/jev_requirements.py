@@ -123,8 +123,9 @@ def check(payload, recs):
     if not prompt:
         return None
     acceptance = _acceptance()
-    criteria = acceptance.contract(prompt).get("criteria")
-    if not criteria:
+    explicit_contract = acceptance.contract(prompt)
+    criteria = explicit_contract.get("criteria")
+    if not explicit_contract:
         requirements = split_requirements(prompt)
         if not requirements:
             return None

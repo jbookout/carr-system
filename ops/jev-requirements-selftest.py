@@ -26,9 +26,12 @@ class RequirementsTests(unittest.TestCase):
         self.assertNotIn('advisory',result);self.assertEqual(result['needs_review'],['Fix the output and verify it.'])
 
     def test_malformed_explicit_contract_announces_needs_review(self):
-        prompt=json.dumps({'acceptance_contract':{'criteria':'report must say ready'}})
-        result=req.check({},[human(prompt)])
-        self.assertEqual(result['status'],'needs_review');self.assertEqual(result['advisory'],'Acceptance needs review.')
+        for criteria in ('report must say ready', [], None, {}, 0, ''):
+            with self.subTest(criteria=criteria):
+                prompt=json.dumps({'acceptance_contract':{'criteria':criteria}})
+                result=req.check({},[human(prompt)])
+                self.assertEqual(result['status'],'needs_review')
+                self.assertEqual(result.get('advisory'),'Acceptance needs review.')
 
     def test_current_typed_contract_reads_current_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -769,10 +769,15 @@ def explicit_contract_needs_review_announces():
     The malformed form (criteria is prose, not a list) evaluates to needs_review
     with an empty criteria list; quieting the prose branch must not swallow it.
     """
-    prompt = json.dumps({"acceptance_contract": {"criteria": "report must say ready"}})
-    stdout = stop_output("contract", prompt)
-    ok = '"Acceptance needs review."' in stdout
-    print(f"{'PASS' if ok else 'FAIL'}  explicit-contract needs_review announces: {stdout[:120]!r}")
+    ok = True
+    for criteria in ("report must say ready", [], None, {}, 0, "",
+                     [{"id": "ready", "kind": "semantic", "text": "report must say ready"}]):
+        prompt = json.dumps({"acceptance_contract": {"criteria": criteria}})
+        stdout = stop_output("contract", prompt)
+        announced = '"Acceptance needs review."' in stdout
+        print(f"{'PASS' if announced else 'FAIL'}  explicit-contract needs_review announces "
+              f"({criteria!r}): {stdout[:120]!r}")
+        ok = ok and announced
     return ok
 
 
