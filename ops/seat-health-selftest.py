@@ -58,6 +58,18 @@ class SeatHealthTests(unittest.TestCase):
         with mock.patch.object(jev_semantic, 'ask', return_value=dict(fresh, cache_hit=True)), mock.patch.object(sys, 'stdout', io.StringIO()):
             self.assertEqual(health.probe_jev('run-three'), 1)
 
+    def test_01_jev_probe_options_fit_the_client_signature(self):
+        import inspect
+        import typesafe_client
+        real = inspect.signature(typesafe_client.ask)
+        def bound(state, questions, **kw):
+            real.bind(state, questions, **kw)
+            return {'model': 'jev-1.13.0', 'answers': {'answer': {'choice': '323'}}}
+        with mock.patch.object(typesafe_client, 'ask', side_effect=bound), \
+             mock.patch.dict(os.environ, {'CARR_JEV_SEMANTIC_CACHE': str(Path(self.home.name) / 'cache')}), \
+             mock.patch.object(sys, 'stdout', io.StringIO()):
+            self.assertEqual(health.probe_jev('run-signature'), 0)
+
     def test_02_observations_do_not_complete_daily_recording(self):
         for options in [('--seat', 'grok', '--no-record'), ('--no-record',)]:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as d:
