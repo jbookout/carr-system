@@ -13,9 +13,13 @@ import sys
 from pathlib import Path
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
-from scac_mutation_db_inventory import project, project_escalation, project_role_authority, summarize
+from scac_mutation_db_inventory import manifest_job_definition_catalog, project, project_escalation, project_role_authority, summarize
 
 REPO = Path(__file__).resolve().parents[1]
+
+JOB_DEFINITION_CATALOG = manifest_job_definition_catalog(
+    json.loads((REPO / "ops/config/control-plane-workflows.v1.json").read_text(encoding="utf-8"))
+)
 
 
 def fail(message: str) -> int:
@@ -159,10 +163,7 @@ def main() -> int:
                     "secdef_execute": current_projection["secdef_execute"],
                     "relation_dml": current_projection["relation_dml"],
                     "column_dml": current_projection["column_dml"],
-                    "job_definitions": {
-                        "count": 26,
-                        "digest": "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
-                    },
+                    "job_definitions": JOB_DEFINITION_CATALOG,
                 },
                 "combined": catalog["combined"],
             }
