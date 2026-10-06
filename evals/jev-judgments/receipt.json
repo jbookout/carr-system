@@ -2,7 +2,7 @@
  "adapter": {
   "adapter_id": "jev-judgments-admission-replay",
   "adapter_version": "1",
-  "configuration_fingerprint": "sha256:a932756f5089b4c52a9c0e283db32fcef30a8883cb9230913168edba2a3d2161",
+  "configuration_fingerprint": "sha256:83a1402c427ca62b99493389024c1d045dc77f1273d5659eaa18c9c8c3310aaa",
   "harness_id": "evals/jev-judgments/run_eval.py",
   "harness_version": "bb321a0a34bac12a9987a310d83b2e0ae3bd0b57370b7d2aae35281eff83370f",
   "model_id": "deterministic-no-model",
@@ -96,7 +96,7 @@
    "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
    "mcp-server/src/jev-spend-authority.js": "d1e2444d23d8fbce95e7b1a5a430914b00e2a45b08da306cb73464fb5cb018c7",
    "mcp-server/src/judge-providers.v1.json": "48b8ca8b4defec4b82fd36f708498c707eab5f861ae0046f857ae06ae8d981ab",
-   "ops/config/jev-call-sites.v1.json": "b931aba0d9cad761b29438d04e5e3602e7a08a5afbe02404bc5d9cf81b084560",
+   "ops/config/jev-call-sites.v1.json": "7b30717ebf477d3a522b7021383a42760e5205e970afadfd773f6b3371f5b552",
    "ops/config/jev-cost-guard.v1.json": "e17dbcf060e2ab9126d99408b4ea2068824066fe90ac5acb8a74d59bb9e0e7e5",
    "ops/typesafe_client.py": "976c734a99bde81358da95a82b2933696be188f4eb00ce21879f4985a479c6d3",
    "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2",

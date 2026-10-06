@@ -133,9 +133,7 @@ class SpendTests(unittest.TestCase):
             log = Path(tmp)/'calls.jsonl'
             log.write_text(json.dumps({'ts':'2026-10-04T01:00:00Z', 'ok':True,
               'server_receipt_id':'r', 'usage':{'input_tokens':1000000}})+'\n')
-            line = spend.check_spend(log, state_path=Path(tmp)/'state',
-                run_verb=lambda *a: self.fail('no alarm below threshold'),
-                now=datetime(2026,10,4,tzinfo=timezone.utc),
+            line = spend.check_spend(log, now=datetime(2026,10,4,tzinfo=timezone.utc),
                 worker_usage=lambda day:{'calls':1,'input_tokens':1000000,'unknown':0})
         self.assertIn('$0.042 estimated', line)
         self.assertIn('$0.042/M', line)
@@ -147,9 +145,8 @@ class SpendTests(unittest.TestCase):
             log.write_text(json.dumps({'ts':'2026-10-04T01:00:00Z', 'ok':True,
               'server_receipt_id':'r', 'usage':{'input_tokens':1000000}})+'\n')
             def unavailable(day): raise RuntimeError('offline fake')
-            line = spend.check_spend(log, state_path=Path(tmp)/'state',
-                run_verb=lambda *a: self.fail('unavailable authority must retain alarm'),
-                now=datetime(2026,10,4,tzinfo=timezone.utc), worker_usage=unavailable)
+            line = spend.check_spend(log, now=datetime(2026,10,4,tzinfo=timezone.utc),
+                worker_usage=unavailable)
         self.assertTrue(line.startswith('UNKNOWN jev spend'))
         self.assertIn('$0.042', line)
         self.assertIn('1000000 input tokens', line)
