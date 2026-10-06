@@ -20,7 +20,7 @@ import threading
 LOCK_PATH = Path('/tmp') / f'carr-disposable-postgres-{os.getuid()}.lock'
 _thread_lock = threading.RLock()
 _depth = 0
-_fixtures = []
+_fixtures: list['DisposablePostgres'] = []
 _main_launches = 0
 _pending_signal = None
 
