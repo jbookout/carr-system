@@ -11,6 +11,8 @@ from successor_generation import render_sql, probe_sql
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('migration_safety', ROOT / 'ops/migration-safety-gate.py')
+if spec is None or spec.loader is None:
+    raise RuntimeError('migration safety checker cannot be loaded')
 migration_safety = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = migration_safety
 spec.loader.exec_module(migration_safety)
