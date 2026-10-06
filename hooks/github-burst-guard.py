@@ -29,13 +29,17 @@ WHAT IT REFUSES (PreToolUse, Bash and the Codex exec shapes):
      one call at a time, are allowed.
 
 WHAT IT RECORDS (PostToolUse / PostToolUseFailure, same file): the time of a
-GitHub rate-limit answer, which starts the cooldown. All three must hold:
-the command touches GitHub (gh, the release tick, shepherd, api.github.com);
-the command FAILED (a PostToolUseFailure event, or a non-zero exit code in the
-payload); and "API rate limit exceeded" or "secondary rate limit" sits on gh's
-own error line, one carrying `HTTP 403` / `HTTP 429` or starting `gh:` or
-`GraphQL:`. A successful `gh pr diff`, PR body or run log that merely mentions
-the phrase therefore records nothing, and neither does reading this file.
+GitHub rate-limit answer, which starts the cooldown. The command must touch
+GitHub (gh, the release tick, shepherd, api.github.com), and then either:
+  a. it FAILED (a PostToolUseFailure event, or a non-zero exit code in the
+     payload) and "API rate limit exceeded" or "secondary rate limit" sits on
+     gh's own error line, one carrying `HTTP 403` / `HTTP 429` or starting
+     `gh:` or `GraphQL:`; or
+  b. whatever the exit code (a piped `gh ... | head` exits 0), a line starts
+     at column 0 with `HTTP 403:`, `HTTP 429:`, `gh:` or `GraphQL:` and holds
+     the phrase. Diff lines (+/-) and indented PR-body lines do not qualify.
+A `gh pr diff`, PR body or run log that merely mentions the phrase therefore
+records nothing, and neither does reading this file.
 
 ALWAYS ALLOWED outside the cooldown, when not inside a loop: a single gh
 command, gh --paginate, and gh api graphql. One paginated call is the cheap
@@ -87,10 +91,13 @@ COOLDOWN = 15 * 60
 # parallel fans out to. So `grep "gh pr merge" f` is not a gh call.
 GH_RE = re.compile(r"(?<![\w./-])gh\s+(?=[a-z])")
 SLEEP_RE = re.compile(r"(?<![\w.-])sleep\s+(\d+(?:\.\d+)?)([smhd]?)\b")
-RATE_LIMIT_TEXT = re.compile(r"api rate limit exceeded|secondary rate limit", re.I)
+# gh's GraphQL lockout reads "API rate limit already exceeded".
+RATE_LIMIT_TEXT = re.compile(r"api rate limit (?:already )?exceeded|secondary rate limit", re.I)
 # gh's own error line: `HTTP 403: ...` / `HTTP 429: ...` anywhere on the line,
 # or a line that starts with `gh:` or `GraphQL:`.
 GH_ERROR_LINE = re.compile(r"\bHTTP (?:403|429)\b|^\s*(?:gh|GraphQL):", re.I)
+# Stricter, for output with no visible failure: the prefix at column 0, exact case.
+GH_ERROR_LINE_START = re.compile(r"(?:HTTP 403:|HTTP 429:|gh:|GraphQL:)")
 EXIT_CODE_LINE = re.compile(r"^\s*Exit code (\d+)\b", re.M)
 
 # Where a command word can start: string or line start, after a shell
@@ -490,12 +497,28 @@ def response_lines(payload):
     return "\n".join(parts)
 
 
+def line_start_rate_limit(text):
+    """True when a line STARTS (column 0, no indent, no diff +/-) with gh's
+    error prefix and that same line carries a rate-limit phrase."""
+    for line in text.splitlines():
+        if GH_ERROR_LINE_START.match(line) and RATE_LIMIT_TEXT.search(line):
+            return True
+    return False
+
+
 def observe(payload, cmd, now, event):
     if not touches_github(mask_quoted_data(inert_stripped(cmd))):
         return
-    if not call_failed(payload, event):
-        return
-    if rate_limit_error_line(response_lines(payload)):
+    text = response_lines(payload)
+    # Path 1: the call failed and the phrase is on gh's error line.
+    # Path 2: no failure is visible, as when gh is piped (`gh pr list | head`
+    # exits with head's 0), but a line starts exactly with gh's own error
+    # prefix. Recording on that weaker evidence is deliberate: a false
+    # 15-minute pause costs little, while a missed lockout lets sessions keep
+    # hammering GitHub and extend its block. Indented PR-body lines and diff
+    # lines (+/-) do not start at column 0 with the prefix, so they stay
+    # rejected.
+    if (call_failed(payload, event) and rate_limit_error_line(text)) or line_start_rate_limit(text):
         write_state(rate_limited_at=now)
         log(f"RECORDED rate-limit answer :: {cmd[:200]}")
 

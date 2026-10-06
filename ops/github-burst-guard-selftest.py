@@ -288,10 +288,37 @@ def cooldown_cases(failures):
                 '+RATE = "secondary rate limit"\n')
     expect(failures, "successful-diff-mentioning-phrase-not-recorded",
            0 if "rate_limited_at" not in read_state() else 1, 0)
+    # Piped gh exits 0 even when gh itself got a 403. A line that STARTS with
+    # gh's own error prefix still records; diff and indented lines do not.
+    clear_state()
+    post("gh pr list | head", exit_code=0,
+         stdout="HTTP 403: You have exceeded a secondary rate limit. Please wait.\n")
+    expect(failures, "piped-exit-zero-line-start-403-recorded",
+           0 if "rate_limited_at" in read_state() else 1, 0)
+    clear_state()
+    post("gh pr list | head",
+         stdout="GraphQL: API rate limit exceeded for user ID 1.\n")
+    expect(failures, "piped-no-exit-code-graphql-line-start-recorded",
+           0 if "rate_limited_at" in read_state() else 1, 0)
+    clear_state()
+    post("gh pr view 1509 --json state",
+         stdout="GraphQL: API rate limit already exceeded for user ID 1.\n")
+    expect(failures, "graphql-already-exceeded-recorded",
+           0 if "rate_limited_at" in read_state() else 1, 0)
     clear_state()
     post("gh pr diff 1630", exit_code=0,
-         stdout="HTTP 403: You have exceeded a secondary rate limit\n")
-    expect(failures, "exit-zero-with-error-line-not-recorded",
+         stdout="+HTTP 403: secondary rate limit\n-gh: API rate limit exceeded\n")
+    expect(failures, "diff-line-plus-prefixed-not-recorded",
+           0 if "rate_limited_at" not in read_state() else 1, 0)
+    clear_state()
+    post("gh pr view 1630 --json body -q .body", exit_code=0,
+         stdout="Notes:\n    gh: API rate limit exceeded\n")
+    expect(failures, "indented-body-line-not-recorded",
+           0 if "rate_limited_at" not in read_state() else 1, 0)
+    clear_state()
+    post("gh pr view 1630 --json body -q .body", exit_code=0,
+         stdout="HTTP 404: secondary rate limit docs moved\n")
+    expect(failures, "exit-zero-404-line-not-recorded",
            0 if "rate_limited_at" not in read_state() else 1, 0)
     clear_state()
     post("gh run view 99 --log", event="PostToolUseFailure",
@@ -390,7 +417,7 @@ def main():
     code, _ = pre("gh pr view 1")
     expect(failures, "corrupt-state-fails-open", code, 0)
 
-    total = len(LOOP_DENY) + len(LOOP_ALLOW) + len(BG_DENY) + len(BG_ALLOW) + 46
+    total = len(LOOP_DENY) + len(LOOP_ALLOW) + len(BG_DENY) + len(BG_ALLOW) + 50
     if failures:
         print(f"FAIL github-burst-guard: {len(failures)} failure(s)")
         for f in failures:
