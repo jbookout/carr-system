@@ -141,4 +141,21 @@ else:
     check("ops/githooks/pre-push is present to check", False,
           f"expected it at {_hook}")
 
+# Repository fixtures exercise pending tracked changes as one checkout.
+from pathlib import Path
+from git_env import clone_checkout_fixture
+source = Path(make_repo("gitenv-checkout-", "source@example.invalid"))
+(source / "f.txt").write_bytes(b"changed\x00binary")
+(source / "added.txt").write_text("staged addition\n")
+subprocess.run(["git", "add", "added.txt"], cwd=source, env=fixture_env(), check=True)
+(source / "ignored.txt").write_text("untracked machine state\n")
+with tempfile.TemporaryDirectory(prefix="gitenv-snapshot-") as directory:
+    target = Path(directory) / "fixture"
+    clone_checkout_fixture(source, target, hostile)
+    check("checkout fixture includes pending binary edits", (target / "f.txt").read_bytes() == b"changed\x00binary")
+    check("checkout fixture includes staged additions", (target / "added.txt").read_text() == "staged addition\n")
+    check("checkout fixture excludes untracked machine state", not (target / "ignored.txt").exists())
+    check("checkout fixture leaves the source commit unchanged", git_out(source, "log", "--format=%s", "-1", env=fixture_env()) == "seed")
+    check("checkout fixture cannot mutate a hostile victim", git_out(victim, "rev-parse", "HEAD", env=fixture_env()) == victim_head)
+
 sys.exit(CHECKER.summary())

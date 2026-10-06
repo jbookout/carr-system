@@ -1,4 +1,5 @@
 import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
+import { restoreEventIdentity } from './helpers/snapshot-schema.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -70,6 +71,7 @@ test('Feature switch record lifecycle on disposable PostgreSQL', { skip: !bin &&
     for (const name of ['actor','event','tool_call','loop_item','loop_block','loop_domain']) {
       await c.query(schema.match(new RegExp(`CREATE TABLE public\\.${name} \\([\\s\\S]*?\\n\\);`))[0]);
     }
+    await restoreEventIdentity(c, schema);
     await c.query('alter table tool_call add primary key(idempotency_key)');
     // This fixture tests registration with the existing guard, whose behavior
     // is covered by the canonical reference-monitor database acceptance gate.
@@ -138,6 +140,10 @@ test('Feature switch record lifecycle on disposable PostgreSQL', { skip: !bin &&
     assert.equal(read.schema,'feature-switches.v1');
     assert.equal(read.switches[0].available,true);
     assert.equal(read.history.length,2);
+    const events = (await c.query('select mutation_order from event order by mutation_order')).rows;
+    assert.equal(events.length, 2);
+    assert.ok(BigInt(events[0].mutation_order) > 0n);
+    assert.ok(BigInt(events[1].mutation_order) > BigInt(events[0].mutation_order));
     assert.equal(read.history[0].actor,'joe');
     assert.equal(read.history[0].before.enabled,null);
     assert.equal(read.history[0].after.enabled,true);
