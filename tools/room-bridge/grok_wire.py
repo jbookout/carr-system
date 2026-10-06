@@ -8,13 +8,14 @@ No token is loaded here, and no other provider is a fallback.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 MODEL = "grok-4.7"
 PROVIDER_MODEL = "grok-4.7-build"
@@ -24,7 +25,17 @@ MAX_TURNS = 60
 
 
 def requested_urls(task: str) -> list[str]:
-    return list(dict.fromkeys(url.rstrip(".,;)]}") for url in re.findall(r"https?://[^\s<>\"']+", task)))
+    urls = []
+    for url in re.findall(r"https?://[^\s<>\"'`*]+", task, re.IGNORECASE):
+        url = url.rstrip(".,;!?")
+        while url and url[-1] in ")]}":
+            opening = {")": "(", "]": "[", "}": "{"}[url[-1]]
+            if url.count(url[-1]) <= url.count(opening):
+                break
+            url = url[:-1].rstrip(".,;!?")
+        if url not in urls:
+            urls.append(url)
+    return urls
 
 
 def public_url(value) -> bool:
@@ -32,14 +43,42 @@ def public_url(value) -> bool:
         return False
     try:
         url = urlsplit(value)
-        return url.scheme in {"https", "http"} and bool(url.hostname) and not url.username and not url.password
+        host = (url.hostname or "").lower().rstrip(".")
+        if (url.scheme not in {"https", "http"} or not host or url.username or url.password
+                or any(c.isspace() or ord(c) < 32 for c in value) or "%" in host
+                or host == "localhost" or host.endswith((".localhost", ".local", ".internal"))):
+            return False
+        # Validate malformed ports even when no caller uses the port.
+        _ = url.port
+        try:
+            if not ipaddress.ip_address(host).is_global:
+                return False
+        except ValueError:
+            if "." not in host or re.fullmatch(r"[0-9.]+", host):
+                return False
+        for key, _ in parse_qsl(url.query, keep_blank_values=True):
+            key = re.sub(r"[^a-z0-9]", "", key.lower())
+            if (key in {"key", "sig", "auth", "authorization", "password", "passwd"}
+                    or any(part in key for part in ("token", "signature", "credential", "secret", "apikey"))):
+                return False
+        return True
     except ValueError:
         return False
 
 
+def normalized_url(value: str) -> str:
+    url = urlsplit(value)
+    host = (url.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    if url.port and (url.scheme, url.port) not in {("https", 443), ("http", 80)}:
+        host += f":{url.port}"
+    return urlunsplit((url.scheme.lower(), host, url.path.rstrip("/") or "/", url.query, url.fragment))
+
+
 def retrieval_request_error(urls: list[str]) -> dict | None:
-    if any(not public_url(url) for url in urls):
-        return {"status": "failed", "detail": "invalid_retrieval_url",
+    if not urls or any(not public_url(url) for url in urls):
+        return {"status": "failed", "code": 6, "detail": "invalid_retrieval_url",
                 "next_route": "Use a public source URL without embedded credentials."}
     return None
 
@@ -51,27 +90,33 @@ def retrieval_prompt(urls: list[str]) -> str:
         "text": "verbatim retrieved source text"}],
         "source_urls": urls, "unresolved_portions": [], "status": "complete or partial"}}
     return ("Return a JSON object in this shape: " + json.dumps(shape) +
-        ". Each source needs its public URL and retrieved text or an existing artifact path in the artifact field. "
-        "Omit artifact when no file exists. "
+        ". Each source requires its public URL and verbatim retrieved text in the text field. "
+        "Local artifact paths are not source evidence. Return only this object, optionally in one JSON fence. "
         "List missing thread, quoted post, linked source or media portions explicitly. "
         "Never substitute an acknowledgment or summary for the source. "
         "If the caller requires a trailing CARR_QUEUE_RESULT line, put it after the JSON object.\n\n")
 
 
-def retrieval_result(text: str, urls: list[str], *, artifact_root=None) -> dict:
-    if error := retrieval_request_error(urls):
-        return error
+def retrieval_result(text: str, urls: list[str]) -> dict:
     missing = {"requested_urls": urls, "sources": [], "source_urls": [],
                "unresolved_portions": urls, "status": "unusable_retrieval"}
-    refusal = {"status": "failed", "detail": "unusable_retrieval", "retrieval": missing,
+    refusal = {"status": "failed", "code": 6, "detail": "unusable_retrieval", "retrieval": missing,
         "next_route": "Read the requested source through its canonical repository or browser; verify the raw source before use."}
     source_text, marker, terminal = text.rpartition("\nCARR_QUEUE_RESULT ")
+    source_text = (source_text if marker else text).strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", source_text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        source_text = fenced[1]
     try:
-        payload = json.loads(source_text if marker else text)
+        payload = json.loads(source_text)
     except ValueError:
         return refusal
     record = payload.get("retrieval") if isinstance(payload, dict) else None
-    if not isinstance(record, dict) or record.get("requested_urls") != urls:
+    if not isinstance(record, dict):
+        return refusal
+    echoed = record.get("requested_urls")
+    if (not isinstance(echoed, list) or not all(public_url(url) for url in echoed)
+            or [normalized_url(url) for url in echoed] != [normalized_url(url) for url in urls]):
         return refusal
     sources, source_urls, unresolved = (record.get(key) for key in
                                        ("sources", "source_urls", "unresolved_portions"))
@@ -83,28 +128,16 @@ def retrieval_result(text: str, urls: list[str], *, artifact_root=None) -> dict:
     for source in sources:
         if not isinstance(source, dict) or source.get("url") not in source_urls:
             return refusal
-        item = {key: source[key] for key in ("url", "text", "artifact") if key in source}
-        if any(not isinstance(item[key], str) or not item[key].strip()
-               for key in ("text", "artifact") if key in item):
+        if not isinstance(source.get("text"), str) or not source["text"].strip():
             return refusal
-        if "artifact" in item:
-            if artifact_root is None:
-                return refusal
-            try:
-                root = Path(artifact_root).resolve()
-                path = (root / item["artifact"]).resolve()
-                exists = path.is_relative_to(root) and path.is_file() and path.stat().st_size
-            except (OSError, ValueError):
-                exists = False
-            if not exists:
-                return refusal
-        if not any(isinstance(item.get(key), str) and item[key].strip() for key in ("text", "artifact")):
-            return refusal
+        item = {"url": source["url"], "text": source["text"]}
         evidence.append(item)
-    if not any(source["url"] in urls for source in evidence):
+    requested = {normalized_url(url) for url in urls}
+    retrieved = {normalized_url(source["url"]) for source in evidence}
+    if not requested & retrieved:
         return refusal
     unresolved = list(dict.fromkeys([*unresolved, *(url for url in urls
-        if not any(source["url"] == url for source in evidence))]))
+        if normalized_url(url) not in retrieved)]))
     retrieval = {"requested_urls": urls, "sources": evidence, "source_urls": source_urls,
         "unresolved_portions": unresolved,
         "status": "partial" if unresolved or record["status"] == "partial" else "complete"}
@@ -112,32 +145,20 @@ def retrieval_result(text: str, urls: list[str], *, artifact_root=None) -> dict:
     if marker:
         # The queue's existing task/capability validator owns this protocol.
         result += marker + terminal
-    return {"status": "completed", "result": result, "retrieval": retrieval}
+    return {"status": "completed", "code": 0, "result": result, "retrieval": retrieval}
 
 
-def preserve_retrieval_receipt(outcome: dict, *, task: str, effort=EFFORT,
-                              max_turns=MAX_TURNS, writable=False, timeout_seconds=TIMEOUT_S) -> str:
+def write_receipt(receipt: dict, path=None) -> str:
     """Keep only adapter-derived diagnostics; never provider stderr, prompts or source text."""
-    configured = os.environ.get("GROK_RUN_RECEIPT")
-    if configured:
-        path = Path(configured).expanduser().absolute()
+    if path:
+        path = Path(path).expanduser().absolute()
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     else:
         root = Path.home() / ".local/state/carr/grok-runs"
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, name = tempfile.mkstemp(prefix="retrieval-", suffix=".json", dir=root)
         path = Path(name)
-    receipt = {"requested_model": MODEL, "effort": effort, "status": outcome["status"],
-        "task_sha256": hashlib.sha256(task.encode()).hexdigest(), "max_turns": max_turns,
-        "sandbox": "workspace" if writable else "read-only", "timeout_seconds": timeout_seconds,
-        "detail": outcome.get("detail"), "retrieval_status": outcome.get("retrieval", {}).get("status"),
-        "diagnostic_path": str(path)}
-    metadata = outcome.get("provider_metadata", {})
-    if metadata.get("actual_model") == PROVIDER_MODEL:
-        receipt["actual_model"] = PROVIDER_MODEL
-    for key in ("model_calls", "cost_usd"):
-        if type(metadata.get(key)) in (int, float):
-            receipt[key] = metadata[key]
+    receipt["diagnostic_path"] = str(path)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         os.fchmod(stream.fileno(), 0o600)
         json.dump(receipt, stream, sort_keys=True)
@@ -220,26 +241,40 @@ def parse_stream(lines, returncode: int = 0) -> dict:
     return {"text": text, "end": end, "detail": detail, "code": code}
 
 
+def provider_receipt(end: dict, cli_version=None) -> dict:
+    models = end.get("modelUsage", {})
+    cost = end.get("total_cost_usd", end.get("cost_usd"))
+    turns = end.get("num_turns")
+    return {"requested_model": MODEL, "actual_models": sorted(models) if isinstance(models, dict) else [],
+               "stopReason": end.get("stopReason") if isinstance(end.get("stopReason"), str) else None,
+               "num_turns": turns if type(turns) is int else None,
+               "cost_usd": cost if type(cost) in (int, float) else None, "cli_version": cli_version}
+
+
 def parse_result(stdout: str, returncode: int, *, urls: list[str] | None = None,
-                 artifact_root=None, effort=EFFORT) -> dict:
+                 effort=EFFORT, cli_version=None, require_identity=True) -> dict:
     parsed = parse_stream(stdout.splitlines(), returncode)
-    if parsed["code"]:
-        return {"status": "failed", "detail": parsed["detail"]}
     end = parsed["end"]
-    usage = end["modelUsage"][PROVIDER_MODEL]
-    if not all(isinstance(end.get(key), str) and end[key].strip() for key in ("requestId", "sessionId")):
-        return {"status": "failed", "detail": "grok_provider_identity_missing"}
+    receipt = provider_receipt(end, cli_version)
+    if parsed["code"]:
+        return {"status": "failed", "detail": parsed["detail"], "code": parsed["code"],
+                "result": "" if urls else parsed["text"], "receipt": receipt}
+    if require_identity and not all(isinstance(end.get(key), str) and end[key].strip()
+                                    for key in ("requestId", "sessionId")):
+        return {"status": "failed", "code": 4, "detail": "grok_provider_identity_missing", "receipt": receipt}
     result = parsed["text"].strip()
-    if not result and not urls:
-        return {"status": "failed", "detail": "grok_empty_result"}
+    if not result and not urls and require_identity:
+        return {"status": "failed", "code": 4, "detail": "grok_empty_result", "receipt": receipt}
     # Select metadata explicitly: tool arguments, diagnostics, credentials and
     # arbitrary future envelope fields never enter the dispatch receipt.
+    usage = end["modelUsage"][PROVIDER_MODEL]
     metadata = {"requested_model": MODEL, "actual_model": PROVIDER_MODEL,
-                "effort": effort, "request_id": end["requestId"],
-                "session_id": end["sessionId"], "model_calls": usage["modelCalls"],
-                "cost_usd": end.get("total_cost_usd"), "stop_reason": end["stopReason"]}
-    outcome = retrieval_result(result, urls, artifact_root=artifact_root) if urls else {"status": "completed", "result": result}
-    return {**outcome, "provider_metadata": metadata}
+                "effort": effort, "request_id": end.get("requestId"),
+                "session_id": end.get("sessionId"), "model_calls": usage["modelCalls"],
+                "cost_usd": receipt["cost_usd"], "stop_reason": end["stopReason"]}
+    outcome = retrieval_result(result, urls) if urls else {
+        "status": "completed", "code": 0, "result": result if require_identity else parsed["text"]}
+    return {**outcome, "provider_metadata": metadata, "receipt": receipt}
 
 
 def invoke_cli(prompt: str, *, cwd=None, effort=EFFORT, max_turns=MAX_TURNS,
@@ -257,25 +292,69 @@ def invoke_cli(prompt: str, *, cwd=None, effort=EFFORT, max_turns=MAX_TURNS,
                stdin=subprocess.DEVNULL, timeout=timeout_seconds, env=env)
 
 
-def run_task(entry: dict, task: str, *, run=subprocess.run) -> dict:
-    validate_entry(entry)
-    urls = requested_urls(task)
-    prompt = ("Read-only retrieval or explanation only. Do not call CARR or MCP tools, "
-              "read credential/config files, write files, or delegate. Return a bounded "
-              "answer with public source URLs when retrieving.\n\n" + retrieval_prompt(urls) + task)
-    outcome = retrieval_request_error(urls)
+class PreflightError(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+def run_request(task: str, *, retrieval=False, prefix="", cwd=None, effort=EFFORT,
+                max_turns=MAX_TURNS, writable=False, timeout_seconds=TIMEOUT_S,
+                invoke=invoke_cli, preflight=None, fixture=None, require_identity=True,
+                receipt_path=None) -> dict:
+    """One execution owns URL validation, provider outcome codes and private receipts.
+
+    URL text alone never changes the caller's contract. Retrieval requires an
+    explicit opt-in and source text; local files cannot establish provenance.
+    """
+    urls = requested_urls(task) if retrieval else []
+    outcome = retrieval_request_error(urls) if retrieval else None
+    cli_version = None
     if outcome is None:
         try:
-            proc = invoke_cli(prompt, cwd=entry.get("cwd"), run=run)
+            prompt = prefix + "\n\n" + retrieval_prompt(urls) + task
+            if fixture:
+                raw, returncode, cli_version = Path(fixture).read_text(encoding="utf-8"), 0, "fixture"
+            else:
+                if preflight:
+                    cli_version = preflight()
+                proc = invoke(prompt, cwd=cwd, effort=effort, max_turns=max_turns,
+                              writable=writable, timeout_seconds=timeout_seconds)
+                raw, returncode = proc.stdout or "", proc.returncode
+            outcome = parse_result(raw, returncode, urls=urls, effort=effort, cli_version=cli_version,
+                                   require_identity=require_identity or retrieval)
+        except PreflightError as error:
+            outcome = {"status": "failed", "code": error.code,
+                       "detail": "grok_sign_in_required" if error.code == 3 else "grok_preflight_failed"}
         except FileNotFoundError:
-            outcome = {"status": "failed", "detail": "grok_cli_unavailable"}
+            outcome = {"status": "failed", "code": 4, "detail": "grok_cli_unavailable"}
         except subprocess.TimeoutExpired:
-            outcome = {"status": "timed_out", "detail": "grok_cli_timeout"}
-        else:
-            outcome = parse_result(proc.stdout or "", proc.returncode, urls=urls, artifact_root=entry.get("cwd"))
-    if urls:
+            outcome = {"status": "timed_out", "code": 4,
+                       "detail": "grok_preflight_timeout" if cli_version is None and preflight else "grok_cli_timeout"}
+        except (OSError, ValueError):
+            outcome = {"status": "failed", "code": 4, "detail": "grok_invocation_failed"}
+    metadata = outcome.get("provider_metadata", {})
+    receipt = {**outcome.pop("receipt", provider_receipt({}, cli_version)),
+               "effort": effort, "status": outcome["status"],
+               "code": outcome["code"], "detail": outcome.get("detail"),
+               "task_sha256": hashlib.sha256(task.encode()).hexdigest(), "max_turns": max_turns,
+               "sandbox": "workspace" if writable else "read-only", "timeout_seconds": timeout_seconds,
+               "retrieval_status": outcome.get("retrieval", {}).get("status"),
+               "actual_model": metadata.get("actual_model"), "model_calls": metadata.get("model_calls"),
+               "diagnostic_path": None}
+    if receipt_path or retrieval:
         try:
-            outcome["diagnostic_path"] = preserve_retrieval_receipt(outcome, task=task)
+            outcome["diagnostic_path"] = write_receipt(receipt, path=receipt_path)
         except OSError:
-            return {"status": "failed", "detail": "grok_receipt_unavailable"}
-    return outcome
+            outcome = {"status": "failed", "code": 4, "detail": "grok_receipt_unavailable"}
+            receipt.update(status="failed", code=4, detail=outcome["detail"], diagnostic_path=None)
+    return {**outcome, "receipt": receipt}
+
+
+def run_task(entry: dict, task: str, *, retrieval=False, run=subprocess.run) -> dict:
+    validate_entry(entry)
+    return run_request(task, retrieval=retrieval, cwd=entry.get("cwd"),
+        prefix=("Read-only retrieval or explanation only. Do not call CARR or MCP tools, "
+                "read credential/config files, write files, or delegate. Return a bounded "
+                "answer with public source URLs when retrieving."),
+        invoke=lambda prompt, **kw: invoke_cli(prompt, **kw, run=run))
