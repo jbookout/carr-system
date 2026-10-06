@@ -117,9 +117,16 @@ _WRAPPERS = {
     "ionice": {"-c", "-n", "-p"}, "caffeinate": {"-t", "-w"}, "time": {"-f", "-o"},
     "xargs": {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"},
     "exec": {"-a"}, "stdbuf": set(), "setsid": set(), "nohup": set(), "command": set(),
-    "npx": set(), "bunx": set(), "yarn": set(), "pnpm": set(),
+    "npx": set(), "bunx": set(), "yarn": set(), "pnpm": set(), "busybox": set(),
 }
-_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "ssh", "eval", "source"})
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "ssh", "su", "eval", "source"})
+# POSIX `source`. Only as the command head: as an argument it is the cwd.
+_DOT = "."
+# Interpreters that run their standard input, or run code over it, when a pipe
+# feeds them. Unpiped, `python3 report.py` is not a reader, and a quoted
+# heredoc into one stays prose (pinned in ops/cmd-text-selftest.py).
+_STDIN_INTERPRETERS = re.compile(
+    r"^(?:python[\d.]*|perl|ruby|node|php|deno|bun|lua|osascript|Rscript|tclsh)$")
 
 
 def _command_words(words):
@@ -148,26 +155,64 @@ def _command_head(words):
     return next(iter(_command_words(words)), "")
 
 
+def _segments(tokens):
+    """Each simple command's tokens, with whether a pipe feeds its stdin."""
+    segment, piped = [], False
+    for token in tokens + [";"]:
+        if token in SHELL_BOUNDARIES:
+            yield segment, piped
+            segment, piped = [], token in {"|", "|&"}
+        else:
+            segment.append(token)
+
+
 def feeds_shell(line):
     """Identify command words after lexing, so quoted pipes remain data.
 
     Behind a wrapper, any bare shell word counts: `sudo -u x bash` and an
-    option this module has never seen both still feed a shell.
+    option this module has never seen both still feed a shell. An
+    interpreter counts once a pipe feeds it.
     """
     try:
         tokens = shell_tokens(line)
     except ValueError:
         return True
-    segment = []
-    for token in tokens + [";"]:
-        if token in SHELL_BOUNDARIES:
-            names = [word.rsplit("/", 1)[-1] for word in segment]
-            if _command_head(segment).rsplit("/", 1)[-1] in _SHELLS or (
-                    names and names[0] in _WRAPPERS and _SHELLS.intersection(names)):
-                return True
-            segment = []
-        else:
-            segment.append(token)
+    for segment, piped in _segments(tokens):
+        names = [word.rsplit("/", 1)[-1] for word in segment]
+        head = _command_head(segment).rsplit("/", 1)[-1]
+        if head in _SHELLS or head == _DOT or (
+                names and names[0] in _WRAPPERS and _SHELLS.intersection(names)):
+            return True
+        if piped and _STDIN_INTERPRETERS.match(head):
+            return True
+    return False
+
+
+# Global git options that consume the following word.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                "--config-env", "--exec-path"})
+# `git config` forms that only read or remove. Any other form may store an
+# alias, pager, editor, helper or hook path, which git later runs.
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--get-urlmatch",
+                               "--get-color", "--get-colorbool", "--list", "-l",
+                               "--unset", "--unset-all", "get", "list", "unset"})
+
+
+def _sets_git_config(cmd):
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        return True
+    for segment, _ in _segments(tokens):
+        words = _command_words(segment)
+        if not words or words[0].rsplit("/", 1)[-1] != "git":
+            continue
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            if rest.pop(0) in _GIT_VALUE_OPTIONS and rest:
+                rest.pop(0)
+        if rest[:1] == ["config"] and not _GIT_CONFIG_READS.intersection(rest[1:]):
+            return True
     return False
 
 
@@ -375,7 +420,7 @@ def executable_text(cmd):
 
 
 def _executes_arguments(cmd):
-    return feeds_shell(cmd) or bool(_EXECUTABLE_OPTION_RE.search(cmd))
+    return feeds_shell(cmd) or bool(_EXECUTABLE_OPTION_RE.search(cmd)) or _sets_git_config(cmd)
 
 
 def runs(cmd, pattern):

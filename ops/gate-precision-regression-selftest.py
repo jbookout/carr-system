@@ -106,6 +106,26 @@ class Regressions(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNotNone(guard.check(command))
 
+    def test_every_shell_reader_executes(self):
+        for command in ["echo 'wrangler deploy' > x.sh; . x.sh",
+                        "git config alias.s '!wrangler deploy' && git s",
+                        "git -C repo config --global alias.s '!wrangler deploy'",
+                        "echo 'wrangler deploy' | busybox sh",
+                        "echo 'wrangler deploy' | su -c sh",
+                        "su -c 'wrangler deploy'",
+                        "echo 'wrangler deploy' | python3",
+                        "echo 'wrangler deploy' | perl -ne 'system($_)'",
+                        "echo 'wrangler deploy' | node -e 'require(`child_process`)'"]:
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.check(command))
+
+    def test_unfed_interpreters_and_config_reads_stay_data(self):
+        for command in ["grep -rn 'wrangler deploy' hooks > hits.txt; python3 report.py hits.txt",
+                        "git config --get user.name; git grep 'wrangler deploy'",
+                        "sudo ls . && git grep 'wrangler deploy'"]:
+            with self.subTest(command=command):
+                self.assertIsNone(guard.check(command))
+
     def test_quoted_substitution_delimiter(self):
         self.assertIsNotNone(guard.check('echo "$(printf \')\'; wrangler deploy)"'))
 
@@ -263,7 +283,11 @@ class Regressions(unittest.TestCase):
                    'tool_use_id': 'native-guard', 'tool_input': {'command': 'env FOO=x wrangler deploy'}}
         env = {**os.environ, 'CARR_HOOK_FIXTURE': '1',
                'CARR_HOOK_TELEMETRY': str(Path(self.tmp.name) / 'telemetry.jsonl')}
-        proc = subprocess.run(shlex.split(command.replace('{{REPO}}', str(ROOT))),
+        interpreter, *chain = shlex.split(command.replace('{{REPO}}', str(ROOT)))
+        # The declared interpreter is the installed checkout's .venv, which a
+        # CI runner does not build; the hook chain after it is what is under test.
+        self.assertTrue(interpreter.endswith('/.venv/bin/python'), interpreter)
+        proc = subprocess.run([sys.executable, *chain],
                               input=json.dumps(payload), text=True, capture_output=True,
                               cwd=self.tmp.name, env=env, timeout=30)
         self.assertEqual(proc.returncode, 2, proc.stderr)
