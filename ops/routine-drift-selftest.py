@@ -16,6 +16,24 @@ spec.loader.exec_module(drift)
 
 
 class DriftTests(unittest.TestCase):
+    def test_any_explicit_enabled_source_overrides_disabled_readback(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            task = home / '.claude/scheduled-tasks/social-batch-weekly'
+            task.mkdir(parents=True)
+            registry = home / '.claude/scheduled_tasks.json'
+            registry.write_text('[{"id":"social-batch-weekly","enabled":false}]')
+            jobs = {'jobs': [{'id': 'social-weekly', 'label': 'com.carr.routine-social-weekly',
+                              'replaces': ['social-batch-weekly']}], 'retired': []}
+            (task / 'SKILL.md').write_text('---\nenabled: true\n---\n')
+            self.assertEqual(drift.check(jobs, home)[0]['state'], 'enabled')
+            (task / 'SKILL.md').write_text('---\nname: social-batch-weekly\n---\n')
+            (task / 'task.json').write_text('{"enabled":false}')
+            (task / 'metadata.json').write_text('{"enabled":true}')
+            self.assertEqual(drift.check(jobs, home)[0]['state'], 'enabled')
+            (task / 'metadata.json').write_text('{broken')
+            self.assertEqual(drift.check(jobs, home)[0]['state'], 'unreadable')
+
     def test_registry_and_directory_status(self):
         with tempfile.TemporaryDirectory() as raw:
             home = Path(raw)

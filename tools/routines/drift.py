@@ -40,19 +40,19 @@ def check(manifest=None, home=None):
     for ident, replacement in sorted(replacements.items()):
         enabled = statuses.get(ident)
         task = home / '.claude/scheduled-tasks' / ident
-        if enabled is None and (task / 'SKILL.md').exists():
+        if (task / 'SKILL.md').exists():
             try:
                 for name in ('task.json', 'metadata.json'):
                     if (task / name).exists():
-                        enabled = json.loads((task / name).read_text()).get('enabled')
-                        if not isinstance(enabled, bool):
+                        metadata = json.loads((task / name).read_text())
+                        if not isinstance(metadata, dict) or not isinstance(metadata.get('enabled'), bool):
                             raise ValueError('enabled must be boolean')
-                        break
-                if enabled is None:
-                    text = (task / 'SKILL.md').read_text()
-                    frontmatter = text.split('---', 2)[1] if text.startswith('---') else ''
-                    match = re.search(r'^enabled:\s*(true|false)\s*$', frontmatter, re.M)
-                    enabled = match.group(1) == 'true' if match else None
+                        enabled = enabled is True or metadata['enabled']
+                text = (task / 'SKILL.md').read_text()
+                frontmatter = text.split('---', 2)[1] if text.startswith('---') else ''
+                match = re.search(r'^enabled:\s*(true|false)\s*$', frontmatter, re.M)
+                if match:
+                    enabled = enabled is True or match.group(1) == 'true'
             except (OSError, ValueError):
                 rows.append({'task_id': ident, 'replacement': replacement, 'state': 'unreadable'})
                 continue
