@@ -9,21 +9,7 @@ fail() {
 
 trap 'fail "key intake failed"' ERR
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-key_name="$(python3 - "$script_dir/../ops/config/github-app.json" 2>/dev/null <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-try:
-    name = json.loads(pathlib.Path(sys.argv[1]).read_text())["key_file"]
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in {".", ".."}:
-        raise ValueError
-    print(name)
-except (OSError, ValueError, KeyError, TypeError):
-    sys.exit(1)
-PY
-)"
+key_name="$(python3 "$script_dir/../lib/github_app_config.py" 2>/dev/null)"
 config_dir="$HOME/.config/carr"
 destination="$config_dir/$key_name"
 mkdir -p "$config_dir" 2>/dev/null

@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import http.client
 import json
 import logging
 import os
-import re
 import stat
 import subprocess
 import tempfile
@@ -25,7 +25,8 @@ from pathlib import Path
 
 import jwt
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "ops/config/github-app.json"
+from lib.github_app_config import CONFIG_PATH, read_config
+
 LOG = logging.getLogger(__name__)
 API = "https://api.github.com"
 
@@ -59,20 +60,8 @@ class GitHubBudget:
 
 def _config() -> dict:
     try:
-        config = json.loads(CONFIG_PATH.read_text())
-        if not re.fullmatch(r"[0-9]+", str(config["app_id"])):
-            raise ValueError
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", config["repository"]):
-            raise ValueError
-        filename = config["key_file"]
-        if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", filename):
-            raise ValueError
-        if filename in {".", ".."}:
-            raise ValueError
-        if type(config.get("reserve", 500)) is not int or config.get("reserve", 500) < 0:
-            raise ValueError
-        return config
-    except (OSError, ValueError, KeyError, TypeError):
+        return read_config(CONFIG_PATH)
+    except ValueError:
         raise GitHubAppError("GitHub App configuration is invalid; GitHub calls stopped") from None
 
 
@@ -93,7 +82,7 @@ def _request(path: str, bearer: str, *, post: bool = False) -> dict:
         if error.code == 404 and not post:
             raise _MissingInstallation from None
         raise GitHubAppError("GitHub App API request failed; GitHub calls stopped") from None
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, http.client.HTTPException):
         raise GitHubAppError("GitHub App API request failed; GitHub calls stopped") from None
 
 
@@ -200,7 +189,8 @@ def remaining_budget(*, env: dict[str, str] | None = None, reserve: int | None =
         for pool in pools:
             if any(type(pool[name]) is not int or pool[name] < 0 for name in ("remaining", "reset")):
                 raise ValueError
+            datetime.fromtimestamp(pool["reset"], timezone.utc)
         reset = max((pool["reset"] for pool in pools if pool["remaining"] < floor), default=None)
         return GitHubBudget(pools[0]["remaining"], pools[1]["remaining"], floor, reset)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, ValueError, OverflowError, KeyError, TypeError, subprocess.SubprocessError):
         raise GitHubAppError("GitHub budget read failed; GitHub calls stopped") from None
