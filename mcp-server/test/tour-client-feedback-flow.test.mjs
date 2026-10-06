@@ -442,16 +442,23 @@ test("the feedback read never gates the packet: pending, timeout and 503 leave t
   ]) {
     const { env, w } = await setup({ scopes: name.startsWith("no feedback") ? ["view_packet"] : undefined });
     env.intercept = intercept;
+    let feedbackSignal;
+    if (name === "pending forever") env.intercept["/api/share/feedback"] = (_call, options) => {
+      feedbackSignal = options.signal;
+      return new Promise(() => {});
+    };
     const list = await openShare(w, { waitFeedback: name !== "pending forever" });
+    assert.equal(list.children.length, 2, `${name}: packet rendered`);
     if (name === "pending forever") {
       assert.equal(list.dataset.feedbackState, "loading");
+      assert.equal(feedbackSignal.aborted, false);
       w.clock.advance(7999);
-      assert.equal(list.dataset.feedbackState, "loading", "no timeout before the browser deadline");
-      assert.equal(list.children.length, 2, "packet renders while feedback is pending");
+      assert.equal(list.dataset.feedbackState, "loading", "deadline has not elapsed");
       w.clock.advance(1);
       await until(() => list.dataset.feedbackState === "unavailable", "feedback deadline reported");
+      assert.equal(feedbackSignal.aborted, true);
+      assert.equal(list.children.length, 2, "packet remains usable after timeout");
     }
-    assert.equal(list.children.length, 2, `${name}: packet rendered`);
     assert.equal(posts(w, "/api/share/exchange").length, 1);
     assert.ok(w.trace.some(t => t.path === "/api/share/report") && w.trace.some(t => t.path === "/api/share/map"), `${name}: report and map were requested`);
     const message = w.doc.querySelector("#feedback-status").textContent;
@@ -466,6 +473,25 @@ test("the feedback read never gates the packet: pending, timeout and 503 leave t
       assert.equal(w.doc.querySelector("#retry-feedback").hidden, true);
     }
   }
+});
+
+test("a delayed feedback retry waits for its response without a shortened fixture deadline", async () => {
+  const { env, w } = await setup();
+  env.intercept = { "/api/share/feedback": async () => new Response("{}", { status: 503 }) };
+  const list = await openShare(w);
+  assert.equal(list.dataset.feedbackState, "unavailable");
+  const hold = deferred();
+  env.intercept = { "/api/share/feedback": async call => { await hold.gate; return call(); } };
+  await w.doc.querySelector("#retry-feedback").click();
+  // A delayed response is still before the browser's deadline. Scheduler load
+  // must not turn it into a timeout in the fixture.
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(list.dataset.feedbackState, "loading");
+  hold.release();
+  await until(() => list.dataset.feedbackState === "ready", "delayed feedback ready after retry");
+  assert.ok(controls(list.children[0]).pick);
+  w.clock.advance(8000);
+  assert.equal(list.dataset.feedbackState, "ready", "completed feedback clears its deadline");
 });
 
 test("a failed feedback read can be retried and then works", async () => {
@@ -492,6 +518,24 @@ test("a failed feedback read can be retried and then works", async () => {
   assert.equal(retrySignal.aborted, false, "successful read cancels its deadline");
   assert.ok(controls(list.children[0]).pick);
   assert.equal(w.doc.querySelector("#retry-feedback").hidden, true);
+});
+
+test("a pending feedback request aborts exactly when the browser deadline advances", async () => {
+  const { env, w } = await setup();
+  let signal;
+  env.intercept = { "/api/share/feedback": async (_call, options) => {
+    signal = options.signal;
+    return new Promise(() => {});
+  } };
+  const list = await openShare(w, { waitFeedback: false });
+  await until(() => Boolean(signal), "feedback request started");
+  w.clock.advance(7999);
+  assert.equal(signal.aborted, false, "request remains live before its deadline");
+  assert.equal(list.children.length, 2, "packet remains available during feedback read");
+  w.clock.advance(1);
+  assert.equal(signal.aborted, true, "deadline aborts without waiting for wall-clock time");
+  await until(() => list.dataset.feedbackState === "unavailable", "timeout shown");
+  assert.equal(list.children.length, 2, "timeout preserves the packet");
 });
 
 test("rotation: the old link stops working for writes and a new link gets fresh, working controls", async () => {

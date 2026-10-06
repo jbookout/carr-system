@@ -5,11 +5,14 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
+import time
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,6 +34,28 @@ class ResearchDeskTests(unittest.TestCase):
                        {'kind': 'claude-session'}, {'add_dirs': ['/']}, {'name': 'unreviewed'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.room.validate_desk({**entry, **change})
+
+    @unittest.skipUnless(shutil.which('sandbox-exec') and shutil.which('codex'), 'installed macOS Codex health probe')
+    def test_installed_codex_starts_without_forking_its_npm_launcher(self):
+        job = self.folder / 'health'
+        job.mkdir()
+        command = [shutil.which('codex'), '--version']
+        proc = subprocess.run(self.room.confine(command, job), cwd=job,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('codex', proc.stdout.lower())
+
+    def test_streaming_cannot_bypass_provider_confinement(self):
+        sys.path.insert(0, str(ROOT / 'tools/room-bridge'))
+        import dispatch
+        from desks import DeskError
+        class Registry:
+            def resolve(self, name):
+                return {'kind': 'codex-session', 'model': 'fixture-model', 'effort': 'high'}
+        with patch.object(dispatch, '_run_codex_streamed', side_effect=AssertionError('unconfined runner')):
+            with self.assertRaises(DeskError):
+                dispatch.dispatch('source-study', 'fixture', registry=Registry(),
+                                  stream_output=True, provider_run=lambda *_: None)
 
     def test_model_readback_is_bound_to_result_thread(self):
         sessions = self.folder / 'sessions'
@@ -100,6 +125,64 @@ class ResearchDeskTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(outside.read_text(), 'synthetic-secret')
         self.assertEqual((job / 'allowed').read_text(), 'report')
+
+    def provider_detach_attempt(self, termination):
+        job = self.folder / termination
+        job.mkdir()
+        intermediary = (
+            "import subprocess, sys\nfrom pathlib import Path\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+            "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+            "stderr=subprocess.DEVNULL)\n"
+            "Path('escaped.pid').write_text(str(child.pid))\n"
+        )
+        code = (
+            "import subprocess, sys, time\nfrom pathlib import Path\n"
+            "try:\n"
+            f" child = subprocess.Popen([sys.executable, '-c', {intermediary!r}])\n"
+            " child.wait()\n"
+            "except OSError:\n Path('fork-denied').write_text('denied')\n"
+            "Path('ready').touch()\n"
+            + ("time.sleep(60)\n" if termination != 'completion' else "")
+        )
+        proc = subprocess.Popen(self.room.confine([sys.executable, '-c', code], job),
+                                cwd=job, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while not (job / 'ready').exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue((job / 'ready').exists(), 'provider did not reach its lifetime fixture')
+            if termination == 'timeout':
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    proc.wait(timeout=.1)
+                proc.kill()
+            elif termination == 'cancellation':
+                proc.terminate()
+            proc.communicate(timeout=5)
+            self.assertTrue((job / 'fork-denied').exists(), 'provider could create an unowned child')
+            self.assertFalse((job / 'escaped.pid').exists(), 'detached grandchild reached execution')
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=5)
+            if (job / 'escaped.pid').exists():
+                try:
+                    os.kill(int((job / 'escaped.pid').read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @unittest.skipUnless(shutil.which('sandbox-exec'), 'macOS confinement probe')
+    def test_completion_prevents_reparented_provider_child(self):
+        self.provider_detach_attempt('completion')
+
+    @unittest.skipUnless(shutil.which('sandbox-exec'), 'macOS confinement probe')
+    def test_timeout_prevents_reparented_provider_child(self):
+        self.provider_detach_attempt('timeout')
+
+    @unittest.skipUnless(shutil.which('sandbox-exec'), 'macOS confinement probe')
+    def test_cancellation_prevents_reparented_provider_child(self):
+        self.provider_detach_attempt('cancellation')
 
     @unittest.skipUnless(shutil.which('sandbox-exec'), 'macOS confinement probe')
     def test_real_room_dispatch_with_fake_provider_binds_model_and_result(self):

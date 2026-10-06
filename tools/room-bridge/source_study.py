@@ -4,12 +4,15 @@
 Model policy lives in the desk registry. This adapter narrows its authority,
 uses the existing dispatch wire and verifies runtime model evidence. No live
 record credential or caller configuration is made available to the worker.
+Providers may use threads and replacement exec, but cannot fork/spawn helper
+processes. The OS rejects detachment before it can escape job cancellation.
 """
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -63,6 +66,30 @@ def runtime_env(folder, auth_home, ambient, *, provider='codex'):
             'LANG': 'en_US.UTF-8', 'PYTHONDONTWRITEBYTECODE': '1'}
 
 
+def provider_executable(binary):
+    executable = Path(binary).resolve()
+    with executable.open('rb') as handle:
+        header = handle.read(128).split(b'\n', 1)[0]
+    if not header.startswith(b'#!') or b'node' not in header:
+        return executable
+    # The npm Codex launcher spawns its packaged Rust executable. Resolve the
+    # same platform package before confinement so the provider needs no fork.
+    package = executable.parent.parent
+    if json.loads((package / 'package.json').read_text()).get('name') != '@openai/codex':
+        raise ValueError('research Node launcher is not the Codex package')
+    architecture = {'arm64': ('arm64', 'aarch64-apple-darwin'),
+                    'x86_64': ('x64', 'x86_64-apple-darwin')}.get(platform.machine())
+    if sys.platform != 'darwin' or architecture is None:
+        raise ValueError('research Codex native platform is unavailable')
+    suffix, target = architecture
+    for vendor in (package / 'node_modules/@openai' / f'codex-darwin-{suffix}' / 'vendor',
+                   package / 'vendor'):
+        candidate = vendor / target / 'bin/codex'
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
+    raise ValueError('research Codex native executable is unavailable')
+
+
 def confine(argv, folder):
     if not Path('/usr/bin/sandbox-exec').exists():
         raise ValueError('source studies require macOS sandbox-exec; no unconfined fallback')
@@ -73,7 +100,8 @@ def confine(argv, folder):
     if any('"' in path or '\\' in path for path in paths):
         raise ValueError('research path cannot be expressed in sandbox profile')
     job, home, prefix, base = paths
-    executable = str(Path(argv[0]).resolve())
+    executable = str(provider_executable(argv[0]))
+    argv = [executable, *argv[1:]]
     if '"' in executable or '\\' in executable:
         raise ValueError('provider executable cannot be expressed in sandbox profile')
     profile = (
@@ -88,6 +116,10 @@ def confine(argv, folder):
         '(allow file-read-metadata)(deny file-write*)'
         f'(allow file-write* (subpath "{job}") (literal "/dev/null"))'
         '(deny mach-lookup)(deny appleevent-send)(deny signal (target others))'
+        # A research provider is one owned process. Fork/spawn is denied by
+        # the OS before an intermediary can detach and disappear between
+        # ancestry samples. Threads and replacement exec remain available.
+        '(deny process-fork)'
     )
     return ['/usr/bin/sandbox-exec', '-p', profile, *argv]
 

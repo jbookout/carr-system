@@ -39,6 +39,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +62,7 @@ TOOLS_ROOT = HERE.parent
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 import credential_env  # noqa: E402 — shared long-lived-token loader
+import flashlib
 
 DEFAULT_RESULTS = Path(
     os.environ.get(
@@ -130,6 +132,30 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
+def _run_codex_streamed(argv, env, timeout):
+    """Preserve result parsing while exposing actual executor output to its job log."""
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    chunks = []
+    def relay():
+        with proc.stdout:
+            for line in proc.stdout:
+                chunks.append(line)
+                print(line, end="", flush=True)
+    reader = threading.Thread(target=relay, daemon=True)
+    reader.start()
+    try:
+        code = proc.wait(timeout=timeout)
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    reader.join(timeout=timeout)
+    if reader.is_alive():
+        raise subprocess.TimeoutExpired(argv, timeout)
+    return subprocess.CompletedProcess(argv, code, "".join(chunks), "")
+
+
 def _to_codex(
     entry: dict,
     task: str,
@@ -138,6 +164,7 @@ def _to_codex(
     config_overrides: tuple[str, ...] = (),
     live_desktop: bool = False,
     provider_run=None,
+    stream_output: bool = False,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -228,10 +255,13 @@ def _to_codex(
             # pipe makes the run hang or swallow whatever the caller was fed.
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
-            proc = (provider_run or subprocess.run)(
-                argv, env=env or os.environ.copy(), capture_output=True,
-                text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
-            )
+            if stream_output:
+                proc = _run_codex_streamed(argv, env or os.environ.copy(), CODEX_TIMEOUT_S)
+            else:
+                proc = (provider_run or subprocess.run)(
+                    argv, env=env or os.environ.copy(), capture_output=True,
+                    text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
+                )
         except FileNotFoundError:
             return {"status": "failed", "detail": "codex is not on PATH"}
         except subprocess.TimeoutExpired:
@@ -287,6 +317,8 @@ def dispatch(
     cwd: str | None = None,
     live_desktop: bool = False,
     provider_run=None,
+    stream_output: bool = False,
+    retrieval: bool = False,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
 
@@ -303,8 +335,18 @@ def dispatch(
     keep the default runner."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
+    if name == "flash" and registry.entries().get(name, {}).get("kind") == "claude-session":
+        try:
+            flashlib.ensure_desk(lambda: desks.is_live(registry.entries()[name].get("socket", "")))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise DeskError("desk_not_live", str(exc)) from exc
     entry = registry.resolve(name)          # every refusal happens here
+    if retrieval and entry["kind"] != "grok-cli":
+        raise DeskError("unsupported_retrieval", "explicit source retrieval requires a Grok desk")
+    if stream_output and (entry["kind"] not in ("codex-session", "codex-exec") or provider_run is not None):
+        raise DeskError("unsupported_stream", "stream output requires a headless Codex desk without a custom runner")
     runner_kwargs = {"provider_run": provider_run} if provider_run is not None else {}
+    stream_options = {"stream_output": True} if stream_output else {}
     original_task = task
     # The background wire validates the original task before adding its own
     # instruction. Prepending here would turn a blank task into valid work.
@@ -328,12 +370,18 @@ def dispatch(
             )
 
     if entry["kind"] == "claude-session":
-        outcome = _to_claude(entry, task, msg_id)
+        if name == "flash":
+            with flashlib.activity_scope():
+                outcome = _to_claude(entry, task, msg_id)
+        else:
+            outcome = _to_claude(entry, task, msg_id)
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
     elif entry["kind"] == "grok-cli":
-        outcome = (grok_wire.run_task(entry, task, run=provider_run) if provider_run is not None
-                   else grok_wire.run_task(entry, task))
+        grok_options = {"retrieval": True} if retrieval else {}
+        if provider_run is not None:
+            grok_options["run"] = provider_run
+        outcome = grok_wire.run_task(entry, task, **grok_options)
     elif entry["kind"] == "flash-local":
         outcome = flash_wire.run_task(task)
     elif entry["kind"] == "codex-live":
@@ -347,13 +395,13 @@ def dispatch(
     elif cwd:
         outcome = _to_codex(
             {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
-            **runner_kwargs,
+            **runner_kwargs, **stream_options,
         )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
             live_desktop=live_desktop,
-            **runner_kwargs,
+            **runner_kwargs, **stream_options,
         )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):
@@ -705,6 +753,10 @@ def main(argv: list[str]) -> int:
     s.add_argument("task")
     s.add_argument("--fresh", action="store_true",
                    help="start a new Codex thread instead of resuming the desk's")
+    s.add_argument("--stream-output", action="store_true",
+                   help="tee headless Codex events into the caller's registered job log")
+    s.add_argument("--retrieve", action="store_true",
+                   help="require public source text evidence from a Grok desk")
 
     a = p.parse_args(argv)
     reg = Registry(a.registry) if a.registry else Registry()
@@ -763,7 +815,8 @@ def main(argv: list[str]) -> int:
             return 0
 
         row = dispatch(a.name, a.task, registry=reg, results_path=results,
-                       fresh=getattr(a, "fresh", False))
+                       fresh=getattr(a, "fresh", False), stream_output=a.stream_output,
+                       retrieval=a.retrieve)
         print(json.dumps(row, indent=2))
         return 0 if row["status"] in ("delivered", "completed") else 1
 
