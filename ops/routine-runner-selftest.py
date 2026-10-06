@@ -2,6 +2,7 @@
 from datetime import datetime
 import importlib.util
 import io
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -62,6 +63,17 @@ class RunnerTests(unittest.TestCase):
         with patch.object(ctx, 'stamp', side_effect=AssertionError('blocked stamp')):
             with patch('sys.stdout', new_callable=io.StringIO):
                 self.assertEqual(runtime.run_module(ctx, Module), 78)
+
+    def test_blocked_plan_rechecks_preflight_after_repair(self):
+        from tools.routines import social_weekly
+        ctx = runtime.Context('social-weekly', dry_run=True, fixture={}, now=datetime.fromisoformat('2026-10-09T08:00:00-05:00'))
+        ctx.state['plan'] = {'work': True, 'reason': 'missing_blotato_key', 'week': '2026-10-12'}
+        ctx.state['blocked'] = 'missing_blotato_key'
+        with patch.object(ctx, 'secret', return_value=True), patch('sys.stdout', new_callable=io.StringIO) as out:
+            ctx.dry_run = False
+            with patch.object(ctx, 'save'), patch.object(ctx, 'review_item'):
+                self.assertEqual(runtime.run_module(ctx, social_weekly), 78)
+            self.assertEqual(json.loads(out.getvalue())['blocked'], 'draft_transport_unavailable')
 
     def test_subscription_cli_no_paid_credentials(self):
         argv, env = runtime.model_command(ROOT, {'OPENAI_API_KEY': 'forbidden', 'CARR_DB_JOBS_URL': 'forbidden', 'PATH': '/bin'})

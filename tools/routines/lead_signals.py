@@ -259,6 +259,13 @@ def execute(ctx, plan):
         combined = {r["source_key"]: r for r in plan["candidates"]}
         for row in fresh:
             if row["source_key"] not in plan.get("consumed_keys", []):
+                previous = combined.get(row["source_key"])
+                if previous:
+                    evidence = [{**candidate, "signal": signal, "source": source}
+                                for candidate in (previous, row)
+                                for signal in candidate["signals"] for source in candidate["sources"]]
+                    row = candidates(evidence)[0]
+                    row["existing_candidates"] = previous.get("existing_candidates", [])
                 combined[row["source_key"]] = row
         plan["candidates"] = list(combined.values())
         plan["lane_health"] = [h for h in plan["lane_health"] if h["pool"] != "pecos.json"] + [health]

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,17 @@ def context(fixture=None, dry_run=True):
 
 
 class LeadTests(unittest.TestCase):
+    def test_overlapping_public_pulls_combine_signals_and_sources(self):
+        row = {'name': 'Fixture Provider', 'npi': '1000000005', 'city': 'Milton', 'state': 'FL', 'signal': 'nppes-org', 'source': 'https://download.cms.gov/nppes/fixture', 'date': '2026-10-01'}
+        ctx = context({'pecos': {}}, dry_run=True)
+        plan = {'work': True, 'refresh_pecos': True, 'pecos_state': {}, 'candidates': leads.candidates([row]), 'lane_health': [], 'consumed_keys': []}
+        fresh = [{**row, 'source_url': 'https://data.cms.gov/fixture', 'date': '2026-10-02'}]
+        with patch.object(radar, 'pull_pecos', return_value=(fresh, {}, {'pool': 'pecos.json'})):
+            result = leads.execute(ctx, plan)
+        self.assertEqual(result['estimated_scores'], [7])
+        self.assertEqual(plan['candidates'][0]['signals'], ['nppes-org', 'pecos-enroll'])
+        self.assertEqual(plan['candidates'][0]['sources'], ['https://data.cms.gov/fixture', 'https://download.cms.gov/nppes/fixture'])
+
     def test_pecos_quarter_gate_catches_missed_quarters(self):
         self.assertFalse(radar.refresh_due(NOW, {"quarter": "2026Q4"}))
         self.assertTrue(radar.refresh_due(NOW, {"quarter": "2026Q2"}))

@@ -165,6 +165,12 @@ class ContactTests(unittest.TestCase):
         contacts.execute(ctx, plan)
         self.assertEqual(ctx.writes, [])
 
+    def test_research_cannot_adopt_intervening_party_version(self):
+        ctx = Context(); plan = contacts.prepare(ctx)
+        ctx.query = lambda *args: [{"version": 9, "contact_state": "active", "merged_into": None}]
+        with self.assertRaises(RuntimeError): contacts.execute(ctx, plan)
+        self.assertEqual(ctx.writes, [])
+
     def test_failed_writer_prevents_success(self):
         ctx = Context(); ctx.write = lambda *args: {"ok": False}
         with self.assertRaises(RuntimeError): contacts.execute(ctx, contacts.prepare(ctx))

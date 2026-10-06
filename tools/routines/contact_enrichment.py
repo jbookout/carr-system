@@ -171,6 +171,11 @@ def execute(ctx, plan):
             if not isinstance(reply, dict) or reply.get("ok") is not True:
                 raise RuntimeError(f"{verb} did not acknowledge the effect")
 
+    def cached_update(verb, ref):
+        subject = "party" if verb == "update-party-contact" else "vendor"
+        return any(effect["verb"] == verb and effect["args"].get(subject) == ref
+                   for effect in state.get("effects", {}).values())
+
     for row in rows:
         if not ctx.dry_run and row["ref"] in state.get("completed_contact_refs", []):
             continue
@@ -179,6 +184,8 @@ def execute(ctx, plan):
             current = ctx.query("select version,contact_state,merged_into from v_routine_contact_party where id=%s", (original["party_id"],))
             if len(current) != 1 or current[0]["contact_state"] == "do_not_contact" or current[0]["merged_into"]:
                 raise RuntimeError("party contact eligibility changed during research")
+            if int(current[0]["version"]) != int(original["party_version"]) and not cached_update("update-party-contact", row["ref"]):
+                raise RuntimeError("party version changed since the research snapshot")
         review = []
         contact_fields, vendor_fields = {}, {}
         for fact in row["facts"]:
@@ -212,7 +219,7 @@ def execute(ctx, plan):
             current = ctx.query("select version,contact_state,merged_into from v_routine_contact_party where id=%s", (original["party_id"],))
             if len(current) != 1 or current[0]["contact_state"] == "do_not_contact" or current[0]["merged_into"]:
                 raise RuntimeError("party contact eligibility changed during research")
-            payload = {"party": row["ref"], "base_version": int(current[0]["version"]),
+            payload = {"party": row["ref"], "base_version": int(original["party_version"]),
                        "fields": contact_fields,
                        "source": " ".join(dict.fromkeys(url for fact in row["facts"]
                                                          if fact["field"] in contact_fields
@@ -222,7 +229,7 @@ def execute(ctx, plan):
         if vendor_fields and not ctx.dry_run:
             current = ctx.query("select version from v_routine_contact_vendor where id=%s and merged_into is null", (original["subject_id"],))
             if len(current) != 1: raise RuntimeError("vendor eligibility changed during research")
-            payload = {"vendor": row["ref"], "base_version": int(current[0]["version"]), "fields": vendor_fields}
+            payload = {"vendor": row["ref"], "base_version": int(original["vendor_version"]), "fields": vendor_fields}
             write("update-vendor", payload, effect_key(row["ref"], "vendor-update",
                   {"fields": vendor_fields, "observed_at": verified_at})); updates += 1
         if review:

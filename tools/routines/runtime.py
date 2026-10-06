@@ -208,7 +208,8 @@ class Context:
 
 
 def run_module(ctx, module):
-    plan = ctx.state.get('plan') or module.prepare(ctx)
+    plan = None if ctx.state.get('blocked') else ctx.state.get('plan')
+    plan = plan or module.prepare(ctx)
     if plan.get('work') is not True:
         return 0
     if not ctx.dry_run:
@@ -216,8 +217,12 @@ def run_module(ctx, module):
         ctx.save()
     result = module.execute(ctx, plan)
     if result.get('blocked'):
+        if not ctx.dry_run:
+            ctx.state['blocked'] = result['blocked']
+            ctx.save()
         print(json.dumps(result, default=str, sort_keys=True))
         return 78
+    ctx.state.pop('blocked', None)
     ctx.stamp(result)
     print(json.dumps(result, default=str, sort_keys=True))
     return 0
