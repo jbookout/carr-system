@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import pg from "pg";
 import { executeRegisteredTool } from "../src/tools.js";
 const dsn = process.env.LEAD_WORKSPACE_TEST_DATABASE_URL;
@@ -513,7 +513,10 @@ run('registered score owner validation and database score check refuse atomicall
   for(const score of [-1,101,1.5])await assert.rejects(()=>c.query('update lead set score=$1 where id=$2',[score,f.lead]),e=>e.code==='23514');
 });
 run('territory backfill emits exact audit, increments versions once, is replay safe and refuses partial or changed inputs',async c=>{
-  const text=await readFile(new URL('../../migrations/0855_lead_score_owner_reader_repair.sql',import.meta.url),'utf8');
+  const directory=new URL('../../migrations/',import.meta.url);
+  const names=(await readdir(directory)).filter(name=>/^\d{4}[a-z]?_lead_score_owner_reader_repair\.sql$/.test(name));
+  assert.equal(names.length,1,'one territory repair migration must survive integration allocation');
+  const text=await readFile(new URL(names[0],directory),'utf8');
   const backfill=text.slice(text.indexOf('create temp table lead_territory_score_repair'));
   const f=await fixture(c);
   await c.query("insert into actor(slug,kind,display_name) values('dell','human','Synthetic Dell'),('system','system','Synthetic migrations') on conflict(slug) do nothing");
