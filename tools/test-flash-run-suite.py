@@ -16,7 +16,7 @@ spec.loader.exec_module(suite)
 
 
 class SuiteSelection(unittest.TestCase):
-    def run_cases(self, args, available):
+    def run_cases(self, args, available, *, sandbox_available=True):
         calls = []
 
         def sandbox_case():
@@ -26,8 +26,10 @@ class SuiteSelection(unittest.TestCase):
             calls.append("model")
 
         sandbox_case.__module__ = model_case.__module__ = "__main__"
+        suite.sandboxed(sandbox_case)
         suite.live(model_case)
         with patch.dict(vars(suite), {"sandbox_case": sandbox_case, "model_case": model_case}), \
+                patch.object(suite, "SANDBOXED", sandbox_available), \
                 patch.object(suite, "_flash_up", side_effect=available) as probe, \
                 patch.object(suite, "FAILURES", []), patch.object(suite, "TEMPS", []), \
                 patch.object(sys, "argv", ["test-flash-run-sandbox.py", *args]), \
@@ -47,6 +49,17 @@ class SuiteSelection(unittest.TestCase):
 
     def test_explicit_live_check_refuses_missing_dependency(self):
         self.assertEqual(self.run_cases(["--live"], lambda: False), (78, [], 1))
+
+    def test_explicit_live_check_refuses_a_host_without_sandboxing(self):
+        self.assertEqual(self.run_cases(["--live"], lambda: True, sandbox_available=False),
+                         (78, [], 0))
+
+    def test_ordinary_suite_does_not_probe_a_model_without_sandboxing(self):
+        def unexpected_probe():
+            raise AssertionError("ordinary CI contacted the model server")
+
+        self.assertEqual(self.run_cases([], unexpected_probe, sandbox_available=False),
+                         (0, [], 0))
 
 
 if __name__ == "__main__":
