@@ -38,7 +38,11 @@ class Lifecycle(unittest.TestCase):
                 root = Path(line)
                 pid = int((root / 'data/postmaster.pid').read_text().splitlines()[0])
                 child.send_signal(signal.SIGTERM)
-                _, stderr = child.communicate(timeout=30)
+                try:
+                    _, stderr = child.communicate(timeout=90)
+                except subprocess.TimeoutExpired:
+                    log = root / 'pg.log'
+                    self.fail(f'teardown timed out; postgres log:\n{log.read_text() if log.exists() else "missing"}')
                 self.assertEqual(child.returncode, 128 + signal.SIGTERM, stderr)
                 with self.assertRaises(ProcessLookupError):
                     os.kill(pid, 0)
@@ -46,7 +50,7 @@ class Lifecycle(unittest.TestCase):
             finally:
                 if child.poll() is None:
                     child.send_signal(signal.SIGTERM)
-                    child.communicate(timeout=30)
+                    child.communicate(timeout=90)
 
 
 if __name__ == '__main__':

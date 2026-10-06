@@ -53,8 +53,8 @@ if threading.current_thread() is threading.main_thread():
 
 
 class DisposablePostgres:
-    def __init__(self, prefix, pg_ctl, env=None, runner=None):
-        self.root = Path(tempfile.mkdtemp(prefix=prefix, dir='/tmp')).absolute()
+    def __init__(self, prefix, pg_ctl, env=None, runner=None, directory='/tmp'):
+        self.root = Path(tempfile.mkdtemp(prefix=prefix, dir=directory)).resolve()
         self._identity = self.root.stat().st_ino
         self.pg_ctl = Path(pg_ctl)
         self.env = dict(env or os.environ, LC_ALL='C')

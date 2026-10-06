@@ -173,7 +173,7 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
         if result.returncode:
             raise RuntimeError("release-abandon disposable PostgreSQL step failed: " + Path(str(args[0])).name)
 
-    with postgres_fixture_group(), DisposablePostgres("release-abandon-", binaries.pg_ctl, env=env) as fixture:
+    with postgres_fixture_group(), DisposablePostgres("release-abandon-", binaries.pg_ctl, env=env, directory=None) as fixture:
         root = fixture.root
         data = root / "data"
         with socket.socket() as probe:
