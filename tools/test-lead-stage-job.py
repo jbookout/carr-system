@@ -19,7 +19,7 @@ class LeadStageJobTests(unittest.TestCase):
                 if failure == "timeout":
                     raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="private-sentinel")
                 raise OSError("private-sentinel launch failure")
-            with self.subTest(failure=failure), patch.object(job.subprocess, "run", run):
+            with self.subTest(failure=failure), patch("subprocess.run", run):
                 try:
                     job.call_verb("record-lead-contact", args)
                 except Exception:
@@ -50,6 +50,19 @@ class LeadStageJobTests(unittest.TestCase):
         self.assertEqual(calls, [])
         with self.assertRaises(ValueError):
             job.run_job(lambda *a: calls.append(a), evidence=[], dry_run=True)
+
+    def test_invoice_batch_uses_capture_then_shared_job_with_stable_replay_keys(self):
+        invoice = {"native_ref":"local-mail:synthetic-invoice", "from_address":"invoices@example.test",
+                   "deal_name":"Synthetic Lease", "client_name":"Synthetic Practice", "occurred_at":"2026-10-03T12:00:00Z"}
+        calls=[]
+        for _ in range(2):
+            job.run_job(lambda v,a:calls.append((v,a)), evidence=[invoice])
+        self.assertEqual([v for v,a in calls], ["record-deal-invoice","advance-leads"]*2)
+        self.assertEqual(calls[0][1]["idempotency_key"],calls[2][1]["idempotency_key"])
+        calls=[]
+        with self.assertRaises(ValueError):
+            job.run_job(lambda v,a:calls.append(v),evidence=[invoice,{**invoice,"body":"Synthetic"}])
+        self.assertEqual(calls,[])
 
     def test_capture_failure_stops_job(self):
         calls = []

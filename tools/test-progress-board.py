@@ -350,7 +350,9 @@ board.main(["task", "demo", "work", "--status", "done", "--note", "Recovered",
         self.assertEqual(snapshot["kind"], "project")
         self.assertEqual(set(snapshot), {"schema", "kind", "project", "title", "tasks", "deliverables",
                                          "notes", "decisions", "ledger", "repos", "history", "updated_at",
-                                         "github_sync", "omitted"})
+                                         "github_sync", "omitted", "costs"})
+        self.assertIn(snapshot["costs"]["state"], ("ready", "partial", "unavailable"))
+        self.assertIn("action", snapshot["costs"])
         self.assertEqual(snapshot["tasks"]["a"]["provider"], "Codex")
         self.assertEqual(snapshot["tasks"]["a"]["model"], "gpt-6-sol")
         self.assertEqual(snapshot["tasks"]["a"]["effort"], "high")
@@ -1036,16 +1038,7 @@ class GitHubSync(BoardCase):
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo")["github_sync"]["failed"], [])
 
-    def test_gh_is_found_outside_a_launchd_path(self):
-        fallback = self.root / "homebrew" / "gh"
-        fallback.parent.mkdir()
-        fallback.write_text("#!/bin/sh\n")
-        fallback.chmod(0o755)
-        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=False), \
-             patch.object(BOARD.shutil, "which", lambda name: None), \
-             patch.object(BOARD, "GH_FALLBACKS", (str(self.root / "missing" / "gh"), str(fallback))):
-            os.environ.pop("PROGRESS_BOARD_SKIP_GH", None)
-            self.assertEqual(BOARD.gh_binary(), str(fallback))
+    def test_the_launchd_job_puts_homebrew_on_path(self):
         self.assertIn("/opt/homebrew/bin", LAUNCHD_SCRIPT.read_text())
 
 
@@ -1754,6 +1747,7 @@ class ReviewRound1420(BoardCase):
                "StartInterval": 120, "RunAtLoad": True, "StandardOutPath": "board.log"}
         dest.write_bytes(plistlib.dumps(old))
         calls = []
+        real_run = subprocess.run
         def install(filename, path, body, matches):
             calls.append((filename, path, matches))
             Path(path).write_text(body)
@@ -1762,7 +1756,7 @@ class ReviewRound1420(BoardCase):
         registered = subprocess.CompletedProcess([], 0, "arguments = {\n" + "\n".join(desired) + "\n}\n")
         with patch.object(installer, "REPO", str(repo)), patch.object(installer, "HOME", str(self.root)), \
              patch.object(installer, "install_launchd_plist", side_effect=install), \
-             patch.object(installer.subprocess, "run", return_value=registered):
+             patch.object(installer.subprocess, "run", side_effect=lambda argv, **kwargs: real_run(argv, **kwargs) if argv[0] == "git" else registered) as run:
             self.assertEqual(installer.cmd_install_progress_board(False), 1)
             self.assertEqual(plistlib.loads(dest.read_bytes()), old)
             self.assertEqual(installer.cmd_install_progress_board(True), 0)
@@ -1773,52 +1767,23 @@ class ReviewRound1420(BoardCase):
             self.assertEqual(actual["StandardOutPath"], old["StandardOutPath"])
             self.assertEqual(len(calls), 1)
             self.assertEqual(installer.cmd_install_progress_board(False), 0)
-            installer.subprocess.run.return_value = subprocess.CompletedProcess([], 0, "arguments = {\n/bin/zsh\nold/render.sh\n}\n")
+            stale = subprocess.CompletedProcess([], 0, "arguments = {\n/bin/zsh\nold/render.sh\n}\n")
+            run.side_effect = lambda argv, **kwargs: real_run(argv, **kwargs) if argv[0] == "git" else stale
             self.assertEqual(installer.cmd_install_progress_board(False), 1)
             # Matching disk bytes cannot hide a stale registered definition.
-            installer.subprocess.run.side_effect = [installer.subprocess.run.return_value, registered]
+            observations = iter([stale, registered])
+            run.side_effect = lambda argv, **kwargs: real_run(argv, **kwargs) if argv[0] == "git" else next(observations)
             self.assertEqual(installer.cmd_install_progress_board(True), 0)
             self.assertFalse(calls[-1][2])
 
-    def test_5_premerge_checkout_migration_preserves_shared_board_state(self):
+    def test_5_feature_checkout_migration_is_refused_before_install(self):
         spec = importlib.util.spec_from_file_location("board_installer_premerge", REPO / "ops/config-as-code.py")
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
-        canonical = self.root / "canonical"
-        checkout = self.root / "reviewed-checkout"
-        (checkout / "ops").mkdir(parents=True)
-        (checkout / "ops/progress-board-render.sh").write_text(LAUNCHD_SCRIPT.read_text())
-        (checkout / ".venv/bin").mkdir(parents=True)
-        python = checkout / ".venv/bin/python"
-        python.write_text("#!/bin/sh\nexit 0\n")
-        python.chmod(0o755)
-        agents = self.root / "Library/LaunchAgents"
-        agents.mkdir(parents=True)
-        dest = agents / "local.carr-progress-board.plist"
-        old = {"Label": "local.carr-progress-board", "ProgramArguments": ["/bin/zsh", "old/render.sh"],
-               "StartInterval": 120, "RunAtLoad": True,
-               "EnvironmentVariables": {"EXISTING": "keep"}}
-        dest.write_bytes(plistlib.dumps(old))
-        desired = ["/bin/bash", str(checkout / "ops/progress-board-render.sh")]
-        registered = subprocess.CompletedProcess([], 0, "arguments = {\n" + "\n".join(desired) + "\n}\n")
-        def install(filename, path, body, matches):
-            Path(path).write_text(body)
-            return "loaded"
-        with patch.object(installer, "REPO", str(canonical)), patch.object(installer, "HOME", str(self.root)), \
-             patch.object(installer, "install_launchd_plist", side_effect=install), \
-             patch.object(installer.subprocess, "run", return_value=registered):
-            self.assertEqual(installer.cmd_install_progress_board(True, repo=str(checkout)), 0)
-            actual = plistlib.loads(dest.read_bytes())
-            self.assertEqual(actual["ProgramArguments"], desired)
-            self.assertEqual(actual["WorkingDirectory"], str(checkout))
-            self.assertEqual(actual["EnvironmentVariables"], {
-                "EXISTING": "keep", "PROGRESS_BOARD_ROOT": str(canonical / "out")})
-            self.assertEqual(actual["StartInterval"], 120)
-            self.assertEqual(installer.cmd_install_progress_board(False, repo=str(checkout)), 0)
-            with patch.object(installer, "cmd_install_progress_board", return_value=0) as command, \
-                 patch.object(sys, "argv", ["config-as-code.py", "verify-progress-board", "--repo", str(checkout)]):
-                self.assertEqual(installer.main(), 0)
-                command.assert_called_once_with(False, repo=str(checkout))
+        with patch.object(installer, "REPO", str(self.root / "canonical")), \
+             patch.object(installer, "install_launchd_plist") as install:
+            self.assertEqual(installer.cmd_install_progress_board(True, repo=str(self.root / "feature")), 1)
+            install.assert_not_called()
 
     def test_5_migration_refuses_missing_checkout_wrapper_without_writing(self):
         spec = importlib.util.spec_from_file_location("board_installer_missing", REPO / "ops/config-as-code.py")

@@ -23,13 +23,34 @@ from git_env import fixture_env
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def copy_ci(root):
+    for relative in ("ops/ci.sh", "ops/ci-quarantine.py", "ops/git_env.py",
+                     "ops/config/ci-quarantine.json", "ops/config/ci-check-scope.json"):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / relative, target)
+    if not (root / ".git").exists():
+        env = fixture_env()
+        for arguments in (("init", "-q", "-b", "main"),
+                          ("config", "user.name", "Fixture"),
+                          ("config", "user.email", "64207374+jbookout@users.noreply.github.com"),
+                          ("add", "ops")):
+            subprocess.run(["git", *arguments], cwd=root, env=env, check=True,
+                           capture_output=True)
+        message = root / ".git/fixture-message"
+        message.write_text("CI fixture\n")
+        subprocess.run(["git", "commit", "-q", "-F", str(message)], cwd=root, env=env,
+                       check=True, capture_output=True)
+
+
 class CheckArtifacts(unittest.TestCase):
     def test_eval_caller_and_inherited_probe_receive_identical_body_arguments(self):
+        self.enterContext(patch.dict(os.environ, CARR_PR_BODY_FILE='outside-fixture-body'))
         with tempfile.TemporaryDirectory(prefix="review-floor-caller-") as td:
             root = Path(td)
             for folder in ["ops", "hooks"]:
                 (root / folder).mkdir()
-            shutil.copy(ROOT / "ops/ci.sh", root / "ops/ci.sh")
+            copy_ci(root)
             (root / "hooks/gate-integrity.py").write_text("raise SystemExit(0)\n")
             (root / "ops/check-eval-receipt.py").write_text(
                 "import sys\nfrom pathlib import Path\nPath('eval-args').write_text(' '.join(sys.argv[1:]))\nraise SystemExit(1 if '--pr-body-file' in sys.argv else 0)\n")
@@ -37,12 +58,14 @@ class CheckArtifacts(unittest.TestCase):
                 "import sys\nfrom pathlib import Path\nPath('probe-args').write_text(' '.join(sys.argv[1:]))\nraise SystemExit(1)\n")
             body = root / "body"
             body.write_text("no-eval: fixture: invalid\n")
+            env = fixture_env()
+            env.pop('CARR_PR_BODY_FILE', None)
             for supplied in [False, True]:
                 with self.subTest(supplied=supplied):
                     argv = ["bash", str(root / "ops/ci.sh"), "--strict", "--only", "gates"]
                     if supplied:
                         argv += ["--pr-body-file", str(body)]
-                    run = subprocess.run(argv, cwd=root, env=fixture_env(), capture_output=True, text=True)
+                    run = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True)
                     self.assertNotIn("unbound variable", run.stdout + run.stderr)
                     self.assertTrue((root / "eval-args").exists())
                     if supplied:
@@ -55,7 +78,7 @@ class CheckArtifacts(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="review-floor-ci-") as td:
             root = Path(td)
             (root / "ops").mkdir()
-            shutil.copy(ROOT / "ops/ci.sh", root / "ops/ci.sh")
+            copy_ci(root)
             result = root / "result.json"
             for rc, expected in [(0, "passed"), (1, "refused"), (78, "refused")]:
                 with self.subTest(rc=rc):
@@ -79,7 +102,7 @@ class CheckArtifacts(unittest.TestCase):
             root = Path(td)
             for folder in ["ops", "hooks", "bin"]:
                 (root / folder).mkdir()
-            shutil.copy(ROOT / "ops/ci.sh", root / "ops/ci.sh")
+            copy_ci(root)
             shutil.copy(ROOT / "bin/with-timeout.py", root / "bin/with-timeout.py")
             (root / "hooks/gate-integrity.py").write_text("raise SystemExit(0)\n")
             result = root / "result.json"
@@ -104,7 +127,7 @@ class CheckArtifacts(unittest.TestCase):
             root = Path(td)
             for folder in ["ops", "hooks"]:
                 (root / folder).mkdir()
-            shutil.copy(ROOT / "ops/ci.sh", root / "ops/ci.sh")
+            copy_ci(root)
             (root / "hooks/gate-integrity.py").write_text("raise SystemExit(1)\n")
             (root / "ops/inherited-from-main.py").write_text("print('INHERITED FROM MAIN: seeded baseline failure')\n")
             result = root / "result.json"
@@ -113,6 +136,31 @@ class CheckArtifacts(unittest.TestCase):
             self.assertNotEqual(run.returncode, 0)
             self.assertIn("ci-inherited-from-main:gate-integrity", run.stdout)
             self.assertFalse(result.exists())
+
+    def test_quarantined_python_and_shell_suites_publish_both_diagnostics(self):
+        with tempfile.TemporaryDirectory(prefix="review-quarantined-logs-") as td:
+            root = Path(td)
+            copy_ci(root)
+            (root / 'hooks').mkdir()
+            (root / 'hooks/gate-integrity.py').write_text('raise SystemExit(0)\n')
+            (root / 'bin').mkdir()
+            shutil.copy(ROOT / 'bin/with-timeout.py', root / 'bin/with-timeout.py')
+            shutil.copy(ROOT / 'ops/ci-secret-scan.py', root / 'ops/ci-secret-scan.py')
+            (root / 'tools').mkdir()
+            for name, command in [('ops/fixture-selftest.py', 'print("python diagnostic"); raise SystemExit(1)\n'),
+                                  ('tools/test-fixture.sh', '#!/bin/sh\necho "shell diagnostic"\nexit 1\n')]:
+                (root / name).write_text(command)
+                (root / name).chmod(0o755)
+            entries = [{'test': name, 'owner': 'qa-engineer', 'expires': '2099-01-01', 'reason': 'Fixture',
+                'loop': 'https://github.com/jbookout/carr-system/issues/123'}
+                for name in ('ops/fixture-selftest.py', 'tools/test-fixture.sh')]
+            (root / 'ops/config/ci-quarantine.json').write_text(json.dumps({'version': 1, 'tests': entries}))
+            run = subprocess.run(['bash', str(root / 'ops/ci.sh'), '--strict', '--only', 'gates'],
+                env=fixture_env(), capture_output=True, text=True, timeout=20)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(run.stdout.count('python diagnostic'), 2, run.stdout)
+            self.assertEqual(run.stdout.count('shell diagnostic'), 2, run.stdout)
+
 
 
 class Admission(unittest.TestCase):
@@ -312,7 +360,7 @@ RESULT
             self.adapter.verify(self.root, "origin/main", "", receipt)
 
     def test_inherited_scan_range_cannot_narrow_the_real_secret_scan(self):
-        shutil.copy(ROOT / "ops/ci.sh", self.root / "ops/ci.sh")
+        copy_ci(self.root)
         shutil.copy(ROOT / "ops/ci-secret-scan.py", self.root / "ops/ci-secret-scan.py")
         (self.root / "bin").mkdir()
         shutil.copy(ROOT / "bin/with-timeout.py", self.root / "bin/with-timeout.py")
@@ -431,7 +479,9 @@ RESULT
             "base": {"sha": self.git("rev-parse", "origin/main"), "ref": "main",
                      "repo": {"full_name": "jbookout/carr-system"}}}
         receipt = Path(self.tmp.name) / "receipt.json"
-        with patch.dict(os.environ, {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"], "FIXTURE_PR": str(provider)}):
+        with patch.dict(os.environ, {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"], "FIXTURE_PR": str(provider),
+                                     "CARR_JEV_OFFLINE": "1",
+                                     "CARR_CI_PYTHON": str(ROOT / ".venv/bin/python") if (ROOT / ".venv/bin/python").is_file() else "python3"}):
             receipt.write_text(json.dumps(self.collect()))
             argv = ["bash", str(ROOT / "ops/ci.sh"), "--review-admit", "--root", str(self.root),
                     "--receipt", str(receipt), "--pr", "7"]

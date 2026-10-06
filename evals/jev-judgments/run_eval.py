@@ -294,7 +294,7 @@ def report(base_ref):
                      "evidence_refs": ["evals/jev-judgments/evidence/baseline.jsonl",
                                        "evals/jev-judgments/evidence/candidate.jsonl"], **m})
     policy_files = [f"tools/room-bridge/{name}.py" for name in
-                    ("evaluation_kernel", "execution_contract", "evaluation_rubrics", "design_kernel", "policy_learning")]
+                    ("evaluation_kernel", "execution_contract", "design_kernel", "policy_learning")]
     deps = [p for p in ARM_FILES if (REPO / p).exists()] + policy_files + ["evals/jev-judgments/expectations.v1.json"]
     fingerprint = hashlib.sha256("".join(_sha(REPO / p) for p in ARM_FILES if (REPO / p).exists())
                                  .encode()).hexdigest()
