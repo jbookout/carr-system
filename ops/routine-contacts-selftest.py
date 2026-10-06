@@ -23,9 +23,9 @@ class Context:
         self.models = 0
 
     def query(self, sql, params=()):
-        if "party where" in sql:
+        if "v_routine_contact_party where" in sql:
             return [{"version": 4, "contact_state": "active", "merged_into": None}]
-        if "vendor where" in sql:
+        if "v_routine_contact_vendor where" in sql:
             return [{"version": 2}]
         raise AssertionError("fixture must avoid queue query")
 

@@ -12,31 +12,7 @@ FACT_FIELDS = CONTACT_FIELDS | {"website", "social", "address", "license_status"
                               "entity_filing", "hours", "practitioners", "category_slug", "verticals"}
 RESEARCH_RETRY_DAYS = 30
 
-QUEUE_SQL = """
-with hydrated as (
- select q.priority,q.subject_type,q.subject_id::text,
-        coalesce(r.ref,p.ref) as ref,p.id::text as party_id,p.name,
-        p.contact_state,p.merged_into::text,p.title,p.email,p.phone,p.cell,
-        p.city,p.county,p.state,p.npi,p.specialty,p.version as party_version,
-        org.name as company,v.category_slug,v.verticals,v.version as vendor_version,
-        q.reverification_due,
-        row_number() over (partition by p.id order by q.priority) as person_rank
- from v_control_plane_enrichment_queue q
- left join v_ref_index r on r.subject_type=q.subject_type and r.subject_id=q.subject_id
- join party p on p.id=case when q.subject_type='party' then q.subject_id else r.party_id end
- left join party org on org.id=p.org_id
- left join vendor v on q.subject_type='vendor' and v.id=q.subject_id
- where not coalesce(r.merged,false) and p.merged_into is null and p.deleted_at is null
-   and p.contact_state <> 'do_not_contact'
-   and not exists (
-     select 1 from record_flag attempt
-      where attempt.subject_type='party' and attempt.subject_id=p.id
-        and attempt.kind='contact_enrichment_attempt'
-        and attempt.expires_on > current_date
-   )
-)
-select * from hydrated where person_rank=1 order by priority limit 40
-"""
+QUEUE_SQL = "select * from v_routine_contact_inputs order by priority"
 
 
 def select_contacts(rows, now=None):
@@ -62,7 +38,7 @@ def prepare(ctx):
     rows = fixture.get("queue", []) if fixture is not None else ctx.query(QUEUE_SQL)
     selected = select_contacts(rows, ctx.now)
     categories = (fixture.get("categories", []) if fixture is not None else
-                  ctx.query("select slug,label from vendor_category order by sort,slug")) if selected else []
+                  ctx.query("select slug,label from v_routine_vendor_category order by sort,slug")) if selected else []
     return {"work": bool(selected), "inputs": {"records": selected, "categories": categories},
             "selected": len(selected)}
 
@@ -201,7 +177,7 @@ def execute(ctx, plan):
             continue
         original = records[row["ref"]]
         if not ctx.dry_run:
-            current = ctx.query("select version,contact_state,merged_into from party where id=%s", (original["party_id"],))
+            current = ctx.query("select version,contact_state,merged_into from v_routine_contact_party where id=%s", (original["party_id"],))
             if len(current) != 1 or current[0]["contact_state"] == "do_not_contact" or current[0]["merged_into"]:
                 raise RuntimeError("party contact eligibility changed during research")
         review = []
@@ -234,7 +210,7 @@ def execute(ctx, plan):
                        "observed_at": verified_at, "expires_on": expires_on}
             write("record-finding", payload, effect_key(row["ref"], "nothing-found", payload)); findings += 1
         if contact_fields and not ctx.dry_run:
-            current = ctx.query("select version,contact_state,merged_into from party where id=%s", (original["party_id"],))
+            current = ctx.query("select version,contact_state,merged_into from v_routine_contact_party where id=%s", (original["party_id"],))
             if len(current) != 1 or current[0]["contact_state"] == "do_not_contact" or current[0]["merged_into"]:
                 raise RuntimeError("party contact eligibility changed during research")
             payload = {"party": row["ref"], "base_version": int(current[0]["version"]),
@@ -245,7 +221,7 @@ def execute(ctx, plan):
             write("update-party-contact", payload, effect_key(row["ref"], "contact-update",
                   {"fields": contact_fields, "source": payload["source"], "observed_at": verified_at})); updates += 1
         if vendor_fields and not ctx.dry_run:
-            current = ctx.query("select version from vendor where id=%s and merged_into is null", (original["subject_id"],))
+            current = ctx.query("select version from v_routine_contact_vendor where id=%s and merged_into is null", (original["subject_id"],))
             if len(current) != 1: raise RuntimeError("vendor eligibility changed during research")
             payload = {"vendor": row["ref"], "base_version": int(current[0]["version"]), "fields": vendor_fields}
             write("update-vendor", payload, effect_key(row["ref"], "vendor-update",
