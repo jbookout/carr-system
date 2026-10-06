@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Current SQL history survives a generated successor and a catalog probe."""
+import importlib.util
 import json
 from pathlib import Path
 import re
+import sys
 import unittest
 
 from successor_generation import render_sql, probe_sql
 
 ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location('migration_safety', ROOT / 'ops/migration-safety-gate.py')
+migration_safety = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = migration_safety
+spec.loader.exec_module(migration_safety)
 
 
 class Rendering(unittest.TestCase):
@@ -19,6 +25,7 @@ class Rendering(unittest.TestCase):
         measured = {**old_catalog, 'projection_version': 'scac-db-catalog-projection.v110'}
         measured['secdef_execute'] = {'count': 1243, 'digest': 'sha256:' + 'f'*64}
         sql = render_sql(template, predecessor, [], measured, 'sha256:' + 'a'*64, [])
+        self.assertEqual(migration_safety.findings(sql), [], 'generated successors must declare rollback and lock risk')
         self.assertIn("when 'scac-mutation-registry.v109' then '" + predecessor['digest'], sql)
         self.assertIn("when 'scac-mutation-registry.v110' then '" + json.dumps(measured, separators=(',', ':')) + "'::jsonb end;", sql)
         self.assertIn('observed_count<>1243', sql)
