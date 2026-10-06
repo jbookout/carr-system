@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { usageResponse } from '../src/usage-signals.js';
 import { RETENTION_SECONDS } from '../src/usage-contract.v1.js';
+import * as contract from '../src/usage-contract.v1.js';
+import { readFile } from 'node:fs/promises';
 
 const origin = 'https://app.doctorcre.com';
 const sha = 'a'.repeat(40);
@@ -44,13 +46,13 @@ test('weekly summary separates partners, paginates, records last use and avoids 
   let releaseStartedAt = new Date(now - 9 * 86400000).toISOString();
   const get = () => usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}&release_started_at=${releaseStartedAt}`), env, session, { now: () => now }, guard);
   let body = await (await get()).json();
-  assert.equal(body.coverage, 'since_release');
+  assert.equal(body.coverage, 'retained_window');
   assert.deepEqual(body.features.find(row => row.id === 'home:view').uses, { joe: 1, dell: 1 });
   const deals = body.features.find(row => row.id === 'deals:view');
   assert.deepEqual(deals.uses, { joe: 0, dell: 0 });
   assert.equal(deals.last_used.joe, '2026-09-27T12:00:00.000Z');
   assert.equal(deals.never_used.joe, false);
-  assert.equal(deals.never_used.dell, true);
+  assert.equal(deals.never_used.dell, null);
   releaseStartedAt = new Date(now - 181 * 86400000).toISOString();
   body = await (await get()).json();
   assert.equal(body.coverage, 'retained_window');
@@ -88,5 +90,86 @@ test('weekly uses and last use survive app releases while never-used describes t
   const row = (await response.json()).features.find(row => row.id === 'deals:view');
   assert.deepEqual(row.uses, { joe: 1, dell: 0 });
   assert.equal(row.last_used.joe, '2026-10-04T12:00:00.000Z');
-  assert.equal(row.never_used.joe, true);
+  assert.equal(row.never_used.joe, null);
+});
+
+const summary = env => usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}&release_started_at=${new Date(now - 86400000).toISOString()}`), env, session, { now: () => now }, guard);
+
+for (const gap of ['disabled then reenabled', 'late capture start', 'failed capture']) {
+  test(`${gap} leaves absent use unknown`, async () => {
+    const env = { OAUTH_KV: new Kv() };
+    if (gap === 'disabled then reenabled') {
+      env.DOCTORCRE_USAGE_CAPTURE_ENABLED = 'false';
+      assert.deepEqual(await (await usageResponse(post(event()), env, session, { now: () => now }, guard)).json(), { captured: false });
+      env.DOCTORCRE_USAGE_CAPTURE_ENABLED = 'true';
+    } else if (gap === 'failed capture') {
+      env.OAUTH_KV.put = async () => { throw new Error('write failed'); };
+      assert.equal((await usageResponse(post(event()), env, session, { now: () => now }, guard)).status, 503);
+    }
+    const body = await (await summary(env)).json();
+    assert.equal(body.coverage, 'retained_window');
+    assert.deepEqual(body.features.find(row => row.id === 'home:view').never_used, { joe: null, dell: null });
+  });
+}
+
+test('KV failures and incomplete pagination return an unavailable summary', async () => {
+  const writeFailure = new Kv();
+  writeFailure.put = async () => { throw new Error('write failed'); };
+  const response = await usageResponse(post(event()), { OAUTH_KV: writeFailure }, session, { now: () => now }, guard);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'usage_unavailable' });
+  for (const list of [async () => { throw new Error('list failed'); }, async () => ({ keys: [], list_complete: false })]) {
+    const response = await summary({ OAUTH_KV: { list } });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: 'usage_unavailable' });
+  }
+});
+
+test('an empty unfinished KV page continues with the cursor and same namespace', async () => {
+  const calls = [];
+  const response = await summary({ OAUTH_KV: { async list(options) {
+    calls.push(options);
+    return calls.length === 1 ? { keys: [], list_complete: false, cursor: 'next' }
+      : { keys: [{ metadata: event() }], list_complete: true };
+  } } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [{ prefix: `doctorcre_usage:v1:${origin}:event:` }, { prefix: `doctorcre_usage:v1:${origin}:event:`, cursor: 'next' }]);
+  const row = (await response.json()).features.find(row => row.id === 'home:view');
+  assert.equal(row.uses.joe, 1);
+  assert.equal(row.never_used.joe, false);
+});
+
+for (const operation of ['put', 'list']) {
+  test(`a stalled KV ${operation} returns 503 after five seconds`, { timeout: 1000 }, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const env = { OAUTH_KV: new Kv() };
+    let entered;
+    const started = new Promise(resolve => { entered = resolve; });
+    env.OAUTH_KV[operation] = () => { entered(); return new Promise(() => {}); };
+    const pending = operation === 'put' ? usageResponse(post(event()), env, session, { now: () => now }, guard) : summary(env);
+    await started;
+    t.mock.timers.tick(5000);
+    const response = await pending;
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: 'usage_unavailable' });
+  });
+}
+
+test('contract owns partner eligibility at both trust checks', async () => {
+  assert.deepEqual(contract.PARTNERS, ['joe', 'dell']);
+  assert.equal(Object.isFrozen(contract.PARTNERS), true);
+  for (const partner of [...contract.PARTNERS, 'outsider']) {
+    assert.equal(contract.validUsageEvent(event({ partner })), contract.PARTNERS.includes(partner));
+    const response = await usageResponse(new Request(`${origin}/api/v1/usage-signals/session`), {}, { ...session, actor: { slug: partner } }, { now: () => now }, guard);
+    assert.equal(response.status, contract.PARTNERS.includes(partner) ? 200 : 403);
+  }
+  const source = await readFile(new URL('../src/usage-signals.js', import.meta.url), 'utf8');
+  assert.equal(source.match(/doctorcre_usage:v1/g)?.length, 1, 'capture and summary must share one namespace definition');
+});
+
+test('screen mappings use the contract paths and reject unknown or query-bearing paths', () => {
+  for (const [screen, [path]] of Object.entries(contract.SCREENS)) assert.equal(contract.usageScreen(path), screen);
+  for (const path of ['/tours/day', '/tours/day.html']) assert.equal(contract.usageScreen(path), 'tours');
+  assert.equal(contract.usageScreen('/control-room/progress/board/synthetic'), 'progress');
+  for (const path of [null, '', '/unknown', '/deals/extra', '/home?name=synthetic', '/deals#fragment', '/tours/day?name=synthetic']) assert.equal(contract.usageScreen(path), null);
 });
