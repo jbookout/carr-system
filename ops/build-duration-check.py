@@ -31,6 +31,9 @@ sys.path.insert(0, str(ROOT))
 from lib.carr_paths import canonical_checkout
 
 STATE = Path(canonical_checkout()) / 'out/build-duration-check.json'
+# The scheduler runs the canonical copy; receipts are judged against it, never the reader's copy.
+DEPLOYED = Path(canonical_checkout()) / 'ops/build-duration-check.py'
+FRESHNESS_SECONDS = 1200
 ACTION = ('on breach: open/update one build-duration loop per workflow · owner orchestrator '
           '(Platform Engineer fixes workflow) · remediation inspect named job/step and remove '
           'the stall or duration regression · verify next run green at or below prior p90 '
@@ -117,17 +120,24 @@ def limit_seconds(value, matrix=None):
     return value * 60
 
 
+def display_name(configured):
+    """GitHub's label for a step: its name, else `Run <action>` or `Run <first script line>`."""
+    if configured.get('name'):
+        return str(configured['name'])
+    if configured.get('uses'):
+        return 'Run ' + str(configured['uses'])
+    lines = [line.strip() for line in str(configured.get('run', '')).splitlines() if line.strip()]
+    return 'Run ' + lines[0] if lines else None
+
+
 def configured_step(config, step):
-    matches = [s for s in config.get('steps', []) if s.get('name') == step['name']]
+    # Step numbers shift with Set up job and action Pre steps, so only the label identifies a step.
+    steps = config.get('steps', [])
+    matches = [s for s in steps if s.get('name') == step['name']]
+    if not matches:
+        matches = [s for s in steps if not s.get('name') and display_name(s) == step['name']]
     if len(matches) == 1:
         return matches[0]
-    # GitHub's number includes Set up job (1); user steps start at 2.
-    number = step.get('number')
-    steps = config.get('steps', [])
-    if type(number) is int and 2 <= number <= len(steps) + 1:
-        candidate = steps[number - 2]
-        if not candidate.get('name'):
-            return candidate
     if any('timeout-minutes' in s for s in steps):
         raise ValueError('step timeout mapping unavailable: ' + step['name'])
     return {}
@@ -481,10 +491,26 @@ def health_line(report):
     details = '; '.join(f'{w["repo"]}/{w["name"]}: ' + ', '.join(sorted({f['kind'] for f in w['flags']})) for w in flagged)
     if report['errors']:
         details += ('; ' if details else '') + '; '.join(report['errors'][:3])
+    if report.get('note'):
+        return f'{report["status"]} build duration · {report["note"]} · {ACTION}'
     return f'{report["status"]} build duration · {len(flagged)} workflow(s) flagged' + (f' · {details}' if details else '') + f' · {ACTION}'
 
 
-def read_receipt(path, now):
+def deployed_at(deployed=DEPLOYED):
+    return datetime.fromtimestamp(deployed.stat().st_mtime, timezone.utc)
+
+
+def awaiting_deployment(path, now, deployed=DEPLOYED):
+    """A release cannot hard-fail on a monitor it has not deployed or not yet given one scan window."""
+    if not deployed.exists():
+        return 'monitor not deployed at canonical checkout'
+    since = deployed_at(deployed)
+    if not path.exists() and seconds(since.isoformat(), now) <= FRESHNESS_SECONDS:
+        return f'checker deployed {since:%Y-%m-%dT%H:%MZ}; first scheduled receipt due within 20 minutes'
+    return None
+
+
+def read_receipt(path, now, deployed=DEPLOYED):
     report = json.loads(path.read_text())
     if not isinstance(report, dict) or report['status'] not in ('OK', 'WARN', 'UNAVAILABLE'):
         raise ValueError('invalid receipt status')
@@ -505,9 +531,11 @@ def read_receipt(path, now):
                 raise ValueError('invalid receipt flag')
     if report['status'] == 'OK' and (report['errors'] or any(w['flags'] for w in report['workflows'])):
         raise ValueError('green receipt contradicts evidence')
-    if report['source_sha256'] != hashlib.sha256(Path(__file__).read_bytes()).hexdigest():
-        raise ValueError('receipt source differs from checker')
-    if timestamp(report['observed_at']) > timestamp(now) or seconds(report['observed_at'], now) > 1200:
+    # A receipt from the previous revision stays valid only until the deployed checker's first scan.
+    if (report['source_sha256'] != hashlib.sha256(deployed.read_bytes()).hexdigest()
+            and timestamp(report['observed_at']) >= deployed_at(deployed)):
+        raise ValueError('receipt source differs from deployed checker')
+    if timestamp(report['observed_at']) > timestamp(now) or seconds(report['observed_at'], now) > FRESHNESS_SECONDS:
         raise ValueError('scheduled receipt older than 20 minutes')
     cursor = report.get('scan_cursor')
     if cursor is not None and timestamp(cursor) > timestamp(report['observed_at']):
@@ -555,7 +583,9 @@ def main():
             cursor_error = f'previous scan coverage unavailable: {exc}'
     if args.health and not args.fixture:
         try:
-            report = read_receipt(args.state_file, now)
+            pending = awaiting_deployment(args.state_file, now)
+            report = ({'observed_at': now, 'status': 'PENDING', 'workflows': [], 'errors': [], 'note': pending}
+                      if pending else read_receipt(args.state_file, now))
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             report = unavailable(now, f'scheduled receipt unavailable: {exc}')
     else:
@@ -597,7 +627,7 @@ def main():
         print(health_line(report))
         for error in report['errors']:
             print('UNAVAILABLE ' + error)
-    return int(report['status'] != 'OK')
+    return int(report['status'] not in ('OK', 'PENDING'))
 
 
 if __name__ == '__main__':

@@ -15,7 +15,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CHECK = ROOT / 'ops/build-duration-check.py'
 FIXTURE = ROOT / 'ops/fixtures/build-duration/five-main-timeouts.json'
-spec = importlib.util.spec_from_file_location('build_duration', CHECK)
+# Receipts are judged against the canonical (scheduler-run) checker, so tests deploy one of their own.
+CANONICAL = tempfile.TemporaryDirectory()
+(Path(CANONICAL.name) / 'ops').mkdir()
+(Path(CANONICAL.name) / 'ops/build-duration-check.py').write_bytes(CHECK.read_bytes())
+os.utime(Path(CANONICAL.name) / 'ops/build-duration-check.py', (0, 0))
+os.environ['CARR_ROOT'] = CANONICAL.name
+spec =importlib.util.spec_from_file_location('build_duration', CHECK)
 assert spec is not None and spec.loader is not None
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
@@ -60,9 +66,45 @@ class ReviewRegressionTests(unittest.TestCase):
         workflow['runs'].insert(0, run)
         return run
 
+    def health(self, canonical, now='2026-10-05T17:00:00Z'):
+        return subprocess.run([sys.executable, str(CHECK), '--health', '--now', now],
+                              env={**os.environ, 'CARR_ROOT': str(canonical)}, capture_output=True, text=True)
+
+    def deploy(self, canonical, source, deployed_at):
+        deployed = canonical / 'ops/build-duration-check.py'
+        deployed.parent.mkdir(parents=True, exist_ok=True)
+        deployed.write_bytes(source)
+        stamp = checker.timestamp(deployed_at).timestamp()
+        os.utime(deployed, (stamp, stamp))
+
+    def test_1_release_before_monitor_deployment_is_not_a_hard_error(self):
+        with tempfile.TemporaryDirectory() as raw:
+            proc = self.health(Path(raw))
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn('not deployed', proc.stdout)
+
+    def test_1_newly_deployed_checker_gets_one_freshness_window(self):
+        with tempfile.TemporaryDirectory() as raw:
+            canonical = Path(raw)
+            self.deploy(canonical, CHECK.read_bytes(), '2026-10-05T16:50:00Z')
+            self.assertEqual(self.health(canonical).returncode, 0)
+            self.assertEqual(self.health(canonical, '2026-10-05T17:11:00Z').returncode, 1)
+            (canonical / 'out').mkdir()
+            report = {'status': 'WARN', 'observed_at': '2026-10-05T16:45:00Z', 'scan_cursor': '2026-10-05T16:45:00Z',
+                      'workflows': [{'repo': 'r', 'id': 1, 'name': 'n', 'path': 'p', 'flags': [{'kind': 'slow'}]}],
+                      'errors': [], 'source_sha256': '0' * 64}
+            (canonical / 'out/build-duration-check.json').write_text(json.dumps(report))
+            proc = self.health(canonical)
+            self.assertEqual(proc.returncode, 1)
+            self.assertTrue(proc.stdout.startswith('WARN'), proc.stdout)
+            report['observed_at'] = '2026-10-05T16:55:00Z'
+            (canonical / 'out/build-duration-check.json').write_text(json.dumps(report))
+            self.assertIn('receipt source differs', self.health(canonical).stdout)
+
     def test_1_health_reads_canonical_receipt_from_another_checkout(self):
         with tempfile.TemporaryDirectory() as raw:
             canonical = Path(raw)
+            self.deploy(canonical, CHECK.read_bytes(), '2026-10-05T10:00:00Z')
             (canonical / 'out').mkdir()
             report = {'status': 'OK', 'observed_at': '2026-10-05T16:59:00Z',
                       'scan_cursor': '2026-10-05T16:59:00Z', 'workflows': [], 'errors': [],
@@ -113,10 +155,28 @@ class ReviewRegressionTests(unittest.TestCase):
                     {'run': 'canary command', 'timeout-minutes': 5}]
                 if named:
                     configured['steps'][1]['name'] = job['steps'][0]['name']
+                else:
+                    job['steps'][0]['name'] = 'Run canary command'
                 flags = self.evaluate(data)['workflows'][0]['flags']
                 self.assertEqual(next(f for f in flags if f['kind'] == 'timeout')['timeout_seconds'], 300)
                 job['steps'][0]['completed_at'] = '2026-10-05T13:01:00Z'
                 self.assertEqual(self.evaluate(data)['status'], 'OK')
+
+    def test_4_unnamed_step_maps_by_display_name_not_shifted_number(self):
+        data = self.data()
+        w = data['workflows'][0]
+        w['runs'] = w['runs'][:1]
+        w['runs'][0].update(conclusion='failure', updated_at='2026-10-05T13:05:00Z')
+        job = w['jobs']['105'][0]
+        job.update(conclusion='failure', completed_at='2026-10-05T13:05:00Z')
+        job['steps'][0].update(name='Run canary command', conclusion='failure', number=4,
+                               started_at=job['started_at'], completed_at=job['completed_at'])
+        w['definitions'][w['runs'][0]['head_sha']]['jobs']['canary']['steps'] = [
+            {'uses': 'some/action-with-pre@v1'},
+            {'run': 'canary command\nsecond line', 'timeout-minutes': 5},
+            {'run': 'cleanup'}]
+        flags = self.evaluate(data)['workflows'][0]['flags']
+        self.assertEqual(next(f for f in flags if f['kind'] == 'timeout')['timeout_seconds'], 300)
 
     def test_5_missing_jobs_are_unavailable(self):
         data = self.data()
