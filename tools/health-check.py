@@ -2980,7 +2980,7 @@ try:
     rc = max(rc, _hold_rc)
 except Exception as e:
     print(f"  WARN launchd holds response failed ({type(e).__name__}) · "
-          "on breach: owner orchestrator repairs the hold health reader; "
+          "on breach: owner claude (Platform Engineer) repairs the hold health reader; "
           "verify rerun health; auto-clear on a successful read")
     rc = 1
 

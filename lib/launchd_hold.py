@@ -2,8 +2,7 @@
 
 ~/.config/carr/launchd-hold contains one `label reason` per line. Blank lines
 and # comments are ignored. `label @2026-10-05T19:31:11Z reason` pins an
-individual hold's start; otherwise age is explicitly the hold file's age.
-Repo plists may declare `<!-- carr-launchd-definition-only: reason -->`.
+individual hold's start; health persists first-seen age for undated labels.
 Removing a hold permits the next installer run to activate the job again.
 """
 from __future__ import annotations
@@ -17,7 +16,13 @@ from datetime import datetime
 from pathlib import Path
 
 LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-DEFINITION_ONLY = re.compile(r"<!--\s*carr-launchd-definition-only:\s*(.*?)\s*-->", re.S)
+# Source definitions that have not passed their activation cutover.
+DEFINITION_ONLY: dict[str, str] = {
+    "com.carr.repo-hygiene-janitor.plist":
+        "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
+        "gate is a separately reviewed live-effect packet, so the definition is "
+        "written down and left uninstalled until that packet is approved",
+}
 
 
 @dataclass(frozen=True)
@@ -64,13 +69,38 @@ def read_holds(home=None):
     return holds
 
 
-def definition_only_reason(body):
-    match = DEFINITION_ONLY.search(body or "")
-    if not match:
-        return None
-    if not match.group(1).strip():
-        raise ValueError("carr-launchd-definition-only requires a reason")
-    return " ".join(match.group(1).split())
+def off_reason(label, home=None, holds=None):
+    holds = read_holds(home) if holds is None else holds
+    hold = holds.get(label)
+    if hold:
+        return hold.describe()
+    reason = DEFINITION_ONLY.get(label + ".plist")
+    return f"DEFINITION ONLY {label}: {reason}" if reason else None
+
+
+def reconcile_off(home, apply, launchctl="launchctl", domain=None, definition_labels=()):
+    """One reconciliation pass, including held labels with no tracked plist."""
+    holds = read_holds(home)
+    labels = set(holds) | set(definition_labels)
+    for label in sorted(labels):
+        print(f"  {off_reason(label, holds=holds)}")
+        if apply:
+            ensure_off(label, launchctl, domain)
+    return labels
+
+
+def activate(label, argv, *, home=None, launchctl="launchctl", domain=None):
+    """The sole guard before load, bootstrap, or kickstart."""
+    reason = off_reason(label, home)
+    if reason:
+        print(f"  {reason}")
+        ensure_off(label, launchctl, domain)
+        result = subprocess.CompletedProcess(argv, 0, "", "")
+        result.held = True
+        return result
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    result.held = False
+    return result
 
 
 def ensure_off(label, launchctl="launchctl", domain=None):
@@ -105,16 +135,10 @@ if __name__ == "__main__":
     import sys
     try:
         label = sys.argv[1]
-        hold = read_holds().get(label)
-        reason = None
-        for source in sys.argv[4:]:
-            try:
-                reason = definition_only_reason(Path(source).read_text()) or reason
-            except FileNotFoundError:
-                continue
-        if hold is None and reason is None:
+        reason = off_reason(label)
+        if reason is None:
             raise SystemExit(3)
-        print(hold.describe() if hold else f"DEFINITION ONLY {label}: {reason}")
+        print(reason)
         ensure_off(label, sys.argv[2], sys.argv[3])
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"launchd hold: REFUSED {exc}", file=sys.stderr)

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
 import tempfile
@@ -39,6 +40,44 @@ class HealthTests(unittest.TestCase):
             self.assertEqual(calls[-1][1]["base_version"], 4)
             health.check(home, verb, now=now)
             self.assertEqual(sum(name == "close-loop" for name, _ in calls), 1)
+
+    def test_unrelated_edit_cannot_renew_undated_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".config/carr/launchd-hold"
+            path.parent.mkdir(parents=True)
+            path.write_text("com.carr.a stuck\n")
+            now = time.time()
+            os.utime(path, (now - 9 * 86400, now - 9 * 86400))
+            calls = []
+            def verb(name, payload):
+                calls.append(name)
+                return {"ok": True, "loop_id": "fixture", "version": 1, "status": "open"}
+            self.assertEqual(health.check(tmp, verb, now)[1], 1)
+            path.write_text("com.carr.a stuck\ncom.carr.b unrelated\n")
+            self.assertEqual(health.check(tmp, verb, now)[1], 1)
+            self.assertNotIn("close-loop", calls)
+            path.write_text("com.carr.a @" + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 60)) + " reviewed\n")
+            self.assertEqual(health.check(tmp, verb, now)[1], 0)
+            self.assertIn("close-loop", calls)
+
+    def test_corrupt_state_is_quarantined_and_alarm_still_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / ".config/carr"
+            directory.mkdir(parents=True)
+            (directory / "launchd-hold").write_text("com.carr.a @2020-01-01T00:00:00Z stuck\n")
+            state = directory / "launchd-hold-health.json"
+            state.write_text("{broken")
+            calls = []
+            def verb(name, payload):
+                calls.append(name)
+                return {"ok": True, "loop_id": "fixture", "version": 1, "status": "open"}
+            line, code = health.check(tmp, verb)
+            self.assertEqual(code, 1)
+            self.assertIn("repair loops recorded", line)
+            self.assertEqual(calls, ["add-loop"])
+            preserved = list(directory.glob("launchd-hold-health.json.corrupt-*"))
+            self.assertEqual(len(preserved), 1)
+            self.assertEqual(preserved[0].read_text(), "{broken")
 
     def test_recent_holds_and_exact_threshold_are_quiet(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -173,12 +173,17 @@ import io  # noqa: E402
 
 
 def run_inproc(templates, agents, fake, *extra, env=None, patch=None):
-    saved = {k: getattr(cac, k) for k in ("DEFINITION_ONLY", "PRIMARY_ONLY",
+    saved = {k: getattr(cac, k) for k in ("PRIMARY_ONLY",
                                           "SECONDARY_ONLY", "IS_PRIMARY")}
+    saved_registry = dict(cac.launchd_hold.DEFINITION_ONLY)
     saved_env = {k: os.environ.get(k) for k in (env or {})}
     try:
         for key, value in (patch or {}).items():
-            setattr(cac, key, value)
+            if key == "DEFINITION_ONLY":
+                cac.launchd_hold.DEFINITION_ONLY.clear()
+                cac.launchd_hold.DEFINITION_ONLY.update(value)
+            else:
+                setattr(cac, key, value)
         os.environ.pop(cac.ACTIVE_LAUNCHD_LABEL_ENV, None)
         os.environ.update(env or {})
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -189,6 +194,8 @@ def run_inproc(templates, agents, fake, *extra, env=None, patch=None):
     finally:
         for key, value in saved.items():
             setattr(cac, key, value)
+        cac.launchd_hold.DEFINITION_ONLY.clear()
+        cac.launchd_hold.DEFINITION_ONLY.update(saved_registry)
         for key, value in saved_env.items():
             if value is None:
                 os.environ.pop(key, None)

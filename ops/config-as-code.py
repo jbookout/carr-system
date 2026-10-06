@@ -233,39 +233,6 @@ from lib.launchd_scope import PRIMARY_ONLY, SECONDARY_ONLY
 
 
 
-# Versioned definitions that deliberately must not become live merely because
-# config-as-code reconciles the rest of the machine.  These adapters have their
-# own evidence/approval cutover gates; installing one early would turn a source
-# artifact into an active schedule before those gates pass.
-DEFINITION_ONLY: dict[str, str] = {
-    # com.carr.control-plane-tick.plist held here until 2026-08-26: its gate was
-    # "accepted shadow/canary evidence and cutover approval". Joe approved the
-    # cutover that evening (decision f4af0c87, "Yes I approve cutover") with the
-    # first accepted shadow receipt on record; the wrapper pins --mode shadow,
-    # so installing activates evidence production only — legacy schedules keep
-    # running until each workflow's replacement is accepted at its own tier.
-    "com.carr.repo-hygiene-janitor.plist":
-        "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
-        "gate is a separately reviewed live-effect packet, so the definition is "
-        "written down and left uninstalled until that packet is approved",
-    # com.carr.gate-zero-canary.plist was held here from 2026-09-11 to
-    # 2026-09-12 with the reason "starting a schedule is Joe's act, so the
-    # definition is written down and left uninstalled until he takes it off this
-    # list deliberately". THAT ACT IS TAKEN. Joe's blanket approval (decision
-    # idempotency 5e2b8c1a-9f47-4d63-b0e5-7a3d1c9f2e84, "I approve everything")
-    # together with his 2026-09-13 ruling that the orchestrator runs release and
-    # activation commands itself is the deliberate removal the reason asked for,
-    # so the canary reconciles like any other agent and the next `install
-    # --apply` loads it. What this buys is the only question Gate Zero's fourth
-    # predecessor actually asks: a hand dispatch through bin/run-scheduled.sh
-    # proves the WRAPPER mints a receipt, and only launchd firing on its own
-    # proves the SCHEDULER does -- which is what `step:scheduler-active-receipt`
-    # reads. ops/config-as-code-selftest.py now asserts this release, the way it
-    # already asserts the 2026-08-26 control-plane tick cutover, so putting the
-    # canary back on the list is a change a test refuses rather than a silent
-    # revert.
-}
-
 # A LaunchAgent that invokes this installer cannot unload its own label and
 # still return to bin/run-scheduled.sh: launchd terminates the wrapper process
 # tree, so the run never reaches its durable receipt.  The caller may identify
@@ -1451,27 +1418,8 @@ def is_definition_only_task(text):
 
 def launchd_off_reason(filename, body):
     label = launchd_calendar.plist_label(body or "") or filename.removesuffix(".plist")
-    hold = launchd_hold.read_holds(HOME).get(label)
-    if hold:
-        return hold.describe()
-    reason = DEFINITION_ONLY.get(filename) or launchd_hold.definition_only_reason(body)
-    return f"DEFINITION ONLY {label}: {reason}" if reason else None
+    return launchd_hold.off_reason(label, HOME)
 
-
-def keep_launchd_off(filename, body, launchctl="launchctl", domain=None):
-    reason = launchd_off_reason(filename, body)
-    if reason:
-        print(f"  {reason}")
-        launchd_hold.ensure_off(launchd_calendar.plist_label(body) or filename.removesuffix(".plist"),
-                               launchctl, domain)
-        return True
-    return False
-
-
-def report_launchd_holds(prefix=""):
-    for hold in launchd_hold.read_holds(HOME).values():
-        print(f"{prefix}{hold.describe()} · enable skipped")
-    return 0
 
 
 def pairs():
@@ -1529,8 +1477,23 @@ def definition_only_installed_plists():
     all, and an install performed from this very repo is the likeliest way for
     that to happen.
     """
-    return [f for f in carr_plists() if f in DEFINITION_ONLY
-            and f.removesuffix(".plist") not in launchd_hold.read_holds(HOME)]
+    holds = launchd_hold.read_holds(HOME)
+    installed = []
+    for filename in carr_plists():
+        label = launchd_calendar.plist_label(read(launchd_repo_path(filename)) or "") or filename.removesuffix(".plist")
+        if label not in holds and launchd_hold.off_reason(label, holds={}):
+            installed.append(filename)
+    return installed
+
+
+def definition_only_labels(templates_dir):
+    labels = []
+    for filename in sorted(os.listdir(templates_dir)) if os.path.isdir(templates_dir) else []:
+        source = LAUNCHD_ALT_REPO.get(filename, os.path.join(templates_dir, filename))
+        label = launchd_calendar.plist_label(read(source) or "") or filename.removesuffix(".plist")
+        if launchd_hold.off_reason(label, holds={}):
+            labels.append(label)
+    return labels
 
 
 def pending_launchd_reloads():
@@ -1659,12 +1622,13 @@ def cmd_check():
     # is an observation about a no-touch setting, so it changes neither the exit
     # code nor the first line the health row reads.
     try:
-        launchd_hold.read_holds(HOME)
-        verdict = _cmd_check()
-        report_launchd_holds()
-    except (OSError, ValueError, RuntimeError) as exc:
+        holds = launchd_hold.read_holds(HOME)
+    except (OSError, ValueError) as exc:
         print(f"config-as-code: HOLD INVALID — {exc}")
         return 1
+    verdict = _cmd_check()
+    for hold in holds.values():
+        print(hold.describe())
     print(git_hooks_path_report())
     return verdict
 
@@ -1728,7 +1692,7 @@ def _cmd_check():
     # evidence against it.
     disallowed += [
         (f"launchd {name} (DEFINITION ONLY, MUST NOT BE INSTALLED)",
-         f"installed in {LAUNCHD_SRC}; {DEFINITION_ONLY[name]}")
+         f"installed in {LAUNCHD_SRC}; {launchd_off_reason(name, read(launchd_repo_path(name)))}")
         for name in definition_only_installed_plists()
     ]
     # A template launchd would load and then never fire. Reported whatever the
@@ -1810,6 +1774,12 @@ def _cmd_check():
 
 
 def cmd_pull(apply):
+    try:
+        launchd_hold.read_holds(HOME)
+    except (OSError, ValueError) as exc:
+        print(f"config-as-code: HOLD INVALID — {exc}")
+        return 1
+
     if codex_configuration_state() == "partial":
         print(f"ERROR: partial Codex configuration — {CODEX_HOOKS_SRC} exists but "
               f"{CODEX_CONFIG} does not; refusing to omit it from the captured baseline.")
@@ -2020,7 +1990,9 @@ def install_launchd_plist(filename, dest, body, body_matches):
     observed absent before load and registered at the installed path after it.
     """
     try:
-        if keep_launchd_off(filename, body):
+        if launchd_off_reason(filename, body):
+            label = launchd_calendar.plist_label(body) or filename.removesuffix(".plist")
+            launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME)
             return "held"
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"  HOLD REFUSED: {exc}")
@@ -2082,10 +2054,14 @@ def install_launchd_plist(filename, dest, body, body_matches):
         print(f"      UNLOAD FAILED ({detail if state == 'failed' else 'job remains loaded'}); "
               "pending reload retained")
         return "failed"
-    if keep_launchd_off(filename, body):
+    try:
+        r = launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"      HOLD REFUSED after unload: {exc}; pending reload retained")
+        print(f"      fix by hand: repair launchd-hold, then run install --apply for {label}")
+        return "failed"
+    if r.held:
         return "held"
-    r = subprocess.run(["launchctl", "load", "-w", dest],
-                       capture_output=True, text=True, check=False)
     if r.returncode == 0:
         state, detail = launchd_registration(label)
         if (state == "loaded" and detail == dest
@@ -2109,12 +2085,16 @@ def cmd_install_progress_board(apply=False, repo=None):
     select a feature tree even for pre-merge verification.
     """
     label = "local.carr-progress-board"
-    hold = launchd_hold.read_holds(HOME).get(label)
-    if hold:
-        print(hold.describe())
-        if apply:
-            launchd_hold.ensure_off(label)
-        return 0
+    try:
+        if launchd_hold.off_reason(label, HOME):
+            if apply:
+                launchd_hold.activate(label, ["launchctl", "load", "-w", label], home=HOME)
+            else:
+                print(launchd_hold.off_reason(label, HOME))
+            return 0
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"progress-board: HOLD REFUSED: {exc}")
+        return 1
     runtime_repo = os.path.abspath(os.path.expanduser(repo)) if repo else REPO
     if os.path.realpath(runtime_repo) != os.path.realpath(REPO):
         print("progress-board: runtime must use the canonical main checkout; "
@@ -2280,11 +2260,7 @@ def git_hooks_path_report() -> str:
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
     try:
-        holds = launchd_hold.read_holds(HOME)
-        for hold in holds.values():
-            print(hold.describe())
-            if apply:
-                launchd_hold.ensure_off(hold.label)
+        held_labels = launchd_hold.reconcile_off(HOME, apply, definition_labels=definition_only_labels(LAUNCHD_REPO))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"  HOLD REFUSED: {exc}")
         return 1
@@ -2444,15 +2420,7 @@ def cmd_install(apply):
         os.makedirs(LAUNCHD_SRC, exist_ok=True)
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
         source = read(launchd_repo_path(f))
-        off_reason = launchd_off_reason(f, source)
-        if off_reason:
-            print(f"  {off_reason}")
-            if apply:
-                try:
-                    keep_launchd_off(f, source)
-                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-                    print(f"  HOLD REFUSED: {exc}")
-                    launchd_activation_failures.append(f)
+        if (launchd_calendar.plist_label(source or "") or f.removesuffix(".plist")) in held_labels:
             continue
         if f in PRIMARY_ONLY and not IS_PRIMARY:
             live = os.path.join(LAUNCHD_SRC, f)
@@ -2751,6 +2719,14 @@ def launchd_calendar_reinstall_plan(templates_dir, agents_dir):
 
 
 def _launchctl(launchctl, *args):
+    if args[0] in {"bootstrap", "kickstart"}:
+        if args[0] == "bootstrap":
+            label = launchd_calendar.plist_label(read(args[-1]) or "")
+            domain = args[1]
+        else:
+            domain, label = args[-1].rsplit("/", 1)
+        return launchd_hold.activate(label, [launchctl, *args], home=HOME,
+                                     launchctl=launchctl, domain=domain)
     return subprocess.run([launchctl, *args], capture_output=True, text=True, check=False)
 
 
@@ -2785,60 +2761,50 @@ class AgentLeftUnloaded(RuntimeError):
 
 
 def _restore_calendar_agent(row, launchctl, domain):
-    if keep_launchd_off(row["name"], row["body"], launchctl, domain):
-        return True
     dest, label = row["dest"], row["label"]
     try:
         _atomic_write(dest, row["previous"])
-    except OSError as exc:
-        print(f"      RESTORE FAILED, {label} is unloaded: could not rewrite {dest}: {exc}")
-        print(f"      fix by hand: put the previous body back, then "
-              f"`launchctl bootstrap {domain} {dest}`")
+        back = _launchctl(launchctl, "bootstrap", domain, dest)
+        if back.returncode:
+            raise RuntimeError(_launchctl_detail(back))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"      RESTORE FAILED, {label} is unloaded ({exc})")
+        print(f"      fix by hand: repair launchd-hold if invalid, then `launchctl bootstrap {domain} {dest}`")
         return False
-    if keep_launchd_off(row["name"], row["body"], launchctl, domain):
-        return True
-    back = _launchctl(launchctl, "bootstrap", domain, dest)
-    if back.returncode != 0:
-        print(f"      RESTORE FAILED, {label} is unloaded ({_launchctl_detail(back)})")
-        print(f"      fix by hand: `launchctl bootstrap {domain} {dest}`")
-        return False
-    print(f"      restored the previous body; {label} is loaded as it was")
+    print(f"      {'held off' if getattr(back, 'held', False) else 'restored the previous body'}; {label}")
     return True
 
 
 def reinstall_calendar_agent(row, launchctl, domain, kickstart):
-    if keep_launchd_off(row["name"], row["body"], launchctl, domain):
-        return True
     dest, label = row["dest"], row["label"]
     target = f"{domain}/{label}"
-    _atomic_write(dest, row["body"])
-    _launchctl(launchctl, "bootout", target)   # fails when not loaded; fine
-    if keep_launchd_off(row["name"], row["body"], launchctl, domain):
+    # Refuse invalid holds before touching the installed definition.
+    if launchd_hold.off_reason(label, HOME):
+        _launchctl(launchctl, "bootstrap", domain, dest)
         return True
-    booted = _launchctl(launchctl, "bootstrap", domain, dest)
-    if booted.returncode != 0:
-        print(f"      BOOTSTRAP FAILED: {_launchctl_detail(booted)} — restoring the previous body")
-        if not _restore_calendar_agent(row, launchctl, domain):
-            raise AgentLeftUnloaded(label)
-        return False
-    shown = _launchctl(launchctl, "print", target)
-    if shown.returncode != 0:
-        # launchd accepted the NEW definition; it must be booted out before the
-        # old file goes back, or launchd keeps running what the disk no longer says.
-        print(f"      PRINT FAILED after a successful bootstrap: {_launchctl_detail(shown)}"
-              " — booting the new definition out and restoring the previous body")
-        _launchctl(launchctl, "bootout", target)
-        if not _restore_calendar_agent(row, launchctl, domain):
-            raise AgentLeftUnloaded(label)
-        return False
-    if kickstart:
-        if keep_launchd_off(row["name"], row["body"], launchctl, domain):
+    _atomic_write(dest, row["body"])
+    _launchctl(launchctl, "bootout", target)
+    try:
+        booted = _launchctl(launchctl, "bootstrap", domain, dest)
+        if booted.returncode:
+            raise RuntimeError(f"BOOTSTRAP FAILED: {_launchctl_detail(booted)}")
+        if getattr(booted, "held", False):
             return True
-        kicked = _launchctl(launchctl, "kickstart", target)
-        if kicked.returncode != 0:
-            print(f"      kickstart failed: {_launchctl_detail(kicked)}")
-            return False
-    return True
+        shown = _launchctl(launchctl, "print", target)
+        if shown.returncode:
+            _launchctl(launchctl, "bootout", target)
+            raise RuntimeError(f"PRINT FAILED after a successful bootstrap: {_launchctl_detail(shown)}")
+        if kickstart:
+            kicked = _launchctl(launchctl, "kickstart", target)
+            if kicked.returncode:
+                print(f"      kickstart failed: {_launchctl_detail(kicked)}")
+                return False
+        return True
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"      {exc} — restoring the previous body")
+        if not _restore_calendar_agent(row, launchctl, domain):
+            raise AgentLeftUnloaded(label) from exc
+        return False
 
 
 def _option(argv, flag, default):
@@ -2857,16 +2823,13 @@ def cmd_reinstall_launchd_calendar(argv):
     launchctl = _option(argv, "--launchctl", "/bin/launchctl")
     domain = f"gui/{os.getuid()}"
 
-    rows = launchd_calendar_reinstall_plan(templates_dir, agents_dir)
-    for hold in launchd_hold.read_holds(HOME).values():
-        print(hold.describe())
-        if apply:
-            launchd_hold.ensure_off(hold.label, launchctl, domain)
-    for row in rows:
-        if row["action"] == "hold":
-            print(f"  {row['why']}")
-            if apply:
-                launchd_hold.ensure_off(row["label"], launchctl, domain)
+    try:
+        launchd_hold.reconcile_off(HOME, apply, launchctl, domain,
+            definition_labels=definition_only_labels(templates_dir))
+        rows = launchd_calendar_reinstall_plan(templates_dir, agents_dir)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"reinstall-launchd-calendar: HOLD REFUSED: {exc}; no agents reinstalled")
+        return 1
     failures = [r for r in rows if r["action"] == "fail"]
     todo = [r for r in rows if r["action"] == "reinstall"]
     for row in rows:
@@ -3043,8 +3006,6 @@ def cmd_launchd_handoff_smoke_job(argv):
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     apply = "--apply" in sys.argv
-    if mode == "launchd-held":
-        return report_launchd_holds("fleet-sync: ")
     if mode == "--selftest":
         return config_selftest()
     if mode == "check":
