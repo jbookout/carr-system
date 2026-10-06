@@ -11,11 +11,12 @@ def plan(s, design):
     queue = s + '_cdc'
     stmts = domain_ddl(s,design) + edge_ddl(s,design)
     stmts += [f'CREATE SCHEMA {queue}',
-              f'CREATE TABLE {queue}.changes(seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,table_name text NOT NULL,operation text NOT NULL,row_data jsonb NOT NULL)',
+              f'CREATE TABLE {queue}.changes(seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,table_name text NOT NULL,operation text NOT NULL,row_data jsonb NOT NULL,old_id uuid)',
               f'''CREATE FUNCTION {queue}.capture() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
- INSERT INTO {queue}.changes(table_name,operation,row_data)
- VALUES (TG_TABLE_NAME,TG_OP,CASE WHEN TG_OP='DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END);
+ INSERT INTO {queue}.changes(table_name,operation,row_data,old_id)
+ VALUES (TG_TABLE_NAME,TG_OP,CASE WHEN TG_OP='DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END,
+         CASE WHEN TG_OP='INSERT' THEN NULL ELSE OLD.id END);
  RETURN NULL;
 END $$''']
     tables = ['d_' + k for k in KINDS] + ['l_' + f.name for f in FAMILIES]
@@ -42,12 +43,13 @@ def apply_branches(s, design):
     branches = []
     for kind in KINDS:
         registry_insert = f"INSERT INTO {s}.entity(id,kind) VALUES ((r.row_data->>'id')::uuid,'{kind}') ON CONFLICT DO NOTHING;" if design == 'B' else ''
-        registry_delete = f"DELETE FROM {s}.entity WHERE id=(r.row_data->>'id')::uuid;" if design == 'B' else ''
+        registry_delete = f"DELETE FROM {s}.entity WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);" if design == 'B' else ''
         branches.append(f'''WHEN 'd_{kind}' THEN
- IF r.operation='DELETE' THEN
-  DELETE FROM {s}.d_{kind} WHERE id=(r.row_data->>'id')::uuid;
+ IF r.operation='DELETE' OR r.old_id IS DISTINCT FROM (r.row_data->>'id')::uuid AND r.old_id IS NOT NULL THEN
+  DELETE FROM {s}.d_{kind} WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);
   {registry_delete}
- ELSE
+ END IF;
+ IF r.operation<>'DELETE' THEN
   {registry_insert}
   INSERT INTO {s}.d_{kind}(id,payload) VALUES ((r.row_data->>'id')::uuid,r.row_data->>'payload')
   ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload;
@@ -62,24 +64,55 @@ def apply_branches(s, design):
             vals = ["(r.row_data->>'id')::uuid","(r.row_data->>'src_id')::uuid"] + [f"CASE WHEN r.row_data->>'dst_kind'='{k}' THEN (r.row_data->>'dst_id')::uuid END" for k in f.targets] + ["r.row_data->>'relation'"]
         update = ','.join(f'{col}=EXCLUDED.{col}' for col in cols[1:])
         branches.append(f'''WHEN 'l_{f.name}' THEN
- IF r.operation='DELETE' THEN
-  DELETE FROM {table} WHERE id=(r.row_data->>'id')::uuid;
- ELSE
+ IF r.operation='DELETE' OR r.old_id IS DISTINCT FROM (r.row_data->>'id')::uuid AND r.old_id IS NOT NULL THEN
+  DELETE FROM {table} WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);
+ END IF;
+ IF r.operation<>'DELETE' THEN
   INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(vals)}) ON CONFLICT(id) DO UPDATE SET {update};
  END IF;''')
     return ' '.join(branches)
 
 
 def replay_sql(s, design):
+    def touched(table):
+        return f"SELECT (row_data->>'id')::uuid FROM {s}_cdc.changes WHERE table_name='{table}' UNION SELECT old_id FROM {s}_cdc.changes WHERE table_name='{table}' AND old_id IS NOT NULL"
+
+    stmts = []
+    tables = ['d_' + k for k in KINDS] + ['l_' + f.name for f in FAMILIES]
+    # Locks give all final-state reads one drained source boundary. Old edge
+    # references must disappear before removing obsolete domain identities.
+    stmts.append('LOCK TABLE ' + ','.join('c.' + t for t in tables) + ' IN SHARE MODE')
+    for f in FAMILIES:
+        stmts.append(f'DELETE FROM {edge_table(s,design,f)} WHERE id IN ({touched("l_"+f.name)})')
+    for kind in KINDS:
+        ids = touched('d_' + kind)
+        missing = f'SELECT id FROM {s}.d_{kind} WHERE id IN ({ids}) AND NOT EXISTS (SELECT 1 FROM c.d_{kind} source WHERE source.id={s}.d_{kind}.id)'
+        stmts.append(f'DELETE FROM {s}.d_{kind} WHERE id IN ({missing})')
+        if design == 'B':
+            stmts.append(f"DELETE FROM {s}.entity WHERE kind='{kind}' AND id IN ({ids}) AND NOT EXISTS (SELECT 1 FROM c.d_{kind} source WHERE source.id={s}.entity.id)")
+    rows = ' UNION ALL '.join(f"SELECT '{table}'::text table_name,'INSERT'::text operation,to_jsonb(source) row_data,NULL::uuid old_id,{int(table.startswith('l_'))} stage FROM c.{table} source WHERE id IN ({touched(table)})" for table in tables)
+    stmts.append(f'''FOR r IN {rows} ORDER BY stage LOOP
+ CASE r.table_name {apply_branches(s,design)} ELSE RAISE EXCEPTION 'unknown CDC table'; END CASE;
+ END LOOP''')
     return f'''CREATE FUNCTION {s}_cdc.replay() RETURNS bigint LANGUAGE plpgsql AS $$
 DECLARE r record; applied bigint := 0;
 BEGIN
- FOR r IN SELECT * FROM {s}_cdc.changes ORDER BY seq LOOP
-  CASE r.table_name {apply_branches(s,design)} ELSE RAISE EXCEPTION 'unknown CDC table'; END CASE;
-  applied := applied+1;
- END LOOP;
+ {(';'+chr(10)).join(stmts)};
+ SELECT count(*) INTO applied FROM {s}_cdc.changes;
  DELETE FROM {s}_cdc.changes;
  RETURN applied;
+END $$'''
+
+
+def sync_sql(s, design):
+    return f'''CREATE OR REPLACE FUNCTION {s}_cdc.capture() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE r record;
+BEGIN
+ SELECT TG_TABLE_NAME table_name,TG_OP operation,
+  CASE WHEN TG_OP='DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END row_data,
+  CASE WHEN TG_OP='INSERT' THEN NULL ELSE OLD.id END old_id INTO r;
+ CASE r.table_name {apply_branches(s,design)} ELSE RAISE EXCEPTION 'unknown CDC table'; END CASE;
+ RETURN NULL;
 END $$'''
 
 
@@ -89,14 +122,7 @@ def rehearsal(cluster, design, nodes, output):
     copy = backfill(s,design)
     replay = replay_sql(s,design)
     locked_tables = ','.join('c.' + t for t in tables)
-    sync = f'''CREATE OR REPLACE FUNCTION {s}_cdc.capture() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE r record;
-BEGIN
- SELECT TG_TABLE_NAME table_name,TG_OP operation,
-  CASE WHEN TG_OP='DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END row_data INTO r;
- CASE r.table_name {apply_branches(s,design)} ELSE RAISE EXCEPTION 'unknown CDC table'; END CASE;
- RETURN NULL;
-END $$'''
+    sync = sync_sql(s,design)
     acquire = f'''DO $$
 DECLARE acquired boolean := false;
 BEGIN
@@ -175,4 +201,4 @@ END $$'''
             'writer_max_cycle_ms':max(writer_latencies),'source_edges':len(source),'edge_sha256':digest(source),
             'matched':True,'sql_file':f'c-to-{design.lower()}.sql',
             'post_cutover_dual_write_matched':True,
-            'limits':'Shadow domain copies are rehearsal isolation overhead. A can reuse existing domain tables in deployment. Cutover duration includes bounded NOWAIT acquisition retries, replay, synchronous capture installation and view switch; equality validation runs after the writer stops. CDC is ordered after source transactions drain. No original table is dropped. Existing orphans/duplicates and unmapped external text/digest references must be resolved before strict backfill.'}
+            'limits':'Shadow domain copies are rehearsal isolation overhead. A can reuse existing domain tables in deployment. Cutover duration includes bounded NOWAIT acquisition retries, final-state reconciliation of touched old/new identities, synchronous capture installation and view switch; equality validation runs after the writer stops. Reconciliation reads drained source tables under SHARE locks, avoiding obsolete pre-snapshot intermediate references. No original table is dropped. Existing orphans/duplicates and unmapped external text/digest references must be resolved before strict backfill.'}

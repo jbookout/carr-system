@@ -1,5 +1,9 @@
 """Three concrete graph storage designs behind the same relationship read shape."""
 from dataclasses import dataclass
+from functools import lru_cache
+import re
+
+from inventory import scan
 
 CORE = ['party', 'lead', 'deal', 'rule', 'doctrine_section', 'loop', 'decision']
 
@@ -32,6 +36,25 @@ FAMILIES = [
 KINDS = sorted(set(CORE + [f.source for f in FAMILIES] + [k for f in FAMILIES for k in f.targets]))
 
 
+@lru_cache(maxsize=1)
+def source_fk_actions():
+    definitions = {e['table']:e['definition'] for e in scan(include_usages=False)}
+    contracts = {
+        'doctrine_link': ('public.doctrine_link', 'source_section_id', 'doctrine_section'),
+        'incident_link': ('ops.incident_link', 'incident_id', 'ops.incident'),
+        'siep_evidence_link': ('ops.siep_evidence_link', 'package_key', 'ops.siep_package_contract'),
+        'f01_derivative_link': ('ops.f01_derivative_link', 'source_artifact_digest', 'ops.f01_corporate_artifact'),
+    }
+    assert {f.name for f in FAMILIES if f.source_fk} == contracts.keys()
+    actions = {}
+    for family, (table, column, target) in contracts.items():
+        match = re.search(r'\b' + column + r'\s+[^,]*?references\s+([\w.]+)\s*\([^)]*\)(?:\s+on\s+delete\s+(cascade|restrict|no\s+action|set\s+null|set\s+default))?', definitions[table], re.I)
+        if not match or match[1] != target:
+            raise ValueError(f'Source FK contract changed for {table}.{column}')
+        actions[family] = ' '.join((match[2] or 'NO ACTION').upper().split())
+    return actions
+
+
 def literals(values):
     return ','.join("'" + v + "'" for v in values)
 
@@ -59,7 +82,8 @@ def edge_ddl(s, design):
                 statements.append(f"CREATE UNIQUE INDEX ON {s}.edge({cols}) WHERE family='{f.name}'")
         return statements
     for f in FAMILIES:
-        source = f'src_id uuid NOT NULL' + (f' REFERENCES {s}.d_{f.source}(id)' if design == 'A' or f.source_fk else '')
+        action = source_fk_actions().get(f.name, 'NO ACTION')
+        source = f'src_id uuid NOT NULL' + (f' REFERENCES {s}.d_{f.source}(id) ON DELETE {action}' if design == 'A' or f.source_fk else '')
         if design == 'A':
             arc = ','.join(f'dst_{k} uuid REFERENCES {s}.d_{k}(id)' for k in f.targets)
             case = 'CASE ' + ' '.join(f"WHEN dst_{k} IS NOT NULL THEN '{k}'" for k in f.targets) + ' END'

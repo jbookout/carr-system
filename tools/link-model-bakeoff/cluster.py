@@ -4,9 +4,12 @@ import secrets
 import re
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 import psycopg
+
+CONNECTION_ENV_LOCK = threading.Lock()
 
 
 class Cluster:
@@ -44,9 +47,18 @@ class Cluster:
         return self
 
     def connect(self, application_name='linkfork'):
-        return psycopg.connect(host=str(self.socket),port=self.port,user='bakeoff',dbname='postgres',
-                               connect_timeout=5,application_name=application_name,
-                               options='-c statement_timeout=60000 -c lock_timeout=5000')
+        # libpq treats an empty service as a service name to look up. Every
+        # harness connection serializes this short environment-default read.
+        with CONNECTION_ENV_LOCK:
+            defaults = {k:v for k,v in os.environ.items() if k.startswith('PG')}
+            try:
+                for key in defaults:
+                    del os.environ[key]
+                return psycopg.connect(host=str(self.socket),hostaddr='',port=self.port,user='bakeoff',dbname='postgres',
+                                       connect_timeout=5,application_name=application_name,
+                                       options='-c statement_timeout=60000 -c lock_timeout=5000')
+            finally:
+                os.environ.update(defaults)
 
     def __exit__(self, *_):
         if self.running:

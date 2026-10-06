@@ -249,12 +249,16 @@ def writes(cluster, nodes, count=200, repeats=5):
             for hotspot in (False,True):
                 stop, barrier = threading.Event(), threading.Barrier(8)
                 lock_samples = []
+                monitor_errors = []
                 def monitor():
-                    with cluster.connect('linkfork-monitor') as c:
-                        c.autocommit = True
-                        while not stop.wait(.01):
-                            n = c.execute("SELECT count(*) FROM pg_stat_activity WHERE application_name='linkfork-writer' AND wait_event_type='Lock'").fetchone()[0]
-                            lock_samples.append(n)
+                    try:
+                        with cluster.connect('linkfork-monitor') as c:
+                            c.autocommit = True
+                            while not stop.wait(.01):
+                                n = c.execute("SELECT count(*) FROM pg_stat_activity WHERE application_name='linkfork-writer' AND wait_event_type='Lock'").fetchone()[0]
+                                lock_samples.append(n)
+                    except Exception as exc:
+                        monitor_errors.append(exc)
                 watcher = threading.Thread(target=monitor)
                 watcher.start()
                 def worker(w):
@@ -280,6 +284,10 @@ def writes(cluster, nodes, count=200, repeats=5):
                 finally:
                     stop.set()
                     watcher.join()
+                if monitor_errors:
+                    raise RuntimeError('lock monitor failed; measurement unavailable') from monitor_errors[0]
+                if not lock_samples:
+                    raise RuntimeError('lock monitor produced no samples; measurement unavailable')
                 elapsed = time.perf_counter()-start
                 flat = [v for ts in timings for v in ts]
                 output[d]['concurrent'].append({'repeat':repeat,'workload':'hotspot update + links (1ms intentional hold)' if hotspot else 'independent insert/update/delete cycles',

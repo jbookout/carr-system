@@ -5,12 +5,14 @@ from pathlib import Path
 
 from inventory import scan
 from run import run
+from regression_sql import verify
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pg-bin',default='/opt/homebrew/opt/postgresql@18/bin')
     args = parser.parse_args()
+    verify(args.pg_bin)
     entries = {e['table']:e for e in scan()}
     expected = {'public.doctrine_link','ops.incident_link','ops.siep_evidence_link','ops.f01_derivative_link','ops.j102_evidence_subject_link'}
     assert expected <= entries.keys()

@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def scan():
+def scan(include_usages=True):
     entries = {}
     for path in sorted((ROOT / 'migrations').glob('*.sql')):
         raw = path.read_text()
@@ -64,7 +64,7 @@ def scan():
                            'definition': 'ALTER-added subject_type / subject_id; MCP create-tour-domain allows client/work.'}
     for e in entries.values():
         usages = []
-        for path in sorted((ROOT / 'mcp-server').rglob('*.js')):
+        for path in sorted((ROOT / 'mcp-server').rglob('*.js')) if include_usages else []:
             for lineno, line in enumerate(path.read_text().splitlines(), 1):
                 if re.search(r'\b' + re.escape(e['table'].split('.')[-1]) + r'\b', line):
                     usages.append(f'{path.relative_to(ROOT)}:{lineno}')

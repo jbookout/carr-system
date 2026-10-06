@@ -5,11 +5,13 @@ Run reproducible identity-integrity and graph workloads on an owned PostgreSQL 1
 Use Python with `psycopg` installed and PostgreSQL 18 binaries available. From the repository root:
 
 ```sh
-python3 tools/link-model-bakeoff/selftest.py --pg-bin /path/to/postgresql18/bin
-python3 tools/link-model-bakeoff/run.py --pg-bin /path/to/postgresql18/bin
+LC_ALL=C python3 tools/link-model-bakeoff/pg18-selftest.py --pg-bin /path/to/postgresql18/bin
+LC_ALL=C python3 tools/link-model-bakeoff/run.py --pg-bin /path/to/postgresql18/bin
 ```
 
 The default binary path is Homebrew's `/opt/homebrew/opt/postgresql@18/bin`. `--output` chooses the report directory. The default is `out/orch/linkfork`. `--small` exercises the same SQL at reduced scale and one timing repetition; it is for integration checks, not design selection.
+
+The canonical CI collector explicitly exempts the PG18 SQL selftest by name in `ops/ci-selftest.py`. Run that selftest before changing the harness. It runs the failure-history regressions and the integration workload. The gates pool collects `tools/test-linkfork.py` for offline namespace, monitor-failure, and collection checks.
 
 The standalone `bakeoff.html` contains the conditional verdict, measurement tables, searchable rows, plans, and source evidence. `results.json` carries raw repetition measurements and inventory definitions. Generated `design-*.sql` and `c-to-*.sql` make the tested DDL and migration statements reviewable.
 
@@ -17,7 +19,7 @@ The standalone `bakeoff.html` contains the conditional verdict, measurement tabl
 
 - A uses one exclusive-arc table per observed relationship family, foreign keys to domain tables, generated kind/ID columns, and a `UNION ALL` read view.
 - B uses a physical registry, fixed-kind composite foreign keys from domain tables, and one edge table with composite endpoint foreign keys. The harness writes registry and domain rows in the same transaction. It deliberately does not add reverse-existence or deletion-cleanup triggers to B, so its specified guarantees can be tested.
-- C projects identity-relevant constraints from migration-defined polymorphic tables. It preserves fixed-source foreign keys, kind checks, and observed duplicate indexes. It does not reproduce record envelopes, permissions, source revision validation, or per-owner next-action uniqueness.
+- C projects identity-relevant constraints from migration-defined polymorphic tables. It preserves fixed-source foreign keys and their scanned deletion actions, kind checks, and observed duplicate indexes. It does not reproduce record envelopes, permissions, source revision validation, or per-owner next-action uniqueness.
 
 `inventory.py` scans every migration's table definitions, applies scalar kind-check amendments and the candidate-pool rename, and searches all MCP JavaScript for table usage. It includes scalar pointer candidates in audit, provenance, taxonomy, notification, and lifecycle tables. Five tables named `link` have polymorphic pointers. Their measured families include doctrine citations, incident references, SIEP evidence, F01 derivatives, and lifecycle evidence pins. Supporting event, source, action, flag, and attachment pointers also participate. JSON distinguishes this broad inventory from the timed families.
 
@@ -33,12 +35,12 @@ Write cycles insert a doctrine section and three links, update the domain payloa
 
 Integrity probes use raw SQL and independent savepoints. They cover missing endpoints, wrong kinds, cross-kind UUIDs, target mutation, deletion, duplicates, and malformed arcs. A's unsupported typed columns can reject with a structural SQL error; the report distinguishes that from FK rejection. Registry-only and deletion bypasses test guarantees that same-transaction insertion cannot provide. Killing an owned backend tests rollback separately.
 
-Migration rehearsals install transactional change capture before a repeatable-read shadow backfill. They replay captured changes, acquire source locks with bounded `NOWAIT` retries, replace capture with synchronous dual-write, and switch the read view. A writer continues through backfill and cutover. Final checks compare every edge and domain row in both directions. Statement counts include client-submitted DDL and transaction control. Backfill-pass counts include every registry UNION arm. Shadow domain copies isolate the rehearsal; A can reference existing domain tables in a deployment.
+Migration rehearsals install transactional change capture before a repeatable-read shadow backfill. Capture retains old and new identities. After acquiring source locks with bounded `NOWAIT` retries, reconciliation removes touched shadow edges, removes obsolete domain identities, and upserts the final source domains and edges. It avoids applying obsolete intermediate references from before the snapshot. Cutover replaces capture with synchronous dual-write and switches the read view. A writer continues through backfill and cutover. Final checks compare every edge and domain row in both directions. Statement counts include client-submitted DDL and transaction control. Backfill-pass counts include every registry UNION arm. Shadow domain copies isolate the rehearsal; A can reference existing domain tables in a deployment.
 
 These are executable rehearsals on normalized synthetic identities. Existing orphan cleanup, duplicate disposition, tenant and external-key mappings, role grants, and application writer cutover remain requirements for a production migration. No original source table is dropped. No production migration is performed.
 
 ## Files
 
-`model.py` owns the storage contracts. `bench.py` owns data and workload checks. `cluster.py` owns local database lifecycle. `migrate.py` renders and executes the online rehearsal. `report.py` renders measured results. `run.py` composes them. `selftest.py` exercises the actual SQL, crash rollback, concurrent writes, migration catch-up, and shutdown.
+`model.py` owns the storage contracts. `bench.py` owns data and workload checks. `cluster.py` owns local database lifecycle and serializes connection creation while clearing and restoring libpq environment defaults. `linkfork_migration.py` renders and executes the online rehearsal. `report.py` renders measured results. `run.py` composes them. `pg18-selftest.py` exercises the actual SQL, failure histories, crash rollback, concurrent writes, migration catch-up, and shutdown.
 
 PostgreSQL primary references: [constraints](https://www.postgresql.org/docs/18/ddl-constraints.html), [ALTER TABLE](https://www.postgresql.org/docs/18/sql-altertable.html), and [CREATE INDEX](https://www.postgresql.org/docs/18/sql-createindex.html).

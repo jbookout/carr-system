@@ -13,7 +13,7 @@ from pathlib import Path
 from bench import BASE_SIZES, SEED, contexts, dataset, digest, drift, fk_probe_diagnostic, integrity, load, writes
 from cluster import Cluster
 from inventory import scan
-from migrate import rehearsal
+from linkfork_migration import rehearsal
 from model import FAMILIES, KINDS, domain_ddl, edge_ddl
 from report import render
 
@@ -36,7 +36,7 @@ def run(bin_dir, output, small=False):
                            'load_average_before':os.getloadavg(),'python':platform.python_version(),
                            'source_revision':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()},
             'methodology':'Five repetitions per side, interleaved reference order and shuffled write-side order; one run only in selftest mode. End-to-end SQL fetch/commit timing includes local client overhead. Identical data, indexes in both directions, statistics refreshed, warm cache, fsync on. EXPLAIN separates server execution and planning and exposes index probes plus recursive result aggregation. Graph equality is checked for every reference and all successful write cycles are verified removed. Concurrent hotspot holds intentionally add 1ms; throughput is for the specified workload on this host, not a production capacity estimate. Baseline C preserves identity-relevant constraints from the migration-defined families, including fixed-source FKs, selected kind checks and duplicate checks; metadata, envelopes, per-owner uniqueness, source revision pins, and verb validation are excluded. A and B add explicit relationship uniqueness as a proposed contract. Open target vocabularies use the declared synthetic core set in A/B. Inventory includes broader pointer candidates and is distinct from the timed relationship families. No network database, production census, Neon command, credentials, or paid model call is used.'}
-    executed_sources = ['inventory.py','model.py','cluster.py','bench.py','migrate.py','report.py','run.py']
+    executed_sources = ['inventory.py','model.py','cluster.py','bench.py','linkfork_migration.py','report.py','run.py']
     data['harness_sha256'] = {name:hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest() for name in executed_sources}
     cluster = Cluster(bin_dir)
     try:
