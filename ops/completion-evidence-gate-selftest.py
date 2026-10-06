@@ -816,9 +816,13 @@ def latch_cases():
     results = []
 
     def fires(records, session):
-        result = sandbox.fire("completion-evidence-gate", {
+        payload = {
             "session_id": session, "stop_hook_active": False, "cwd": REPO,
-        }, turns=completed_fixture(records))
+        }
+        expect("event cwd belongs to copied hook checkout",
+               payload["cwd"] == str(sandbox.repo), True)
+        result = sandbox.fire("completion-evidence-gate", payload,
+                              turns=completed_fixture(records))
         body = result.envelopes[0] if result.envelopes else {}
         return result.decision == "deny", body.get("reason", "")
 
@@ -1034,6 +1038,9 @@ def native_context_orders():
                 payload = ({"transcriptPath": path, "sessionId": "selftest"} if kind == "codex" else
                            {"transcript_path": path, "session_id": "selftest"})
                 payload.update(cwd=REPO, hook_event_name="Stop", stop_hook_active=False)
+                scope_ok = payload["cwd"] == str(sandbox.repo)
+                outcomes.append(scope_ok)
+                print(f"{'PASS' if scope_ok else 'FAIL'}  {kind} configured Stop cwd belongs to copied hook checkout")
                 result = sandbox.fire("completion-evidence-gate", payload, argv=argv)
                 event_ok = result.code == 0 and (result.decision == "deny") == expected
                 outcomes.append(event_ok)
