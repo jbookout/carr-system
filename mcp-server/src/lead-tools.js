@@ -1,5 +1,5 @@
 import { FK, RESEARCH_EVIDENCE_SCHEMA, researchEvidence, resolveSubject, stampResearch } from "./verb-support.js";
-import { versionGuard, versionedWrite, withEnvelope, writeEvent } from "./versioned-write.js";
+import { versionGuard, withEnvelope, writeEvent } from "./versioned-write.js";
 import { ToolError } from "./tool-error.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { lockLeadLifecycle, validateStageReview } from "./lead-workspace.js";
@@ -21,7 +21,7 @@ export function leadTools() {
         // to go straight into the insert, so a plausible-but-wrong value — `lane:
         // "referral"`, which reads like an obvious lane and is not one — came back as
         // a bare "internal error" with nothing naming the field or the options.
-        // Measured live 2026-08-10 creating Dr. Harlan's lead: three attempts failed
+        // Measured live 2026-08-10 creating Dr. Example's lead: three attempts failed
         // opaquely and the bare call succeeded, which tells the caller nothing about
         // WHICH field was wrong. Same failure class as loop #261.
         for (const [field, table] of [["stage", "lead_stage"], ["lane", "lead_lane"]]) {
@@ -372,22 +372,21 @@ export function leadTools() {
         stage_review: { type: "object", additionalProperties: false, properties: { reason: { type: "string", minLength: 1, maxLength: 1000 }, evidence_ids: { type: "array", items: { type: "string" }, maxItems: 20 }, undo_event_id: { type: "string" }, human_quote: { type: "string", maxLength: 1000 } }, required: ["reason", "evidence_ids"] },
         fields: { type: "object", description: "subset of: stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
         required: ["idempotency_key","lead","base_version","fields"] },
-      handler: versionedWrite("update-lead", {
-        table: "lead",
-        resolve: (c, args) => resolveSubject(c, args.lead),
-        fields: ["stage","lane","segment","source_type","source_detail","suppressed",
-                         "est_lease_event","next_action_date","notes_path","notes","event_source",
-                         "event_confidence","report_back_due","drip_campaign","drip_added","sf_deal"],
-        before: async ({ c, actor, args }) => {
+      handler: (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
         const reviewed = Object.hasOwn(args, "stage_review") ? validateStageReview(args.stage_review, args.fields, ToolError) : null;
         if (reviewed?.undo_event_id) {
           if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_confirmation_required" });
           if (!reviewed.human_quote?.trim()) throw new ToolError({ error: "undo_human_quote_required" });
         }
         if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
-        return reviewed;
-        },
-        guards: async ({ c, actor, args, subject, keys, prepared }) => {
+        const subject = await resolveSubject(c, args.lead);
+        if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: subject });
+        const allowed = ["stage","lane","segment","source_type","source_detail","suppressed",
+                         "est_lease_event","next_action_date","notes_path","notes","event_source",
+                         "event_confidence","report_back_due","drip_campaign","drip_added","sf_deal"];
+        const keys = Object.keys(args.fields).filter(key => allowed.includes(key));
+        await versionGuard(c, "lead", subject.id, args.base_version);
+        if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
         // Pre-validate rather than letting the FK abort the transaction, same reason
         // new-lead checks stage/lane up front: once the violation fires the
         // transaction is poisoned and cannot even run the query that would list the
@@ -419,7 +418,6 @@ export function leadTools() {
           throw new ToolError({ error: "suppression_clear_requires_human",
             hint: "a standing suppression instruction may be cleared only by an authenticated human" });
         }
-        const reviewed = prepared;
         let stageReview = null;
         if (reviewed) {
           const ids = reviewed.evidence_ids;
@@ -437,12 +435,22 @@ export function leadTools() {
           stageReview = { ...reviewed, evidence_ids: ids,
             evidence_date: evidence.map(row => new Date(row.occurred_at).toISOString()).sort().at(-1) || null };
         }
-        return stageReview;
-        },
-        eventFields: ({ args, field, old, guarded }) => ({ recorded_at_after_lock: field === "stage", field, old: { [field]: old[field] }, new: { [field]: args.fields[field], ...(field === "stage" && guarded ? { stage_review: guarded } : {}) },
-              ...(field === "stage" && guarded ? { cause: guarded.undo_event_id ? "human_correction" : undefined,
-                human_quote: guarded.human_quote, agent_rationale: guarded.reason } : {}), idempotency_key: args.idempotency_key }),
-      }),
+        const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [subject.id])).rows[0];
+        const sets = keys.map((key, i) => `${key}=$${i + 2}`).join(", ");
+        await c.query(`update lead set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
+          [actor.id, ...keys.map(key => args.fields[key]), subject.id]);
+        for (const field of keys) await writeEvent(c, actor, "update-lead", "lead", subject.id, {
+          field, old: { [field]: old[field] },
+          new: { [field]: args.fields[field], ...(field === "stage" && stageReview ? { stage_review: stageReview } : {}) },
+          idempotency_key: args.idempotency_key,
+          recorded_at_after_lock: field === "stage",
+          ...(field === "stage" && stageReview ? {
+            cause: stageReview.undo_event_id ? "human_correction" : undefined,
+            human_quote: stageReview.human_quote, agent_rationale: stageReview.reason,
+          } : {}),
+        });
+        return { ok: true, updated: keys };
+      }, { serialized: true }),
     },
   };
 }

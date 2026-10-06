@@ -760,6 +760,15 @@ assert "SCAC_FULL_SET_SEAL_COUNT=100" in GENERATOR
 assert "ops.scac_mutation_catalog_v101_current()" in GENERATOR
 assert 'scac-mutation-registry.v101.generated.js' in GENERATOR
 registry_gate = (ROOT / 'ops/siep11-mutation-registry-local-pg-gate.py').read_text()
+successor_allowlists = [ast.literal_eval(node.comparators[0])
+                       for node in ast.walk(ast.parse(registry_gate))
+                       if isinstance(node, ast.Compare)
+                       and isinstance(node.left, ast.Name) and node.left.id == "runtime_version"
+                       and len(node.ops) == 1 and isinstance(node.ops[0], ast.NotIn)]
+assert successor_allowlists == [{f"scac-mutation-registry.v{version}"
+                                for version in range(2, CURRENT_NUMBER + 1)}], (
+    "DB gate must accept every sealed successor through the current frontier and reject unreviewed versions"
+)
 assert "0768_confirm_merge_human_only_scac_successor.sql" in GENERATOR
 assert "CONFIRM_MERGE_REGISTRY_APPLIED" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=102" in GENERATOR

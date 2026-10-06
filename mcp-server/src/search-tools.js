@@ -22,7 +22,7 @@ const WHO_PATH_CAP = 25;
 // [loop #132] How many RETIRED refs `find` lists per organisation group.
 //
 // A tombstone list is navigation, not an answer. 0059 consolidated 415 org rows
-// into 306 survivors plus 109 tombstones and one name alone (Henry Schein) carries
+// into 306 survivors plus 109 tombstones and one name alone (Synthetic Supply Co) carries
 // sixteen of them; the useful facts are "sixteen exist" and "here is where to look
 // them up", not sixteen refs spending the whole payload. The COUNT is always exact
 // and never truncated — only the ref list is capped, and the row says so.
@@ -140,8 +140,8 @@ export function searchTools() {
          order by merged, similarity(display_name,$1) desc limit 10`, [q, `%${q}%`]);
         // ORGS AND UNLINKED PEOPLE, GROUPED (0056, 2026-08-02). Until migration 0056
         // v_ref_index held only role records, so 415 org parties were invisible here:
-        // `find "Henry Schein"` returned "Henry Prescott" — a trigram hit on one word —
-        // and none of the 17 rows literally named Henry Schein.
+        // `find "Synthetic Supply Co"` returned "Synthetic Person" — a trigram hit on one word —
+        // and none of the 17 rows literally named Synthetic Supply Co.
         // GROUPED BY NAME ON PURPOSE. Those 17 rows are one company minted 17 times,
         // once per rep, and listing them raw would spend the whole 10-row budget on
         // copies of one answer and push every other match out. One row per name, with
@@ -152,7 +152,7 @@ export function searchTools() {
         // LIVE AND RETIRED ARE COUNTED SEPARATELY, AND THE BLEND WAS THE BUG (loop
         // #132, 2026-08-02). This grouping shipped in b0fda91, BEFORE 0059 consolidated
         // the orgs, and it was never taught about merged_into. Afterwards it kept
-        // reporting `duplicate_rows: 17` for Henry Schein and `13` for Cadence Studio —
+        // reporting `duplicate_rows: 17` for Synthetic Supply Co and `13` for Synthetic Studio —
         // both of which are ONE live row plus sixteen and twelve tombstones. That
         // number then read as "the book is still full of duplicates", which is the
         // opposite of what 0059 did, and every ref in the list read as a live target.
@@ -165,7 +165,7 @@ export function searchTools() {
           // ONTO each aggregate. It has to, because v_ref_index indexes SUBJECTS rather
           // than roles (0056): the moment an org party gains a client, lead or vendor
           // record it stops appearing as a party row and starts appearing under that
-          // role's ref. 0061 did exactly that to Cadence Studio — P-0111 is live and
+          // role's ref. 0061 did exactly that to Synthetic Studio — P-0111 is live and
           // unmerged, but it now indexes as client C-161, so a party-only query saw its
           // twelve tombstones, reported live_rows:0, and fired the all_retired note
           // claiming the survivor "carries a DIFFERENT name and is not in this result"
@@ -430,12 +430,12 @@ export function searchTools() {
           // 'party' INCLUDED (0056, 2026-08-02). This block is the verb's honesty
           // guarantee — "exists but has no edges" must never collapse into "no such
           // person". Restricted to role records it was breaking exactly that promise:
-          // asked for Henry Schein, which is 17 party rows, it answered "No record and
+          // asked for Synthetic Supply Co, which is 17 party rows, it answered "No record and
           // no graph node matches that name", which was simply false. A read-only
           // existence check has no reason to be narrower than the record.
           // MATCHING_RECORDS IS LIVE-ONLY, AND THE COUNT OF TOMBSTONES TRAVELS BESIDE
           // IT (loop #132). Unordered and capped at five, this block handed back five
-          // tombstones for "Cadence Studio" — P-0840, P-1044, P-0909, P-0796 — as
+          // tombstones for "Synthetic Studio" — P-0840, P-1044, P-0909, P-0796 — as
           // selectable records while the survivor P-0111 never appeared. A caller that
           // links or writes to one of those defeats the merge. So: survivors in
           // matching_records, tombstones as a COUNT only (find lists them with their

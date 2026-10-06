@@ -1,11 +1,11 @@
-import { RESEARCH_EVIDENCE_SCHEMA, UUID_RE, fmtPhoneUS, researchEvidence, resolvePartyByRef, resolveSubject, stampResearch, validateLinkKind } from "./verb-support.js";
+import { RESEARCH_EVIDENCE_SCHEMA, UUID_RE, config, fmtPhoneUS, researchEvidence, resolvePartyByRef, resolveSubject, stampResearch, validateLinkKind } from "./verb-support.js";
 import { ToolError } from "./tool-error.js";
 import { versionGuard, withEnvelope, writeEvent } from "./versioned-write.js";
 import { dealEvidenceEntries, mergeRelationshipFields, requireRelationshipPartner, trustedOverride } from "./vendor-relationship.js";
 import { bindReferralDeal } from "./relationship-network.js";
 
 // [defect 18b12fda-b79c-43a1-86c4-51b9623e12fd, 2026-08-14] THE VIOLATION WAS OURS.
-// add-party (kind='org', name='Wagtail Lodge Resort') refused twice with
+// add-party (kind='org', name='Synthetic Lodge') refused twice with
 // unique_violation on party_org_identity_uniq while a read-only tap of the same
 // database found zero matching rows — because the collision was with the verb's
 // OWN uncommitted work. The call carried org_name restating the org itself, so
@@ -75,7 +75,7 @@ function preferredMergeSurvivor(rows) {
 // vendor.stage is a FOREIGN KEY into vendor_stage(slug), and until now nothing
 // checked it before the insert — so a plausible label (`prospect`, `Prospect`,
 // `building`) came back as a bare "internal error" naming neither the field nor
-// the options. Measured live 2026-08-10 re-creating Carla Adair: four calls
+// the options. Measured live 2026-08-10 re-creating Synthetic contact: four calls
 // died that way before the pattern was readable. Same failure class as
 // new-lead's stage/lane and update-vendor's category_slug branch.
 //
@@ -99,12 +99,26 @@ async function validateVendorStage(c, slug) {
           "into vendor_stage by a human, never a guess." });
 }
 
+async function refuseActorPhone(c, value, field) {
+  if (!value) return;
+  const digits = String(value).replace(/\D/g, "");
+  const contacts = await c.query("select phone from actor where kind='human' and phone is not null");
+  const configured = await config(c, "contacts.protected_phone_numbers", []);
+  const phones = [...configured, ...contacts.rows.map(row => row.phone)];
+  if (phones.some(phone => {
+    const own = phone.replace(/\D/g, "");
+    const suffix = own.length === 11 && own.startsWith("1") ? own.slice(1) : own;
+    return suffix.length >= 10 && digits.endsWith(suffix);
+  })) throw new ToolError({ error: "placeholder_phone", ...(field ? { field } : {}),
+    hint: "a partner's own number is never a contact; record the field as unknown instead" });
+}
+
 export function partyTools() {
   return {
     "add-party": {
       discoveryOrder: 33,
       write: true,
-      description: "Create a party (person or org). CHECKS for existing matches first (email, similar name) and returns candidates INSTEAD of inserting when found — pass force_new:true only after the human confirms it is genuinely a different person. Never store 205-643-6555 (it is Dell's placeholder, not a contact).",
+      description: "Create a party (person or org). CHECKS for existing matches first (email, similar name) and returns candidates INSTEAD of inserting when found — pass force_new:true only after the human confirms it is genuinely a different person. A partner's own number is refused as a placeholder.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, name: { type: "string" },
         kind: { type: "string", enum: ["person","org"], default: "person" },
@@ -114,8 +128,7 @@ export function partyTools() {
         research_evidence: RESEARCH_EVIDENCE_SCHEMA },
         required: ["idempotency_key","name"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "add-party", args, async () => {
-        if (args.phone && args.phone.replace(/\D/g, "").endsWith("2056436555"))
-          throw new ToolError({ error: "placeholder_phone", hint: "205-643-6555 is never stored as a contact" });
+        await refuseActorPhone(c, args.phone);
         if (!args.force_new) {
           const cand = await c.query(
             `select id, name, email, city,
@@ -145,8 +158,8 @@ export function partyTools() {
         }
         // THE GENERATOR, CLOSED (0059, 2026-08-02). This line used to INSERT an org
         // unconditionally with no lookup, so every contact minted a private copy of
-        // their own employer: Henry Schein existed as 17 org rows, one per rep,
-        // Patterson Dental as 10, and all 415 org rows had exactly one inbound person
+        // their own employer: Synthetic Supply Co existed as 17 org rows, one per rep,
+        // Synthetic Dental Co as 10, and all 415 org rows had exactly one inbound person
         // — a distribution with a single bucket, which is the signature. That is why
         // "who do we know at X" could not be answered: there was no X, only copies.
         // 0059 consolidated the 115 surplus rows AND added a unique index, so this
@@ -532,9 +545,7 @@ export function partyTools() {
         // Placeholder rule 54e2bcb9: an agent's own details standing in for a contact
         // nobody had. Stored, they read as enriched while being emptier than a blank.
         for (const k of ["phone","cell"]) {
-          if (args.fields[k] && String(args.fields[k]).replace(/\D/g, "").endsWith("2056436555"))
-            throw new ToolError({ error: "placeholder_phone", field: k,
-              hint: "205-643-6555 is a CARR agent's own line, never a contact — record the field as unknown instead" });
+          await refuseActorPhone(c, args.fields[k], k);
         }
         if (args.fields.email && /@carr\.us\s*$/i.test(String(args.fields.email).trim()))
           throw new ToolError({ error: "placeholder_email",

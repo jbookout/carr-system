@@ -2,6 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createToolRegistry } from '../src/tool-registry.js';
 
+test('lead patches own their product flow without a generic callback write framework', async () => {
+  const writes = await import('../src/versioned-write.js');
+  assert.equal(Object.hasOwn(writes, 'versionedWrite'), false);
+});
+
 test('declarations supply immutable writer, serialization and completion facts', () => {
   const { tools, registerTools } = createToolRegistry();
   registerTools({ 'synthetic-write': { write: true, serialization: 'idempotency-key' },

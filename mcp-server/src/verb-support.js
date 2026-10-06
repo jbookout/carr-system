@@ -124,10 +124,7 @@ export async function config(client, key, fallback) {
   return r.rows.length ? r.rows[0].value : fallback;
 }
 
-// The deal paper writes a phone as (850) 361-2208. The actor row stores what the
-// human typed (joe: 850.361.2208), so the plan formats it here — one convention
-// in one place, rather than every field map carrying a format. An unrecognized
-// shape passes through verbatim: a phone is never invented or truncated to fit.
+// Unrecognized phone shapes pass through unchanged.
 export function fmtPhoneUS(v) {
   if (v === null || v === undefined) return null;
   const digits = String(v).replace(/\D/g, "");
@@ -209,7 +206,7 @@ export async function resolveSubject(client, ref) {
   }
   // BARE PARTIES ARE A FALLBACK, NEVER A COMPETITOR (0056, 2026-08-02). Migration
   // 0056 put every party in v_ref_index, which is what finally makes an org like
-  // Henry Schein — 17 rows, no lead/client/vendor among them — resolvable at all.
+  // Synthetic Supply Co — 17 rows, no lead/client/vendor among them — resolvable at all.
   // But this is the WRITE path: folding parties into the query above would let a
   // bare party outrank the client or vendor a name resolves to today and quietly
   // move where writes land. So the role query runs first and unchanged, and this

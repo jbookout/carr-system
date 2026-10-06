@@ -229,30 +229,3 @@ export async function versionGuard(client, table, id, baseVersion, touchedFields
   }
   return { version: current, rebased: false, rebase_receipt: null };
 }
-
-
-// Declarations own domain guards; this module owns the write ordering and SQL.
-export function versionedWrite(verb, declaration) {
-  const { table, subjectType = table, resolve, fields, before, guards, eventFields } = declaration;
-  if (!/^[a-z_]+$/.test(table) || !fields.every(field => /^[a-z_]+$/.test(field)))
-    throw new Error("versioned write identifiers must be declared SQL identifiers");
-  return (c, actor, args) => withEnvelope(c, actor, verb, args, async () => {
-    const prepared = await before?.({ c, actor, args });
-    const subject = await resolve(c, args);
-    if (subject.type !== subjectType) throw new ToolError({ error: `not_a_${subjectType}`, resolved: subject });
-    const keys = Object.keys(args.fields).filter(key => fields.includes(key));
-    await versionGuard(c, table, subject.id, args.base_version);
-    if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed: fields });
-    const context = { c, actor, args, subject, keys, prepared };
-    const guarded = await guards?.(context);
-    const old = (await c.query(`select ${keys.join(",")} from ${table} where id=$1`, [subject.id])).rows[0];
-    const sets = keys.map((key, i) => `${key}=$${i + 2}`).join(", ");
-    await c.query(`update ${table} set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
-      [actor.id, ...keys.map(key => args.fields[key]), subject.id]);
-    for (const field of keys) await writeEvent(c, actor, verb, subjectType, subject.id, {
-      field, old: { [field]: old[field] }, new: { [field]: args.fields[field] },
-      idempotency_key: args.idempotency_key, ...eventFields?.({ ...context, guarded, field, old }),
-    });
-    return { ok: true, updated: keys };
-  }, { serialized: true });
-}
