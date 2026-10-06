@@ -1,65 +1,36 @@
 #!/usr/bin/env python3
-"""brief-check.py — before the orchestrator reviews a builder PR, say which
-numbered requirement of the builder's brief has evidence in the PR.
+"""Compare numbered builder obligations with evidence at one PR head.
 
-    ops/brief-check.py <owner/repo> <pr> [--brief PATH] [--post] [--jev] [--json]
-    ops/brief-check.py --stamp <brief>
+    bin/brief-check <owner/repo> <pr> [--brief PATH] [--post] [--jev] [--json]
+    bin/brief-check --stamp <brief>
 
-WHY (Joe 2026-10-05, gap #17). Review time went to re-deriving whether the
-builder did each numbered item. That part is mostly mechanical: did the diff
-touch the file the brief named, did tests land and is CI green on them, does
-the PR body carry what the brief asked to put there. This does the mechanical
-part and leaves the reviewer the residue that needs judgment.
+Builders put the helper's `Brief: <path> sha256:<hex>` line in the PR body.
+Paths with spaces are supported. Relative paths resolve against --brief-root,
+or this repository's canonical checkout. Hash conflicts invalidate grading.
 
-THE BRIEF RECORD CONVENTION. A builder states which brief it ran as one line in
-the PR body:
+Only complete mechanical asks can be met deterministically. Changed paths,
+body mentions and CI checks are evidence for compound or semantic obligations,
+which remain needs judgment. Missing base evidence stays unknown. Every row
+preserves the complete obligation and evidence; this tool never approves.
 
-    Brief: out/orch/gaps/gap17.md sha256:<64 hex>
+--post requires the brief's bytes to match a file already present at the
+inspected PR head. Untracked local input cannot be published. One orchestrator
+host owns publication, serialized across its processes and worktrees by a
+per-repository/per-PR lock. A persistent journal refuses repeat creates after
+uncertain outcomes until the original comment is read back. GitHub's comment
+API has no cross-host lock or head-conditional write; additional publishers
+must use that same host. Head checks bracket writes and all source links pin
+the inspected revision.
 
-The path is relative to the orchestrator checkout that holds the brief (or
-absolute when the brief lives outside a git checkout). Runners append the
-instruction to the prompt they hand the builder:
-
-    { cat "$P"; python3 ~/carr-system/ops/brief-check.py --stamp "$P"; } | <builder>
-
-The hash lets this check say whether the brief changed after the builder ran,
-in which case the requirements it reads are not the ones the builder saw.
-
-THE PROCEDURE, per numbered requirement. The requirement is split into
-sentences; each sentence runs these ordered probes, every one deterministic:
-
-  1. Does it ask for tests (test, tests, selftest)?
-       no test file in the diff           -> fail
-       a CI check failed                  -> fail
-       CI still running, or no checks     -> judgment
-       test files in the diff, CI green   -> pass
-  2. Does it ask for PR-body content ("PR body", "in the PR")?
-       empty body                         -> fail
-       a paragraph carries its key terms  -> pass, quoted
-       otherwise                          -> judgment
-  3. For each repository path it names:
-       changed in the diff                -> pass, linked to the diff
-       named in a CI check's name         -> that check's result
-       exists on the base branch / disk   -> reference only, no evidence either way
-       exists nowhere                     -> fail (a deliverable that was never made)
-
-  A sentence with any fail fails; with any judgment, or with no passing probe,
-  needs judgment; otherwise passes. A requirement is "not met" if any sentence
-  fails, "met" if every sentence passes, else "needs judgment".
-
-  "met" therefore means every sentence had positive deterministic evidence. It
-  is evidence for the reviewer, not a verdict on quality, and this tool never
-  approves: it only ever creates or edits its own marked comment.
-
-JEV, ONLY ON THE RESIDUE. With --jev, the needs-judgment requirements go to Jev
-in ONE batched request, a noul each, and the answer is printed beside the item
-labelled as advisory. It never moves a verdict. Off by default: paid Jev calls
-in the review path were switched off on 2026-10-04 for cost, so the caller opts
-in per run.
+--jev is opt-in advisory judgment. Shared translation and observation policy
+owns its result; vendor or loader failures preserve the deterministic report.
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -68,24 +39,25 @@ import os
 import re
 import subprocess
 import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MARKER = "<!-- brief-check -->"
 VERDICTS = ("met", "not met", "needs judgment")
-STAMP_RE = re.compile(r"^Brief: (\S+) sha256:([0-9a-f]{64})\s*$", re.M)
+STAMP_RE = re.compile(r"^Brief: (.+?) sha256:([0-9a-f]{64})\s*$", re.M)
 
 # A list header is a line that says the list is required. The job-conduct
 # section ("RULES FOR THIS JOB (all required):") is not a build requirement.
 HEADER_RE = re.compile(r"required", re.I)
-NOT_REQUIREMENTS_RE = re.compile(r"^\W*RULES\b")
-ITEM_RE = re.compile(r"^(\d+)\.\s+(.*)$")
+NOT_REQUIREMENTS_RE = re.compile(r"^\W*(RULES|BOUNDARIES)\b", re.I)
+ITEM_RE = re.compile(r"^\s*(\d+)\.\s+(.*)$")
 # A caps label ("BOUNDARIES:", "RULES FOR THIS JOB (...):") or a markdown heading ends a list.
 SECTION_RE = re.compile(r"^(#|[A-Z][A-Z /-]{2,}(\([^)]*\))?:)")
 
-TESTS_RE = re.compile(r"\b(tests?|selftests?|test-first)\b", re.I)
 BODY_RE = re.compile(r"\bPR (body|description)\b|\bin the PR\b", re.I)
 PATH_RE = re.compile(r"(?<![\w/~.:@-])(\.?[A-Za-z0-9_][A-Za-z0-9_.-]*/(?:[A-Za-z0-9_.-]+/)*(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\.[A-Za-z0-9]{1,6})?)(?![\w*/<-])")
-ALTERNATIVES_RE = re.compile(PATH_RE.pattern + r"\s+or\s+" + PATH_RE.pattern)
 TABLE_RE = re.compile(r"^\|.*\|", re.M)
 TEST_FILE_RE =re.compile(r"(^|/)(tests?|__tests__|e2e)/|(^|/)test[-_][^/]*$|[-_.](selftest|test|spec)\.[A-Za-z0-9]+$")
 STOP = set("""about above after again against also because been before being below between both
@@ -93,7 +65,7 @@ build builder change changes code does done each every file files first from hav
 made make must name never only other over same should show some such than that their them then
 there these they this those through under until very want when where which while will with
 without would your body description section include report state evidence list item items put what""".split())
-GREEN = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+GREEN = {"SUCCESS"}
 PENDING_STATES = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 REVIEW_LINE_RE = re.compile(r"^(APPROVE|Reviewed-SHA:|REVIEW: BLOCKED|CHANGES REQUESTED)", re.M)
 COMMENT_ENDPOINT_RE = re.compile(r"^repos/[\w.-]+/[\w.-]+/issues/(\d+/comments|comments/\d+)$")
@@ -124,13 +96,15 @@ def _numbered_list(lines):
         if item:
             items.append({"n": int(item.group(1)), "text": item.group(2).strip()})
         elif not line.strip():
-            if items:
-                break
+            continue
         elif SECTION_RE.match(line) or not items:
             if items:
                 break
         else:
             items[-1]["text"] += " " + line.strip()
+    numbers = [item["n"] for item in items]
+    if len(numbers) != len(set(numbers)):
+        raise BriefError("duplicate requirement numbers; disambiguate the brief before checking")
     return items
 
 
@@ -151,8 +125,11 @@ def stamp_line(path, sha):
 
 
 def stamp_preamble(brief_path, recorded_as=None):
-    with open(brief_path, encoding="utf-8") as handle:
-        sha = hashlib.sha256(handle.read().encode()).hexdigest()
+    try:
+        with open(brief_path, encoding="utf-8") as handle:
+            sha = hashlib.sha256(handle.read().encode()).hexdigest()
+    except (OSError, UnicodeError) as exc:
+        raise BriefError(f"brief unavailable ({type(exc).__name__})") from None
     line = stamp_line(recorded_as or _recorded_path(brief_path), sha)
     return ("\nBRIEF RECORD (required): put this line, verbatim, on its own line in the PR body, "
             "so the reviewer's brief check reads the brief you ran:\n" + line + "\n")
@@ -168,8 +145,8 @@ def _main_checkout(directory):
     """The main checkout owning `directory` (worktrees share its common dir)."""
     try:
         common = subprocess.run(["git", "-C", directory, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                                capture_output=True, text=True, check=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+                                capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
         return None
     return os.path.dirname(common)
 
@@ -214,7 +191,8 @@ def _link(name, url):
 
 
 def _diff_link(pr, path):
-    return f"[`{path}`]({pr['url']}/files#diff-{hashlib.sha256(path.encode()).hexdigest()})"
+    repo_url = pr['url'].split('/pull/')[0]
+    return f"[`{path}`]({repo_url}/blob/{pr['headRefOid']}/{quote(path, safe='/')})"
 
 
 def _terms(text):
@@ -267,70 +245,127 @@ def _body_probe(sentence, body):
         enough = hits(ask, best) >= max(1, math.ceil(0.6 * len(ask)))
         (found if enough else missing).append((ask, best[0]))
     if not missing:
-        excerpts = dict.fromkeys(re.sub(r"\s+", " ", p)[:160] for _, p in found)
-        return "pass", "PR body: " + " … ".join(f"“{e}”" for e in excerpts)
+        excerpts = dict.fromkeys(re.sub(r"\s+", " ", p) for _, p in found)
+        return "judge", "PR body: mentions require semantic review: " + " … ".join(f"“{e}”" for e in excerpts)
     return "judge", "PR body has nothing on: " + "; ".join(" ".join(a.values()) for a, _ in missing)
 
 
-def _tests_probe(pr, changed):
-    tests = [p for p in changed if TEST_FILE_RE.search(p)]
-    if not tests:
-        return [("fail", "no test file in the diff")]
-    listed = "tests in diff: " + ", ".join(_diff_link(pr, p) for p in tests[:6]) + (
-        f" (+{len(tests) - 6} more)" if len(tests) > 6 else "")
-    state, failed, pending, green = _ci(pr.get("statusCheckRollup") or [])
+def _test_intent(sentence):
+    if re.search(r"\b(?:without|no|not|never|do not|don't)\s+(?:adding?\s+|new\s+)?tests?\b", sentence, re.I):
+        return None
+    if re.search(r"\b(?:add|write|create)\s+(?:\w+\s+){0,3}(?:tests?|selftests?)\b|\btests? first\b", sentence, re.I):
+        return "add"
+    if re.search(r"\b(?:run|execute)\s+(?:existing\s+|the\s+)?(?:tests?|selftests?)\b", sentence, re.I):
+        return "run"
+    return None
+
+
+def _execution_lanes(check):
+    name = check.get("name") or check.get("context") or ""
+    if name == "ops/ci.sh --strict":
+        return {"unit", "gates"}
+    prefix = "ops/ci.sh --strict --only "
+    if name.startswith(prefix):
+        return set(name[len(prefix):].replace(",", " ").split()) & {"unit", "gates"}
+    return set()
+
+
+def _test_lane(path):
+    if re.fullmatch(r"ops/[^/]+-selftest\.py|tools/test-[^/]+\.py|tools/room-bridge/test_[^/]+_unit\.py|tools/room-bridge/test_activation_reliability\.py", path):
+        return "gates"
+    if re.match(r"(?:mcp-server|control-room|workspace|practice-plugin)/test/", path):
+        return "unit"
+    return None
+
+
+def _tests_probe(pr, changed, intent):
+    tests = [p for p, file in changed.items() if TEST_FILE_RE.search(p)
+             and file.get("changeType") != "DELETED"
+             and re.search(r"\.(?:py|mjs|cjs|js|ts|tsx|swift|sh)$", p)]
+    if intent == "add" and not tests:
+        removed = any(TEST_FILE_RE.search(p) and f.get("changeType") == "DELETED" for p, f in changed.items())
+        state = "fail" if removed or not any(TEST_FILE_RE.search(p) for p in changed) else "judge"
+        return [(state, "no executable test file delivered in the diff")]
+    evidence = [("pass", "tests in diff: " + ", ".join(_diff_link(pr, p) for p in tests))] if tests else []
+    known_repo = (pr.get("url") or "").startswith("https://github.com/jbookout/carr-system/pull/")
+    execution = [c for c in pr.get("statusCheckRollup") or [] if known_repo and _execution_lanes(c)]
+    state, failed, pending, green = _ci(execution)
+    if not execution:
+        return evidence + [("judge", "test execution unavailable: no recognized test check")]
+    if any((c or "").upper() in {"SKIPPED", "NEUTRAL"} for _, _, c in failed):
+        return evidence + [("judge", "test execution skipped or neutral")]
     if state == "failed":
-        return [("fail", listed), ("fail", "CI " + "; ".join(f"{c} {_link(n, u)}" for n, u, c in failed))]
+        return evidence + [("fail", "test execution: " + "; ".join(f"{c} {_link(n, u)}" for n, u, c in failed))]
     if state == "pending":
-        total = len(pr.get("statusCheckRollup") or [])
-        detail = f"CI pending: {len(pending)} of {total} checks still running" if total else "CI pending: no checks reported"
-        return [("pass", listed), ("judge", detail)]
-    return [("pass", listed), ("pass", f"CI green ({len(green)} checks), e.g. {_link(green[0][0], green[0][1])}")]
+        return evidence + [("judge", "CI pending: test execution has not completed")]
+    if intent == "add":
+        covered = set().union(*(_execution_lanes(c) for c in execution))
+        unresolved = [p for p in tests if _test_lane(p) not in covered]
+        if unresolved:
+            return evidence + [("judge", "test collection not covered by successful execution: " + ", ".join(unresolved))]
+    return evidence + [("pass", "test execution: " + "; ".join(_link(n, u) for n, u, _ in green))]
 
 
-def _path_probe(pr, changed, path, exists_in_base, local_reference):
+def _path_probe(pr, changed, path, exists_in_base, local_reference, *, command=None):
     is_dir = path.endswith("/")
-    if path in changed or (is_dir and any(p.startswith(path) for p in changed)):
-        return "pass", "diff: " + (_diff_link(pr, path) if not is_dir else f"`{path}` ({sum(p.startswith(path) for p in changed)} files)")
-    for check in pr.get("statusCheckRollup") or []:
+    files = [f for p, f in changed.items() if p == path or (is_dir and p.startswith(path))]
+    if files and command is None:
+        if all(f.get("changeType") == "DELETED" for f in files):
+            return "fail", f"`{path}` removed from the inspected head"
+        return "pass", "diff: " + (_diff_link(pr, path) if not is_dir else f"`{path}` ({len(files)} files)")
+    for check in (pr.get("statusCheckRollup") or []) if command else []:
         name = check.get("name") or check.get("context") or ""
-        if path in name.split():
-            state, failed, pending, _ = _ci([check])
+        if name == command:
+            state, _, _, _ = _ci([check])
             url = check.get("detailsUrl") or check.get("targetUrl") or ""
-            word = {"green": "pass", "failed": "fail", "pending": "judge"}[state]
-            return word, f"check {_link(f'`{name}`', url)} {state}"
-    if exists_in_base is not None and exists_in_base(path):
-        return "neutral", f"`{path}` named, exists on the base branch, unchanged"
+            conclusion = (check.get("conclusion") or "").upper()
+            verdict = "judge" if conclusion in {"SKIPPED", "NEUTRAL"} else {"green": "pass", "failed": "fail", "pending": "judge"}[state]
+            return verdict, f"check {_link(f'`{name}`', url)} {state}"
+    if command:
+        return "judge", f"execution unavailable for `{command}` at the inspected head"
+    present = exists_in_base(path) if exists_in_base else None
+    if present:
+        return "neutral", f"`{path}` exists at the bound base revision, unchanged"
     if local_reference is not None and local_reference(path):
-        return "neutral", f"`{path}` named, a local file the repository does not track"
-    if exists_in_base is None:
-        return "judge", f"`{path}` not in the diff (base branch not checked)"
-    return "fail", f"`{path}` is in neither the diff nor the base branch"
+        return "neutral", f"`{path}` names a local untracked reference"
+    if present is None:
+        return "judge", f"`{path}` not in the diff (base revision unavailable)"
+    return "fail", f"`{path}` is in neither the diff nor the bound base revision"
+
+
+def _path_groups(sentence):
+    matches = list(PATH_RE.finditer(sentence))
+    groups = []
+    for i, match in enumerate(matches):
+        if i and re.fullmatch(r"\s+or\s+", sentence[matches[i-1].end():match.start()], re.I):
+            groups[-1].append(match.group())
+        else:
+            groups.append([match.group()])
+    return groups
 
 
 def _sentence(pr, changed, sentence, exists_in_base, local_reference):
     probes = []
-    if TESTS_RE.search(sentence):
-        probes += _tests_probe(pr, changed)
+    intent = _test_intent(sentence)
+    if intent:
+        probes += _tests_probe(pr, changed, intent)
     if BODY_RE.search(sentence):
         probes.append(_body_probe(sentence, pr.get("body")))
-    # "tools/ or ops/" is one ask with two acceptable homes: the best result stands for both.
-    groups = {path: [path] for path in PATH_RE.findall(sentence)}
-    for first, second in ALTERNATIVES_RE.findall(sentence):
-        groups[first] = groups[second] = [first, second]
-    for group in dict.fromkeys(tuple(g) for g in groups.values()):
-        results = [_path_probe(pr, changed, p, exists_in_base, local_reference) for p in group]
+    for group in _path_groups(sentence):
+        results = [_path_probe(pr, changed, p, exists_in_base, local_reference,
+                               command=sentence.strip()[4:].rstrip(".") if re.match(r"Run\b", sentence, re.I) else None) for p in group]
         probes.append(min(results, key=lambda r: ("pass", "neutral", "judge", "fail").index(r[0])))
+    # Only these complete, mechanical asks can be certified. Every other
+    # sentence may contain obligations that a path or word match cannot prove.
+    paths = PATH_RE.sub("PATH", sentence.strip().rstrip("."))
+    complete = bool(re.fullmatch(r"(?:Add|Create|Change|Update|Modify) PATH(?: or PATH)*", paths, re.I)
+                    or re.fullmatch(r"(?:Add|Write|Create|Run|Execute) (?:existing )?(?:tests|selftests)", paths, re.I)
+                    or re.fullmatch(r"Run PATH --strict", paths, re.I))
     states = {s for s, _ in probes}
-    if "fail" in states:
-        verdict = "fail"
-    elif "judge" in states or "pass" not in states:
-        verdict = "judge"
-    else:
-        verdict = "pass"
+    verdict = "fail" if "fail" in states else "pass" if complete and states == {"pass"} else "judge"
     evidence = [e for _, e in probes]
-    if verdict == "judge" and not any(s in ("judge", "pass") for s, _ in probes):
-        evidence.append("no deterministic evidence for: “" + sentence[:90] + ("…" if len(sentence) > 90 else "") + "”")
+    if verdict == "judge":
+        evidence.append("requires review of the complete obligation: “" + sentence + "”")
     return verdict, evidence
 
 
@@ -342,7 +377,7 @@ def check(brief_text, pr, *, exists_in_base=None, local_reference=None, brief_pa
     (present on disk or gitignored, like the out/orch briefs). None means
     unknown, which turns a missing path into needs judgment rather than not met.
     """
-    changed = [f["path"] for f in pr.get("files") or []]
+    changed = {f["path"]: f for f in pr.get("files") or []}
     stamp = read_stamp(pr.get("body"))
     rows = []
     for item in parse_requirements(brief_text):
@@ -351,11 +386,16 @@ def check(brief_text, pr, *, exists_in_base=None, local_reference=None, brief_pa
         verdict = "not met" if "fail" in found else "met" if all(r == "pass" for r in found) else "needs judgment"
         evidence = list(dict.fromkeys(e for _, ev in results for e in ev))
         rows.append({"n": item["n"], "text": item["text"], "verdict": verdict, "evidence": evidence})
+    provenance = stamp_state(stamp[1] if stamp else None, brief_text)
+    if provenance == "changed since the builder ran":
+        for row in rows:
+            row["verdict"] = "needs judgment"
+            row["evidence"].append("brief hash conflict: resolve the builder's recorded source before grading")
     state, _, _, _ = _ci(pr.get("statusCheckRollup") or [])
     return {
         "pr": pr.get("number"), "url": pr.get("url"), "head": pr.get("headRefOid"),
         "brief": brief_path or (stamp[0] if stamp else None),
-        "brief_state": stamp_state(stamp[1] if stamp else None, brief_text),
+        "brief_state": provenance, "brief_sha256": hashlib.sha256(brief_text.encode()).hexdigest(),
         "ci": state, "requirements": rows,
     }
 
@@ -366,33 +406,55 @@ def add_jev(report, *, judge=None, noul=None):
     residue = [r for r in report["requirements"] if r["verdict"] == "needs judgment"]
     if not residue:
         return report
-    if judge is None or noul is None:
-        judge, noul = _jev()
-    questions = {f"r{r['n']}": noul(
-        f"Requirement {r['n']} of the builder's brief: {r['text']}\n"
-        "Using only the pull request evidence in the state, was this requirement met?") for r in residue}
-    subject = {"pr_body": (report.get("body") or "")[:6000], "evidence": {f"r{r['n']}": r["evidence"] for r in residue}}
-    try:
-        answer = judge(subject, questions, caller="brief_check")
-    except Exception as exc:  # any failure is reported beside the item, never hidden
-        for r in residue:
-            r["jev"] = f"Jev unavailable ({type(exc).__name__}: {str(exc)[:80]})"
+    if report_status(report) == 2:
+        for row in residue:
+            row["jev"] = "Jev unavailable (brief provenance conflict)"
         return report
-    for r in residue:
-        p = float(answer["answers"][f"r{r['n']}"]["noul"])
-        word = "likely met" if p >= 0.8 else "likely not met" if p <= 0.2 else "unsure"
-        r["jev"] = f"Jev (advisory, needs-judgment residue): {word}, p={p:.2f}"
+    policy = None
+    try:
+        policy = _jev_policy()
+        if judge is None or noul is None:
+            judge, noul = _jev()
+        questions = {f"r{r['n']}": noul(
+            f"Requirement {r['n']}: {r['text']}\n"
+            "Using only the PR evidence in the state, was this requirement met?") for r in residue}
+        subject = {"pr_body": report.get("body") or "", "head": report["head"],
+                   "evidence": {f"r{r['n']}": r["evidence"] for r in residue}}
+        answer = judge(subject, questions, caller="brief_check", timeout=20, retries=0,
+                       deadline=time.monotonic() + 20)
+        for r in residue:
+            decision = policy.read(answer, f"r{r['n']}")
+            word = "unsure" if decision["escalate"] else "likely met" if decision["outcome"] == "yes" else "likely not met"
+            r["jev"] = f"Jev (advisory, needs-judgment residue): {word}, p={decision['value']:.2f}"
+        policy.record("brief_check", f"{report['url']}@{report['head']}", answer,
+                      {f"r{r['n']}": r["verdict"] for r in residue},
+                      family="brief_requirement", consequence_class="review_advisory",
+                      downstream_action="advisory_only")
+    except Exception as exc:
+        for r in residue:
+            r["jev"] = f"Jev unavailable ({type(exc).__name__})"
+        if policy:
+            policy.record("brief_check", f"{report['url']}@{report['head']}", None,
+                          error=type(exc).__name__, family="brief_requirement",
+                          consequence_class="review_advisory", downstream_action="deterministic_only")
     return report
 
 
+def _load_module(name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, "ops", f"{name}.py"))
+    if spec is None or spec.loader is None:
+        raise BriefError(f"cannot load ops/{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _jev_policy():
+    return _load_module("jev_judge")
+
+
 def _jev():
-    def load(name):
-        spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, "ops", f"{name}.py"))
-        assert spec is not None and spec.loader is not None, f"cannot load ops/{name}.py"
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    return load("jev_judge").judge, load("typesafe_client").noul
+    return _jev_policy().judge, _load_module("typesafe_client").noul
 
 
 # ── comment ───────────────────────────────────────────────────────────────────
@@ -417,7 +479,7 @@ def render_comment(report):
     ]
     for r in report["requirements"]:
         evidence = "<br>".join(_cell(e) for e in r["evidence"] + ([r["jev"]] if r.get("jev") else []))
-        text = r["text"] if len(r["text"]) <= 220 else r["text"][:220] + "…"
+        text = r["text"]
         lines.append(f"| {r['n']} | {_cell(text)} | **{r['verdict']}** | {evidence} |")
     lines += ["", "<sub>ops/brief-check.py: met = every sentence of the requirement has deterministic evidence; "
               "needs judgment = the reviewer decides. Re-runs edit this comment in place.</sub>"]
@@ -429,61 +491,173 @@ def render_comment(report):
 # ── gh, comment endpoints only ────────────────────────────────────────────────
 
 def guarded(args):
-    """The only gh calls this tool makes: read the PR, read and write its own comment."""
     args = list(args)
     if args[:2] == ["pr", "view"]:
         return args
     if args and args[0] == "api":
-        rest = [a for a in args[1:] if not a.startswith("-")]
-        method = args[args.index("-X") + 1] if "-X" in args else "GET"
-        endpoint = next((a for a in rest if a.startswith("repos/")), "")
-        if method in ("GET", "POST", "PATCH") and COMMENT_ENDPOINT_RE.match(endpoint):
+        methods = [args[i + 1].upper() for i, a in enumerate(args[:-1]) if a in ("-X", "--method")]
+        methods += [a.split("=", 1)[1].upper() for a in args if a.startswith("--method=")]
+        method = methods[0] if len(methods) == 1 else "GET" if not methods else "INVALID"
+        endpoint = next((a for a in args[1:] if a.startswith("repos/") or a == "user"), "")
+        read = endpoint == "user" or bool(re.fullmatch(r"repos/[\w.-]+/[\w.-]+/contents/[^?]+\?ref=[0-9a-f]{40}", endpoint))
+        if (method in ("GET", "POST", "PATCH") and COMMENT_ENDPOINT_RE.fullmatch(endpoint)) or (method == "GET" and read):
             return args
-    raise BriefError("refused gh call outside the comment endpoints: " + " ".join(args))
+    raise BriefError("refused gh call outside the read/publication interface")
 
 
 def run_gh(args, stdin=None):
     try:
-        return subprocess.run(["gh", *guarded(args)], input=stdin, capture_output=True, text=True, check=True).stdout
+        return subprocess.run(["gh", *guarded(args)], input=stdin, capture_output=True,
+                              text=True, check=True, timeout=30).stdout
     except subprocess.CalledProcessError as exc:
         raise BriefError(f"gh {' '.join(args[:3])} failed: {((exc.stderr or '').strip().splitlines() or [''])[-1][:300]}") from None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BriefError(f"gh unavailable ({type(exc).__name__})") from None
 
 
 def _json_stream(text):
     decoder, at, items = json.JSONDecoder(), 0, []
-    while at < len(text.strip()):
-        while text[at].isspace():
-            at += 1
-        value, at = decoder.raw_decode(text, at)
-        items += value if isinstance(value, list) else [value]
-        if at >= len(text) or not text[at:].strip():
-            break
+    try:
+        while at < len(text):
+            while at < len(text) and text[at].isspace():
+                at += 1
+            if at == len(text):
+                break
+            value, at = decoder.raw_decode(text, at)
+            items += value if isinstance(value, list) else [value]
+    except (ValueError, TypeError):
+        raise BriefError("invalid JSON from gh") from None
     return items
 
 
-def post_comment(repo, number, body, *, gh=run_gh):
-    comments = _json_stream(gh(guarded(["api", "--paginate", f"repos/{repo}/issues/{number}/comments"])))
-    mine = [c for c in comments if (c.get("body") or "").startswith(MARKER)]
-    if mine:
-        args = ["api", "-X", "PATCH", f"repos/{repo}/issues/comments/{mine[-1]['id']}", "-F", "body=@-"]
-    else:
-        args = ["api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", "-F", "body=@-"]
-    return json.loads(gh(guarded(args), stdin=body)).get("html_url")
+@contextlib.contextmanager
+def _publication_lock(repo, number):
+    root = Path(os.environ.get("CARR_BRIEF_LOCK_ROOT", os.path.expanduser("~/.cache/carr/brief-check")))
+    root.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(f"{repo}/{number}".encode()).hexdigest()
+    with (root / (key + ".lock")).open("a+") as handle:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise BriefError("publication lock unavailable") from None
+                time.sleep(0.05)
+        try:
+            yield root / (key + ".pending")
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def post_comment(repo, number, report, *, gh=run_gh):
+    if not isinstance(report, dict):
+        raise BriefError("publication requires a checked report and a cleared source")
+    with _publication_lock(repo, number) as journal:
+        def verify_head():
+            current = json.loads(gh(guarded(["pr", "view", str(number), "-R", repo, "--json", "headRefOid"])))
+            if current.get("headRefOid") != report["head"]:
+                raise BriefError("PR head changed; obsolete report refused")
+        verify_head()
+        path = report.get("brief") or ""
+        if os.path.isabs(path) or ".." in path.split("/") or not path:
+            raise BriefError("local brief is not cleared for publication; use a brief tracked at the inspected head")
+        try:
+            source = json.loads(gh(guarded(["api", f"repos/{repo}/contents/{quote(path, safe='/')}?ref={report['head']}"])))
+            content = base64.b64decode(source["content"])
+            if source.get("type") != "file" or hashlib.sha256(content).hexdigest() != report["brief_sha256"]:
+                raise BriefError("local brief does not match the source published at the inspected head")
+        except (KeyError, ValueError, TypeError):
+            raise BriefError("brief source cannot be cleared for publication") from None
+        body = render_comment(report)
+        if len(body) > 65000:
+            raise BriefError("complete checklist exceeds the comment limit; publication refused without truncation")
+        login = json.loads(gh(guarded(["api", "user"]))).get("login")
+        if not login:
+            raise BriefError("authenticated comment author unavailable")
+        def mine():
+            comments = _json_stream(gh(guarded(["api", "--paginate", f"repos/{repo}/issues/{number}/comments"])))
+            return [c for c in comments if (c.get("body") or "").startswith(MARKER)
+                    and (c.get("user") or {}).get("login") == login]
+        comments = mine()
+        verify_head()
+        if comments:
+            chosen = min(comments, key=lambda c: c["id"])
+            # Converge prior duplicates without deleting someone else's record.
+            for extra in comments:
+                if extra["id"] != chosen["id"]:
+                    gh(guarded(["api", "-X", "PATCH", f"repos/{repo}/issues/comments/{extra['id']}", "-F", "body=@-"]),
+                       stdin="Superseded brief checklist. See the canonical checklist comment.")
+            args = ["api", "-X", "PATCH", f"repos/{repo}/issues/comments/{chosen['id']}", "-F", "body=@-"]
+        else:
+            if journal.exists() and journal.read_text():
+                raise BriefError("earlier POST outcome unresolved; read back the comment before another create")
+            journal.write_text(json.dumps({"head": report["head"], "body_sha256": hashlib.sha256(body.encode()).hexdigest()}))
+            args = ["api", "-X", "POST", f"repos/{repo}/issues/{number}/comments", "-F", "body=@-"]
+        verify_head()
+        try:
+            result = json.loads(gh(guarded(args), stdin=body))
+        except BriefError:
+            if "POST" not in args:
+                raise
+            found = mine()
+            matching = [c for c in found if c.get("body") == body]
+            if not matching:
+                raise BriefError("POST outcome uncertain; journal retained, no automatic retry") from None
+            result = matching[0]
+        journal.write_text("")
+        verify_head()
+        return result.get("html_url")
 
 
 # ── command line ──────────────────────────────────────────────────────────────
 
+def _git(checkout, *args):
+    try:
+        return subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _bound_base(checkout, repo, revision):
+    origin = _git(checkout, "remote", "get-url", "origin")
+    if origin is None or origin.returncode or not re.fullmatch(
+            r"(?:https://github.com/|git@github.com:|ssh://git@github.com/)" + re.escape(repo) + r"(?:\.git)?", origin.stdout.strip()):
+        raise BriefError("base checkout repository identity does not match the PR")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision or ""):
+        raise BriefError("exact PR base revision unavailable")
+    result = _git(checkout, "cat-file", "-t", revision)
+    if result is None or result.returncode:
+        fetched = _git(checkout, "fetch", "origin", revision)
+        if fetched is None or fetched.returncode:
+            raise BriefError("exact PR base revision could not be fetched")
+        result = _git(checkout, "cat-file", "-t", revision)
+    if result is None or result.returncode or result.stdout.strip() != "commit":
+        raise BriefError("exact PR base revision could not be verified")
+    return _git_exists(checkout, revision)
+
+
 def _git_exists(checkout, ref):
     def exists(path):
-        return subprocess.run(["git", "-C", checkout, "cat-file", "-e", f"{ref}:{path.rstrip('/')}"],
-                              capture_output=True).returncode == 0
+        revision = _git(checkout, "rev-parse", "--verify", f"{ref}^{{commit}}")
+        if revision is None or revision.returncode:
+            return None
+        result = _git(checkout, "ls-tree", "-z", revision.stdout.strip(), "--", path.rstrip('/'))
+        return bool(result.stdout) if result is not None and result.returncode == 0 else None
     return exists
+
+
+def report_status(report):
+    if report["brief_state"] == "changed since the builder ran":
+        return 2
+    return 1 if any(r["verdict"] == "not met" for r in report["requirements"]) else 0
 
 
 def _local_reference(checkout):
     def local(path):
-        return os.path.exists(os.path.join(checkout, path)) or subprocess.run(
-            ["git", "-C", checkout, "check-ignore", "-q", "--no-index", path], capture_output=True).returncode == 0
+        ignored = _git(checkout, "check-ignore", "-q", "--no-index", path)
+        return os.path.exists(os.path.join(checkout, path)) or bool(ignored and ignored.returncode == 0)
     return local
 
 
@@ -494,7 +668,7 @@ def main(argv=None):
     parser.add_argument("--stamp", metavar="BRIEF", help="print the brief-record instruction for a builder prompt")
     parser.add_argument("--brief", help="brief file (default: the Brief: line in the PR body)")
     parser.add_argument("--brief-root", help="where a relative Brief: path resolves (default: this repo's main checkout)")
-    parser.add_argument("--checkout", help="local clone of <repo> for base-branch lookups (default: ~/<repo name>)")
+    parser.add_argument("--checkout", help="clone of <repo> for exact PR base revision lookups (default: ~/<repo name>)")
     parser.add_argument("--post", action="store_true", help="create or update the one brief-check comment on the PR")
     parser.add_argument("--jev", action="store_true", help="ask Jev about the needs-judgment residue (paid, advisory)")
     parser.add_argument("--json", action="store_true", help="print the report as JSON instead of the comment")
@@ -507,7 +681,7 @@ def main(argv=None):
         parser.error("<owner/repo> <pr> are required unless --stamp is given")
 
     pr = json.loads(run_gh(["pr", "view", str(args.pr), "-R", args.repo, "--json",
-                            "number,url,headRefOid,baseRefName,body,files,statusCheckRollup"]))
+                            "number,url,headRefOid,baseRefOid,body,files,statusCheckRollup"]))
     brief_path = args.brief
     if not brief_path:
         stamp = read_stamp(pr.get("body"))
@@ -516,15 +690,24 @@ def main(argv=None):
             return 2
         root = args.brief_root or _main_checkout(REPO) or REPO
         brief_path = stamp[0] if os.path.isabs(stamp[0]) else os.path.join(root, stamp[0])
-    with open(brief_path, encoding="utf-8") as handle:
-        brief_text = handle.read()
+    try:
+        with open(brief_path, encoding="utf-8") as handle:
+            brief_text = handle.read()
+    except (OSError, UnicodeError) as exc:
+        raise BriefError(f"brief unavailable ({type(exc).__name__})") from None
 
     checkout = args.checkout or os.path.expanduser(f"~/{args.repo.split('/')[-1]}")
     has_checkout = os.path.isdir(os.path.join(checkout, ".git")) or os.path.isfile(os.path.join(checkout, ".git"))
+    base_lookup = None
+    if has_checkout:
+        try:
+            base_lookup = _bound_base(checkout, args.repo, pr.get("baseRefOid"))
+        except BriefError as exc:
+            print(f"brief-check: {exc}; base lookup remains unknown", file=sys.stderr)
     report = check(
         brief_text, pr,
-        exists_in_base=_git_exists(checkout, f"origin/{pr.get('baseRefName') or 'main'}") if has_checkout else None,
-        local_reference=_local_reference(checkout) if has_checkout else None,
+        exists_in_base=base_lookup,
+        local_reference=_local_reference(checkout) if base_lookup else None,
         brief_path=args.brief or read_stamp(pr.get("body"))[0])
     if args.jev:
         report["body"] = pr.get("body")
@@ -534,8 +717,10 @@ def main(argv=None):
     comment = render_comment(report)
     print(json.dumps(report, indent=2) if args.json else comment)
     if args.post:
-        print("posted:", post_comment(args.repo, args.pr, comment), file=sys.stderr)
-    return 1 if any(r["verdict"] == "not met" for r in report["requirements"]) else 0
+        if report_status(report) == 2:
+            raise BriefError("brief hash conflict must be resolved before publication")
+        print("posted:", post_comment(args.repo, args.pr, report), file=sys.stderr)
+    return report_status(report)
 
 
 if __name__ == "__main__":
