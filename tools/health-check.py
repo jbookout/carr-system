@@ -1325,6 +1325,17 @@ def _red(key, detail, *, subject="", count=1, hard_error=False, time_rolling=Fal
     return 1
 
 
+def _seat_health_rows():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
+    from seat_health import health_rows
+    try:
+        with open(os.path.join(REPO_ROOT, "out", "orch", "budget", "seat-health.json")) as source:
+            report = json.load(source)
+    except (OSError, ValueError):
+        report = {}
+    return health_rows(report)
+
+
 def _tailscale_row():
     spec = importlib.util.spec_from_file_location(
         "tailscale_health", os.path.join(REPO_ROOT, "ops", "tailscale_health.py"))
@@ -1817,6 +1828,19 @@ def _canonical_health():
         except Exception as e:
             print(f"  ⚠︎ {'credential health':<18} check failed ({type(e).__name__}: {e})")
             rc = _red("credential_health", f"check failed ({type(e).__name__}: {e})", hard_error=True)
+
+    if CANONICAL_SECTION == "all":
+        try:
+            for _seat_line in _seat_health_rows():
+                print("  " + _seat_line)
+                if _seat_line.startswith("FAIL"):
+                    rc = _red("ai_seat_health", _seat_line, time_rolling=True)
+        except (ImportError, TypeError, AttributeError):
+            _seat_detail = ("Seat health evidence unreadable; on breach: orchestrator repairs "
+                            "ops/seat-health.py and reruns the daily exact-value probes; "
+                            "auto-clear when all seats pass")
+            print("  FAIL " + _seat_detail)
+            rc = _red("ai_seat_health", _seat_detail, time_rolling=True)
 
     if CANONICAL_SECTION == "all":
         # Jev liveness compares the last usable provider receipt with a
