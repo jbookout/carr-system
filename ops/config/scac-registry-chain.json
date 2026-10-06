@@ -5576,6 +5576,62 @@
         "include_current_entry_set": false,
         "catalog_function": "ops.scac_mutation_catalog_v112_current()"
       }
+    },
+    {
+      "number": 113,
+      "version": "scac-mutation-registry.v113",
+      "predecessor": "scac-mutation-registry.v112",
+      "digest": "sha256:3347f2decef907eabf6fa89009e681a707d41ece14f53c91abbb6b63fa020208",
+      "source_set_digest": "sha256:26961565cfa794677fc1da2f33bbe0b0be3d9f6706cf3f2a58b58f002c0ea210",
+      "catalog_digest": "sha256:214c1ba13bfb7e90f434facfaaee6b172305ea8db7a73eaa0c39d03589d25de1",
+      "artifact_sha256": "14dd186819e559ba988e20609255183d156d3ca325e80e66a7922027d535e20b",
+      "path": "mcp-server/src/scac-mutation-registry.current.generated.js",
+      "catalog": {
+        "column_dml": {
+          "count": 12,
+          "digest": "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"
+        },
+        "relation_dml": {
+          "count": 319,
+          "digest": "sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"
+        },
+        "role_authority": {
+          "count": 13,
+          "digest": "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"
+        },
+        "secdef_execute": {
+          "count": 1246,
+          "digest": "sha256:6e7ec210c949fbd87f47d04260ae03d9b4ccac569beb7b5439f69f754ed429ae"
+        },
+        "job_definitions": {
+          "count": 2,
+          "digest": "sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"
+        },
+        "projection_version": "scac-db-catalog-projection.v113",
+        "runtime_dml_grants": {
+          "count": 331,
+          "digest": "sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"
+        }
+      },
+      "commit": "52044064c07a8124138869342a22be9a3520139d",
+      "source_count": 1145,
+      "entry_count": 2722,
+      "migration": "migrations/0852_one_step_rule_approval_scac_successor.sql",
+      "entry_set_digest": "sha256:97146113e273d0671889bde505642eb8dba2987e3de8876b4c4195dbaa3e3880",
+      "atomic_pair": [
+        "0851_one_step_rule_approval.sql",
+        "0852_one_step_rule_approval_scac_successor.sql"
+      ],
+      "strict_atomic": true,
+      "dependencies": [
+        "0846_leads_scac_successor.sql",
+        "0851_one_step_rule_approval.sql"
+      ],
+      "snapshot": {
+        "include_current_entry_set": true,
+        "catalog_function": "ops.scac_mutation_catalog_v113_current()"
+      },
+      "migration_sha256": "39d7330aab873fd93ebab761a47055c2398d2dfb9dafddc106584c1c3900140b"
     }
   ],
   "atomic_groups": [
@@ -5779,6 +5835,10 @@
     [
       "0845_lead_archived_stage.sql",
       "0846_leads_scac_successor.sql"
+    ],
+    [
+      "0851_one_step_rule_approval.sql",
+      "0852_one_step_rule_approval_scac_successor.sql"
     ]
   ],
   "strict_atomic_groups": [
@@ -5933,6 +5993,10 @@
     [
       "0845_lead_archived_stage.sql",
       "0846_leads_scac_successor.sql"
+    ],
+    [
+      "0851_one_step_rule_approval.sql",
+      "0852_one_step_rule_approval_scac_successor.sql"
     ]
   ],
   "inactive_atomic_groups": [
