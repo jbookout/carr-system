@@ -13,11 +13,12 @@ class OwnershipError(ValueError):
     pass
 
 
-REGISTRY_JS = re.compile(r"mcp-server/src/scac-mutation-registry(?:\.v[1-9][0-9]*)?\.generated\.js\Z")
+REGISTRY_JS = re.compile(r"mcp-server/src/scac-mutation-registry(?:\.v[1-9][0-9]*|\.current)?\.generated\.js\Z")
 MIGRATION = re.compile(r"migrations/([0-9]+[a-z]?)_(.+\.sql)\Z")
 GENERATED_SQL = re.compile(r"migrations/[0-9]+[a-z]?_.+_(?:scac_successor|registry_seal)\.sql\Z")
 JSON_ARTIFACTS = frozenset({
     "ops/config/scac-registry-full-entry-set-seals.json",
+    "ops/config/scac-registry-chain.json",
     "ops/config/scac-registry-source-inventory-fixtures.v1.json",
 })
 COUNT_NAMES = r"SCAC_(?:CURRENT_NUMBER|VERSION_COUNT|TOTAL_ENTRY_COUNT|CURRENT_ENTRY_COUNT|CURRENT_SOURCE_COUNT|FULL_SET_SEAL_COUNT)"
@@ -69,11 +70,26 @@ def _same_json(left, right):
 def is_owned_file(path, before, after):
     """Return whole-file ownership. None means absent, never an unreadable blob."""
     if REGISTRY_JS.fullmatch(path):
-        return path == "mcp-server/src/scac-mutation-registry.generated.js" or before is None and after is not None
+        return path in {"mcp-server/src/scac-mutation-registry.generated.js", "mcp-server/src/scac-mutation-registry.current.generated.js"} or before is None and after is not None
     if path in JSON_ARTIFACTS:
         old, new = (_generated_json(path, content) for content in (before, after))
         if old is None or new is None:
             return False
+        if path.endswith('scac-registry-chain.json'):
+            if len(new.get('versions', [])) != len(old.get('versions', [])) + 1:
+                return False
+            from pathlib import Path
+            import subprocess
+            from git_env import scrubbed_env
+            script = """import fs from 'node:fs';
+import {preservesRegistryChainHistory} from './ops/registry-chain.mjs';
+const {before,after}=JSON.parse(fs.readFileSync(0,'utf8'));
+process.exit(preservesRegistryChainHistory(before,after)?0:1);
+"""
+            result = subprocess.run(['node', '--input-type=module', '-e', script],
+                input=json.dumps({'before': old, 'after': new}).encode(),
+                cwd=Path(__file__).resolve().parents[1], env=scrubbed_env(), capture_output=True, timeout=120)
+            return result.returncode == 0
         if path.endswith('full-entry-set-seals.json'):
             if any(key not in new or not _same_json(new[key], value) for key, value in old.items()):
                 return False
