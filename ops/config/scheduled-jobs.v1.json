@@ -921,6 +921,73 @@
       "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
     },
     {
+      "label": "com.carr.flash-idle-stop",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "--heartbeat-interval",
+        "300",
+        "flash-idle-stop",
+        "launchd.run",
+        "~/carr-system/bin/flash-idle-stop"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 5
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 15
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 25
+          },
+          {
+            "Minute": 30
+          },
+          {
+            "Minute": 35
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 45
+          },
+          {
+            "Minute": 50
+          },
+          {
+            "Minute": 55
+          }
+        ],
+        "RunAtLoad": true
+      },
+      "expected_enabled": true,
+      "expected_installed": true,
+      "log_path": "~/carr-system/out/flash-idle-stop.log",
+      "log_paths": [
+        "~/carr-system/out/flash-idle-stop.log",
+        "~/carr-system/out/flash-idle-stop.log"
+      ],
+      "log_max_age_seconds": 900,
+      "owner": "orchestrator",
+      "done_signal": "local run-scheduled receipt ~/carr-system/out/run-scheduled-receipts/93dfeb445c72ae34.fbc9c66faebfd4b4db566c360b68b894.receipt",
+      "expectation_note": "Every-machine template added on main (flash-on-demand-lifecycle); declared from its repository template.",
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/93dfeb445c72ae34.fbc9c66faebfd4b4db566c360b68b894.receipt"
+    },
+    {
       "label": "com.carr.fleet-sync",
       "scheduler": "launchd",
       "program_arguments": [
@@ -1523,13 +1590,181 @@
             "Minute": 0
           },
           {
+            "Minute": 1
+          },
+          {
+            "Minute": 2
+          },
+          {
+            "Minute": 3
+          },
+          {
+            "Minute": 4
+          },
+          {
+            "Minute": 5
+          },
+          {
+            "Minute": 6
+          },
+          {
+            "Minute": 7
+          },
+          {
+            "Minute": 8
+          },
+          {
+            "Minute": 9
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 11
+          },
+          {
+            "Minute": 12
+          },
+          {
+            "Minute": 13
+          },
+          {
+            "Minute": 14
+          },
+          {
             "Minute": 15
+          },
+          {
+            "Minute": 16
+          },
+          {
+            "Minute": 17
+          },
+          {
+            "Minute": 18
+          },
+          {
+            "Minute": 19
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 21
+          },
+          {
+            "Minute": 22
+          },
+          {
+            "Minute": 23
+          },
+          {
+            "Minute": 24
+          },
+          {
+            "Minute": 25
+          },
+          {
+            "Minute": 26
+          },
+          {
+            "Minute": 27
+          },
+          {
+            "Minute": 28
+          },
+          {
+            "Minute": 29
           },
           {
             "Minute": 30
           },
           {
+            "Minute": 31
+          },
+          {
+            "Minute": 32
+          },
+          {
+            "Minute": 33
+          },
+          {
+            "Minute": 34
+          },
+          {
+            "Minute": 35
+          },
+          {
+            "Minute": 36
+          },
+          {
+            "Minute": 37
+          },
+          {
+            "Minute": 38
+          },
+          {
+            "Minute": 39
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 41
+          },
+          {
+            "Minute": 42
+          },
+          {
+            "Minute": 43
+          },
+          {
+            "Minute": 44
+          },
+          {
             "Minute": 45
+          },
+          {
+            "Minute": 46
+          },
+          {
+            "Minute": 47
+          },
+          {
+            "Minute": 48
+          },
+          {
+            "Minute": 49
+          },
+          {
+            "Minute": 50
+          },
+          {
+            "Minute": 51
+          },
+          {
+            "Minute": 52
+          },
+          {
+            "Minute": 53
+          },
+          {
+            "Minute": 54
+          },
+          {
+            "Minute": 55
+          },
+          {
+            "Minute": 56
+          },
+          {
+            "Minute": 57
+          },
+          {
+            "Minute": 58
+          },
+          {
+            "Minute": 59
           }
         ],
         "RunAtLoad": false

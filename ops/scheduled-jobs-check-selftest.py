@@ -511,6 +511,8 @@ class ManifestTests(unittest.TestCase):
         for name in sorted(p.name for p in (ROOT / "ops/launchd").glob("com.carr.*.plist")):
             path = ROOT / os.path.relpath(config.launchd_repo_path(name), config.REPO)
             template = plistlib.loads(portable(path.read_text()).encode())
+            self.assertIn(template["Label"], [j["label"] for j in self.raw["jobs"]],
+                          f"{name} has no manifest row; declare it in {MANIFEST.name}")
             job = self.row(self.raw, template["Label"])
             with self.subTest(label=job["label"]):
                 self.assertEqual(job["program_arguments"], template["ProgramArguments"])
