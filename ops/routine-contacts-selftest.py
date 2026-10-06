@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Contact routine behavior, with no database, model, or record writes."""
 import copy
 import datetime as dt
 import importlib.util
@@ -9,6 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("contacts", ROOT / "tools/routines/contact_enrichment.py")
+assert spec and spec.loader
 contacts = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(contacts)
 

@@ -47,6 +47,20 @@ def validate_timezone(localtime=Path('/etc/localtime')):
         raise ValueError('launchd calendar schedules require machine timezone America/Chicago')
 
 
+def retain_pool_inputs(repo):
+    source = repo / 'pipelines/radar/upstream'
+    target = repo / 'out/routines/radar/upstream'
+    for path in sorted(source.glob('*.json')):
+        destination = target / path.name
+        if destination.exists():
+            continue
+        content = path.read_bytes()
+        if not isinstance(json.loads(content), list):
+            raise ValueError(f'retained radar pool is not an array: {path.name}')
+        target.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+
+
 def install(repo, home, manifest, *, apply=False):
     if manifest.get('timezone') != TIMEZONE or not isinstance(manifest.get('jobs'), list):
         raise ValueError('routine manifest needs America/Chicago and a jobs array')
@@ -65,6 +79,7 @@ def install(repo, home, manifest, *, apply=False):
         return report
     validate_main(repo, home)
     validate_timezone()
+    retain_pool_inputs(repo)
     destination.mkdir(parents=True, exist_ok=True)
     (repo / 'out/routines').mkdir(parents=True, exist_ok=True)
     domain = f'gui/{os.getuid()}'
@@ -77,15 +92,27 @@ def install(repo, home, manifest, *, apply=False):
             raise RuntimeError(f"launchd readback failed for {job['label']}")
         if not state.returncode:
             subprocess.run(['/bin/launchctl', 'bootout', service], capture_output=True, check=True)
+        backups = destination / '_to_delete'
+        backups.mkdir(exist_ok=True)
+        backup = None
         if target.exists():
-            backups = destination / '_to_delete'
-            backups.mkdir(exist_ok=True)
             backup = backups / f'{target.name}.{stamp}'
             target.rename(backup)
-        target.write_bytes(raw)
-        target.chmod(0o644)
-        subprocess.run(['/bin/launchctl', 'bootstrap', domain, str(target)], capture_output=True, check=True)
-        subprocess.run(['/bin/launchctl', 'print', service], capture_output=True, check=True)
+        try:
+            target.write_bytes(raw)
+            target.chmod(0o644)
+            subprocess.run(['/bin/launchctl', 'bootstrap', domain, str(target)], capture_output=True, check=True)
+            subprocess.run(['/bin/launchctl', 'print', service], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            subprocess.run(['/bin/launchctl', 'bootout', service], capture_output=True)
+            if target.exists():
+                target.rename(backups / f'{target.name}.{stamp}.failed')
+            if backup:
+                backup.rename(target)
+                if not state.returncode:
+                    subprocess.run(['/bin/launchctl', 'bootstrap', domain, str(target)], capture_output=True, check=True)
+                    subprocess.run(['/bin/launchctl', 'print', service], capture_output=True, check=True)
+            raise
     report['mode'] = 'installed'
     return report
 

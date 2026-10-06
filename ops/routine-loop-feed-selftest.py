@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Read-only loop feed fixtures, including actual board/body read shapes."""
 import importlib.util
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("loop_feed", ROOT / "tools/routines/loop_feed.py")
+assert spec and spec.loader
 feed = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(feed)
 

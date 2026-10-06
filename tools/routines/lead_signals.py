@@ -1,4 +1,3 @@
-"""Weekly public NPPES and retained radar inputs, without model calls."""
 from __future__ import annotations
 
 import csv
@@ -218,14 +217,10 @@ def prepare(ctx):
         for url in urls:
             rows.extend(parse_weekly_zip(_fetch(url), as_of=as_of, source=url))
         pools = {}
-        # The new writers use out/routines/radar; existing repo-local retained inputs
-        # remain readable during cutover. No Drive path is read or written.
         for filename in POOLS:
-            for directory in (ROOT / "out/routines/radar/upstream", ROOT / "pipelines/radar/upstream"):
-                path = directory / filename
-                if path.exists():
-                    pools[filename] = json.loads(path.read_text())
-                    break
+            path = ROOT / "out/routines/radar/upstream" / filename
+            if path.exists():
+                pools[filename] = json.loads(path.read_text())
         reservoir = ctx.read("claim-card", {"include_needs_contact": True, "limit": 100000})
         claims = reservoir.get("candidates", [])
         if len(claims) < reservoir.get("claimable", len(claims)):
@@ -249,7 +244,6 @@ def prepare(ctx):
             and _text(c.get("city")).casefold() == _text(row.get("city")).casefold()
         ]
     refresh_state = fixture.get("pecos_state", {}) if fixture is not None else radar_inputs.load_state()
-    # Fixture previews exercise public refresh only when its inputs are supplied.
     refresh_pecos = radar_inputs.refresh_due(ctx.now, refresh_state) and (fixture is None or "pecos" in fixture)
     return {"work": bool(proposed) or refresh_pecos, "candidates": proposed, "lane_health": lane_health,
             "refresh_pecos": refresh_pecos, "pecos_state": refresh_state, "consumed_keys": sorted(consumed),
@@ -302,8 +296,6 @@ def execute(ctx, plan):
             continue
         sources = [{"url": url, "observed_at": ctx.now.isoformat()} for url in row["sources"] if url.startswith("https://")]
         if not sources:
-            # Retained pool provenance must resolve to a primary HTTPS source
-            # before identity intake; never stamp repo filenames as verification.
             reviews.append(ctx.review_item("Verify a new lead's source: " + row["name"],
                 json.dumps({"candidate": row["name"], "source_key": key, "sources": row["sources"],
                             "estimated_score": row["score"], "fix": "Resolve this retained radar signal to primary-source evidence before identity intake."})[:2000],

@@ -1,7 +1,5 @@
--- Scoped definer projections for jobs that hold no contact-table or ledger grant.
--- This migration ships as source. The build never applies it to production.
-begin;
-
+-- rollback: drop the five v_routine_* views; no base-table data or mutation privileges change.
+-- expand-contract: expand — scoped read views support code-owned routines with the existing carr_jobs credential.
 create or replace view public.v_routine_contact_inputs
 with (security_barrier=true) as
 with hydrated as (
@@ -57,5 +55,3 @@ comment on view public.v_routine_contact_inputs is
  'Code routine contact inputs: existing five-band enrichment priority, one person per slice, cap 40, contact exclusion and 30-day research retry receipt.';
 comment on view public.v_routine_effect_receipts is
  'Interrupted routine effect readback: only routine effect verbs and their envelope response, without other tool replies or credential columns.';
-
-commit;

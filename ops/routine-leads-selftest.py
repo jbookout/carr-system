@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Fixture checks for the lead routine's predicates, parsers, and write boundary."""
 import copy
 import csv
 import io

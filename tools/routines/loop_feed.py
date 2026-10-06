@@ -1,4 +1,3 @@
-"""Read the autonomous builder queue. This module has no write path."""
 import argparse
 import json
 from pathlib import Path

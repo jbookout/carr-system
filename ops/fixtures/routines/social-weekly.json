@@ -1,4 +1,5 @@
 {
+  "secrets": {"BLOTATO_API_KEY": true},
   "completed_week": null,
   "last_slot": "market-data",
   "banked_urls": [],

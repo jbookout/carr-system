@@ -137,6 +137,19 @@
         "mcp-server/src/model-role-store.v5.js",
         "tools/room-bridge/desks.py"
       ]
+    },
+    {
+      "id": "scheduled-routines",
+      "description": "Code predicates, subscription-only model routing and bounded research/draft prompts for the weekly routine migration.",
+      "globs": [
+        "ops/routines/jobs.v1.json",
+        "ops/routines/prompts/**",
+        "tools/routines/runtime.py",
+        "tools/routines/contact_enrichment.py",
+        "tools/routines/social_weekly.py",
+        "lib/headless_tasks.py",
+        "ops/config/control-plane-workflows.v1.json"
+      ]
     }
   ],
   "unsure": [

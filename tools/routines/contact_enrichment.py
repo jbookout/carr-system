@@ -1,4 +1,3 @@
-"""Select in code, research on the subscription, validate, then write via verbs."""
 import datetime as dt
 import hashlib
 import json

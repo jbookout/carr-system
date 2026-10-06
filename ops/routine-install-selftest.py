@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Fixture-only tests for routine plist rendering and explicit activation."""
 import importlib.util
 from pathlib import Path
 import plistlib
@@ -11,6 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('routine_install', ROOT / 'tools/routines/install.py')
+assert spec and spec.loader
 install = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(install)
 
@@ -21,6 +21,18 @@ JOBS = {'timezone': 'America/Chicago', 'jobs': [
 ]}
 
 class InstallerTests(unittest.TestCase):
+    def test_retained_pool_copy_uses_one_input_home_and_preserves_new_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            old = repo / 'pipelines/radar/upstream'
+            old.mkdir(parents=True)
+            (old / 'jobs.json').write_text('[{"source":"retained"}]')
+            install.retain_pool_inputs(repo)
+            target = repo / 'out/routines/radar/upstream/jobs.json'
+            self.assertEqual(target.read_text(), '[{"source":"retained"}]')
+            target.write_text('[{"source":"new"}]')
+            install.retain_pool_inputs(repo)
+            self.assertEqual(target.read_text(), '[{"source":"new"}]')
     def test_preview_has_no_files_or_launchctl_effects(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(install.subprocess, 'run', side_effect=AssertionError('preview cannot run commands')):
             home = Path(tmp)
@@ -41,6 +53,29 @@ class InstallerTests(unittest.TestCase):
         job = {**JOBS['jobs'][2], 'hour': 9}
         with self.assertRaises(ValueError):
             install.render(ROOT, Path('/Users/fixture'), job)
+
+    def test_failed_replacement_restores_previous_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            repo = home / 'carr-system'
+            (repo / 'ops/launchd').mkdir(parents=True)
+            for job in JOBS['jobs']:
+                shutil.copyfile(ROOT / 'ops/launchd' / f"{job['label']}.plist", repo / 'ops/launchd' / f"{job['label']}.plist")
+            target = home / 'Library/LaunchAgents/com.carr.routine-lead-signals-weekly.plist'
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b'previous installed fixture')
+            boots = []
+            def run(command, **kwargs):
+                if command[1] == 'bootstrap':
+                    boots.append(command)
+                    if len(boots) == 1:
+                        raise subprocess.CalledProcessError(1, command)
+                return subprocess.CompletedProcess(command, 0, stdout='', stderr='')
+            with patch.object(install, 'validate_main'), patch.object(install, 'validate_timezone'), patch.object(install.subprocess, 'run', side_effect=run):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    install.install(repo, home, JOBS, apply=True)
+            self.assertEqual(target.read_bytes(), b'previous installed fixture')
+            self.assertEqual(len(boots), 2)
     def test_apply_refuses_feature_tree_before_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):

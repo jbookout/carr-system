@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Fixture checks for the social routine's predicate and model boundary."""
 import copy
 import json
 from datetime import datetime, timezone
@@ -7,9 +6,9 @@ from pathlib import Path
 import sys
 import unittest
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(Path(__file__).parent))
-import social_weekly as social
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.routines import social_weekly as social
 
 FIXTURE = json.loads((ROOT / 'ops/fixtures/routines/social-weekly.json').read_text())
 

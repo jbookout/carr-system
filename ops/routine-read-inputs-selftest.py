@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Prove routine read grants in a private Unix-socket PostgreSQL cluster."""
 import importlib.util
 import datetime as dt
 import json

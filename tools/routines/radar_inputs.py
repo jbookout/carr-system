@@ -1,4 +1,3 @@
-"""Public quarterly PECOS refresh; retained pools never pretend to be fresh pulls."""
 from __future__ import annotations
 
 import json
@@ -21,7 +20,6 @@ def quarter(now):
 
 
 def refresh_due(now, state):
-    # A missed quarter is caught up on the next weekly firing, regardless of month.
     return state.get("quarter") != quarter(now)
 
 

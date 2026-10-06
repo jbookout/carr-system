@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""CLI entry point for the read-only builder loop feed."""
 from pathlib import Path
 import sys
 
