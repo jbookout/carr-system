@@ -115,6 +115,17 @@ class ContactTests(unittest.TestCase):
         self.assertNotIn("update-vendor", [v for v,_,_ in ctx.writes])
         self.assertIn("report-problem", [v for v,_,_ in ctx.writes])
 
+    def test_catch_all_category_never_creates_review_or_finding(self):
+        ctx = Context(); row = ctx.fixture["model_response"]["records"][0]
+        row["facts"] = [{"field": "category_slug", "value": "misc", "citations": ["https://example.com/team"]}]
+        with self.assertRaises(ValueError): contacts.execute(ctx, contacts.prepare(ctx))
+        self.assertEqual(ctx.writes, [])
+
+    def test_contact_state_change_prevents_vendor_and_finding_writes(self):
+        ctx = Context(); ctx.query = lambda *args: [{"version": 4, "contact_state": "do_not_contact", "merged_into": None}]
+        with self.assertRaises(RuntimeError): contacts.execute(ctx, contacts.prepare(ctx))
+        self.assertEqual(ctx.writes, [])
+
     def test_empty_research_is_recorded_without_contact_update(self):
         ctx = Context(); row = ctx.fixture["model_response"]["records"][0]
         row["facts"] = []; row["corrections"] = []

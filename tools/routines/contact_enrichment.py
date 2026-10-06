@@ -137,6 +137,8 @@ def validate_response(response, inputs):
                 for v in fact["value"]: text(v, field)
             else:
                 value = text(fact["value"], field)
+                if field == "category_slug" and value.casefold() in {"misc", "miscellaneous"}:
+                    raise ValueError("catch-all vendor categories are forbidden")
                 if field == "email" and (not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) or value.lower().endswith("@carr.us")):
                     raise ValueError("invalid or placeholder email")
                 if field in {"phone", "cell"} and (len(re.sub(r"\D", "", value)) not in {10,11}
@@ -198,6 +200,10 @@ def execute(ctx, plan):
         if not ctx.dry_run and row["ref"] in state.get("completed_contact_refs", []):
             continue
         original = records[row["ref"]]
+        if not ctx.dry_run:
+            current = ctx.query("select version,contact_state,merged_into from party where id=%s", (original["party_id"],))
+            if len(current) != 1 or current[0]["contact_state"] == "do_not_contact" or current[0]["merged_into"]:
+                raise RuntimeError("party contact eligibility changed during research")
         review = []
         contact_fields, vendor_fields = {}, {}
         for fact in row["facts"]:
