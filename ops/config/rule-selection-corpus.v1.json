@@ -1,6 +1,6 @@
 {
  "schema": "rule-selection-corpus.v1",
- "note": "Full active rule statements for judged rule selection, keyed by the record layer short id. Refreshed from live standing-context on 2026-09-23; the five retired rules were removed and three newly active rules added. Scope and active-state authority remain in the record layer. 2026-09-29: rule ede4b241 (cloud model choice) added ahead of its approval so its delivery route can be verified; it is proposed in the record layer until one approve-rule act by Joe.",
+ "note": "Full active rule statements for judged rule selection, keyed by the record layer short id. Refreshed from live standing-context on 2026-09-23; the five retired rules were removed and three newly active rules added. Scope and active-state authority remain in the record layer. 2026-09-29: rule ede4b241 (cloud model choice) added ahead of its approval so its delivery route can be verified; it is proposed in the record layer until one approve-rule act by Joe. Rule 729770dd is staged ahead of admission and approval; active-state authority remains in the store.",
  "rules": [
   {
    "id": "015183f5",
@@ -777,6 +777,12 @@
     "quote_absent": true,
     "tier_verdict": "shared"
    }
+  },
+  {
+   "id": "729770dd",
+   "gist": "EVERY FINDING GETS FIXED, WHATEVER ITS SEVERITY",
+   "statement": "EVERY FINDING GETS FIXED, WHATEVER ITS SEVERITY. When a test run, review or audit produces findings (e2e, architecture review, code review, QA), the fix work covers all of them \u2014 minor and polish included. Severity sets the ORDER of fixing, never whether a finding is fixed. A finding may be left unfixed only when the fixer shows it is not a defect, and the reason is written in the PR. Reports to Joe present the full count being fixed, not only the headline findings.",
+   "scope": {}
   },
   {
    "id": "72e06bdf",

@@ -820,6 +820,13 @@
    "summary": "Never pre-qualify leads before the board; present every lead with an estimated score, Joe qualifies.",
    "when": "lead board presentation"
   },
+  "729770dd": {
+   "class": "b",
+   "always_on": false,
+   "summary": "Fix every finding regardless of severity; show non-defect evidence in the PR and report the full count.",
+   "when": "writing a fixer or builder brief, triaging findings, or reporting findings to a partner",
+   "chars": 470
+  },
   "73381d78": {
    "always_on": true,
    "always_on_reason": "stop-gate:completion_evidence",

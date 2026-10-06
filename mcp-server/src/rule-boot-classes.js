@@ -9,7 +9,7 @@
 // at request time. A Worker has no filesystem, so this is a checked-in module.
 
 export const RULE_BOOT_CLASSES_SOURCE = "ops/config/rule-classes.v1.json";
-export const RULE_BOOT_CLASSES_DIGEST = "sha256:b1637bdefb79b6b5f962ef0c1bd663d4c4eadca5dccc51e90bb0ad63fb1c6364";
+export const RULE_BOOT_CLASSES_DIGEST = "sha256:f3d945b6272df0f7b1dcd2599c5f8775c40fbcff803115ee98d391085d727b8e";
 export const RULE_BOOT_BUDGET_TOKENS = 80000;
 export const RULE_BOOT_CHARS_PER_TOKEN = 3.6;
 
@@ -107,6 +107,7 @@ export const RULE_BOOT_CLASSES = Object.freeze({
   "70e372f0": Object.freeze({"cls": "c", "on": true, "summary": "When calibrating to Dell's style, learn only from what he says/asks/corrects; never assess his personality.", "when": "calibrating to Dell's working style"}),
   "7105955b": Object.freeze({"cls": "d", "on": true, "summary": "When closing a renumbered or superseded loop, use dropped and say it was superseded, not abandoned", "when": "loop_successor schema (close-loop verb)"}),
   "725dff46": Object.freeze({"cls": "a", "on": true, "summary": "Our vendor network belongs to the team; Dell's healthcare experience is his.", "when": "every turn"}),
+  "729770dd": Object.freeze({"cls": "b", "on": true, "summary": "Fix every finding regardless of severity; show non-defect evidence in the PR and report the full count.", "when": "writing a fixer or builder brief, triaging findings, or reporting findings to a partner"}),
   "72e06bdf": Object.freeze({"cls": "b", "on": true, "summary": "Never pre-qualify leads before the board; present every lead with an estimated score, Joe qualifies.", "when": "lead board presentation"}),
   "73381d78": Object.freeze({"cls": "d", "on": true, "summary": "After a config-file change, enumerate and verify every consumer, since format fixes for one can break another.", "when": "after config-file changes"}),
   "737a68d6": Object.freeze({"cls": "e", "on": true, "summary": "Duplicate of 204391be: a missing record-layer verb should be built immediately, not left manual", "when": "duplicate of 204391be"}),

@@ -475,13 +475,14 @@ def main() -> int:
         # Replay the real retirement repin, including its guarded preimage.
         # A hand-written fixture UPDATE would hide a missing/broken migration.
         cur.execute(RETIREMENT_REPIN.read_text(encoding="utf-8"), prepare=False)
+        cur.execute((REPO / "migrations/0850_repin_rule_delivery_activation_after_findings_rule.sql").read_text(encoding="utf-8"), prepare=False)
         cur.execute(
             """select count(*), count(*) filter (where map_digest=%s),
                       array_agg(short_id order by short_id)
                  from ops.rule_delivery_activation_target""",
             (current_map_digest,),
         )
-        check("retirement repins the exact targets to the current reviewed map",
+        check("forward repins preserve the exact targets to the current reviewed map",
               one(cur) == (len(EXPECTED_IDS), len(EXPECTED_IDS), sorted(EXPECTED_IDS)))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")

@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:da8595f9f67df270ab38e252c1f5ae6b92dcbb9ecc73830584e39ceaa09c369a",
+    "configuration_fingerprint": "sha256:2dad9e71119da2b2fc6f874ccebc5a16b663a2edf1d357b8239db2918670037e",
     "harness_id": "evals/rule-delivery/run_eval.py",
-    "harness_version": "3f049576a98b237d34ae4a664a287f8b1b13508d635838d06d9270e69ad2f4a6",
+    "harness_version": "67b55fe06856bc98dbe1a07461070f243f24183d47c442c733a31be9da24b4db",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a10f62-18c2-7a70-8adb-99a1a74992e3",
+    "native_session_ref": "01a11004-c20f-7e22-9201-1bfca24203dd",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -164,7 +164,7 @@
       },
       "candidate": {
         "path": "evals/rule-delivery/evidence/candidate.jsonl",
-        "sha256": "5c698f4df99dc6262169487b26ea705f580c8928c89ba4ca612704cb4bacacb8"
+        "sha256": "897fb7d8c015e650685ec64b504357eecfa9fcbbd0d9fb8ece6c5bfc5f94ac12"
       }
     },
     "dependencies": {
@@ -177,12 +177,12 @@
       "lib/rule_routes.py": "84f227f016caa8424bcd98bf0acb68424f22bc48437965d244de235f44f51d62",
       "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
       "ops/config/jev-cost-guard.v1.json": "8920873a41078dca949d8e31f50705e1330bcfa087b5260c22693f220488a2f8",
-      "ops/config/rule-classes.v1.json": "b659eeb6806156b7a518ac3cdb27963de583a7c174618857ccc7951b37463968",
-      "ops/config/rule-enforcement-map.json": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
-      "ops/config/rule-jev-triggers.v1.json": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
-      "ops/config/rule-jit-triggers.v1.json": "b0b23e68c4121e649b82f5d7f93704f1574e2a7ce798a5e3d823b1322c04dd59",
-      "ops/config/rule-routes.v1.json": "a430be96f45260f858f9ad021064a103d0b80cb32e3fbd04b9c9782b4c64714e",
-      "ops/config/rule-selection-corpus.v1.json": "90f0e31475f1cd2c445475f8742de3dc94b62a2474d581fcefb5429a5eae102f",
+      "ops/config/rule-classes.v1.json": "1d0cb6115f3670c6c022f8c99327c2ed4a11af79f8fad780e0c6e93f760a0d21",
+      "ops/config/rule-enforcement-map.json": "40f63e0f5ecf012a6b6137f3af34ed3a0bedc7a590e2a05f552fa47b9c65b74b",
+      "ops/config/rule-jev-triggers.v1.json": "2ebc46cd5ca789d9f22e111b48c717b3350508cc2a5e9184dc10f759bde166c1",
+      "ops/config/rule-jit-triggers.v1.json": "a28f7e3ad79957fda7a40ba223a862f27904db1034629d232c29cc3741661c5f",
+      "ops/config/rule-routes.v1.json": "8a7eccebaee71eb07c15c65711cb295d15b1d199c7cca9da3243a7b97f25630b",
+      "ops/config/rule-selection-corpus.v1.json": "9bdcd262edfee3c4e1c6674b74dbfbdc717d322d7b3d6449f91527b1f3af88a6",
       "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
       "ops/fixtures/real-replay/read-calls.jsonl": "19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
       "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
@@ -204,7 +204,7 @@
     },
     "source": {
       "evals/rule-delivery/make_report.py": "868f75651f7b80d6303d293a77ea151f4a8b69ed3ca49122cc474ac03ce86b26",
-      "evals/rule-delivery/run_eval.py": "3f049576a98b237d34ae4a664a287f8b1b13508d635838d06d9270e69ad2f4a6"
+      "evals/rule-delivery/run_eval.py": "67b55fe06856bc98dbe1a07461070f243f24183d47c442c733a31be9da24b4db"
     }
   },
   "grader": {
@@ -217,7 +217,7 @@
       "result": "pass"
     }
   },
-  "measured_on": "2026-10-05",
+  "measured_on": "2026-10-06",
   "min_useful_gain": 0.7,
   "noise_floor": 0.3,
   "notes": [

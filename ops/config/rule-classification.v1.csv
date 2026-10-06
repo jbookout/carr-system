@@ -92,6 +92,7 @@ id,layer,class,moment
 70e372f0,pack,c,calibrating to Dell's working style
 7105955b,control,d,loop_successor schema (close-loop verb)
 725dff46,pack,b,writing prospect-visible content
+729770dd,pack,b,"writing a fixer or builder brief, triaging findings, or reporting findings to a partner"
 72e06bdf,pack,b,lead board presentation
 73381d78,control,d,completion_evidence stop_gate - config-file change completion
 737a68d6,layer0,e,duplicate of 204391be

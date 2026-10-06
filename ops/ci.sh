@@ -861,6 +861,13 @@ PYEOF
            failures="$failures $inv"; tail -12 "$LOGDIR/gate-$inv.log" >&2; }
   done
 
+  local findings_args=()
+  if [ -n "${CARR_PR_BODY_FILE:-}" ]; then
+    findings_args=(--brief "$CARR_PR_BODY_FILE")
+  fi
+  run_quiet "$LOGDIR/gate-findings-coverage.log" "$PY" ops/findings-coverage-gate.py ${findings_args[@]+"${findings_args[@]}"} \
+    || { failures="$failures findings-coverage"; tail -12 "$LOGDIR/gate-findings-coverage.log" >&2; }
+
   # Did the suite move the tree it was invoked in? See tree_fingerprint() above.
   if [ "$(tree_fingerprint)" != "$tree_before" ]; then
     failures="$failures tree-mutated-by-selftests"

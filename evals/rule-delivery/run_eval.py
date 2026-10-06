@@ -328,6 +328,7 @@ def grade_observation(label, obs, labelled):
     false = {rid for rid in delivered - allowed if rid in labelled}
     prompt_false = {rid for rid in set(obs["prompt_delivered"]) - allowed if rid in labelled}
     return {"expected": sorted(expected), "delivered": sorted(delivered),
+            "labelled_delivered": sorted(delivered & labelled),
             "hit": sorted(hit), "missed": sorted(expected - delivered),
             "false": sorted(false), "prompt_false": sorted(prompt_false),
             "events": obs["events"], "tokens": obs["tokens"],
@@ -551,7 +552,7 @@ def summarize(rows):
     quiet = [x for x in d if not x["expected"]]
     n_exp = sum(len(x["expected"]) for x in d)
     n_hit = sum(len(x["hit"]) for x in d)
-    n_del = sum(len(x["delivered"]) for x in d)
+    n_del = sum(len(x["labelled_delivered"]) for x in d)
     n_false = sum(len(x["false"]) for x in d)
     events = sum(x["events"] for x in d)
     return {
@@ -650,6 +651,12 @@ def load_run(variant, split=None):
     path = os.path.join(RUNS, variant, "results.jsonl")
     with open(path, "r", encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
+    expectations = load_expectations()
+    labelled = set(expectations["labelled"])
+    for row in rows:
+        detail = row["detail"]
+        row["detail"] = grade_observation(expectations["cases"][row["prompt_id"]],
+                                         dict(detail, prompt_delivered=detail["prompt_false"]), labelled)
     return [r for r in rows if split in (None, "all", r["split"])]
 
 

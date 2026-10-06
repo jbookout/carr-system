@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def copy_ci(root):
-    for relative in ("ops/ci.sh", "ops/ci-quarantine.py", "ops/git_env.py",
+    for relative in ("ops/ci.sh", "ops/findings-coverage-gate.py", "ops/ci-quarantine.py", "ops/git_env.py",
                      "ops/config/ci-quarantine.json", "ops/config/ci-check-scope.json"):
         target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
