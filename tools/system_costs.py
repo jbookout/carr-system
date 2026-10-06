@@ -4,7 +4,6 @@ import calendar
 import json
 import hashlib
 import os
-import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,14 +15,12 @@ from statistics import median
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ops'))
-from jev_spend_health import _loop_lock, _save_state, _run_verb, _loop_version, USAGE_LOG
+from jev_spend_health import _loop_lock, _save_state, _run_verb, USAGE_LOG, FACTORY_USAGE_LOG, LOOP_STATE, ACTION
+from credential_env import load_carr_tokens
 
 SCHEMA = 'carr-system-costs.v1'
 ROOT = Path(__file__).resolve().parents[1]
-ACTION = ('on breach: open/update one deduplicated loop per provider · owner orchestrator · '
-          'remediation inspect named billing driver and remove duplicate work or reduce its usage; restore named billing reader and confirmed plan price for unknown coverage · '
-          'verify next complete UTC day <= 2x prior 14-day median and projection <= budget · '
-          'auto-clear after both checks pass with complete coverage')
+
 
 
 def amount(value):
@@ -95,10 +92,30 @@ def jev_usage(path, price, start=None, through=None):
                 rows.append({'day': day.isoformat(),
                              'usd': float(amount(tokens) * amount(price) / 1000000),
                              'driver': str(item.get('caller') or item.get('call_site') or 'unattributed')})
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, ArithmeticError, AttributeError):
                 unknown += 1
     return {'state': 'partial' if unknown else 'ready', 'reason': f'{unknown} unreadable/missing usage receipts' if unknown else None,
             'rows': rows, 'estimated': True}
+
+
+def jev_sources(local, price, start, through, extra_logs=(FACTORY_USAGE_LOG,)):
+    rows, reasons, seen = [], [], set()
+    for path in (local, *extra_logs):
+        path = Path(path).resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            source = jev_usage(path, price, start=start, through=through)
+            rows.extend(source['rows'])
+            if source.get('reason'):
+                reasons.append(source['reason'])
+        except (OSError, UnicodeError):
+            reasons.append('Local/factory Jev ledger unavailable')
+    # The current Worker verb exposes only today's aggregate. It cannot
+    # establish the closed-day history needed for projections or clearing.
+    reasons.append('Worker historical receipts unavailable; local/factory spend is a known lower bound')
+    return {'state': 'partial', 'rows': rows, 'reason': '; '.join(reasons), 'estimated': True}
 
 
 def summarize(config, sources, through, observed_at=None, month=None):
@@ -115,10 +132,14 @@ def summarize(config, sources, through, observed_at=None, month=None):
         if fixed is None and plan.get('annual_usd') is not None:
             fixed = float(amount(plan['annual_usd']) / 12)
         daily = defaultdict(lambda: defaultdict(Decimal))
+        invoices = defaultdict(Decimal)
         for row in source.get('rows', []):
             day = date.fromisoformat(row['day'])
             if start <= day <= through:
-                daily[day][str(row['driver'])] += amount(row['usd'])
+                if row.get('basis') == 'invoice':
+                    invoices[day.strftime('%Y-%m')] += amount(row['usd'])
+                else:
+                    daily[day][str(row['driver'])] += amount(row['usd'])
         series = []
         day = start
         while day <= through:
@@ -128,15 +149,27 @@ def summarize(config, sources, through, observed_at=None, month=None):
             series.append({'day': day.isoformat(), 'usd': float(sum(drivers.values())),
                            'drivers': {k: float(v) for k, v in sorted(drivers.items())}})
             day += timedelta(days=1)
+        for period, invoiced in invoices.items():
+            period_rows = [r for r in series if r['day'].startswith(period)]
+            accrued = sum(r['drivers'].get('Fixed subscription (daily accrual)', 0) for r in period_rows)
+            # Invoice totals include the plan charge. Keep only the excess
+            # over its known accrual, and never treat postings as a daily rate.
+            remainder = max(0, float(invoiced) - accrued)
+            if period_rows and remainder:
+                period_rows[-1]['drivers']['Invoice charges above fixed accrual'] = remainder
+                period_rows[-1]['usd'] += remainder
         current = [row for row in series if row['day'].startswith(month)]
         mtd = sum(row['usd'] for row in current)
-        accrued_fixed = float(amount(fixed) * elapsed / days_in_month) if fixed is not None else 0
-        projection = (float(fixed or 0) + (mtd - accrued_fixed) / elapsed * days_in_month) if elapsed else float(fixed or 0)
+        usage_mtd = sum(float(amount(r['usd'])) for r in source.get('rows', [])
+                        if r.get('basis') != 'invoice' and r['day'].startswith(month) and r['day'] <= through.isoformat())
+        projection = max(float(fixed or 0), float(invoices[month])) + (usage_mtd / elapsed * days_in_month if elapsed else 0)
         state = source['state']
         reasons = [source.get('reason')] if source.get('reason') else []
         if fixed is None:
             state = 'partial'
             reasons.append('subscription plan/price unconfirmed')
+        elif fixed > 0 and state == 'unavailable':
+            state = 'partial'
         sites = defaultdict(float)
         if provider == 'jev':
             for row in current:
@@ -236,18 +269,37 @@ def load_snapshot(path=ROOT / 'out/system-costs.json', now=None):
         return unavailable()
 
 
-def reconcile(report, path, run_verb=_run_verb):
-    """Persist write intents before record calls, so crash recovery reuses the exact payload."""
+def report_order(report):
+    stamp = datetime.fromisoformat(report.get('observed_at', report['through'] + 'T00:00:00+00:00').replace('Z', '+00:00'))
+    if stamp.tzinfo is None:
+        raise ValueError('report observation requires timezone')
+    return date.fromisoformat(report['through']), stamp.astimezone(timezone.utc)
+
+
+def cost_verb(name, payload):
+    return _run_verb(name, payload, allow_refusal=True)
+
+
+def reconcile(report, path, run_verb=cost_verb, *, legacy_path=None):
+    """Serialize durable intents; uncertain outcomes replay, refusals re-decide."""
     with _loop_lock(path):
         try:
             state = json.loads(Path(path).read_text())
         except FileNotFoundError:
-            state = {'open': {}, 'episodes': {}, 'pending': None}
-
-        def write(name, payload, provider, after):
-            state['pending'] = {'name': name, 'payload': payload, 'provider': provider, 'after': after}
-            _save_state(path, state)
-            complete_pending()
+            state = {'open': {}, 'episodes': {}, 'pending': None, 'revision': 0}
+        state.setdefault('revision', 0)
+        if legacy_path is not None and not state.get('legacy_imported'):
+            with _loop_lock(legacy_path):
+                try:
+                    legacy = json.loads(Path(legacy_path).read_text())
+                except FileNotFoundError:
+                    legacy = {}
+                if legacy.get('loop_id') and 'jev' not in state['open']:
+                    state['open']['jev'] = {'loop_id': legacy['loop_id'], 'fingerprint': '',
+                                            'through': legacy.get('day', report['through'])}
+                    state['episodes'].setdefault('jev', 1)
+                state['legacy_imported'] = True
+                _save_state(path, state)
 
         def complete_pending():
             pending = state.get('pending')
@@ -255,10 +307,17 @@ def reconcile(report, path, run_verb=_run_verb):
                 return
             answer = run_verb(pending['name'], pending['payload'])
             if answer.get('ok') is not True:
-                raise RuntimeError('loop action unconfirmed')
+                if answer.get('error') not in ('version_conflict', 'loop_not_open', 'key_reuse'):
+                    raise RuntimeError('loop action unconfirmed')
+                # A structured refusal confirms no write. A timeout or lost
+                # response leaves this intent intact for exact-key replay.
+                state['pending'] = None
+                state.setdefault('refusals', {})[pending['provider']] = str(answer['error'])
+                _save_state(path, state)
+                return
             provider = pending['provider']
             if pending['name'] == 'close-loop':
-                state['open'].pop(provider)
+                state['open'].pop(provider, None)
             else:
                 after = pending['after']
                 if pending['name'] == 'add-loop':
@@ -266,10 +325,39 @@ def reconcile(report, path, run_verb=_run_verb):
                         raise RuntimeError('loop id missing')
                     after['loop_id'] = answer['loop_id']
                 state['open'][provider] = after
+            state.get('refusals', {}).pop(provider, None)
             state['pending'] = None
             _save_state(path, state)
 
+        def remote_current(provider):
+            current = state['open'].get(provider)
+            if not current:
+                return None, None
+            answer = run_verb('read-loop', {'loop_id': current['loop_id']})
+            row = answer.get('loop', answer)
+            if row.get('loop_id') != current['loop_id'] or type(row.get('version')) is not int:
+                raise RuntimeError('read-loop returned no matching version')
+            if row.get('status', 'open') != 'open':
+                state['open'].pop(provider, None)
+                state.get('refusals', {}).pop(provider, None)
+                _save_state(path, state)
+                return None, None
+            return current, row['version']
+
+        def write(name, payload, provider, after):
+            state['revision'] += 1
+            manifest = json.dumps([name, provider, state['revision'], payload], sort_keys=True)
+            payload['idempotency_key'] = hashlib.sha256(manifest.encode()).hexdigest()
+            state['pending'] = {'name': name, 'payload': payload, 'provider': provider, 'after': after}
+            _save_state(path, state)
+            complete_pending()
+
         complete_pending()
+        highwater = state.get('highwater')
+        if highwater and report_order(report) < report_order(highwater):
+            return len(state['open'])
+        state['highwater'] = {key: report[key] for key in ('through', 'observed_at') if key in report}
+        _save_state(path, state)
         grouped = defaultdict(list)
         for alert in report.get('alerts', []):
             grouped[alert['provider']].append(alert)
@@ -278,17 +366,14 @@ def reconcile(report, path, run_verb=_run_verb):
                 f"{a['kind']}: ${a['amount_usd']:.3f} > ${a['threshold_usd']:.3f}; driver {a['driver']}" for a in alerts)
             body += '. ' + ACTION
             fingerprint = hashlib.sha256(body.encode()).hexdigest()
-            current = state['open'].get(provider)
+            current, version = remote_current(provider)
             if current and current['fingerprint'] == fingerprint:
                 continue
-            episode = state['episodes'].get(provider, 0)
             if not current:
-                episode += 1
-                state['episodes'][provider] = episode
-            key = hashlib.sha256(f'system-costs:{provider}:{episode}:{fingerprint}'.encode()).hexdigest()
-            payload = {'idempotency_key': key, 'body': body}
+                state['episodes'][provider] = state['episodes'].get(provider, 0) + 1
+            payload = {'body': body}
             if current:
-                payload.update(loop_id=current['loop_id'], base_version=_loop_version(run_verb, current['loop_id']))
+                payload.update(loop_id=current['loop_id'], base_version=version)
                 name = 'update-loop'
             else:
                 payload.update(kind='open_loop', domain='system', owner='claude', marker='none',
@@ -303,16 +388,17 @@ def reconcile(report, path, run_verb=_run_verb):
                 p['provider'] == provider and p['state'] == 'ready' for p in report['providers'])
             if not ready:
                 continue
-            write('close-loop', {'idempotency_key': hashlib.sha256(f"clear:{provider}:{state['episodes'][provider]}:{report['through']}".encode()).hexdigest(),
-                                 'loop_id': current['loop_id'], 'base_version': _loop_version(run_verb, current['loop_id']),
-                                 'resolution': 'done', 'outcome': f"Auto-clear: {provider} complete UTC day {report['through']} within daily and projection thresholds."},
-                  provider, {})
-    return len(state['open'])
+            current, version = remote_current(provider)
+            if current:
+                write('close-loop', {'loop_id': current['loop_id'], 'base_version': version,
+                                     'resolution': 'done', 'outcome': f"Auto-clear: {provider} complete UTC day {report['through']} within daily and projection thresholds."},
+                      provider, {})
+        return len(state['open'])
 
 
 def health_row(report, loop_result='not reconciled'):
     status = 'WARN' if report.get('alerts') else 'OK' if report['state'] == 'ready' else 'UNKNOWN'
-    total = sum(p['mtd_usd'] for p in report.get('providers', []))
+    total = sum(p.get('mtd_usd') or 0 for p in report.get('providers', []))
     return f"{status} system costs · known MTD ${total:.2f}; {report['state']} coverage; loops {loop_result} · {ACTION}"
 
 
@@ -326,14 +412,10 @@ def read_tokens():
     names = set(TOKEN_NAMES.values())
     tokens = {k: os.environ[k] for k in names if os.environ.get(k)}
     for filename in ('tokens.env', 'db.env'):
-        try:
-            for line in (Path.home() / '.config/carr' / filename).read_text().splitlines():
-                key, sep, value = line.partition('=')
-                key = key.strip()
-                if sep and key in names and value.strip() and key not in tokens:
-                    tokens[key] = value.strip().strip('\"').strip("'")
-        except FileNotFoundError:
-            pass
+        loaded = load_carr_tokens(names, path=Path.home() / '.config/carr' / filename)
+        for key, value in loaded.items():
+            if value and key not in tokens:
+                tokens[key] = value
     return tokens
 
 
@@ -357,10 +439,11 @@ def collect(config, tokens, fetch=get_json, now=None, jev_path=None):
         try:
             if provider == 'jev':
                 price = json.loads((ROOT / 'ops/config/jev-cost-guard.v1.json').read_text())['price_usd_per_million_input_tokens']
-                source = jev_usage(jev_path or USAGE_LOG, price, start=start, through=through)
+                source = jev_sources(jev_path or USAGE_LOG, price, start, through)
             elif provider == 'neon' and token:
                 cfg = config['neon']
-                base = {'from': start_iso, 'to': end_iso, 'granularity': 'daily', 'org_id': cfg['org_id'],
+                neon_start = max(start, now.date() - timedelta(days=60))
+                base = {'from': neon_start.isoformat() + 'T00:00:00Z', 'to': end_iso, 'granularity': 'daily', 'org_id': cfg['org_id'],
                         'metrics': ','.join(cfg['rates']), 'limit': 100}
                 projects, seen, cursor = [], set(), None
                 for _ in range(100):
@@ -368,7 +451,10 @@ def collect(config, tokens, fetch=get_json, now=None, jev_path=None):
                     response = fetch('https://console.neon.tech/api/v2/consumption_history/v2/projects?' + urllib.parse.urlencode(query),
                                      {'Authorization': f'Bearer {token}'})
                     projects.extend(response['projects'])
-                    cursor = response.get('pagination', {}).get('cursor')
+                    pagination = response.get('pagination', {})
+                    if not isinstance(pagination, dict):
+                        raise ValueError('invalid pagination')
+                    cursor = pagination.get('cursor')
                     if not cursor:
                         break
                     if cursor in seen:
@@ -382,6 +468,8 @@ def collect(config, tokens, fetch=get_json, now=None, jev_path=None):
                     continue
                 source = normalize('neon', {'projects': projects}, cfg['rates'])
                 source.update(estimated=True, reason=cfg.get('estimate_note'))
+                if neon_start > start:
+                    source.update(state='partial', reason='Older daily history outside Neon 60-day retention; known retained costs only')
             elif provider == 'github' and token:
                 combined = []
                 for period in (start, first):
@@ -421,7 +509,7 @@ def collect(config, tokens, fetch=get_json, now=None, jev_path=None):
                     if item.get('currency', '').lower() != 'usd':
                         raise ValueError('non USD billing')
                     if item.get('type') == 'invoice' and item.get('action') in ('charge', 'invoice'):
-                        source['rows'].append({'day': item['occurred_at'][:10], 'usd': float(amount(item['amount'])), 'driver': 'Invoice charge'})
+                        source['rows'].append({'day': item['occurred_at'][:10], 'usd': float(amount(item['amount'])), 'driver': 'Invoice charge', 'basis': 'invoice'})
             elif provider in ('grok', 'domains'):
                 source['reason'] = (f'{name} present but billing contract/reader unconfigured' if token else f'Missing {name}')
                 source['reason'] += '; subscription/renewal totals supplied by committed config'
@@ -429,7 +517,7 @@ def collect(config, tokens, fetch=get_json, now=None, jev_path=None):
                 source['reason'] = f'Missing {name} with Plan:read; repo-scoped gh token is not billing authority'
         except urllib.error.HTTPError as exc:
             source = {'state': 'unavailable', 'reason': f'{name} billing HTTP {exc.code}', 'rows': []}
-        except (OSError, ValueError, KeyError, TypeError, ArithmeticError):
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError, AttributeError):
             source = {'state': 'unavailable', 'reason': f'{provider} billing source unreadable or invalid', 'rows': []}
         sources[provider] = source
     return summarize(config, sources, through, observed_at=now.isoformat(), month=first.strftime('%Y-%m'))
@@ -446,20 +534,40 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = json.loads(args.config.read_text())
     report = collect(config, read_tokens(), jev_path=args.jev_log)
-    _save_state(args.output, report)
-    loop_result = reconcile(report, args.output.with_name('system-cost-loops.json')) if args.alerts else 'disabled'
-    if args.publish:
-        import progress_board
-        if not progress_board.state_path('system-costs').exists():
-            try:
-                progress_board.command_init(argparse.Namespace(project='system-costs', title='System costs'))
-            except SystemExit as exc:
-                # create_json reports a concurrent exclusive create as SystemExit.
-                # An init/publication failure must still fail this collector run.
-                if str(exc) != 'board already exists: system-costs' or not progress_board.state_path('system-costs').exists():
-                    raise
-                progress_board.publish_board('system-costs')
-        else:
-            progress_board.publish_board('system-costs')
+    coordinator = ROOT / 'out/system-cost-collector.json'
+    with _loop_lock(coordinator):
+        try:
+            previous = json.loads(coordinator.read_text())
+        except FileNotFoundError:
+            previous = None
+        candidates = [previous] if previous else []
+        for path in {args.output, ROOT / 'out/system-costs.json'}:
+            snapshot = load_snapshot(path)
+            if snapshot['state'] != 'unavailable':
+                candidates.append(snapshot)
+        previous = max(candidates, key=report_order) if candidates else None
+        if previous and report_order(report) < report_order(previous):
+            _save_state(coordinator, {key: previous[key] for key in ('through', 'observed_at')})
+            print('Ignored stale system cost collection; newer evidence retained')
+            return 0
+        _save_state(args.output, report)
+        _save_state(coordinator, {key: report[key] for key in ('through', 'observed_at')})
+        loops_path = ROOT / 'out/system-cost-loops.json'
+        loop_result = reconcile(report, loops_path, legacy_path=LOOP_STATE) if args.alerts else 'disabled'
+        refusals = json.loads(loops_path.read_text()).get('refusals', {}) if args.alerts and loops_path.exists() else {}
+        if refusals:
+            loop_result = f"{loop_result} open; refused providers {', '.join(sorted(refusals))}"
+        if args.publish:
+            import progress_board
+            published_costs = load_snapshot(args.output)
+            if not progress_board.state_path('system-costs').exists():
+                try:
+                    progress_board.command_init(argparse.Namespace(project='system-costs', title='System costs', costs=published_costs))
+                except SystemExit as exc:
+                    if str(exc) != 'board already exists: system-costs' or not progress_board.state_path('system-costs').exists():
+                        raise
+                    progress_board.publish_board('system-costs', costs=published_costs)
+            else:
+                progress_board.publish_board('system-costs', costs=published_costs)
     print(health_row(report, loop_result))
-    return 0 if report['state'] == 'ready' else 1
+    return 0 if report['state'] == 'ready' and not refusals else 1

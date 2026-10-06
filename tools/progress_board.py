@@ -1946,7 +1946,7 @@ def cost_snapshot_reader() -> Callable:
     return module.load_snapshot
 
 
-def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+def board_snapshot(state: dict[str, Any], *, costs=None) -> dict[str, Any]:
     """The versioned data contract the app page renders, including fresh local
     cost evidence. Full diagnostics stay local; the app receives bounded cards."""
     tasks = {}
@@ -1986,7 +1986,7 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         # When GitHub facts were last checked and verified, and what failed:
         # a card kept from before an outage is never shown as fresh.
         "github_sync": state.get("github_sync"),
-        "costs": cost_snapshot_reader()(REPO_ROOT / "out" / "system-costs.json", now=now_utc()),
+        "costs": costs if costs is not None else cost_snapshot_reader()(REPO_ROOT / "out" / "system-costs.json", now=now_utc()),
         "omitted": {"live": 0, "merged": 0, "history": 0},
         "updated_at": state.get("updated_at"),
     })
@@ -2034,12 +2034,12 @@ def publish_external_inventory(cache: dict[str, Any]) -> dict[str, Any]:
             'schema': 'system-work-external.v2', 'pages': pages, 'item_count': len(cache['items'])}
 
 
-def publish_board(project: str) -> dict[str, int]:
+def publish_board(project: str, *, costs=None) -> dict[str, int]:
     state = read_state(project)
     board = safe_project(project)
     before = call_verb("read-progress-board", {"board_id": board})
     remote_snapshot = before.get("snapshot")
-    snapshot = board_snapshot(state)
+    snapshot = board_snapshot(state, costs=costs)
     if board == "carr-v5":
         from system_work_cache import cached_github
         snapshot["external_inventory"] = publish_external_inventory(cached_github(board_dir() / "system-work-github-cache.json",
@@ -2230,7 +2230,10 @@ def command_init(args: argparse.Namespace) -> None:
     }
     with board_lock(args.project):
         create_json(state)
-    refresh_and_publish(args.project)
+    if getattr(args, "costs", None) is not None:
+        publish_board(args.project, costs=args.costs)
+    else:
+        refresh_and_publish(args.project)
 
 
 def command_task(args: argparse.Namespace) -> None:

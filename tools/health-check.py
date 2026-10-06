@@ -1333,14 +1333,18 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+def _system_cost_row():
+    import system_costs
+    snapshot = system_costs.load_snapshot(os.path.join(REPO_ROOT, 'out/system-costs.json'))
+    return snapshot, system_costs.health_row(snapshot, 'nightly collector owns reconciliation')
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
     if CANONICAL_SECTION == "all":
-        import system_costs
-        _cost_snapshot = system_costs.load_snapshot(os.path.join(REPO_ROOT, 'out/system-costs.json'))
-        _cost_line = system_costs.health_row(_cost_snapshot, 'nightly collector owns reconciliation')
+        _cost_snapshot, _cost_line = _system_cost_row()
         print("  " + _cost_line)
         if _cost_snapshot['state'] != 'ready' or _cost_snapshot['alerts']:
             rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable')
