@@ -14,7 +14,21 @@ await pool.query(`create table tool_call (
   idempotency_key text primary key, verb text not null, actor_id uuid not null,
   request_hash text not null, response jsonb not null,
   created_at timestamptz not null default now())`);
-await pool.query(readFileSync(new URL('../../migrations/0857_jev_spend_attempt_index.sql', import.meta.url), 'utf8'));
+const migrationClient = await pool.connect();
+let migrationSettings;
+try {
+  await migrationClient.query('begin');
+  await migrationClient.query(readFileSync(new URL('../../migrations/0857_jev_spend_attempt_index.sql', import.meta.url), 'utf8'));
+  migrationSettings = (await migrationClient.query(`select
+    current_setting('lock_timeout') lock_timeout,
+    current_setting('statement_timeout') statement_timeout`)).rows[0];
+  await migrationClient.query('commit');
+} catch (error) {
+  await migrationClient.query('rollback');
+  throw error;
+} finally {
+  migrationClient.release();
+}
 // The receipt sink is a database fixture; admission/insertion uses the
 // production reservation function, and no provider is configured.
 await pool.query(`create schema ops;
@@ -22,6 +36,10 @@ await pool.query(`create schema ops;
     text,text,text,text,jsonb,jsonb,uuid,text,text) returns table(receipt_id uuid, recorded_at timestamptz)
     language sql as 'select gen_random_uuid(), clock_timestamp()'`);
 test.after(() => pool.end());
+
+test('index migration bounds both lock acquisition and build time', () => {
+  assert.deepEqual(migrationSettings, { lock_timeout: '2s', statement_timeout: '30s' });
+});
 
 async function reserve(attribution = who, registry = spendPolicy, cost = costPolicy) {
   const c = await pool.connect();
