@@ -24,6 +24,8 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
 import jev_outage_health as _jev_outage
+import flashlib
+from lib.credential_file import read_env_file
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -106,8 +108,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -116,6 +118,22 @@ def _reader_args(argv):
 RECOVERY_MODE, RECOVERY_REASON, VAULT, CANONICAL_SECTION, CANONICAL_FIXTURE, FINDINGS_JSON_PATH, \
     _READER_REST = _reader_args(sys.argv[1:])
 sys.argv[1:] = _READER_REST
+
+
+def _headless_rows():
+    sys.path.insert(0, REPO_ROOT)
+    from pathlib import Path
+    from lib.headless_tasks import health_rows
+    return health_rows(Path(REPO_ROOT), Path.home())
+
+
+if CANONICAL_SECTION == "headless":
+    _rows = _headless_rows()
+    for _row in _rows:
+        print(_row["line"])
+    if not _rows:
+        print("OK headless — no installed headless task plists")
+    sys.exit(int(any(row["status"] == "WARN" for row in _rows)))
 
 
 def _jev_spend_row():
@@ -127,6 +145,45 @@ def _jev_spend_row():
     return jev_spend_health, jev_spend_health.check_spend(
         extra_logs=[jev_spend_health.FACTORY_USAGE_LOG],
         worker_usage=jev_spend_health.read_worker_usage)
+
+
+def _jev_paid_cap_row():
+    try:
+        client_path = os.path.join(REPO_ROOT, "ops", "typesafe_client.py")
+        spec = importlib.util.spec_from_file_location("jev_cap_client", client_path)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        return client.paid_cap_health()
+    except Exception as exc:
+        return (f"UNKNOWN jev paid cap — {type(exc).__name__} · on breach: "
+                "owner orchestrator · remediation restore the cap reader/configuration · "
+                "verify rerun health · auto-clear on successful read")
+
+
+def _jev_site_spend_row():
+    """Today's paid Jev attempts per registered call site, against its budget."""
+    try:
+        client_path = os.path.join(REPO_ROOT, "ops", "typesafe_client.py")
+        spec = importlib.util.spec_from_file_location("jev_site_client", client_path)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        return client.spend_by_site_health()
+    except Exception as exc:
+        return (f"UNKNOWN jev spend by site — {type(exc).__name__} · on breach: "
+                "owner orchestrator · remediation restore ops/config/jev-call-sites.v1.json "
+                "or the cap reader · verify rerun health · auto-clear on successful read")
+
+
+def _grok_session_row():
+    try:
+        sys.path.insert(0, os.path.join(REPO_ROOT, "ops"))
+        from grok_session import health_row
+        line = health_row()
+        return line, int(line.startswith("FAIL") or "FAILED" in line)
+    except Exception as exc:
+        return (f"UNAVAILABLE Grok session — {type(exc).__name__} · on breach: "
+                "owner orchestrator · remediation restore the Grok reader/lock storage · "
+                "verify rerun health · auto-clear on successful read", 1)
 
 
 if CANONICAL_SECTION == "jev-spend":
@@ -1262,12 +1319,40 @@ def _red(key, detail, *, subject="", count=1, hard_error=False, time_rolling=Fal
     return 1
 
 
+def _tailscale_row():
+    spec = importlib.util.spec_from_file_location(
+        "tailscale_health", os.path.join(REPO_ROOT, "ops", "tailscale_health.py"))
+    if spec is None or spec.loader is None:
+        raise ImportError("Tailscale health loader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
+
+
+def _branch_janitor_row():
+    sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+    from branch_retirement import health
+    return health(REPO_ROOT)
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
+        _cap_line = _jev_paid_cap_row()
+        print("  " + _cap_line)
+        if _cap_line.startswith(("HIT", "UNKNOWN")):
+            rc = _red("jev_paid_cap", _cap_line, hard_error=_cap_line.startswith("UNKNOWN"))
+        for _subject, _count in re.findall(r"(pending|failed)=(\d+)", _cap_line):
+            if int(_count):
+                rc = _red("jev_spend_alert", _cap_line, subject=_subject, count=int(_count))
+        _site_line = _jev_site_spend_row()
+        print("  " + _site_line)
+        if " over budget: " in _site_line or _site_line.startswith("UNKNOWN"):
+            rc = _red("jev_site_budget", _site_line, hard_error=_site_line.startswith("UNKNOWN"))
     try:
-        snap = _canonical_snapshot()
+        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session") else _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
         _red("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
@@ -1283,6 +1368,11 @@ def _canonical_health():
         return 1
 
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        flash_line = flashlib.health_row()
+        print("  " + flash_line)
+        if flash_line.startswith("WARN"):
+            rc = _red("flash_residency", flash_line)
     for error in snap.get("errors", []):
         print(f"  ⚠︎ canonical source UNREADABLE — {error}")
         rc = _red("source_unreadable", str(error), hard_error=True)
@@ -1342,6 +1432,12 @@ def _canonical_health():
                       f"all receipted inside 26h{_carried}")
 
     if CANONICAL_SECTION in ("all", "jobs"):
+        for headless_row in _headless_rows():
+            print("  " + headless_row["line"])
+            if headless_row["status"] == "WARN":
+                rc = _red("headless_"+headless_row["reason"], headless_row["line"],
+                          subject=headless_row["task_id"],
+                          hard_error=headless_row["hard_error"], time_rolling=headless_row["time_rolling"])
         print("Schedule drift — durable Control Plane job state")
         jobs = snap.get("jobs")
         definitions = snap.get("job_definitions")
@@ -1535,6 +1631,13 @@ def _canonical_health():
             if _needs_attention:
                 rc = _red("repo_loose_work", f"{len(_actionable)} actionable path(s)", count=len(_actionable))
 
+    if CANONICAL_SECTION in ("all", "credentials", "grok-session"):
+        _grok_line, _grok_rc = _grok_session_row()
+        print("  " + _grok_line)
+        if _grok_rc:
+            rc = _red("grok_session", _grok_line,
+                      hard_error=_grok_line.startswith("UNAVAILABLE"), time_rolling=True)
+
     if CANONICAL_SECTION in ("all", "credentials"):
         # The source log is canonical across worktrees. The row carries its
         # response action on both OK and WARN, and the helper owns one loop.
@@ -1684,7 +1787,7 @@ def _canonical_health():
             _action = _jev_outage.action(_joh.get("reason"))
             _outcome = _jev_outage.reconcile(
                 _joh, _loop_state,
-                lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+                _jev_outage.call_verb)
             if _joh["status"] == "warn":
                 _last = (f"last success {_joh['age_hours']}h ago"
                          if _joh["age_hours"] is not None else "no usable call recorded")
@@ -1757,6 +1860,31 @@ def _canonical_health():
             _detail = f"check failed ({type(e).__name__}: {e})"
             print(f"  ⚠︎ {'jev receipts':<18} {_detail}")
             rc = _red("jev_call_receipt_integrity", _detail, hard_error=True)
+
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        print("Branch retirement — local scheduled receipts")
+        try:
+            line, failed = _branch_janitor_row()
+            print("  " + line)
+            if failed:
+                rc = _red("branch_janitor", line, subject="three-repo-retirement")
+        except Exception as exc:
+            line = (f"branch janitor unavailable ({type(exc).__name__}) · on breach: owner orchestrator "
+                    "· restore lib/branch_retirement.py · verify health · auto-clear after successful readback")
+            print("  WARN " + line)
+            rc = _red("branch_janitor", line, subject="three-repo-retirement")
+
+    if CANONICAL_SECTION in ("all", "tailscale"):
+        try:
+            line, failed = _tailscale_row()
+            print(line)
+            if failed:
+                rc = _red("tailscale", line.strip(), subject="local-node", hard_error=True)
+        except Exception as exc:
+            detail = (f"Tailscale check unavailable ({type(exc).__name__}) · on breach: "
+                      "owner orchestrator · fix: restore ops/tailscale_health.py · "
+                      "verify: rerun health · auto-clear: next successful node read")
+            rc = _red("tailscale", detail, subject="local-node", hard_error=True)
 
     # WHOLE-RUN backstop, alongside the static AST proof in tools/health-
     # check-findings-selftest.py (round 8 of an independent review of PR
@@ -1966,12 +2094,10 @@ GATES = {
 
 
 def _keys_in_env_file():
-    """Key names declared in db.env, parsed as text. Never sources, never stores values."""
+    """Key names whose value LOADS from db.env through lib/credential_file, the
+    reader every Python job uses. Never sources, never stores values."""
     try:
-        with open(DB_ENV) as fh:
-            return {ln.split("=", 1)[0].strip()
-                    for ln in fh
-                    if "=" in ln and not ln.lstrip().startswith("#") and ln.split("=", 1)[1].strip()}
+        return {name for name, value in read_env_file(DB_ENV).items() if value}
     except OSError:
         return set()
 
@@ -2569,18 +2695,11 @@ else:
             if ("/migrations/" in _f or "node_modules" in _f or "/corpus/" in _f
                     or f"import_{_n}" in _f):
                 continue
-            # A WATCHER NAMING A FILE IS NOT A CONSUMER OF IT. Added 2026-08-09,
-            # same council pass. Five of the six deprecation rows warned solely
-            # because THIS file's own WATCH list holds those filenames, and
-            # parity-lead-board.py is the test harness that dies with them. The
-            # check was its own dependency, so the register could never go green
-            # and had printed the identical six warnings since 2026-08-02. That
-            # is not a harmless cosmetic: a row that is chronically red detects
-            # nothing, and this system has already been bitten by it once — on
-            # 2026-08-08 a plugin install deleted the entire hooks block and the
-            # catastrophic wipe printed the same headline as a benign stale row,
-            # so all five gates were off for a day and it was found by accident.
-            if os.path.basename(_f) in ("health-check.py", "parity-lead-board.py"):
+            # A WATCHER NAMING A FILE IS NOT A CONSUMER OF IT. health-check.py's
+            # WATCH list names deprecated files to detect their remaining users.
+            # Skip this watcher so its own list does not count as a dependency
+            # and keep the warning active after the last consumer is removed.
+            if os.path.basename(_f) == "health-check.py":
                 continue
             try:
                 _lines = open(_f, errors="replace").read().splitlines()
@@ -3246,6 +3365,18 @@ except Exception as e:
 # --- the doctrine store (P4/P5, 2026-08-08; decisions 82a2fb62 + import door) -
 # Every row prints its bound action inline (rule 590b11e1: no metric without a
 # bound action, visible in the render itself). A failed read is never all-clear.
+print("\nrule delivery")
+try:
+    from ops.rule_recall_health import check_local as _check_rule_recall
+    _line = _check_rule_recall(REPO_ROOT)
+    print("  " + _line)
+    if not _line.startswith("OK"):
+        rc = 1
+except Exception as e:
+    from ops.rule_recall_health import ACTION as _recall_action
+    print(f"  UNAVAILABLE rule recall — {type(e).__name__}; warning retained · {_recall_action}")
+    rc = 1
+
 print("\ndoctrine store")
 try:
     _q = ("select "

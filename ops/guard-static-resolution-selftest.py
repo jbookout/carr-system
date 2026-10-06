@@ -104,6 +104,10 @@ MUST_ALLOW.extend(("sanctioned static command", cases.bash(command)) for command
     "git status > out/status 2>&1", "git status | head -20",
     "echo '<<' 'EOF'", "echo ';' '|' '(' ')'",
     "perl -pi -e 's/a/b/' ops/fixture.py",
+    "export MODE=$MODE; git status",
+    "declare -x MODE=$MODE; git status",
+    "read -r MODE <<< test; git status",
+    "read -a modes <<< test; git status",
 ))
 
 def main():
@@ -163,6 +167,17 @@ def main():
             "PATH+=/tmp git status", "export PATH+=/tmp; git status",
             "typeset -x path=/tmp; git status", "path=/tmp git status",
             "export PATH[1]=/tmp; git status",
+            f"key=PATH; export $key={path}; {payload}",
+            f"read PATH <<< {path}; {payload}",
+            f"key=PATH; export $key={path}; git --version",
+            f"read PATH <<< {path}; git --version",
+            f"key=PATH; declare -x $key={path}; git --version",
+            f"key=path; typeset $key={path}; git --version",
+            f"read -r PATH <<< {path}; git --version",
+            f"read -a path <<< {path}; git --version",
+            f"read -p PATH ignored; git --version",
+            f"printf '%s' {path} | read PATH; git --version",
+            f"key=PATH; read $key <<< {path}; git --version",
         ):
             identity_total += 1
             code, error = cases.run(cases.bash(command, cwd=cases.REPO))

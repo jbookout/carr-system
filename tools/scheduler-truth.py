@@ -80,7 +80,7 @@ WRAPPER_EXEMPT = {
     # run row from the wrapper can ask it.
     #
     # THE MISSING SIGNAL IS NO LONGER MISSING (2026-08-14). bin/probe-keepalive.py
-    # asks the question every 10 minutes and records the answer, so these three
+    # asks the question every 10 minutes and records the answer, so these servers
     # are exempt from the WRAPPER while being fully observed — which is a
     # different state from the one this list described when it was written, and
     # worth spelling out so nobody "fixes" the exemption by wrapping them.
@@ -89,6 +89,9 @@ WRAPPER_EXEMPT = {
                  "per restart",
     "doc-engine": "KeepAlive server — probed by bin/probe-keepalive.py (TCP "
                   "connect to 127.0.0.1:4680); same wrapper reason as call-mode",
+    "canary-ingest-sink": "KeepAlive server — probed by bin/probe-keepalive.py "
+                          "(TCP connect to 127.0.0.1:4684) on its installation "
+                          "machine; the wrapper would record one row per restart",
     "quill-dictate": "KeepAlive server — probed by bin/probe-keepalive.py, "
                      "process liveness only (no port to knock on); same wrapper "
                      "reason as call-mode",

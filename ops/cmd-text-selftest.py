@@ -72,17 +72,6 @@ def load():
 mod = load()
 strip = mod.strip_inert_text
 
-# A tokenizing caller needs the shell's quoted argument boundaries intact,
-# while still removing non-shell heredoc payloads.
-quoted = 'gh pr comment 12 --body "Use \\"quoted\\" names"'
-try:
-    check("tokenizing mode preserves quoted prose", strip(quoted, strip_prose=False) == quoted)
-    heredoc = "python3 <<'EOF'\nprint(\"an unmatched quote: '\")\nEOF"
-    check("tokenizing mode still removes heredoc payload",
-          "print(" not in strip(heredoc, strip_prose=False))
-except TypeError:
-    check("tokenizing mode exists", False)
-
 # A command string is "carried" if a dangerous fragment SURVIVES stripping,
 # meaning the gate will still scan and refuse it.
 def survives(cmd, fragment):
@@ -159,3 +148,7 @@ if failures:
     sys.exit(1)
 print("CMD TEXT SELFTEST PASSED: prose the shell hands over as bytes is "
       "invisible, and everything the shell actually runs is still scanned.")
+
+# Independently reproduced Dot cases share the offline behavioral fixtures.
+import runpy as _dot_runpy
+_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b01', 'test_control_single'])

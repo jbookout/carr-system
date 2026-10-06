@@ -8,10 +8,14 @@ import fcntl
 import json
 import os
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import contextmanager
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib import record_call  # noqa: E402
 
 
 def _root():
@@ -37,21 +41,18 @@ ACTION = ("on breach: open/update one dedup loop · owner orchestrator · "
 
 
 def _run_verb(name, payload):
-    result = subprocess.run(["./run.sh", "call", name, json.dumps(payload)],
-                            cwd=ROOT, capture_output=True, text=True, timeout=35)
-    if result.returncode:
-        raise RuntimeError(f"{name} returned {result.returncode}")
-    start = result.stdout.find("{")
-    if start < 0:
-        raise RuntimeError(f"{name} returned no JSON")
-    answer = json.loads(result.stdout[start:])
-    if not isinstance(answer, dict) or answer.get("error") or (name != "read-loop" and answer.get("ok") is not True):
+    result = record_call.call_verb(name, payload, timeout=35)
+    if result.kind not in (record_call.OK, record_call.REFUSED):
+        raise RuntimeError(result.describe())
+    answer = result.reply
+    if not result.ok or not isinstance(answer, dict) or (name != "read-loop" and answer.get("ok") is not True):
         raise RuntimeError(f"{name} did not confirm the write")
     return answer
 
 
 def _loop_version(run_verb, loop_id):
     current = run_verb("read-loop", {"loop_id": loop_id})
+    current = current.get("loop", current)
     if current.get("loop_id") != loop_id or type(current.get("version")) is not int:
         raise RuntimeError("read-loop returned no matching version")
     return current["version"]
@@ -125,10 +126,10 @@ def read_worker_usage(day):
 
 
 def nightly_exit_status(line):
-    """Fail the scheduled step when its receipt or response is incomplete."""
-    return 0 if line.startswith(("OK jev spend", "WARN jev spend")) and not any(
+    """Missing token counts are informational; fail unreadable sources/writes."""
+    return 0 if line.startswith(("OK jev spend", "WARN jev spend", "UNKNOWN jev spend")) and not any(
         marker in line for marker in
-        ("missing usage", "Worker usage unavailable", "loop action FAILED")
+        ("usage unavailable", "loop action FAILED")
     ) else 1
 
 
@@ -141,13 +142,18 @@ def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
     day = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
     if not Path(log_path).is_file() and not any(Path(extra).is_file() for extra in extra_logs) and worker_usage is None:
         return f"UNAVAILABLE jev spend — local usage log absent · {ACTION}"
-    calls, tokens, unknown = _today_usage(log_path, day) if Path(log_path).is_file() else (0, 0, 0)
-    for extra in extra_logs:
-        if Path(extra).is_file():
-            measured = _today_usage(extra, day)
-            calls += measured[0]
-            tokens += measured[1]
-            unknown += measured[2]
+    calls = tokens = unknown = 0
+    try:
+        for path in (log_path, *extra_logs):
+            if Path(path).is_file():
+                measured = _today_usage(path, day)
+                calls += measured[0]
+                tokens += measured[1]
+                unknown += measured[2]
+    except (OSError, UnicodeError):
+        return f"UNAVAILABLE jev spend — local usage unavailable · {ACTION}"
+    abandoned = 0
+    abandon_after = 3600
     worker_unavailable = False
     if worker_usage is not None:
         try:
@@ -158,18 +164,23 @@ def check_spend(log_path=USAGE_LOG, config_path=CONFIG, state_path=LOOP_STATE,
             calls += measured["calls"]
             tokens += measured["input_tokens"]
             unknown += measured["unknown"]
+            abandoned = measured.get("abandoned_attempts", 0)
+            abandon_after = measured.get("abandon_after_seconds", 3600)
+            if type(abandoned) is not int or abandoned < 0 or type(abandon_after) is not int or abandon_after <= 0:
+                raise ValueError("invalid Worker abandoned attempt usage")
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             worker_unavailable = True
     amount = tokens * price / 1_000_000
     missing = f"{unknown} call or attempt{'s' if unknown != 1 else ''} missing usage"
+    attempts = f" · {abandoned} abandoned attempts (older than {abandon_after}s; excluded from missing usage)"
     if (unknown or worker_unavailable) and amount <= threshold:
         return (f"UNKNOWN jev spend — {missing}"
                 f"; Worker usage {'unavailable' if worker_unavailable else 'read'} "
                 f"({calls} measured calls; warning retained until usage is measurable) "
-                f"· {ACTION}")
+                f"· {ACTION}{attempts}")
     status = "WARN" if amount > threshold else "OK"
     line = (f"{status} jev spend — ${amount:.3f} estimated / UTC day "
-            f"({calls} calls, {tokens} input tokens; threshold ${threshold:.2f}) · {ACTION}")
+            f"({calls} calls, {tokens} input tokens; threshold ${threshold:.2f}) · {ACTION}{attempts}")
     if unknown:
         line += f" · at least this amount; {missing}"
     if worker_unavailable:

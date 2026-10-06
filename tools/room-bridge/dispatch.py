@@ -29,6 +29,7 @@ A codex-exec run is synchronous, so its line carries the actual result.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -38,6 +39,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +62,7 @@ TOOLS_ROOT = HERE.parent
 if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 import credential_env  # noqa: E402 — shared long-lived-token loader
+import flashlib
 
 DEFAULT_RESULTS = Path(
     os.environ.get(
@@ -87,9 +90,10 @@ def _record(results_path: Path, row: dict) -> None:
 
 def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
     """Deliver one peer turn to a live labeled session."""
+    desks.dispatched_permission_mode(entry.get("permission_mode"))
     payload = {
         "type": "user",
-        "message": {"role": "user", "content": task},
+        "message": {"role": "user", "content": desks.desk_prompt(task)},
         "origin": {"kind": "peer", "from": f"hermes:{entry['name']}", "msg_id": msg_id},
     }
     conn = inject_mod.inject_keepalive(entry["socket"], payload)
@@ -111,7 +115,7 @@ def _to_claude_desktop(entry: dict, task: str) -> dict:
     try:
         return claude_desktop_wire.launch_background(entry, task)
     except claude_desktop_wire.ClaudeDesktopError as exc:
-        return {"status": "failed", "detail": exc.code}
+        return {"status": "failed", "detail": exc.code, "error": str(exc)}
 
 
 def _codex_events(stdout: str) -> list[dict]:
@@ -128,6 +132,30 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
+def _run_codex_streamed(argv, env, timeout):
+    """Preserve result parsing while exposing actual executor output to its job log."""
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    chunks = []
+    def relay():
+        with proc.stdout:
+            for line in proc.stdout:
+                chunks.append(line)
+                print(line, end="", flush=True)
+    reader = threading.Thread(target=relay, daemon=True)
+    reader.start()
+    try:
+        code = proc.wait(timeout=timeout)
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    reader.join(timeout=timeout)
+    if reader.is_alive():
+        raise subprocess.TimeoutExpired(argv, timeout)
+    return subprocess.CompletedProcess(argv, code, "".join(chunks), "")
+
+
 def _to_codex(
     entry: dict,
     task: str,
@@ -135,6 +163,7 @@ def _to_codex(
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
     live_desktop: bool = False,
+    stream_output: bool = False,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -143,6 +172,7 @@ def _to_codex(
     would throw away everything it had been told. `codex exec resume <id>`
     carries it, and --json reports the thread id in its first event.
     """
+    task = desks.desk_prompt(task)
     thread = None if fresh else entry.get("thread_id")
     # A THREAD CODEX DESKTOP HOLDS OPEN CANNOT BE RESUMED FROM HERE. Found live
     # 2026-09-27: the orchestrator's Desktop thread refused `codex exec resume`
@@ -159,7 +189,7 @@ def _to_codex(
     # Desktop thread on every retry (PR #1345 review). "delivered_live" says the
     # answer arrives in the session's own window and nowhere a caller can wait on.
     if live_desktop and thread and codex_ipc.thread_owner(thread) is not None:
-        live = codex_ipc.start_turn(thread, task)
+        live = codex_ipc.start_turn(thread, task, approval_policy="never")
         if live.get("status") != "not_live":
             status = "delivered_live" if live.get("status") == "delivered" else live.get("status")
             return {"resumed": True, **live, "status": status, "thread_id": thread}
@@ -196,6 +226,9 @@ def _to_codex(
                     "bad_codex_config",
                     "Codex config overrides must be non-empty strings")
             argv += ["-c", override]
+        # Bind both starts and resumes, after overrides, so an old thread or
+        # caller config cannot restore human approval cards.
+        argv += ["-c", 'approval_policy="never"']
         # `codex exec resume` does not accept -C/-s/--add-dir at all — a
         # resumed session already carries the cwd, sandbox and extra dirs it
         # was FIRST started with, and passing them again is a hard CLI parse
@@ -221,10 +254,13 @@ def _to_codex(
             # pipe makes the run hang or swallow whatever the caller was fed.
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
-            proc = subprocess.run(
-                argv, env=env or os.environ.copy(), capture_output=True,
-                text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
-            )
+            if stream_output:
+                proc = _run_codex_streamed(argv, env or os.environ.copy(), CODEX_TIMEOUT_S)
+            else:
+                proc = subprocess.run(
+                    argv, env=env or os.environ.copy(), capture_output=True,
+                    text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
+                )
         except FileNotFoundError:
             return {"status": "failed", "detail": "codex is not on PATH"}
         except subprocess.TimeoutExpired:
@@ -279,6 +315,8 @@ def dispatch(
     config_overrides: tuple[str, ...] = (),
     cwd: str | None = None,
     live_desktop: bool = False,
+    stream_output: bool = False,
+    retrieval: bool = False,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
 
@@ -291,7 +329,22 @@ def dispatch(
     the Sol fixer desk a throwaway copy per task (2026-09-24)."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
+    if name == "flash" and registry.entries().get(name, {}).get("kind") == "claude-session":
+        try:
+            flashlib.ensure_desk(lambda: desks.is_live(registry.entries()[name].get("socket", "")))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise DeskError("desk_not_live", str(exc)) from exc
     entry = registry.resolve(name)          # every refusal happens here
+    if retrieval and entry["kind"] != "grok-cli":
+        raise DeskError("unsupported_retrieval", "explicit source retrieval requires a Grok desk")
+    if stream_output and entry["kind"] not in ("codex-session", "codex-exec"):
+        raise DeskError("unsupported_stream", "stream output requires a headless Codex desk")
+    stream_options = {"stream_output": True} if stream_output else {}
+    original_task = task
+    # The background wire validates the original task before adding its own
+    # instruction. Prepending here would turn a blank task into valid work.
+    if entry["kind"] != "claude-desktop":
+        task = desks.desk_prompt(task)
     msg_id = str(uuid.uuid4())
     if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli"):
         if not entry.get("model") or not str(entry.get("model")).strip():
@@ -310,11 +363,15 @@ def dispatch(
             )
 
     if entry["kind"] == "claude-session":
-        outcome = _to_claude(entry, task, msg_id)
+        if name == "flash":
+            with flashlib.activity_scope():
+                outcome = _to_claude(entry, task, msg_id)
+        else:
+            outcome = _to_claude(entry, task, msg_id)
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
     elif entry["kind"] == "grok-cli":
-        outcome = grok_wire.run_task(entry, task)
+        outcome = grok_wire.run_task(entry, task, **({"retrieval": True} if retrieval else {}))
     elif entry["kind"] == "flash-local":
         outcome = flash_wire.run_task(task)
     elif entry["kind"] == "codex-live":
@@ -328,11 +385,13 @@ def dispatch(
     elif cwd:
         outcome = _to_codex(
             {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+            **stream_options,
         )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
             live_desktop=live_desktop,
+            **stream_options,
         )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):
@@ -342,7 +401,7 @@ def dispatch(
         "msg_id": msg_id,
         "desk": name,
         "kind": entry["kind"],
-        "task": task,
+        "task": original_task,
         "dispatched_at": _now(),
         **outcome,
     }
@@ -444,6 +503,39 @@ def _read_pid(pid_file: Path) -> int | None:
         return None
 
 
+def _send_seed(fifo: Path, seed: str, pid: int, deadline: float) -> None:
+    """Bound both FIFO open and backpressure by the startup deadline."""
+    payload = (json.dumps({"type": "user", "message": {
+        "role": "user", "content": desks.desk_prompt(seed)}}) + "\n").encode()
+    fd = None
+    try:
+        while time.monotonic() < deadline:
+            if not _alive(pid):
+                raise DeskError("desk_failed_to_start", "the desk exited while accepting its seed")
+            if fd is None:
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError as exc:
+                    if exc.errno != errno.ENXIO:
+                        raise
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                    continue
+            try:
+                written = os.write(fd, payload)
+            except BlockingIOError:
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                continue
+            payload = payload[written:]
+            if not payload:
+                return
+        raise DeskError("desk_failed_to_start", "the desk did not accept its seed within the startup deadline")
+    except OSError as exc:
+        raise DeskError("desk_failed_to_start", "the desk seed input became unavailable") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def desk_start(
     name: str,
     registry: Registry | None = None,
@@ -504,6 +596,7 @@ def desk_start(
     shell = (
         f"exec 3<>{shlex.quote(str(fifo))}; "
         f"exec claude --messaging-socket-path {shlex.quote(str(sock))} "
+        f"--permission-mode dontAsk "
         f"-p --input-format stream-json --output-format stream-json --verbose "
         f"<&3 >>{shlex.quote(str(log))} 2>&1"
     )
@@ -540,11 +633,14 @@ def desk_start(
         raise DeskError("desk_failed_to_start",
                         f"nothing bound {sock} within {BIND_TIMEOUT_S:.0f}s")
 
-    registry.register(name, "claude-session", socket=str(sock))
+    if proc.poll() is not None or not _alive(proc.pid):
+        raise DeskError("desk_failed_to_start", "the session exited after binding its socket")
+    # An unseeded desk has no pending turn. The instruction rides on its
+    # first dispatched task, avoiding an unrelated bootstrap result racing
+    # with bridge.deliver's first task log offset.
     if seed:
-        with fifo.open("w") as fh:
-            fh.write(json.dumps(
-                {"type": "user", "message": {"role": "user", "content": seed}}) + "\n")
+        _send_seed(fifo, seed, proc.pid, deadline)
+    registry.register(name, "claude-session", socket=str(sock))
 
     return {"name": name, "socket": str(sock), "pid": proc.pid, "log": str(log),
             "already_running": False}
@@ -647,6 +743,10 @@ def main(argv: list[str]) -> int:
     s.add_argument("task")
     s.add_argument("--fresh", action="store_true",
                    help="start a new Codex thread instead of resuming the desk's")
+    s.add_argument("--stream-output", action="store_true",
+                   help="tee headless Codex events into the caller's registered job log")
+    s.add_argument("--retrieve", action="store_true",
+                   help="require public source text evidence from a Grok desk")
 
     a = p.parse_args(argv)
     reg = Registry(a.registry) if a.registry else Registry()
@@ -705,7 +805,8 @@ def main(argv: list[str]) -> int:
             return 0
 
         row = dispatch(a.name, a.task, registry=reg, results_path=results,
-                       fresh=getattr(a, "fresh", False))
+                       fresh=getattr(a, "fresh", False), stream_output=a.stream_output,
+                       retrieval=a.retrieve)
         print(json.dumps(row, indent=2))
         return 0 if row["status"] in ("delivered", "completed") else 1
 

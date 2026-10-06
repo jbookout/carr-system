@@ -211,7 +211,8 @@
       "a7784a18",
       "204391be",
       "a2e78f48",
-      "b7ec8f3b"
+      "b7ec8f3b",
+      "ede4b241"
     ]
   },
   "categories": {
@@ -874,15 +875,6 @@
       ],
       "test": [
         "ops/gate-baseline-cochange-selftest.py"
-      ]
-    },
-    "stale_claim": {
-      "failure_mode": "Stop block; names the recent commit that already fixed what the reply calls broken",
-      "implementation": [
-        "hooks/stale-claim-gate.py"
-      ],
-      "test": [
-        "ops/stale-claim-gate-selftest.py"
       ]
     },
     "stale_count": {
@@ -1628,7 +1620,7 @@
       "category": "session_task_rail",
       "control": "session_boot",
       "enforcement_class": "surfacing",
-      "exceptions": "none — create and register the missing verb in the same work"
+      "exceptions": "none \u2014 create and register the missing verb in the same work"
     },
     "7105955b": {
       "binding_moment": "close-loop for a renumbered, superseded, merged or split row",
@@ -2088,8 +2080,7 @@
       "category": "session_task_rail",
       "control": "drift_claim",
       "enforcement_class": "surfacing",
-      "exceptions": "a drift claim with no matching ruling is usually a real finding, and passes",
-      "second_control": "stale_claim"
+      "exceptions": "a drift claim with no matching ruling is usually a real finding, and passes"
     },
     "d7c69aa6": {
       "binding_moment": "live calendar capture completion for an unmatched attendee",
@@ -2197,6 +2188,11 @@
       "control": "completion_evidence",
       "enforcement_class": "deny_gate",
       "exceptions": "explicitly unverified/failed disclosure"
+    },
+    "ede4b241": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "Whether a job is well-scoped with a checkable done-condition, or is design, gate, eval-design or review work, is a judgment about the job. No predicate over a dispatch call can decide it. The half a machine can carry is delivery: the rule is put in front of the session at the moment it dispatches work to another model or launches a cloud session (pack delegation-council, verb trigger compiled from the rule-triage detector), and the floors Joe set for specific lanes stay enforced by hooks/model-floor-gate.py."
     },
     "ede4c735": {
       "binding_moment": "at each write, when the surface is classified",
@@ -3455,6 +3451,13 @@
       "load_layer": "control",
       "packs": [],
       "why": "An installed deny gate delivers this at its binding moment."
+    },
+    "ede4b241": {
+      "load_layer": "pack",
+      "packs": [
+        "delegation-council"
+      ],
+      "why": "Model choice is made at the moment of dispatch, not at every boot. Delivered by pack delegation-council on the Agent tool and on Claude Code Remote create_session / create_trigger."
     },
     "ede4c735": {
       "load_layer": "pack",

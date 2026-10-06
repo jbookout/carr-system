@@ -64,6 +64,13 @@ MAX_NEAR_MISS = 8
 # negative is a rule that never arrives.
 SURFACE_AT = 0.50
 NEAR_MISS_AT = 0.60
+
+# Words that name the house and its assistants rather than any rule's moment:
+# nearly every partner message and notification carries one, so as a
+# single-word statement candidate they fire a rule everywhere. A phrase that
+# contains one ("carr surface") is still a candidate. "joe" and "dell" are
+# already STOPWORDS.
+HOUSE_WORDS = frozenset({"carr", "claude"})
 ALWAYS_ON_AT = 0.70
 NO_CUE_AT = 0.70
 
@@ -196,7 +203,8 @@ def candidates(rule, *, all_rules, pack_keywords, verbs, history=()):
     idf_pairs = _idf([_bigrams(d) for d in docs.values()])
     mine = docs.get(rule["id"]) or _words(text)
     tf = Counter(mine)
-    for word, _ in sorted(tf.items(), key=lambda kv: (-kv[1] * idf_words.get(kv[0], 1.0), kv[0]))[:MAX_WORDS]:
+    singles = [(w, c) for w, c in tf.items() if w not in HOUSE_WORDS]
+    for word, _ in sorted(singles, key=lambda kv: (-kv[1] * idf_words.get(kv[0], 1.0), kv[0]))[:MAX_WORDS]:
         add("keyword", word, "statement")
     tf2 = Counter(_bigrams(mine))
     for pair, _ in sorted(tf2.items(), key=lambda kv: (-kv[1] * idf_pairs.get(kv[0], 1.0), kv[0]))[:MAX_PHRASES]:
@@ -235,7 +243,8 @@ def candidates(rule, *, all_rules, pack_keywords, verbs, history=()):
             floor = max(2, 0.1 * len(bound))
             scored = {}
             for word, count in here.items():
-                if count < floor or not base[word] or not re.fullmatch(r"[a-z][a-z'-]*", word):
+                if count < floor or not base[word] or word in HOUSE_WORDS \
+                        or not re.fullmatch(r"[a-z][a-z'-]*", word):
                     continue
                 lift = (count / len(bound)) / (base[word] / len(history))
                 if lift > 1.5:
@@ -357,12 +366,20 @@ def compile_rule(rule, *, all_rules, pack_keywords, verbs, history, client, ask)
     cands, near = candidates(rule, all_rules=all_rules, pack_keywords=pack_keywords,
                              verbs=verbs, history=history)
     questions, state, index = questions_for(rule, cands, near, client)
-    answer = ask(state, questions, facets=["semantic_creation"])
-    return interpret(rule, answer, index, model=answer.get("model") or "unknown")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("jev_semantic", os.path.join(REPO, "ops", "jev_semantic.py"))
+    semantic = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(semantic)
+    answer = semantic.ask(state, questions, transport=ask, caller="rule_trigger_compile",
+                          version="vendor-v1", facets=["semantic_creation"] )
+    proposal = interpret(rule, answer, index, model=answer.get("model") or "unknown")
+    return dict(proposal, proposed_mode=proposal.get("mode"), mode="review_required")
 
 
 def document(entries):
-    rules = {e["id"]: e for e in sorted(entries, key=lambda e: e["id"])}
+    entries = sorted(entries, key=lambda e: e["id"])
+    rules = {e["id"]: e for e in entries if e.get("mode") != "review_required"}
+    proposals = {e["id"]: e for e in entries if e.get("mode") == "review_required"}
     counts = Counter(e["mode"] for e in rules.values())
     return {
         "schema": SCHEMA,
@@ -375,6 +392,7 @@ def document(entries):
                        "always_on_at": ALWAYS_ON_AT, "no_cue_at": NO_CUE_AT},
         "counts": {"rules": len(rules), **{k: counts[k] for k in sorted(counts)}},
         "rules": rules,
+        "proposals": proposals,
     }
 
 
@@ -403,7 +421,8 @@ def stale_or_missing(doc, rules):
     out = []
     for rule in rules:
         entry = compiled.get(rule["id"])
-        if not isinstance(entry, dict) or entry.get("statement_sha256") != sha256_text(rule["statement"]):
+        if (not isinstance(entry, dict) or entry.get("mode") not in {"triggered", "residual", "always_on"}
+                or entry.get("statement_sha256") != sha256_text(rule["statement"])):
             out.append(rule["id"])
     return sorted(out)
 
@@ -414,6 +433,8 @@ def coverage_problems(doc, rules):
     residual (judged at run time). Returns human-readable problems."""
     problems = [f"{rid}: not compiled against its current statement"
                 for rid in stale_or_missing(doc, rules)]
+    problems += [f"{rid}: proposal requires independent review"
+                 for rid in sorted((doc or {}).get("proposals") or {})]
     compiled = (doc or {}).get("rules") or {}
     live = {r["id"] for r in rules}
     for rid, entry in sorted(compiled.items()):
@@ -442,21 +463,37 @@ def _alternation(terms):
     return "|".join(parts)
 
 
+def prompt_keywords(entry):
+    """Keep compiled cues at SURFACE_AT, excluding bare house words.
+
+    The same cues feed rows and runtime probability attribution. Required
+    human actions must still surface when runtime judgment is unavailable.
+    """
+    keywords = ((entry or {}).get("triggers") or {}).get("keywords") or {}
+    return {k: p for k, p in keywords.items()
+            if isinstance(p, (int, float)) and p >= SURFACE_AT and k not in HOUSE_WORDS}
+
+
 def trigger_rows(doc):
     """Rows for ops/config/rule-jit-triggers.v1.json, one group per rule and
     kind. prompt_regex runs at UserPromptSubmit only; verb, bash_family and
     path_pattern join the existing PreToolUse rail unchanged."""
     rows = []
     for rid, entry in sorted(((doc or {}).get("rules") or {}).items()):
-        if entry.get("mode") == "always_on":
+        if entry.get("mode") not in {"triggered", "residual"}:
             continue
         trig = entry.get("triggers") or {}
         packs = sorted(entry.get("packs") or [])
-        if trig.get("keywords"):
-            row = {"kind": "prompt_regex", "pattern": _alternation(trig["keywords"]),
+        keywords = prompt_keywords(entry)
+        if keywords:
+            row = {"kind": "prompt_regex", "pattern": _alternation(keywords),
                    "packs": packs, "rule_ids": [rid], "source": "jev_compiled"}
-            if entry.get("negatives"):
-                row["negative_pattern"] = _alternation(entry["negatives"])
+            # interpret()'s rule, re-applied to the keywords that survive: a
+            # near-miss only means something beside a positive it would mask.
+            words = {w for k in keywords for w in k.split()}
+            negatives = [n for n in (entry.get("negatives") or {}) if words & set(n.split())]
+            if negatives:
+                row["negative_pattern"] = _alternation(negatives)
             rows.append(row)
         verbs = sorted(trig.get("verbs") or [])
         tools = sorted(trig.get("tools") or [])

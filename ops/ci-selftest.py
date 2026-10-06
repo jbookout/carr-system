@@ -1168,34 +1168,56 @@ def _push_floor_body():
 
 
 @contextlib.contextmanager
-def _stub_git_answering_the_floor(changed_paths):
+def _stub_git_answering_the_floor(changed_paths, *, main_paths=None, added_paths=(),
+                                  main_tree_paths=(), main_readable=True):
     """PATH-shadow git so the floor sees a chosen diff, and real git does the rest.
 
-    The floor decides what to run from `git diff --name-only ... $CARR_CI_RANGE`.
-    Feeding that one question is enough to drive the branch under test, and doing
-    it here rather than from history keeps the fixture hermetic: no commit is
-    made, no path is written into the tree, and the repository is not touched.
-    Every other git call — the branch name, HEAD, status — passes straight
-    through, so ci.sh still runs against the real checkout.
+    Model the pushed diff, the final diff from main, and main's admitted paths.
+    Keeping those separate exercises imported files and branch-owned changes
+    without creating commits or changing repository files. Other git calls,
+    including the branch name, HEAD and status, pass through to the real git.
     """
     real = shutil.which("git")
+    if main_paths is None:
+        main_paths = changed_paths
+    quoted_main = " ".join(shlex.quote(path) for path in main_paths)
+    quoted_added = " ".join(shlex.quote(path) for path in added_paths)
+    quoted_tree = " ".join(shlex.quote(path) for path in main_tree_paths)
+    quoted_main_added = " ".join(shlex.quote(path) for path in added_paths
+                                  if path in main_paths and path not in main_tree_paths)
+    main_exit = "" if main_readable else "exit 7; "
     with tempfile.TemporaryDirectory(prefix="ci-selftest-stub-git-") as td:
         stub = pathlib.Path(td) / "git"
         stub.write_text(
             "#!/bin/sh\n"
-            f'case " $* " in *" {FIXTURE_RANGE} "*)\n'
+            'case " $* " in *" diff --name-only origin/main HEAD "*)\n'
+            f'  {main_exit}printf "%s\\n" {quoted_main}; exit 0 ;;\n'
+            '  *" diff --diff-filter=A --name-only origin/main -- "*)\n'
+            f'  {main_exit}printf "%s\\n" {quoted_main_added}; exit 0 ;;\n'
+            '  *" ls-tree -r --name-only origin/main "*)\n'
+            f'  {main_exit}printf "%s\\n" {quoted_tree}; exit 0 ;;\n'
+            f'*" {FIXTURE_RANGE} "*)\n'
             '  case " $* " in *--diff-filter=ACMR*)\n'
             f'    printf "%s\\n" {" ".join(changed_paths)}; exit 0 ;;\n'
-            # ACR drives path-hygiene, which reads the files it is given. The
-            # fixture path does not exist, so report nothing ADDED rather than
-            # handing a checker a path it cannot open.
-            '  *--diff-filter=ACR*) exit 0 ;;\n'
+            # Filename admission independently reads newly pushed paths.
+            # Ordinary fixtures add none; integration fixtures declare them.
+            f'  *--diff-filter=ACR*) printf "%s\\n" {quoted_added}; exit 0 ;;\n'
             '  esac ;;\n'
             'esac\n'
             f'exec {shlex.quote(real or "git")} "$@"\n'
         )
         stub.chmod(0o755)
         yield {"PATH": f"{td}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+def test_migration_structure_is_checked_before_slow_work():
+    floor = _push_floor_body()
+    migration = _ci_function_body("check_migration", "check_binding")
+    command = '"$PY" ops/migration-order-gate.py'
+    check("migration structure runs in the push floor before gate closure",
+          command in floor and floor.index(command) < floor.index('local gate_surface='))
+    check("migration structure runs before schema loading and the database probe",
+          command in migration and migration.index(command) < migration.index('local dsn='))
 
 
 def test_push_floor_defers_the_gates_class_instead_of_running_it():
@@ -1246,6 +1268,46 @@ def test_push_floor_defers_the_gates_class_instead_of_running_it():
     check("naming a deferred gate is not itself a failure", rc == 0, f"rc={rc}")
 
 
+def test_push_floor_distinguishes_imported_main_paths_from_branch_changes():
+    inherited_name = "mcp-server/test/doctorcre-v5-review.test.mjs"
+    inherited_gate = "hooks/zz-ci-selftest-fixture-inherited-gate.py"
+    with _stub_git_answering_the_floor(
+            [inherited_name, inherited_gate, FIXTURE_GATE],
+            main_paths=[FIXTURE_GATE], added_paths=[inherited_name],
+            main_tree_paths=[inherited_name, inherited_gate]) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("importing admitted main paths does not fail the push floor", rc == 0, out[-900:])
+    check("main-identical gates are excluded but the branch's gate remains checked",
+          pathlib.Path(inherited_gate).stem not in out
+          and pathlib.Path(FIXTURE_GATE).stem in out, out[-900:])
+    owned_name = "ops/report-v2.json"
+    with _stub_git_answering_the_floor(
+            [owned_name], main_paths=[owned_name], added_paths=[owned_name]) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("a branch-owned forbidden filename is still refused",
+          rc != 0 and owned_name in out and "path-hygiene" in out, out[-900:])
+    historical_gate = "hooks/zz-ci-selftest-historical-v2.py"
+    with _stub_git_answering_the_floor(
+            [historical_gate], main_paths=[historical_gate],
+            added_paths=[historical_gate], main_tree_paths=[historical_gate]) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("editing an imported historical path is checked without rejudging its name",
+          rc == 0 and pathlib.Path(historical_gate).stem in out, out[-900:])
+    with _stub_git_answering_the_floor(
+            [owned_name], added_paths=[owned_name], main_readable=False) as stub_env:
+        rc, out = run(["--only", "pushfloor"],
+                      env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                      timeout=FLOOR_BUDGET_SECONDS)
+    check("an unreadable main preserves the full push-floor scope",
+          rc != 0 and owned_name in out and "path-hygiene" in out, out[-900:])
+
+
 def test_strict_still_owns_the_gates_class():
     """The deferral is scoped to a --only run, so hosted strict never takes it.
 
@@ -1262,16 +1324,16 @@ def test_strict_still_owns_the_gates_class():
 
 
 # ------------------------------------------------- 25. the hosted split
-def _hosted_workflow():
-    """ci.yml as a dict, parsed by the js-yaml the server already carries."""
+def _hosted_workflow(filename="ci.yml"):
+    """Workflow as a dict, parsed by the js-yaml the server already carries."""
     import json
     out = subprocess.run(
         ["node", "-e",
          "const y=require('js-yaml');const fs=require('fs');"
          "process.stdout.write(JSON.stringify(y.load(fs.readFileSync(process.argv[1],'utf8'))))",
-         str(REPO / ".github" / "workflows" / "ci.yml")],
+         str(REPO / ".github" / "workflows" / filename)],
         cwd=REPO / "mcp-server", capture_output=True, text=True, timeout=60)
-    check("ci.yml parses", out.returncode == 0, out.stderr[-300:])
+    check(f"{filename} parses", out.returncode == 0, out.stderr[-300:])
     return json.loads(out.stdout) if out.returncode == 0 else {}
 
 
@@ -1321,7 +1383,152 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
           {"ran": ran, "order": classes})
 
 
-def main():
+def test_hosted_migration_budget_covers_observed_acceptance_runtime():
+    """PR1121's strict migration job was killed at 20 minutes, while its
+    separate exact-head DB acceptance succeeded after 23m51s. Allow at least
+    30 minutes including setup, without relaxing the other groups' budgets.
+    Both workflows run the canonical migration class; its budget must also
+    cover the separate database lane. Read the actual job/matrix wiring,
+    so an unused budget cannot pass.
+
+    The database lane runs that class and then its own acceptance programs.
+    On 2026-10-04 it routinely took 22-24 minutes, and six branches
+    (PR 1470's run 37182226032 among them) were cancelled at a 25-minute cap
+    after every check had passed. It needs the same headroom.
+    """
+    job = _hosted_workflow()["jobs"]["classes"]
+    groups = job["strategy"]["matrix"]["classes"]
+    budgets = re.fullmatch(
+        r"\$\{\{ matrix\.classes == 'migration' && (\d+) \|\| (\d+) \}\}",
+        str(job["timeout-minutes"]))
+    check("class jobs select a bounded migration-specific budget", budgets is not None)
+    if budgets is None:
+        return
+    migration_budget, other_budget = map(int, budgets.groups())
+    database_jobs = _hosted_workflow("db-acceptance.yml").get("jobs") or {}
+    database_budget = (database_jobs.get("acceptance") or {}).get("timeout-minutes")
+    check("database acceptance declares a finite job budget",
+          isinstance(database_budget, int) and database_budget > 0, database_budget)
+    check("hosted migration budget covers the database lane budget",
+          isinstance(database_budget, int) and migration_budget >= database_budget > 0,
+          {"migration_minutes": migration_budget, "database_minutes": database_budget})
+    bounded_headroom = range(30, 36)
+    check("database lane has bounded headroom over its observed 24-minute run",
+          database_budget in bounded_headroom, database_budget)
+    migration = [migration_budget for group in groups if group == "migration"]
+    check("migration job has bounded headroom over the observed 24-minute run",
+          len(migration) == 1 and migration[0] in bounded_headroom, migration)
+    other = [other_budget for group in groups if group != "migration"]
+    check("other class groups retain their 20-minute budgets",
+          bool(other) and all(budget == 20 for budget in other), other)
+
+
+def test_gate_replay_has_an_independent_required_class():
+    """PR1546's gates passed at 1101s, then cleanup hit the 20-minute cap.
+
+    Its 295s replay must run in a separate required job, preserving the cap
+    and every check instead of making the already long job wait for replay.
+    """
+    src = CI.read_text()
+    order = re.search(r'^CLASS_ORDER="([^"]+)"', src, re.M)
+    check("full local CI includes the replay class",
+          order is not None and "replay" in order.group(1).split())
+    gates_body = src.split("check_gates() {", 1)[1].split("\ncheck_", 1)[0]
+    check("gates no longer serializes the real-fixture replay",
+          '"$PY" ops/gate-replay.py' not in gates_body)
+    job = _hosted_workflow()["jobs"]["classes"]
+    groups = job["strategy"]["matrix"]["classes"]
+    check("hosted replay runs once as its own required matrix job",
+          groups.count("replay") == 1)
+    check("gates and replay retain the existing 20-minute cap",
+          job["timeout-minutes"] == "${{ matrix.classes == 'migration' && 35 || 20 }}")
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = pathlib.Path(tmp) / "gate-replay.py"
+        fixture.write_text("import os,sys\n"
+                           "print('gate-replay: OK replay fixture ran')\n"
+                           "sys.exit(int(os.environ['REPLAY_FIXTURE_RC']))\n")
+        # Invoke the class through ci.sh's normal --only interface. Replace
+        # only the replay program with a cheap fixture, keeping its handling.
+        script = pathlib.Path(tmp) / "ci.sh"
+        body = src.replace('"$PY" ops/gate-replay.py', f'"$PY" {shlex.quote(str(fixture))}')
+        # The script resolves the repository from its own path.
+        body = re.sub(r'^REPO=.*$', f'REPO={shlex.quote(str(REPO))}', body, flags=re.M)
+        script.write_text(body)
+        for child_rc, expected_rc in ((0, 0), (1, 1), (78, 1), (124, 1)):
+            out = subprocess.run(["bash", str(script), "--strict", "--only", "replay"],
+                                 cwd=REPO, env=scrubbed_env(dict(os.environ,
+                                     REPLAY_FIXTURE_RC=str(child_rc))),
+                                 capture_output=True, text=True, timeout=10)
+            check(f"strict replay propagates child exit {child_rc}",
+                  out.returncode == expected_rc and "replay fixture ran" in out.stdout + out.stderr,
+                  out.stdout + out.stderr)
+
+
+def test_hosted_zsh_setup_does_not_refresh_working_indexes():
+    """PR 1465 spent its entire job budget in apt update before any class ran.
+
+    Execute the workflow's setup with a synthetic apt, not a second installer.
+    A working install must never refresh; stale indexes must still be repaired;
+    an unavailable mirror must fail setup rather than green-light missing zsh.
+    """
+    wf = _hosted_workflow()
+    setup = next(st for st in wf["jobs"]["classes"]["steps"]
+                 if st.get("name") == "Install zsh")
+    check("zsh setup has a three-minute step deadline",
+          0 < setup.get("timeout-minutes", 0) <= 3)
+    with tempfile.TemporaryDirectory(prefix="ci-zsh-setup-") as tmp:
+        fixture = pathlib.Path(tmp)
+        sudo = fixture / "sudo"
+        sudo.write_text("#!" + sys.executable + "\n" + '''
+import json, os, pathlib, sys
+log = pathlib.Path(os.environ["CI_SETUP_CALLS"])
+calls = json.loads(log.read_text()) if log.exists() else []
+calls.append(sys.argv[1:])
+log.write_text(json.dumps(calls))
+args = sys.argv[1:]
+mode = os.environ["CI_SETUP_FIXTURE"]
+if mode == "working" and "update" in args:
+    sys.exit(91)
+if mode != "working" and len(calls) == 1:
+    sys.exit(100)
+if mode == "unavailable" and "update" in args:
+    sys.exit(100)
+if mode == "retry-failed" and len(calls) == 3:
+    sys.exit(100)
+''')
+        sudo.chmod(0o755)
+        for mode, expected in (("working", ["install"]),
+                               ("stale", ["install", "update", "install"]),
+                               ("unavailable", ["install", "update"]),
+                               ("retry-failed", ["install", "update", "install"])):
+            log = fixture / (mode + ".json")
+            env = scrubbed_env()
+            env.update(PATH=str(fixture) + os.pathsep + os.environ["PATH"],
+                       CI_SETUP_CALLS=str(log), CI_SETUP_FIXTURE=mode)
+            ran = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", setup["run"]],
+                                 cwd=fixture, env=env, capture_output=True, text=True,
+                                 timeout=10)
+            calls = json.loads(log.read_text()) if log.exists() else []
+            actions = [next((arg for arg in args if arg in ("install", "update")), "unknown")
+                       for args in calls]
+            check(f"zsh setup {mode} uses the required install/refresh path",
+                  actions == expected, actions)
+            check(f"zsh setup {mode} propagates its outcome",
+                  (ran.returncode != 0) == (mode in ("unavailable", "retry-failed")),
+                  ran.returncode)
+            check(f"zsh setup {mode} bounds every apt network request",
+                  bool(calls) and all(args[0] == "apt-get" and
+                      all(option in args for option in ("Acquire::Retries=1",
+                          "Acquire::http::Timeout=15", "Acquire::https::Timeout=15"))
+                      for args in calls), calls)
+        check("zsh remains a required installed package",
+              all("zsh" in args for args in calls if "install" in args))
+
+
+def main(argv=None):
+    if (sys.argv[1:] if argv is None else argv) == ["--collection-only"]:
+        test_every_test_file_in_the_tree_is_collected()
+        return 1 if any(not ok for _, ok, _ in RESULTS) else 0
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
                test_strict_turns_skip_into_failure,
@@ -1344,9 +1551,14 @@ def main():
                test_fail_tail_withholds_the_window_when_it_cannot_redact,
                test_gates_treats_only_78_as_not_configured,
                test_gates_selftests_have_a_process_group_watchdog,
+               test_migration_structure_is_checked_before_slow_work,
                test_push_floor_defers_the_gates_class_instead_of_running_it,
+               test_push_floor_distinguishes_imported_main_paths_from_branch_changes,
                test_strict_still_owns_the_gates_class,
-               test_hosted_ci_runs_classes_in_parallel_behind_one_required_context):
+               test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
+               test_hosted_migration_budget_covers_observed_acceptance_runtime,
+               test_gate_replay_has_an_independent_required_class,
+               test_hosted_zsh_setup_does_not_refresh_working_indexes):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip
