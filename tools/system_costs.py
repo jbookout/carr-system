@@ -183,6 +183,11 @@ def summarize(config, sources, through, observed_at=None, month=None):
         providers.append(view)
         if series:
             today = series[-1]
+            daily_warning = plan.get('daily_warning_usd')
+            if daily_warning is not None and today['usd'] > float(amount(daily_warning)):
+                driver = max(today['drivers'], key=today['drivers'].get)
+                alerts.append({'provider': provider, 'driver': driver, 'kind': 'daily_warning',
+                               'amount_usd': round(today['usd'], 6), 'threshold_usd': float(amount(daily_warning))})
             prior = [r['usd'] for r in series if through - timedelta(days=14) <= date.fromisoformat(r['day']) < through]
             if len(prior) == 14 and source['state'] == 'ready' and today['usd'] > 2 * median(prior):
                 driver = max(today['drivers'], key=today['drivers'].get)
@@ -438,8 +443,10 @@ def collect(config, tokens, fetch=get_json, now=None, jev_path=None):
         source = {'state': 'unavailable', 'reason': f'Missing {name}', 'rows': []}
         try:
             if provider == 'jev':
-                price = json.loads((ROOT / 'ops/config/jev-cost-guard.v1.json').read_text())['price_usd_per_million_input_tokens']
-                source = jev_sources(jev_path or USAGE_LOG, price, start, through)
+                guard = json.loads((ROOT / 'ops/config/jev-cost-guard.v1.json').read_text())
+                config = {**config, 'providers': {**config['providers'], 'jev': {
+                    **config['providers']['jev'], 'daily_warning_usd': guard['daily_warning_usd']}}}
+                source = jev_sources(jev_path or USAGE_LOG, guard['price_usd_per_million_input_tokens'], start, through)
             elif provider == 'neon' and token:
                 cfg = config['neon']
                 neon_start = max(start, now.date() - timedelta(days=60))

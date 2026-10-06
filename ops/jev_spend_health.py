@@ -33,14 +33,25 @@ LOOP_STATE = ROOT / "out" / "jev-spend-loop.json"
 CONFIG = Path(__file__).resolve().parent / "config" / "jev-cost-guard.v1.json"
 ACTION = ('on breach: open/update one deduplicated loop per provider · owner orchestrator · '
           'remediation inspect named billing driver; for Jev find caller in jev usage log and remove duplicate work or reduce its usage; restore named billing reader and confirmed plan price for unknown coverage · '
-          'verify next complete UTC day <= 2x prior 14-day median and projection <= budget · '
-          'auto-clear after both checks pass with complete coverage')
+          'verify next complete UTC day <= daily warning threshold where configured, <= 2x prior 14-day median and projection <= budget · '
+          'auto-clear after all checks pass with complete coverage')
 
 
 def _run_verb(name, payload, *, allow_refusal=False):
     result = subprocess.run(["./run.sh", "call", name, json.dumps(payload)],
                             cwd=ROOT, capture_output=True, text=True, timeout=35)
-    if result.returncode and not allow_refusal:
+    if result.returncode:
+        if allow_refusal:
+            for line in result.stderr.splitlines(keepends=True):
+                if line.startswith("TOOL ERROR "):
+                    offset = result.stderr.index(line) + len("TOOL ERROR ")
+                    try:
+                        answer, _ = json.JSONDecoder().raw_decode(result.stderr[offset:].lstrip())
+                    except ValueError:
+                        break
+                    if isinstance(answer, dict) and isinstance(answer.get("error"), str) and answer['error']:
+                        return {**answer, 'ok': False}
+                    break
         raise RuntimeError(f"{name} returned {result.returncode}")
     start = result.stdout.find("{")
     if start < 0:

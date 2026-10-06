@@ -3,6 +3,7 @@ import json
 import unittest
 import tempfile
 import sys
+import subprocess
 from unittest.mock import patch
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -221,6 +222,110 @@ class ReviewRegressions(unittest.TestCase):
         return {'budget_usd': 100, 'providers': {provider: {
             'label': provider, 'plan': 'fixture', 'monthly_usd': fixed}},
             'neon': {'org_id': 'fixture', 'rates': {}}, 'cloudflare_account_id': 'fixture'}
+
+    def test_transport_refusal_redecides_instead_of_replaying_rejected_write(self):
+        for refusal in ('version_conflict', 'loop_not_open'):
+            with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as tmp:
+                calls, writes = [], []
+                remote = {'version': 1, 'status': 'open'}
+                def transport(args, **kwargs):
+                    name, payload = args[2], json.loads(args[3])
+                    calls.append(name)
+                    if name == 'read-loop':
+                        answer = {'loop': {'loop_id': 'loop-1', **remote}}
+                    else:
+                        writes.append((name, payload))
+                        if len(writes) == 2:
+                            remote.update(version=2, status='closed' if refusal == 'loop_not_open' else 'open')
+                            return subprocess.CompletedProcess(args, 1, '', 'local-verb identity\nTOOL ERROR ' +
+                                json.dumps({'error': refusal}, indent=2) + '\n')
+                        answer = {'ok': True, 'loop_id': 'loop-1'}
+                    return subprocess.CompletedProcess(args, 0, json.dumps(answer), '')
+                path = Path(tmp) / 'loops.json'
+                with patch('jev_spend_health.subprocess.run', side_effect=transport):
+                    costs.reconcile(self.report(), path)
+                    costs.reconcile(self.report(9), path)
+                    costs.reconcile(self.report(9), path)
+                self.assertIsNone(json.loads(path.read_text())['pending'])
+                self.assertEqual(calls, ['add-loop', 'read-loop', 'update-loop', 'read-loop',
+                                        'add-loop' if refusal == 'loop_not_open' else 'update-loop'])
+                self.assertNotEqual(writes[1][1]['idempotency_key'], writes[2][1]['idempotency_key'])
+                if refusal == 'version_conflict':
+                    self.assertEqual(writes[2][1]['base_version'], 2)
+
+    def test_transport_uncertain_error_preserves_exact_intent(self):
+        for failure in ('service_unavailable', 'timeout', 'malformed'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                writes = []
+                def transport(args, **kwargs):
+                    if args[2] == 'read-loop':
+                        return subprocess.CompletedProcess(args, 0, json.dumps({'loop': {
+                            'loop_id': 'loop-1', 'status': 'open', 'version': 1}}), '')
+                    writes.append((args[2], json.loads(args[3])))
+                    if len(writes) == 1:
+                        if failure == 'timeout':
+                            raise subprocess.TimeoutExpired(args, 35)
+                        stderr = ('TOOL ERROR {"error":"service_unavailable"}' if failure == 'service_unavailable'
+                                  else 'TOOL ERROR not-json')
+                        return subprocess.CompletedProcess(args, 1, '', stderr)
+                    return subprocess.CompletedProcess(args, 0, '{"ok":true,"loop_id":"loop-1"}', '')
+                path = Path(tmp) / 'loops.json'
+                with patch('jev_spend_health.subprocess.run', side_effect=transport):
+                    with self.assertRaises((RuntimeError, subprocess.TimeoutExpired)):
+                        costs.reconcile(self.report(), path)
+                    self.assertIsNotNone(json.loads(path.read_text())['pending'])
+                    costs.reconcile(self.report(), path)
+                self.assertEqual(writes[0], writes[1])
+                self.assertIsNone(json.loads(path.read_text())['pending'])
+
+    def test_transport_nonzero_cannot_confirm_success_or_rpc_refusal(self):
+        for stderr in ('TOOL ERROR {"ok":true}', 'RPC ERROR {"error":"version_conflict"}'):
+            with self.subTest(stderr=stderr), patch('jev_spend_health.subprocess.run', return_value=
+                    subprocess.CompletedProcess([], 1, '{"ok":true}', stderr)):
+                with self.assertRaises(RuntimeError):
+                    costs.cost_verb('update-loop', {})
+
+    def test_transport_tool_error_overrides_success_flag_and_ignores_guidance(self):
+        result = subprocess.CompletedProcess([], 1, '',
+            'local-verb identity\nTOOL ERROR {"ok":true,"error":"version_conflict"}\nhelp text\n')
+        with patch('jev_spend_health.subprocess.run', return_value=result):
+            self.assertEqual(costs.cost_verb('update-loop', {}), {'ok': False, 'error': 'version_conflict'})
+
+    def test_partial_jev_daily_warning_has_one_owner_and_cannot_clear(self):
+        config = json.loads((costs.ROOT / 'ops/config/system-costs.v1.json').read_text())
+        config['providers'] = {'jev': config['providers']['jev']}
+        for spiking in (True, False):
+            with self.subTest(spiking=spiking), tempfile.TemporaryDirectory() as tmp:
+                local, factory = Path(tmp) / 'local.jsonl', Path(tmp) / 'factory.jsonl'
+                local.write_text('')
+                factory.write_text('\n'.join(json.dumps({'ts': f'2026-10-{day:02}T00:00:00Z',
+                    'ok': True, 'caller': 'factory', 'usage': {'input_tokens':
+                        30000000 if day == 15 else 1000000 if spiking else 30000000}})
+                    for day in range(1, 16)))
+                reader = costs.jev_sources
+                def source(local, price, start, through):
+                    return reader(local, price, start, through, extra_logs=(factory,))
+                with patch.object(costs, 'jev_sources', side_effect=source):
+                    report = costs.collect(config, {}, jev_path=local,
+                        now=datetime(2026, 10, 16, tzinfo=timezone.utc))
+                self.assertEqual(report['providers'][0]['state'], 'partial')
+                warning = next((a for a in report['alerts'] if a['kind'] == 'daily_warning'), None)
+                self.assertIsNotNone(warning)
+                self.assertEqual(warning['amount_usd'], 1.26)
+                self.assertEqual(warning['threshold_usd'], .5)
+                writes = []
+                def verb(name, payload):
+                    if name == 'read-loop':
+                        return {'loop': {'loop_id': 'loop-1', 'version': 1, 'status': 'open'}}
+                    writes.append(name)
+                    return {'ok': True, 'loop_id': 'loop-1'}
+                path = Path(tmp) / 'loops.json'
+                costs.reconcile(report, path, verb)
+                costs.reconcile(report, path, verb)
+                healthy = {**report, 'through': '2026-10-16', 'observed_at': '2026-10-17T00:00:00Z', 'alerts': []}
+                costs.reconcile(healthy, path, verb)
+                self.assertEqual(writes, ['add-loop'])
+                self.assertIn('daily warning threshold', costs.ACTION)
 
     def test_3_action_keys_bind_operation_and_revision(self):
         manifests, writes = {}, []
