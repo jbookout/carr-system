@@ -1,5 +1,17 @@
 # Rule-delivery eval
 
+Historical experiment: train/test were both used in selection. Preserve its
+`historical-receipt.json` and runs as exploratory evidence. The current
+`measured-historical-receipt.json` preserves main's replay-bound measurement.
+Its source, dependencies, cohorts and scorer remain authenticated in the receipt
+selftest; neither historical receipt can authorize shipping. Fresh final claims
+follow the
+three-way procedure in `../README.md`; the historical report writer is retired.
+Set `CARR_EVAL_SPLIT` to a fresh frozen manifest for tuning.
+The frozen runner defaults to development, tags results by manifest membership,
+and selects variants on development. It never loads final via its tuning loader.
+Historical runs retain their train/test tags.
+
 Measures the deterministic half of CARR rule delivery: which taught rules the
 trigger and pack layer puts in front of a session at each prompt and each tool
 call, with the Jev judgment switched off. It is the "skill triggering" case:
@@ -53,28 +65,13 @@ python3 evals/rule-delivery/run_eval.py --compare baseline v3
 python3 evals/rule-delivery/run_eval.py --verdict baseline v3 recall
 python3 evals/rule-delivery/noise.py baseline
 python3 evals/rule-delivery/explain.py                        # train split only
-python3 evals/rule-delivery/make_report.py receipt --baseline-ref <sha>   # evidence/ + receipt.json
-python3 evals/rule-delivery/make_report.py rounds             # runs/results.md (+ report.html with --builder)
-python3 evals/rule-delivery/run_eval.py --freeze-expectations # only for a new expectations version
 ```
 
-## The receipt
-
-`make_report.py receipt` replays every case through the working tree
-(candidate) and through the tree at `--baseline-ref` (baseline) with the same
-harness, and writes the raw observations to `evidence/{baseline,candidate}.jsonl`.
-`run_eval.score_receipt` grades both against `expectations.v1.json` and
-computes each dimension on the test split of its cohort: per-arm case
-bootstrap intervals and a paired-bootstrap delta over identical cohorts.
-`receipt.json` binds the harness, every tracked file the candidate replay
-read, the expectations and both cohorts by sha256; authored fields (change,
-verdict, notes, critical flags) carry over from the current receipt.
-`ops/check-eval-receipt.py` re-runs the scorer and refuses any difference.
-
-The current round command and candidate verdict read the train split only.
+The round command and candidate verdict use development with a frozen manifest,
+and train for historical runs.
 Historical rounds v1-v3 used the test split to decide keep/revert; those test
-intervals are descriptive, not untouched-holdout evidence. The frozen split
-still protects future rounds. `explain.py` reads train only. The system is
+intervals are descriptive, not untouched-holdout evidence. Fresh frozen cohorts
+protect future rounds. `explain.py` reads train only. The system is
 deterministic, so run-to-run noise is zero; paired bootstrap intervals measure
 case-sampling variation only.
 

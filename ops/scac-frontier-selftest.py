@@ -2,11 +2,10 @@
 """The generated fixture owns current-version discovery and runtime rendering."""
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 import unittest
-from git_env import fixture_env
+from git_env import clone_current_fixture, fixture_env
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,11 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class GeneratedFrontier(unittest.TestCase):
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp(prefix='scac-frontier-')) / 'repo'
-        subprocess.run(['git', 'clone', '-q', '--shared', str(ROOT), str(self.repo)],
-                       env=fixture_env(), check=True, capture_output=True)
-        shutil.copyfile(ROOT / 'ops/scac-mutation-inventory.mjs', self.repo / 'ops/scac-mutation-inventory.mjs')
+        clone_current_fixture(ROOT, self.repo)
         self.path = self.repo / 'ops/config/scac-registry-source-inventory-fixtures.v1.json'
-        shutil.copyfile(ROOT / 'ops/config/scac-registry-source-inventory-fixtures.v1.json', self.path)
         self.fixture = json.loads(self.path.read_text())
         previous = self.fixture['patches'][-1]
         self.number = int(previous['version'][1:]) + 1

@@ -77,6 +77,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ops"))
 sys.path.insert(0, str(ROOT / "tools" / "room-bridge"))
 import ai_eval  # noqa: E402  (also puts room-bridge on the path)
+import eval_split  # noqa: E402
 import evaluation_kernel as kernel  # noqa: E402
 import execution_contract as contract  # noqa: E402
 
@@ -269,13 +270,13 @@ def claim_errors(r: Any, surface: str, root: Path = ROOT) -> list[str]:
             errs.append(str(exc))
 
     c = r["cases"]
-    if not isinstance(c, dict) or not {"total", "train", "test", "should_not_fire", "sources"} <= set(c):
-        errs.append("cases must carry total, train, test, should_not_fire, sources")
+    if not isinstance(c, dict) or not {"total", "train", "development", "final", "should_not_fire", "sources"} <= set(c):
+        errs.append("cases must carry total, train, development, final, should_not_fire, sources")
     else:
-        if not (_int(c["total"], 1) and _int(c["train"], 0) and _int(c["test"], 1)):
-            errs.append("cases: total and test must be positive integers, train a non-negative integer")
-        elif c["train"] + c["test"] != c["total"]:
-            errs.append(f"cases: train {c['train']} + test {c['test']} != total {c['total']}")
+        if not (_int(c["total"], 1) and _int(c["train"], 1) and _int(c["development"], 1) and _int(c["final"], 1)):
+            errs.append("cases: train, development and final must be positive integers")
+        elif sum(c[p] for p in eval_split.PARTITIONS) != c["total"]:
+            errs.append("cases: train + development + final != total")
         if not _int(c["should_not_fire"], 1):
             errs.append("cases.should_not_fire must be at least 1: an eval with no should-not-fire cases rewards firing on everything")
         elif _int(c["total"], 1) and c["should_not_fire"] > c["total"]:
@@ -291,6 +292,16 @@ def claim_errors(r: Any, surface: str, root: Path = ROOT) -> list[str]:
         errs.append("split.method must name how train and test were drawn")
     elif s.get("sealed_test") is not True:
         errs.append("split.sealed_test must be true: the test split's transcripts are never read while proposing changes")
+    if isinstance(s, dict):
+        provenance = s.get("provenance")
+        errs.extend(eval_split.provenance_errors(provenance, root))
+        if isinstance(provenance, dict) and isinstance(c, dict):
+            if provenance.get("counts") != {p: c.get(p) for p in eval_split.PARTITIONS}:
+                errs.append("split provenance must match receipt case counts")
+            if isinstance(a, dict) and provenance.get("model") != a.get("model_id"):
+                errs.append("split provenance model must match receipt adapter")
+            if isinstance(a, dict) and provenance.get("candidate_digest") != a.get("configuration_fingerprint"):
+                errs.append("split provenance must bind the measured candidate configuration")
     if not _int(r["repeats"], 1):
         errs.append("repeats must be a positive integer")
 
@@ -713,10 +724,21 @@ def evidence_errors(r: dict, surface: str, root: Path = ROOT, base: str | None =
                 if rows is not None:
                     cohorts[arm] = rows
 
+    provenance = r.get("split", {}).get("provenance")
+    if cases is not None and isinstance(provenance, dict):
+        try:
+            manifest = eval_split.read_manifest(root / provenance["manifest"])
+            frozen = {member["id"]: partition for partition in eval_split.PARTITIONS
+                      for member in manifest["partitions"][partition]["members"]}
+            if {cid: case["split"] for cid, case in cases.items()} != frozen:
+                errs.append("evidence expectations must match the frozen manifest membership")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            errs.append(f"evidence frozen manifest unreadable: {exc}")
+
     if cases is not None and isinstance(r.get("cases"), dict):
         counts = {"total": len(cases),
-                  "train": sum(1 for v in cases.values() if v["split"] == "train"),
-                  "test": sum(1 for v in cases.values() if v["split"] == "test"),
+                  **{p: sum(1 for v in cases.values() if v["split"] == p)
+                     for p in (eval_split.PARTITIONS if "final" in r["cases"] else ("train", "test"))},
                   "should_not_fire": sum(1 for v in cases.values() if v["should_not_fire"])}
         for key, n in counts.items():
             if r["cases"].get(key) != n:
@@ -752,10 +774,10 @@ def _expectation_cases(doc: Any, version: str, errs: list[str]) -> dict[str, Any
         errs.append("evidence.expectations must label at least one case under cases")
         return None
     for cid, case in cases.items():
-        if (not isinstance(case, dict) or case.get("split") not in ("train", "test")
+        if (not isinstance(case, dict) or case.get("split") not in (*eval_split.PARTITIONS, "test")
                 or not isinstance(case.get("should_not_fire"), bool)
                 or not isinstance(case.get("input_sha256"), str) or not HEX64.match(case["input_sha256"])):
-            errs.append(f"evidence.expectations: case {cid} needs split (train|test), should_not_fire (bool) "
+            errs.append(f"evidence.expectations: case {cid} needs split (train|development|final; historical test), should_not_fire (bool) "
                         f"and input_sha256")
             return None
     return cases

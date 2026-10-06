@@ -15,6 +15,7 @@ changing result bytes and reusing a stale summary each fail the check.
 from __future__ import annotations
 
 import copy
+import atexit
 from functools import lru_cache
 import hashlib
 import importlib.util
@@ -31,6 +32,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ops"))
+import eval_split as E
 from git_env import fixture_env  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("check_eval_receipt", ROOT / "ops" / "check-eval-receipt.py")
@@ -59,11 +61,22 @@ def dimension(dim_id, *, critical, base, cand, delta, direction, status="passed"
     }
 
 
-def good_receipt():
-    """A clear, attributable win on the primary dimension, nothing critical lost.
+_BUNDLES = tempfile.TemporaryDirectory()
+atexit.register(_BUNDLES.cleanup)
+_BUNDLE_NUMBER = 0
 
-    Its numbers are hand-written, so only claim_errors() may judge it; a receipt
-    that has to pass the whole gate comes from evidenced_receipt()."""
+def good_receipt():
+    """A clear, attributable win on the primary dimension, nothing critical lost."""
+    global _BUNDLE_NUMBER
+    _BUNDLE_NUMBER += 1
+    cases = [{"id": str(i), "group": f"synthetic-{i}", "input": str(i), "label": i % 2} for i in range(80)]
+    manifest = E.freeze(cases, Path(_BUNDLES.name) / str(_BUNDLE_NUMBER), seed="test",
+                        source="human judged fresh cases", previously_seen=[])
+    with E.tuning_guard(manifest) as audit:
+        E.load_partition(manifest, "development")
+    _, provenance = E.final_evaluation(manifest, {"candidate_digest": E.digest("candidate"),
+        "baseline_digest": E.digest("baseline"), "harness_digest": E.digest("harness"),
+        "model": "model:claude-sonnet-5-5"}, audit)
     return {
         "schema_version": 2,
         "surface": "jev-judgments",
@@ -79,11 +92,11 @@ def good_receipt():
             "provider_id": "provider:anthropic",
             "model_id": "model:claude-sonnet-5-5",
             "native_session_ref": "session:hillclimb-jev-v3",
-            "configuration_fingerprint": "sha256:" + "a" * 64,
+            "configuration_fingerprint": E.digest("candidate"),
         },
-        "cases": {"total": 80, "train": 40, "test": 40, "should_not_fire": 16,
+        "cases": {"total": 80, "train": 48, "development": 16, "final": 16, "should_not_fire": 16,
                   "sources": ["production_trace", "human_judged_hard_case"]},
-        "split": {"method": "random, stratified by first tag", "seed": 11, "sealed_test": True},
+        "split": {"method": "random, stratified by first tag", "seed": 11, "sealed_test": True, "provenance": provenance},
         "repeats": 3,
         "grader": {"kind": "programmatic",
                    "validation": {"graded_twice": True, "agreement": 0.98, "oracle_pass_rate": 1.0,
@@ -128,7 +141,7 @@ def _interval(draws):
 
 
 def score(expectations, baseline, candidate):
-    ids = sorted(cid for cid, case in expectations["cases"].items() if case["split"] == "test")
+    ids = sorted(cid for cid, case in expectations["cases"].items() if case["split"] == "final")
     b = {r["case_id"]: r for r in baseline}
     n = {r["case_id"]: r for r in candidate}
     out = {}
@@ -157,7 +170,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> str:
 def evidenced_receipt(root: Path, surface: str, *, judgment=(25, 33), precision=(36, 36)) -> dict:
     """good_receipt() backed by a real evidence chain written under root.
 
-    80 cases (40 train, 40 test, 16 should-not-fire); on the test split the
+    Frozen train, development and final cases; on the final partition the
     baseline gets judgment[0] cases right and the candidate judgment[1], and the
     same for precision. Every measured number comes from the synthetic scorer."""
     edir = root / "evals" / surface
@@ -167,17 +180,29 @@ def evidenced_receipt(root: Path, surface: str, *, judgment=(25, 33), precision=
     cases: dict[str, dict] = {}
     base_rows: list[dict] = []
     cand_rows: list[dict] = []
-    for split, prefix in (("train", "r"), ("test", "t")):
-        for i in range(40):
-            cid = f"{prefix}{i:02d}"
-            inp = sha_bytes(cid.encode())
+    r = good_receipt()
+    manifest = E.freeze([{"id": f"r{i:02d}", "group": f"evidence-{i}", "input": str(i), "label": i % 2}
+                         for i in range(200)], root / f"split-{_BUNDLE_NUMBER}", seed="evidence",
+                        source="human judged synthetic cases", previously_seen=[])
+    with E.tuning_guard(manifest) as audit:
+        E.load_partition(manifest, "development")
+    final_rows, provenance = E.final_evaluation(manifest, {
+        "candidate_digest": E.digest("candidate"), "baseline_digest": E.digest("baseline"),
+        "harness_digest": E.digest("harness"), "model": r["adapter"]["model_id"]}, audit)
+    r["split"]["provenance"] = provenance
+    for split in E.PARTITIONS:
+        rows = final_rows if split == "final" else E.load_partition(manifest, split)
+        for i, case in enumerate(rows):
+            cid = case["id"]
+            inp = sha_bytes(case["input"].encode())
             cases[cid] = {"split": split, "should_not_fire": i < 8, "input_sha256": inp}
-            for rows, (right, kept) in ((base_rows, (judgment[0], precision[0])),
-                                        (cand_rows, (judgment[1], precision[1]))):
-                on_test = split == "test"
-                rows.append({"case_id": cid, "split": split, "input_sha256": inp,
-                             "scores": {dims[0]: int(on_test and i < right),
-                                        dims[1]: int(on_test and i < kept)}})
+            for observations, (right, kept) in ((base_rows, (judgment[0], precision[0])),
+                                              (cand_rows, (judgment[1], precision[1]))):
+                observations.append({"case_id": cid, "split": split, "input_sha256": inp,
+                                     "scores": {dims[0]: int(split == "final" and i < right),
+                                                dims[1]: int(split == "final" and i < kept)}})
+    r["cases"].update(total=len(cases), **provenance["counts"],
+                      should_not_fire=sum(c["should_not_fire"] for c in cases.values()))
     expectations = {"version": "synthetic-expectations/v1", "dimensions": dims, "cases": cases}
     exp_path = edir / "expectations.v1.json"
     exp_path.write_text(json.dumps(expectations, indent=1, sort_keys=True) + "\n")
@@ -197,7 +222,6 @@ def evidenced_receipt(root: Path, surface: str, *, judgment=(25, 33), precision=
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     measured = mod.score(expectations, base_rows, cand_rows)["dimensions"]
-    r = good_receipt()
     r["surface"] = surface
     r["evidence"] = evidence
     for d in r["dimensions"]:
@@ -344,6 +368,24 @@ class Globs(unittest.TestCase):
 
 
 class Receipts(unittest.TestCase):
+    def test_rehashed_invalid_lock_contract_cannot_pass_shipping_gate(self):
+        for field, value in (("schema", "unrelated"), ("baseline_digest", ""), ("harness_digest", [])):
+            r = good_receipt()
+            p = r["split"]["provenance"]
+            path = Path(p["final_lock"])
+            lock = json.loads(path.read_text())
+            lock[field] = value
+            lock["digest"] = E.digest({k: v for k, v in lock.items() if k != "digest"})
+            path.write_text(json.dumps(lock))
+            p[field] = value
+            p["final_lock_digest"] = lock["digest"]
+            self.assertTrue(cer.validate_receipt(r, "jev-judgments", ROOT), field)
+
+    def test_boolean_seal_cannot_replace_frozen_final_provenance(self):
+        r = good_receipt()
+        r["split"].pop("provenance", None)
+        self.assertTrue(any("provenance" in e for e in cer.validate_receipt(r, "jev-judgments")))
+
     def errors(self, receipt, surface="jev-judgments"):
         return cer.claim_errors(receipt, surface, ROOT)
 
@@ -452,7 +494,7 @@ class Receipts(unittest.TestCase):
         self.assertTrue(self.errors(r))
         r = good_receipt(); r["split"]["sealed_test"] = False
         self.assertTrue(any("sealed" in e for e in self.errors(r)))
-        r = good_receipt(); r["cases"]["test"] = 0; r["cases"]["train"] = 80
+        r = good_receipt(); r["cases"]["final"] = 0; r["cases"]["train"] = 80
         self.assertTrue(self.errors(r))
 
     def test_should_not_fire_and_real_sources_are_required(self):
@@ -750,8 +792,32 @@ class EvidenceChain(unittest.TestCase):
         c = self.r["evidence"]["cohorts"][which]
         c["sha256"] = sha_file(self.root / c["path"])
 
+    def test_frozen_final_evidence_can_authorize_shipping(self):
+        self.assertEqual(set(c["split"] for c in json.loads(
+            (self.root / self.r["evidence"]["expectations"]["path"]).read_text())["cases"].values()),
+                         set(E.PARTITIONS))
+        self.assertEqual(self.errors(), [])
+
     def test_evidenced_receipt_passes(self):
         self.assertEqual(self.errors(), [])
+
+    def test_evidence_membership_must_match_the_frozen_manifest(self):
+        x = self.r["evidence"]["expectations"]
+        path = self.root / x["path"]
+        doc = json.loads(path.read_text())
+        cid = next(iter(doc["cases"]))
+        doc["cases"]["renamed-case"] = doc["cases"].pop(cid)
+        path.write_text(json.dumps(doc))
+        x["sha256"] = sha_file(path)
+        for arm in cer.ARMS:
+            block = self.r["evidence"]["cohorts"][arm]
+            cohort = self.root / block["path"]
+            rows = read_jsonl(cohort)
+            for row in rows:
+                if row["case_id"] == cid:
+                    row["case_id"] = "renamed-case"
+            block["sha256"] = write_jsonl(cohort, rows)
+        self.assertTrue(any("frozen manifest" in e for e in self.errors()), self.errors())
 
     def test_schema_version_1_receipts_are_refused(self):
         r = copy.deepcopy(self.r); r["schema_version"] = 1
@@ -800,8 +866,8 @@ class EvidenceChain(unittest.TestCase):
 
     def test_case_counts_must_match_the_expectations(self):
         r = copy.deepcopy(self.r)
-        r["cases"].update(total=79, train=39)
-        self.assertTrue(any("cases.total" in e for e in self.errors(r)), self.errors(r))
+        r["cases"].update(total=199, train=119)
+        self.assertTrue(any("counts" in e for e in self.errors(r)), self.errors(r))
 
     def test_oracle_and_null_controls_are_recomputed(self):
         r = copy.deepcopy(self.r)
@@ -1027,7 +1093,7 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.receipt = json.loads((ROOT / RD / "receipt.json").read_text())
+        cls.receipt = json.loads((ROOT / RD / "measured-historical-receipt.json").read_text())
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1042,7 +1108,10 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
         self.tmp.cleanup()
 
     def errors(self, root=None):
-        return cer.validate_receipt(self.r, "rule-delivery", root or self.root)
+        return cer.evidence_errors(self.r, "rule-delivery", root or self.root)
+
+    def test_historical_measurement_cannot_authorize_shipping(self):
+        self.assertTrue(cer.validate_receipt(self.r, "rule-delivery", self.root))
 
     def test_checked_in_receipt_passes_against_its_own_evidence(self):
         self.assertEqual(self.r["schema_version"], 2)
@@ -1062,7 +1131,7 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
             mirror(self.receipt, other)
             with patch.object(cer.subprocess, "run", wraps=subprocess.run) as run:
                 self.assertEqual(self.errors(), [])
-                self.assertEqual(cer.validate_receipt(self.receipt, "rule-delivery", other), [])
+                self.assertEqual(cer.evidence_errors(self.receipt, "rule-delivery", other), [])
             commands = [call.args[0] for call in run.call_args_list]
             archives = [cmd for cmd in commands if "archive" in cmd]
             observations = [cmd for cmd in commands if "--observe" in cmd]
@@ -1110,12 +1179,8 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
         self.exp.write_bytes(shrunk)
         (repo / RD / "receipt.json").write_text(json.dumps(self.r, indent=1, sort_keys=True) + "\n")
         git("commit", "-qam", "shrink the owed rules, same version")
-        body = repo.parent / "body.md"; body.write_text("")
-        out = subprocess.run([sys.executable, str(ROOT / "ops" / "check-eval-receipt.py"), "--root", str(repo),
-                              "--base", "base", "--pr-body-file", str(body)],
-                             cwd=repo, env=env, capture_output=True, text=True)
-        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
-        self.assertIn("without a new version", out.stderr)
+        errs = cer.evidence_errors(self.r, "rule-delivery", repo, base="base")
+        self.assertTrue(any("without a new version" in error for error in errs), errs)
 
     def test_changing_result_bytes_fails(self):
         self.assertEqual(self.errors(), [])

@@ -3,6 +3,10 @@
   "contract": "drive-dependencies",
   "binary_exclusions": [
     {
+      "path": "evals/rule-delivery/historical-source.pack",
+      "reason": "archived Git commit, path trees and source blobs authenticated by the historical receipt verifier"
+    },
+    {
       "path": "mcp-server/assets/*.ttf",
       "reason": "pinned OFL font binaries embedded by the deterministic Tour PDF renderer"
     },

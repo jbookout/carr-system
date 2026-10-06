@@ -43,6 +43,9 @@ stops covering GIT_LOCATION_VARS — the hook keeps its own literal list on
 purpose (see the note there) and that case is what stops the two drifting.
 """
 import os
+from pathlib import Path
+import shutil
+import subprocess
 
 # Every variable git consults BEFORE the working directory. Sourced from
 # git(1)'s environment section rather than from memory, and deliberately
@@ -111,3 +114,46 @@ def fixture_env(base=None):
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     return env
+
+
+def clone_current_fixture(source, target, *, env=None):
+    """Clone history, then commit the caller's current tracked tree in the fixture.
+
+    HEAD can lag the code under test during a merge or an uncommitted repair.
+    Copy tracked working-tree bytes, including additions and deletions, so a
+    fixture never mixes new entrypoints with old dependencies.
+    """
+    source, target = Path(source), Path(target)
+    clean_env = fixture_env(env)
+
+    def git(repo, *args):
+        return subprocess.run(["git", *args], cwd=repo, env=clean_env,
+                              check=True, capture_output=True)
+
+    git(source, "clone", "--quiet", "--shared", "--no-checkout", str(source), str(target))
+    entries = git(source, "ls-files", "--stage", "-z").stdout.decode().split("\0")
+    git(target, "read-tree", "--empty")
+    copied = []
+    for entry in filter(None, entries):
+        metadata, path = entry.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        if stage != "0":
+            raise ValueError(f"fixture source has an unresolved conflict: {path}")
+        if mode == "160000":
+            git(target, "update-index", "--add", "--cacheinfo", f"{mode},{oid},{path}")
+            (target / path).mkdir(parents=True, exist_ok=True)
+            continue
+        original, destination = source / path, target / path
+        if not original.exists() and not original.is_symlink():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if original.is_symlink():
+            destination.symlink_to(os.readlink(original))
+        else:
+            shutil.copy2(original, destination)
+        copied.append(path)
+    git(target, "add", "-f", "--", *copied)
+    message = target / ".git" / "fixture-message"
+    message.write_text("Snapshot current tracked source for fixture\n")
+    git(target, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--quiet", "--allow-empty", "-F", str(message))

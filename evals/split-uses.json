@@ -1,0 +1,165 @@
+{
+  "schema": "carr.eval-use-inventory/v1",
+  "policy": "Existing scored corpora are development or regression only; never promote them to a fresh final cohort",
+  "families": [
+    {
+      "id": "jev-calibration",
+      "readers": [
+        "ops/jev_calibration.py",
+        "ops/jev-calibration-report.py"
+      ],
+      "case_globs": [
+        "ops/fixtures/jev-calibration/*.json",
+        "ops/fixtures/rule-delivery-eval/*.json"
+      ],
+      "use": "development_or_regression",
+      "reason": "calibration tunes entropy bands; held_out confirms proposals and therefore is development",
+      "observed_sources": {
+        "ops/fixtures/jev-calibration/distribution-vectors.v1.json": "sha256:199287dc88c3ed0f693bd7fcb2c3bdf5919ec3fe4fec8d90edc0c6ec30b50845",
+        "ops/fixtures/jev-calibration/rule_binding.v1.json": "sha256:f308d88155b8ebbbc00390f43dde6191a0c327507eb56bfdee18e33f1b29180c",
+        "ops/fixtures/rule-delivery-eval/action-signals.v2.json": "sha256:5ff0b1ce92673d3c7eef38cae934839ab87799426be2fb19811e427d9836cd01",
+        "ops/fixtures/rule-delivery-eval/adjudication-repair.v2.json": "sha256:c1b2b7bf696d9c30e0953ee49d0eebc76b9a7fb01188df924eead72e3e87abaf",
+        "ops/fixtures/rule-delivery-eval/cases.v1.json": "sha256:7ef423c946881082b99d42ccb57cabf6c41db915703a466aa0ec1aae221f1a9d",
+        "ops/fixtures/rule-delivery-eval/cases.v2.json": "sha256:20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+        "ops/fixtures/rule-delivery-eval/labels.v2.json": "sha256:cec5d5053d1eb23e1ddd41924a614be59a93244662af18ae03c3dd7c8e21f8da",
+        "ops/fixtures/rule-delivery-eval/review-floors.v2.json": "sha256:b125dc46e50b15d9b1ea7f2d59568272edf8a20794d7b902b39cc2fcaaf1f7de"
+      }
+    },
+    {
+      "id": "rule-delivery",
+      "readers": [
+        "ops/rule_delivery_eval.py",
+        "evals/rule-delivery/run_eval.py",
+        "evals/rule-delivery/round.sh",
+        "evals/rule-delivery/make_report.py",
+        "ops/rule_gold_label.py"
+      ],
+      "case_globs": [
+        "ops/fixtures/rule-delivery-eval/*.json",
+        "ops/fixtures/real-replay/*.jsonl",
+        "evals/rule-delivery/hard_cases.v1.json",
+        "evals/rule-delivery/split.json"
+      ],
+      "use": "development_or_regression",
+      "reason": "historical v1-v3 consulted test during selection; frozen historical report is exploratory",
+      "observed_sources": {
+        "evals/rule-delivery/hard_cases.v1.json": "sha256:abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
+        "evals/rule-delivery/split.json": "sha256:488e6f868fa5de794331610a5102e5b340de4a88b5d4f4b432ea3c3405a6eac8",
+        "ops/fixtures/real-replay/agent-prompts.jsonl": "sha256:616727a69c5d05dfb77c041da59f5a4915389389516f470a71bca503a71fb0ee",
+        "ops/fixtures/real-replay/bash-commands.jsonl": "sha256:ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
+        "ops/fixtures/real-replay/file-edits.jsonl": "sha256:c8f747f9496d4a5b6091a0f93b9d69b340cea475e77d901b1dd00c7bcc810a8c",
+        "ops/fixtures/real-replay/gate-scenarios.jsonl": "sha256:d4dd96c5351e4d280b83c2611c753816b5840c5f07bb903fe4ea941eefadfe09",
+        "ops/fixtures/real-replay/hook-advisories.jsonl": "sha256:50d49f6942f09d2d20cdba4bba3e89047fadb74cc3091b2f3d5bed952f270d62",
+        "ops/fixtures/real-replay/read-calls.jsonl": "sha256:19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
+        "ops/fixtures/real-replay/tool-calls.jsonl": "sha256:5ce403ba8c20bdd31bab24c2c5159aa661dc33481e94535d553b4204e45ce84a",
+        "ops/fixtures/real-replay/user-prompts.jsonl": "sha256:03e0a46352f88a691b9daaea9a3a381b32f922cbd6775ee1ab10c51fe6acda50",
+        "ops/fixtures/rule-delivery-eval/action-signals.v2.json": "sha256:5ff0b1ce92673d3c7eef38cae934839ab87799426be2fb19811e427d9836cd01",
+        "ops/fixtures/rule-delivery-eval/adjudication-repair.v2.json": "sha256:c1b2b7bf696d9c30e0953ee49d0eebc76b9a7fb01188df924eead72e3e87abaf",
+        "ops/fixtures/rule-delivery-eval/cases.v1.json": "sha256:7ef423c946881082b99d42ccb57cabf6c41db915703a466aa0ec1aae221f1a9d",
+        "ops/fixtures/rule-delivery-eval/cases.v2.json": "sha256:20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+        "ops/fixtures/rule-delivery-eval/labels.v2.json": "sha256:cec5d5053d1eb23e1ddd41924a614be59a93244662af18ae03c3dd7c8e21f8da",
+        "ops/fixtures/rule-delivery-eval/review-floors.v2.json": "sha256:b125dc46e50b15d9b1ea7f2d59568272edf8a20794d7b902b39cc2fcaaf1f7de"
+      }
+    },
+    {
+      "id": "retrieval-policy",
+      "readers": [
+        "ops/retrieval_eval.py",
+        "ops/situation_retrieval_gate.py",
+        "ops/situation-retrieval-db-gate.py"
+      ],
+      "case_globs": [
+        "evals/retrieval/*queries*.json",
+        "evals/retrieval/baselines/*.json",
+        "evals/retrieval/observations/*.json"
+      ],
+      "use": "development_or_regression",
+      "reason": "policy selection and baseline regression suites are development/regression",
+      "observed_sources": {
+        "evals/retrieval/baselines/doctrine-fts.2026-08-15.v1.json": "sha256:0bdf6acd417a16a7a2000a67133764727a432ad4cbe5f458701cd3425b296cff",
+        "evals/retrieval/baselines/doctrine-fts.2026-08-16.title-v1.json": "sha256:651714ec5554de3eaa836b62d7d2aab6d3ab9363e7bb79d1a754aca0b9b70f88",
+        "evals/retrieval/baselines/lexical.v1.json": "sha256:e14e7b78b9d2fea1f8caa1dc0f391877ed5049f79cbefce3c7d3f9c69aae8c6d",
+        "evals/retrieval/baselines/situation-retrieval-policy-selection.2026-08-16.v1.json": "sha256:ce1568416417a80c58c53bb694ee9bf91f249c24fa16c074753178d98ac7ec0e",
+        "evals/retrieval/baselines/situation-retrieval.coequal-normalized.2026-08-16.v1.json": "sha256:1266836e7bf138ccc01723f4eed12e84af91b44b18f5d365caeef65306a3c001",
+        "evals/retrieval/baselines/situation-retrieval.lexical-dominant.2026-08-16.v1.json": "sha256:e07b2653848e5b9385114d1c795ecf144a945c5715228740e5c6a914cf9c3aa2",
+        "evals/retrieval/golden-queries.v1.json": "sha256:4ac58f2a603685040ad2c4c2d31622137bdc57f30647791a293e0498e4479f58",
+        "evals/retrieval/observations/situation-retrieval-policy-selection.measured.20260817T013032Z.4d2cfa0b37deee0ccc7711ad82cb457ab669dec9.json": "sha256:6a0b25e9f387a76818d2f0e2ab69d567eb313cdac7f45603102a69a7e58e0fd6",
+        "evals/retrieval/observations/situation-retrieval.coequal-normalized.measured.20260817T013032Z.4d2cfa0b37deee0ccc7711ad82cb457ab669dec9.json": "sha256:d4db4c4fb62385f2ec691bf17f002ee5524111073ef1508eb79e361eb2569bec",
+        "evals/retrieval/observations/situation-retrieval.lexical-dominant.measured.20260817T013032Z.4d2cfa0b37deee0ccc7711ad82cb457ab669dec9.json": "sha256:67109ccee40d8cdb15cff26b259ccbf18ce3623dce478721efe8b1c2a97b3562",
+        "evals/retrieval/situation-golden-queries.2026-08-16.v1.json": "sha256:2dd2a949b37941cd564f1787eb4d2e6bc4cf816a2d1826a834882d1ad45bc73e"
+      }
+    },
+    {
+      "id": "ai-regression",
+      "readers": [
+        "ops/ai_eval.py"
+      ],
+      "case_globs": [
+        "evals/ai/*.json"
+      ],
+      "use": "development_or_regression",
+      "reason": "offline fixed expectations test behavior; regression scores alone cannot claim final generalization",
+      "observed_sources": {
+        "evals/ai/bounded-read-loop-observations.v1.json": "sha256:96d1cb3bdef8716d27b09b19eed9c650ec93cb8bcf1d5a38d2b648d0b39aaf7d",
+        "evals/ai/bounded-read-loop.v1.json": "sha256:18a07f9c531a1df69c1a1c9f05de1b5ce9777567691406d8ed9ae74d7d28643d",
+        "evals/ai/function-router.v1.json": "sha256:45a6075598db613870130921522101eecbe4a43145d3bd37872dd9190f02c7ea",
+        "evals/ai/gateway-decision.v1.json": "sha256:5c64fd4a7f5f42be36215a4244f349285642df9eb26e01195c3d01a97b0cb5ca",
+        "evals/ai/model-boundary.v1.json": "sha256:b11f90c24435dae528451e67c171f7ca190f2f230885d820ae9c2ae876bd9b34",
+        "evals/ai/read-router-integration-review.v1.json": "sha256:5f2096fdfcf0e65a3e890e07b293cf1f482814febb30c6a127e537ae61991cbd",
+        "evals/ai/response-envelope.v1.json": "sha256:3dd3a9f98ab16ab49d8d598e57ddb8c918e4a82d9bd861cf454534154f727d98",
+        "evals/ai/synthetic-baseline-history.v1.json": "sha256:d566e0f31f32f5cf593a7620fb75e2b0fca61c75755b79287cf822987e5fc196",
+        "evals/ai/synthetic-observed-run.v1.json": "sha256:550456e743c185b3de9835f96971ade435111b844b79be9b2e1c1cdd60d915b7"
+      }
+    },
+    {
+      "id": "jev-code-and-scorecard",
+      "readers": [
+        "ops/jev_code_pilot_eval.py",
+        "ops/jev_scorecard.py"
+      ],
+      "case_globs": [
+        "ops/config/flash-scorecard-tasks.v1.json"
+      ],
+      "use": "development_or_regression",
+      "reason": "code partition coverage and hidden-test scorecards are development diagnostics",
+      "observed_sources": {
+        "ops/config/flash-scorecard-tasks.v1.json": "sha256:e1637fb74e027cd530b7e91592a039884daec776c14ee33f2e5f3df594fb2197"
+      }
+    },
+    {
+      "id": "model-room-golden-and-policy",
+      "readers": [
+        "tools/room-bridge/evaluation_kernel.py",
+        "tools/room-bridge/policy_learning.py"
+      ],
+      "case_globs": [
+        "control-room/contracts/fixtures/*evaluation*.json",
+        "control-room/contracts/fixtures/execution-fabric/*evaluation*.json",
+        "control-room/contracts/fixtures/*policy-learning*.json"
+      ],
+      "use": "development_or_regression",
+      "reason": "development/held_out/canary membership and frozen rubrics exist; no untouched-final claim from repeated selection",
+      "observed_sources": {
+        "control-room/contracts/fixtures/execution-fabric/carr-evaluation-kernel.synthetic.v1.json": "sha256:1a397f2308369cffd7353112a29f636256b42cb21b6763254ad91107467a0cec",
+        "control-room/contracts/fixtures/memory-evaluation-s0.synthetic.v1.json": "sha256:5c9fdd424853960a9b848a10653cd7212fccfcb1dfa596a5687f0d5658f42c05",
+        "control-room/contracts/fixtures/policy-learning-envelope.synthetic.v1.json": "sha256:0590b429cffb2e44678d3345537b9ea1748c3e6856d07e2d80b81b18f915eb66"
+      }
+    },
+    {
+      "id": "eval-receipt",
+      "readers": [
+        "ops/check-eval-receipt.py"
+      ],
+      "case_globs": [
+        "evals/*/receipt.json",
+        "evals/rule-delivery/*historical-receipt.json"
+      ],
+      "use": "development_or_regression",
+      "reason": "new shipping receipts require final manifest, clean tuning audit and candidate lock; historical receipts remain historical",
+      "observed_sources": {
+        "evals/rule-delivery/historical-receipt.json": "sha256:d9934b02d9e3ccf07cbb39ff98e0570a71d8f75e37ea371bb27023936e628953",
+        "evals/rule-delivery/measured-historical-receipt.json": "sha256:6cd565a970f224901d0a90bfddde03623a3e86907121a8c198559400e35d96ce"
+      }
+    }
+  ]
+}
