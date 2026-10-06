@@ -43,6 +43,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -676,18 +677,30 @@ declaration_classification()
 
 
 def registry_declaration_coverage():
+    """The live registry's declarations decide classification; a load failure fails."""
     generated = subprocess.run(["node", "ops/verb-completion-facts.mjs", "--check"],
                                cwd=REPO, capture_output=True, text=True, timeout=30)
-    assert generated.returncode == 0, generated.stderr
+    if generated.returncode:
+        print("FAIL  live registry declarations could not be checked; run npm --prefix "
+              "mcp-server ci, then node ops/verb-completion-facts.mjs --write\n"
+              + generated.stderr.strip())
+        return False
     facts = mod.registry_verb_facts()
-    assert facts, "registry must load; an import failure is not a passing check"
-    missing = [name for name, value in facts.items()
-               if mod.is_write_action(name) != (value["completionClass"] == "write")]
-    assert not missing, missing
-    for name in ["prepare-conversation", "claim-card", "resolve-doctrine-rules"]:
-        assert mod.is_write_action(name), "preserve prior evidence classes for reads"
-    print(f"PASS  declaration-derived classification: {len(facts)} verbs")
-    return True
+    mismatched = [name for name, value in facts.items()
+                  if mod.is_write_action(name) != (value["completionClass"] == "write")]
+    # Prior evidence classes for these reads stay writes; the named reads stay reads.
+    lost_writes = [name for name in ["prepare-conversation", "claim-card", "resolve-doctrine-rules"]
+                   if not mod.is_write_action(name)]
+    false_writes = [name for name in ["get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
+                                      "notification-feed", "read-doc-conversation",
+                                      "read-journey-one-clock"]
+                    if mod.is_write_action(name)]
+    ok = bool(facts) and not (mismatched or lost_writes or false_writes)
+    print(f"{'PASS' if ok else 'FAIL'}  declaration-derived classification: {len(facts)} verbs"
+          + (f"; mismatched={','.join(mismatched)}" if mismatched else "")
+          + (f"; lost writes={','.join(lost_writes)}" if lost_writes else "")
+          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
 
 
 
@@ -1056,7 +1069,10 @@ runpy.run_path({os.path.join(REPO, 'hooks', 'completion-evidence-gate.py')!r}, r
 
 
 def main():
+    if sys.argv[1:] == ["--registry-only"]:
+        return 0 if registry_declaration_coverage() else 1
     outcomes = []
+    _dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b21', 'test_b22'])
     for name, recs, expected in CASES:
         got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected
@@ -1096,7 +1112,5 @@ def main():
 
 # Independently reproduced Dot cases share the offline behavioral fixtures.
 import runpy as _dot_runpy
-_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b21', 'test_b22'])
-
 if __name__ == "__main__":
     raise SystemExit(main())
