@@ -149,6 +149,12 @@ def python_errors(source):
                                   for value in values}.values())
             prior.update(*(branch[1] for branch in branches))
 
+        def irrefutable(pattern):
+            if isinstance(pattern, ast.MatchAs):
+                return pattern.pattern is None or irrefutable(pattern.pattern)
+            return isinstance(pattern, ast.MatchOr) and any(
+                irrefutable(alternative) for alternative in pattern.patterns)
+
         def walk(statements, env, prior):
             for node in statements:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -160,6 +166,25 @@ def python_errors(source):
                         branch_env, branch_seen = dict(env), set(prior)
                         walk(body, branch_env, branch_seen)
                         branches.append((branch_env, branch_seen))
+                    merge(env, prior, branches)
+                elif isinstance(node, ast.Match):
+                    expression(node.subject, env, prior)
+                    branches = []
+                    exhaustive = False
+                    for case in node.cases:
+                        branch_env, branch_seen = dict(env), set(prior)
+                        for pattern in ast.walk(case.pattern):
+                            name = (pattern.name if isinstance(pattern, (ast.MatchAs, ast.MatchStar))
+                                    else pattern.rest if isinstance(pattern, ast.MatchMapping) else None)
+                            if name:
+                                branch_env.pop(name, None)
+                        if case.guard is not None:
+                            expression(case.guard, branch_env, branch_seen)
+                        walk(case.body, branch_env, branch_seen)
+                        branches.append((branch_env, branch_seen))
+                        exhaustive |= case.guard is None and irrefutable(case.pattern)
+                    if not exhaustive:
+                        branches.append((dict(env), set(prior)))
                     merge(env, prior, branches)
                 elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
                     expression(node.iter if hasattr(node, 'iter') else node.test, env, prior)
@@ -179,9 +204,14 @@ def python_errors(source):
                         is_loader = (isinstance(value, ast.Call) and value.args
                                      and isinstance(value.args[0], ast.Constant)
                                      and value.args[0].value in {'jev_semantic', 'jev_judge', 'typesafe_client'})
-                        # Track requests and module aliases, not arbitrary data
-                        # expressions that can expand exponentially on reuse.
-                        values = resolve(value, env) if isinstance(value, ast.Name) or is_request or is_loader else None
+                        try:
+                            ast.literal_eval(value)
+                            is_literal = True
+                        except (ValueError, TypeError):
+                            is_literal = False
+                        # Closed literals have stable state identity. Keep other
+                        # data expressions opaque to bound expansion on reuse.
+                        values = resolve(value, env) if isinstance(value, ast.Name) or is_request or is_loader or is_literal else None
                         for name in node.targets if isinstance(node, ast.Assign) else [node.target]:
                             if isinstance(name, ast.Name):
                                 env[name.id] = values or [ast.Name(id=f'{name.id}@{node.lineno}', ctx=ast.Load())]

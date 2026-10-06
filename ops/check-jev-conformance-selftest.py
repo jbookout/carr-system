@@ -14,6 +14,66 @@ def load(name):
     return module
 
 class Conformance(unittest.TestCase):
+    def test_literal_state_reassignments_preserve_equivalence(self):
+        checker = load('check-jev-conformance')
+        for literal in ("{'text': 'same', 'nested': [1, None]}",
+                        "['same', -1]", "('same', 1)", "'same'", "42"):
+            source = f"""from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(qa, qb):
+ state = {literal}
+ E(R(state, qa, caller='fixture', version='v1'))
+ state: object = {literal}
+ E(R(state, qb, caller='fixture', version='v1'))
+"""
+            with self.subTest(literal=literal):
+                self.assertEqual(checker.python_errors(source),
+                                 ['6: fanout: combine all questions for this state'])
+        distinct = source.replace('state: object = 42', 'state: object = 43')
+        self.assertEqual(checker.python_errors(distinct), [])
+
+    def test_exhaustive_match_preserves_request_bindings(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(a, b, q, flag):
+ match flag:
+  case True:
+   request = R(a, q, caller='fixture', version='v1')
+  case _:
+   request = R(b, q, caller='fixture', version='v1')
+ E(request)
+"""
+        self.assertEqual(checker.python_errors(source), [])
+        self.assertEqual(checker.python_errors(source +
+                         " E(R(a, q, caller='fixture', version='v1'))\n"),
+                         ['9: fanout: combine all questions for this state'])
+        for pattern in ('selected', '_ as selected', 'True | selected',
+                        '(True | False) as selected'):
+            with self.subTest(pattern=pattern):
+                single = source.replace('case True:', f'case {pattern}:')
+                single = single[:single.index('  case _:')] + ' E(request)\n'
+                expected = (['6: cache: semantic call needs caller/version']
+                            if pattern == '(True | False) as selected' else [])
+                self.assertEqual(checker.python_errors(single), expected)
+
+    def test_partial_and_guarded_matches_keep_unmatched_bindings(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(a, b, q, flag):
+ request = R(a, q, caller='fixture', version='v1')
+ E(request)
+ match flag:
+  case True:
+   request = R(b, q, caller='fixture', version='v1')
+ E(request)
+"""
+        for pattern in ('True', '_ if flag'):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(checker.python_errors(source.replace('case True:', f'case {pattern}:')),
+                                 ['8: fanout: combine all questions for this state'])
+        no_prior = source.replace(" request = R(a, q, caller='fixture', version='v1')\n E(request)\n", '')
+        self.assertEqual(checker.python_errors(no_prior),
+                         ['6: cache: semantic call needs caller/version'])
+
     def test_request_bindings_are_resolved_at_each_call(self):
         checker = load('check-jev-conformance')
         prefix = "from jev_semantic import JudgmentRequest as R, evaluate as E\n"
