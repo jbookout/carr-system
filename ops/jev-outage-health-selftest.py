@@ -268,6 +268,55 @@ class OutageTests(unittest.TestCase):
             self.assertEqual(calls[-1][0], "close-loop")
             self.assertEqual(calls[-1][1]["loop_id"], "loop-123")
 
+    def test_recovery_remains_healthy_on_next_poll_with_unchanged_logs(self):
+        for fail_close in (False, True):
+            with self.subTest(fail_close=fail_close), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                state = root / "state.json"
+                calls = root / "calls.jsonl"
+                judge = root / "judge.jsonl"
+                state.write_text(json.dumps({"state": "healthy",
+                    "event_at": "2026-09-28T09:00:00Z",
+                    "last_success_at": "2026-09-28T09:00:00Z"}))
+                calls.write_text(json.dumps(receipt("2026-09-28T09:00:00Z")) + "\n")
+                judge.write_text(json.dumps({"at": "2026-09-28T10:00:00Z",
+                                             "error": "TypeSafe returned HTTP 402"}) + "\n")
+                mutations = []
+                loop_status = "open"
+                close_failed = False
+                def verb(name, payload):
+                    nonlocal loop_status, close_failed
+                    mutations.append((name, payload))
+                    if name == "close-loop":
+                        if fail_close and not close_failed:
+                            close_failed = True
+                            return {"ok": False}
+                        loop_status = "done"
+                    return {"ok": True, "loop_id": "loop-123", "version": 1,
+                            "status": loop_status}
+                def poll(when):
+                    result = health.evaluate(judge, calls, state_path=state,
+                        now=health.parse_time(when))
+                    return result, health.reconcile(result, state, verb)
+                self.assertEqual(poll("2026-09-28T13:00:00Z")[1], "opened")
+                calls.write_text(calls.read_text() + json.dumps(
+                    receipt("2026-09-28T13:01:00Z")) + "\n")
+                result, outcome = poll("2026-09-28T13:02:00Z")
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(outcome, "error" if fail_close else "cleared")
+                if fail_close:
+                    self.assertEqual(poll("2026-09-28T13:03:00Z")[1], "cleared")
+                    closes = [payload for name, payload in mutations if name == "close-loop"]
+                    self.assertEqual(closes[0], closes[1])
+                result, outcome = poll("2026-09-28T13:04:00Z")
+                self.assertEqual((result["state"], result["status"], outcome),
+                                 ("healthy", "ok", "none"))
+                self.assertEqual(sum(name == "add-loop" for name, _ in mutations), 1)
+                persisted = json.loads(state.read_text())
+                self.assertNotIn("loop_id", persisted)
+                self.assertNotIn("open_key", persisted)
+                self.assertNotIn("close_payload", persisted)
+
     def test_existing_loop_without_attempt_time_requires_new_success(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

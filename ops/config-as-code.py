@@ -1416,15 +1416,16 @@ def is_definition_only_task(text):
     return bool(text) and "This definition is disabled" in text
 
 
-def launchd_off_reason(filename, body):
+def launchd_off_reason(filename, body, holds=None):
     label = launchd_calendar.plist_label(body or "") or filename.removesuffix(".plist")
-    return launchd_hold.off_reason(label, HOME)
+    return launchd_hold.off_reason(label, HOME, holds=holds)
 
 
 
-def pairs():
+def pairs(holds=None):
     """(label, live_text, repo_path) for every tracked item. live_text is
     already portable; repo contents are compared verbatim against it."""
+    holds = launchd_hold.read_holds(HOME) if holds is None else holds
     out = []
 
     hooks = live_hooks_block()
@@ -1462,14 +1463,14 @@ def pairs():
         # must not be waved through merely because its body matches the repo —
         # matching bytes are exactly what an unauthorized install would have.
         # It is reported separately, by presence, in cmd_check.
-        if launchd_off_reason(f, read(launchd_repo_path(f))):
+        if launchd_off_reason(f, read(launchd_repo_path(f)), holds):
             continue
         out.append((f"launchd {f}", portable(read(os.path.join(LAUNCHD_SRC, f))),
                     launchd_repo_path(f)))
     return out
 
 
-def definition_only_installed_plists():
+def definition_only_installed_plists(holds=None):
     """DEFINITION_ONLY agents that are on the machine and must not be.
 
     Body equality is deliberately not consulted: the failure being detected is
@@ -1477,7 +1478,7 @@ def definition_only_installed_plists():
     all, and an install performed from this very repo is the likeliest way for
     that to happen.
     """
-    holds = launchd_hold.read_holds(HOME)
+    holds = launchd_hold.read_holds(HOME) if holds is None else holds
     installed = []
     for filename in carr_plists():
         label = launchd_calendar.plist_label(read(launchd_repo_path(filename)) or "") or filename.removesuffix(".plist")
@@ -1626,14 +1627,14 @@ def cmd_check():
     except (OSError, ValueError) as exc:
         print(f"config-as-code: HOLD INVALID — {exc}")
         return 1
-    verdict = _cmd_check()
+    verdict = _cmd_check(holds)
     for hold in holds.values():
         print(hold.describe())
     print(git_hooks_path_report())
     return verdict
 
 
-def _cmd_check():
+def _cmd_check(holds):
     # SEVERITY IS NOT COSMETIC HERE, and the 2026-08-08 incident is why.
     # A tracked item MISSING from the machine means a protection that was
     # supposed to be running is not running. A tracked item merely DIFFERENT
@@ -1659,7 +1660,7 @@ def _cmd_check():
         return 1
 
     try:
-        configured_pairs = pairs()
+        configured_pairs = pairs(holds)
     except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"config-as-code: CLAUDE CONTINUITY INVALID — {exc}")
         return 1
@@ -1692,22 +1693,22 @@ def _cmd_check():
     # evidence against it.
     disallowed += [
         (f"launchd {name} (DEFINITION ONLY, MUST NOT BE INSTALLED)",
-         f"installed in {LAUNCHD_SRC}; {launchd_off_reason(name, read(launchd_repo_path(name)))}")
-        for name in definition_only_installed_plists()
+         f"installed in {LAUNCHD_SRC}; {launchd_off_reason(name, read(launchd_repo_path(name)), holds)}")
+        for name in definition_only_installed_plists(holds)
     ]
     # A template launchd would load and then never fire. Reported whatever the
     # machine holds, because the machine matching it is exactly the failure.
     refused = [
         (f"launchd template {rel} (SCHEDULE REFUSED)", problem)
         for rel, problem in refused_launchd_templates()
-        if not launchd_off_reason(os.path.basename(rel), read(os.path.join(REPO_HERE, rel)))
+        if not launchd_off_reason(os.path.basename(rel), read(os.path.join(REPO_HERE, rel)), holds)
     ]
     pending_reloads = [
         (f"launchd {name} (PENDING RELOAD)",
          "disk bytes do not prove the new definition is loaded; retry installation "
          "from an external process and verify launchd registration")
         for name in pending_launchd_reloads()
-        if not launchd_off_reason(name, read(launchd_repo_path(name)))
+        if not launchd_off_reason(name, read(launchd_repo_path(name)), holds)
     ]
     drift = missing + untracked + different + disallowed + refused + pending_reloads
     if not drift and not unversioned:
@@ -1775,7 +1776,7 @@ def _cmd_check():
 
 def cmd_pull(apply):
     try:
-        launchd_hold.read_holds(HOME)
+        holds = launchd_hold.read_holds(HOME)
     except (OSError, ValueError) as exc:
         print(f"config-as-code: HOLD INVALID — {exc}")
         return 1
@@ -1790,7 +1791,7 @@ def cmd_pull(apply):
               + ", ".join(disallowed) + "; refusing to capture them into the repo.")
         return 1
     try:
-        configured_pairs = pairs()
+        configured_pairs = pairs(holds)
     except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: Claude continuity configuration is invalid ({exc}); refusing to capture it.")
         return 1

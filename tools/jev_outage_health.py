@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from lib import repair_loop  # noqa: E402
+from lib import record_call, repair_loop  # noqa: E402
 
 THRESHOLD_HOURS = 2
 REMEDIATION = {
@@ -191,7 +190,8 @@ def evaluate(judge_path, calls_path, *, now=None, threshold_hours=THRESHOLD_HOUR
         state = transition(state, "legacy_incomplete", at=now, now=now, legacy_mtime=mtime)
     if ((state["state"] in ("failing_in_grace", "outage_open") and
          not parse_time(state.get("first_failure_at"))) or
-            (state.get("loop_id") and state["state"] == "healthy")):
+            (state.get("loop_id") and state["state"] == "healthy" and
+             state.get("recovered_by_usable_success") is not True)):
         state = transition(state, "legacy_incomplete", at=now, now=now, legacy_mtime=mtime)
 
     calls, call_loss = _log(calls_path)
@@ -299,23 +299,14 @@ def reconcile(result, state_path, verb):
                 result.get("recovered_by_usable_success") is True):
             outcome = repair_loop.reconcile(state, None, verb, save, outcome=
                 "A new usable Jev judgment verified that the TypeSafe outage cleared.")
-            repair_loop.save_state(state_path, result)
+            save()
             return "cleared" if outcome == "cleared" or previous.get("first_failure_at") else "none"
         return "none"
     except (OSError, ValueError, RuntimeError):
         return "error"
 
 
-def call_verb(name, payload, *, repo):
-    process = subprocess.run(["./run.sh", "call", name, json.dumps(payload)],
-                             cwd=repo, capture_output=True, text=True, timeout=35,
-                             stdin=subprocess.DEVNULL)
-    if process.returncode:
-        return {"ok": False}
-    output = process.stdout
-    start = output.find("{")
-    try:
-        response = json.loads(output[start:]) if start >= 0 else {}
-    except json.JSONDecodeError:
-        response = {}
-    return response if isinstance(response, dict) else {"ok": False}
+def call_verb(name, payload):
+    """A loop verb's reply, or {"ok": False} for anything but an ok outcome."""
+    result = record_call.call_verb(name, payload, timeout=35)
+    return result.reply if result.ok and isinstance(result.reply, dict) else {"ok": False}

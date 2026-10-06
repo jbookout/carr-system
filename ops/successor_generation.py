@@ -37,13 +37,22 @@ def replace_once(text, before, after):
     return text.replace(before, after)
 
 
+def jsonb_key_order(value):
+    """Match PostgreSQL jsonb's length-then-byte key order for catalog readback."""
+    if isinstance(value, dict):
+        return {key: jsonb_key_order(value[key]) for key in sorted(value, key=lambda key: (len(key.encode()), key.encode()))}
+    if isinstance(value, list):
+        return [jsonb_key_order(item) for item in value]
+    return value
+
+
 def render_sql(template, predecessor, rows, baseline, entry_set, dependencies):
     """Extend history while replacing only the current, generated frontier."""
     previous = predecessor["number"]
     current = previous + 1
     old_version = f"scac-mutation-registry.v{previous}"
     new_version = f"scac-mutation-registry.v{current}"
-    old_catalog = json.dumps(predecessor["catalog"], separators=(",", ":"))
+    old_catalog = json.dumps(jsonb_key_order(predecessor["catalog"]), separators=(",", ":"))
     new_catalog = json.dumps(baseline, separators=(",", ":"))
     new_digest = digest({"schema_version": new_version, "rows": rows, "db_catalog_baseline": baseline})
     count = len(rows) + sum(baseline[key]["count"] for key in ("secdef_execute", "relation_dml", "column_dml"))
@@ -103,7 +112,7 @@ def render_sql(template, predecessor, rows, baseline, entry_set, dependencies):
     if n != 1:
         raise ValueError("successor SQL template source seed drifted")
     checks = "\n".join(
-        f"  if not exists(select 1 from public.schema_migrations where filename='{path.name}' and sha256='{hashlib.sha256(path.read_bytes()).hexdigest()}') then raise exception 'Successor dependency drifted: {path.name}'; end if;"
+        f"  if not exists(select 1 from public.schema_migrations where filename='{path['filename'] if isinstance(path, dict) else path.name}' and sha256='{hashlib.sha256(path['sql'].encode() if isinstance(path, dict) else path.read_bytes()).hexdigest()}') then raise exception 'Successor dependency drifted: {path['filename'] if isinstance(path, dict) else path.name}'; end if;"
         for path in dependencies)
     preflight = ("do $rehome_preflight$\nbegin\n" + checks +
         f"\n  if not ops.scac_mutation_registry_v{previous}_seal_available() then raise exception 'Successor predecessor seal unavailable'; end if;\nend $rehome_preflight$;\n\n")
@@ -170,7 +179,7 @@ def predecessor_rows(repo, version):
 def regenerate(repo, plan, domain_paths, successor_path, predecessor_path):
     import psycopg
     validate_outputs(repo, [*JSON_ARTIFACTS, str(successor_path.relative_to(repo)),
-        f"mcp-server/src/scac-mutation-registry.v{plan['registry_successor']}.generated.js", '.git/successor-runtime.json'])
+        'mcp-server/src/scac-mutation-registry.current.generated.js', '.git/successor-runtime.json'])
     with disposable_database(repo) as (dsn, env, run):
         run(["psql", dsn, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", repo / "db/schema.sql"])
         last_main = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", plan["base"], "--", "migrations"], cwd=repo, env=scrubbed_env()).decode().splitlines()
@@ -215,33 +224,25 @@ def regenerate(repo, plan, domain_paths, successor_path, predecessor_path):
         writer = subprocess.run(["python3", repo / "tools/integration_candidate.py", "--write", str(successor_path)], input=sql.encode(), cwd=repo, env=env, capture_output=True, timeout=120)
         if writer.returncode:
             raise ValueError("integration allocator refused successor SQL publication")
-        with psycopg.connect(dsn) as conn:
-            seals = dict(conn.execute("select registry_version,entry_set_digest from ops.scac_mutation_registry_version"))
-        seal_path = repo / "ops/config/scac-registry-full-entry-set-seals.json"
-        seal_path.write_text(json.dumps(seals, indent=2) + "\n")
-        fixture_path = repo / "ops/config/scac-registry-source-inventory-fixtures.v1.json"
-        fixture = json.loads(fixture_path.read_text())
-        prior_rows = {row['ingress_key']: row for row in predecessor_rows(repo, version)}
-        fixture['patches'].append({
-            'version': f"v{plan['registry_successor']}",
-            'reason': 'Regenerated from live source and disposable current-main catalog.',
-            'remove': sorted(set(prior_rows) - {row['ingress_key'] for row in rows}),
-            'upsert': [row for row in rows if prior_rows.get(row['ingress_key']) != row],
-            'expected_count': len(rows),
-            'expected_sha256': hashlib.sha256(json.dumps(rows, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest(),
-        })
-        fixture_path.write_text(json.dumps(fixture, indent=2, ensure_ascii=False) + "\n")
-        payload = {"rows": rows, "baseline": baseline, "version": new_version, "predecessor": version}
+        payload = {"expectedSqlDigest": hashlib.sha256(sql.encode()).hexdigest(), "rows": rows, "catalog": baseline, "entrySetDigest": entry_set,
+            "domainMigration": [{"filename": path.name, "sql": path.read_text(),
+                **({"successor_filename": successor_path.name} if index == len(domain_paths)-1 else {})}
+                for index, path in enumerate(domain_paths)]}
         payload_path = repo / '.git/successor-runtime.json'
         payload_path.write_text(json.dumps(payload, separators=(',', ':'), ensure_ascii=False))
-        render = """import {renderRuntimeProjection} from './ops/scac-mutation-inventory.mjs';
+        render = """import {createHash} from 'node:crypto';
+import {appendSuccessor} from './ops/registry-chain.mjs';
 import {writeIntegratedArtifact} from './ops/integration-generation.mjs';
-import {readFileSync} from 'node:fs';
+import {readFileSync,writeFileSync} from 'node:fs';
 const p=JSON.parse(readFileSync(process.argv[1],'utf8'));
-const source=renderRuntimeProjection(p.rows,{version:p.version,dbCatalogBaseline:p.baseline});
-await writeIntegratedArtifact(`mcp-server/src/${p.version}.generated.js`,source);
+const result=appendSuccessor(p);
+if(createHash('sha256').update(result.sql).digest('hex')!==p.expectedSqlDigest) throw new Error('chain SQL differs from disposable readback');
+await writeIntegratedArtifact('mcp-server/src/scac-mutation-registry.current.generated.js',result.runtime);
+writeFileSync('ops/config/scac-registry-chain.json',JSON.stringify(result.chain,null,2)+'\\n');
+writeFileSync('ops/config/scac-registry-source-inventory-fixtures.v1.json',JSON.stringify(result.fixture,null,2)+'\\n');
+writeFileSync('ops/config/scac-registry-full-entry-set-seals.json',JSON.stringify(result.seals,null,2)+'\\n');
 """
         result = subprocess.run(["node", "--input-type=module", "-e", render, str(payload_path)], cwd=repo, env=env, capture_output=True, timeout=120)
         if result.returncode:
-            raise ValueError("integration allocator refused runtime projection publication")
+            raise ValueError("registry chain refused successor publication")
         return {"version": new_version, "catalog": baseline, "entry_set": entry_set, "source_count": len(rows), "entry_count": len(rows) + sum(baseline[k]["count"] for k in ("secdef_execute", "relation_dml", "column_dml"))}

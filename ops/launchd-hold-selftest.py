@@ -118,6 +118,26 @@ class HoldTests(unittest.TestCase):
         self.assertIn("HOLD INVALID", output.getvalue())
         self.assertNotIn("continuity configuration", output.getvalue())
 
+    def test_pull_uses_validated_holds_when_file_changes_during_collection(self):
+        def hooks():
+            self.hold.write_text(self.label + "\n")
+            return {}
+        patch.object(cac, "live_hooks_block", side_effect=hooks).start()
+        patch.object(cac, "codex_configuration_state", return_value="absent").start()
+        patch.object(cac, "secondary_scheduled_task_violations", return_value=[]).start()
+        patch.object(cac, "TASKS_SRC", str(self.home / "absent-tasks")).start()
+        patch.object(cac, "tracked_scheduled_task_paths", return_value={}).start()
+        patch.object(cac, "carr_plists", return_value=[self.dest.name]).start()
+        patch.object(cac, "launchd_repo_path", return_value=str(self.dest)).start()
+        hooks_repo = self.home / "hooks.json"
+        hooks_repo.write_text("{}\n")
+        patch.object(cac, "HOOKS_REPO", str(hooks_repo)).start()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cac.cmd_pull(False), 0)
+        self.assertNotIn("INVALID", output.getvalue())
+        self.assertIn("0 item(s) would be written", output.getvalue())
+
     def test_watchdog_uses_launchd_hold_before_config(self):
         self.hold.write_text("com.carr.job-watchdog operator repair\n")
         patch.stopall()
