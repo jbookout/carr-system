@@ -101201,6 +101201,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:ops/config-as-code.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/config-as-code.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/config-as-code.py",
+          "schema_digest": "8122de1133cbc25937112ea3c5de2253cd4757a34ac777cf30323708da90b6b7",
+          "handler_digest": "8122de1133cbc25937112ea3c5de2253cd4757a34ac777cf30323708da90b6b7",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:ops/dependency-update-repin.py",
           "ingress_kind": "script_entrypoint",
           "operation": "ops/dependency-update-repin.py",
@@ -101478,7 +101501,7 @@
         }
       ],
       "expected_count": 1164,
-      "expected_sha256": "775f88cabe5a2f271754fa51ac7be15bac4561678f97853c876e954af17f5aec"
+      "expected_sha256": "8344e08391bd751bbd44777bfae205ec019f4b5195c0e594864637740d51d04d"
     }
   ],
   "current_source_review": {
