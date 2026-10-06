@@ -733,7 +733,8 @@ jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f5c0deb10c61	announce	[jev test_quality] needs_review: Test behavioral coverage needs review.
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f66adb22dbc7	announce	[jev test_quality] needs_review: Test behavioral coverage needs review.
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fd26ca56df4b	announce	[jev test_quality] needs_review: Test behavioral coverage needs review.
-jev-supervisor.py	Stop	(all)	counts	allow=87
+jev-supervisor.py	Stop	(all)	counts	allow=87 announce=1
+jev-supervisor.py	Stop	scenarios:e1a5c0de0001	announce	[jev done_claim] unsupported: Completion criteria are not met.
 job-watchdog-digest.py	UserPromptSubmit	(all)	counts	allow=6
 ledger-sweep.py	Stop	(all)	counts	allow=87 announce=1
 ledger-sweep.py	Stop	scenarios:c3f6a7b8c9d0	announce	LEDGER SWEEP — the partner's last turn matched triggers # · OVERRULED A RECOMMENDATION; # · RULED ON HOW SOMETHING IS STRUCTURED from rule <
