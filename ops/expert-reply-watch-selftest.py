@@ -48,10 +48,14 @@ class WatchTests(unittest.TestCase):
             with self.subTest(output=output), self.assertRaises(watch.WatchError):
                 watch.parse_replies(output, ENTRY, TODAY)
         for change in ({'quote': 'word ' * 31}, {'technique': ''}, {'topics': ['unknown']},
-                       {'handle': '@other'}, {'date': '2026-09-28'}, {'date': '2026-10-07'},
+                       {'handle': '@other'}, {'date': '2026-09-29'}, {'date': '2026-10-07'},
                        {'parent_url': None}, {'date': '2026-10-99'}):
             with self.subTest(change=change), self.assertRaises(watch.WatchError):
                 watch.parse_replies(json.dumps({**NUGGET, **change}), ENTRY, TODAY)
+
+    def test_seven_calendar_dates_include_today(self):
+        for day in ('2026-09-30', '2026-10-06'):
+            self.assertEqual(watch.parse_replies(json.dumps({**NUGGET, 'date': day}), ENTRY, TODAY)[0]['date'], day)
 
     def run_watch(self, root, grok=None, record=None):
         return watch.run([ENTRY], root, grok or Mock(return_value=json.dumps(NUGGET)),
@@ -140,6 +144,7 @@ class WatchTests(unittest.TestCase):
             args, kwargs = calls[0]
             self.assertEqual(args[0:2], ['grok', '-p'])
             self.assertIn('from:ihurricanez filter:replies', args[2])
+            self.assertIn('since:2026-09-30 until:2026-10-07', args[2])
             self.assertIn('ONLY', args[2])
             self.assertEqual(args[3:], ['-m', 'grok-4.5', '--reasoning-effort', 'high', '--sandbox', 'workspace', '--cwd', d])
             self.assertGreater(kwargs['timeout'], 0)

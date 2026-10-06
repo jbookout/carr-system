@@ -111,7 +111,7 @@ def parse_replies(stdout, entry, today):
             raise WatchError(f'invalid reply content at line {line_number}')
         if not isinstance(topics, list) or not topics or any(not isinstance(t, str) or t not in entry['topics'] for t in topics) or len(set(topics)) != len(topics):
             raise WatchError(f'invalid reply topics at line {line_number}')
-        if not today - timedelta(days=7) <= iso_date(row['date']) <= today:
+        if not today - timedelta(days=6) <= iso_date(row['date']) <= today:
             raise WatchError(f'reply outside seven-day window at line {line_number}')
         replies.append({**row, 'handle': entry['handle'], 'reply_url': url, 'parent_url': parent})
     return replies
@@ -139,7 +139,7 @@ def execute(args, *, timeout):
 
 
 def grok_replies(entry, today, scratch, *, execute=execute):
-    since = today - timedelta(days=7)
+    since = today - timedelta(days=6)
     until = today + timedelta(days=1)
     brief = (
         f'Read public X replies using from:{entry["handle"].lstrip("@")} filter:replies '
