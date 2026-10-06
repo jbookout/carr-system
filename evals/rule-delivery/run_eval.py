@@ -189,7 +189,10 @@ class World:
                                for r in json.load(handle)["rules"]}
         meta = ev.rule_meta(REPO)
         self.layer = {rid: row["layer"] for rid, row in meta.items()}
-        self.boot = ev.boot_always_on_ids(REPO) | {
+        with open(os.path.join(REPO, "ops/config/rule-classes.v1.json"), encoding="utf-8") as handle:
+            classes = json.load(handle)["rules"]
+        self.frozen_jit_boot_ids = {rid for rid, row in classes.items() if row["always_on"]
+                     and row.get("personal_to") in (None, "joe")} | {
             rid for rid, row in meta.items() if row["layer"] == "layer0"}
         routes = self.rule_routes.load_routes(__import__("pathlib").Path(REPO))["rules"]
         owed = set()
@@ -197,7 +200,9 @@ class World:
             if any(route.get("kind") in ("trigger", "path_rule") for route in entry["routes"]):
                 owed.add(rid)
         owed |= {rid for rid, layer in self.layer.items() if layer == "pack"}
-        self.owed = owed - self.boot
+        self.owed = owed - self.frozen_jit_boot_ids
+        if expectations:
+            self.owed = {rid for row in expectations["cases"].values() for rid in row["expected"]}
         self.envelope = _load(os.path.join(REPO, "ops", "machine_envelope.py"),
                               "rde_envelope").is_machine_envelope
         self.pinned = (expectations or {}).get("cases", {})
@@ -302,9 +307,12 @@ def replay(world, case):
     return events
 
 
-def observe(case, events):
+def observe(case, events, boot_ids=None):
     """The raw observation of one case: what was delivered, never how it grades."""
+    if boot_ids is None:
+        boot_ids = _load(os.path.join(REPO, "ops/rule_delivery_eval.py"), "rde_boot").boot_always_on_ids(REPO)
     return {"case_id": case["id"], "split": case.get("split"), "input_sha256": case.get("input_sha256"),
+            "available": sorted(set(boot_ids) | {rid for ev in events for rid in ev["ids"]}),
             "delivered": sorted({rid for ev in events for rid in ev["ids"]}),
             "prompt_delivered": sorted({rid for ev in events if ev["kind"] == "prompt" for rid in ev["ids"]}),
             "events": len(events), "tokens": sum(ev["tokens"] for ev in events),
@@ -320,6 +328,7 @@ def grade_observation(label, obs, labelled):
     false = {rid for rid in delivered - allowed if rid in labelled}
     prompt_false = {rid for rid in set(obs["prompt_delivered"]) - allowed if rid in labelled}
     return {"expected": sorted(expected), "delivered": sorted(delivered),
+            "labelled_delivered": sorted(delivered & labelled),
             "hit": sorted(hit), "missed": sorted(expected - delivered),
             "false": sorted(false), "prompt_false": sorted(prompt_false),
             "events": obs["events"], "tokens": obs["tokens"],
@@ -412,7 +421,8 @@ def expectation_drift(world, cases, expectations):
 
 def observe_all():
     world = World()
-    return [observe(case, replay(world, case)) for case in sorted(load_cases("all"), key=lambda c: c["id"])]
+    boot_ids = world.ev.boot_always_on_ids(REPO)
+    return [observe(case, replay(world, case), boot_ids) for case in sorted(load_cases("all"), key=lambda c: c["id"])]
 
 
 def trace_repo_reads():
@@ -492,6 +502,23 @@ def score_receipt(expectations, baseline_rows, candidate_rows):
                       "detail": grade_observation(cases[cid], row, labelled)} for cid, row in rows.items()}
     gb, gc = graded(base), graded(cand)
     dims = {}
+    with open(V2_CASES, encoding="utf-8") as handle:
+        fixture = json.load(handle)
+    availability_ids = {c["id"]: set(c["gold"]) for c in fixture["cases"] if c["split"] == "test"}
+    def availability_row(observed, cid):
+        gold = availability_ids[cid]
+        return dict(observed, prompt_id=cid, availability_hits=len(set(observed["available"]) & gold),
+                    availability_required=len(gold))
+    def availability(rows):
+        return sum(r["availability_hits"] for r in rows) / sum(r["availability_required"] for r in rows)
+    ab = [availability_row(base[cid], cid) for cid in sorted(availability_ids)]
+    ac = [availability_row(cand[cid], cid) for cid in sorted(availability_ids)]
+    b_lo, b_hi = boot_ci(ab, availability)
+    c_lo, c_hi = boot_ci(ac, availability)
+    delta, low, high = paired_bootstrap(ab, ac, availability)
+    dims["full-text-availability"] = {"baseline": {"score": availability(ab), "ci_low": b_lo, "ci_high": b_hi},
+        "candidate": {"score": availability(ac), "ci_low": c_lo, "ci_high": c_hi},
+        "delta": {"value": delta, "ci_low": low, "ci_high": high}}
     for dim_id, cohort, stat in RECEIPT_DIMENSIONS:
         ids = sorted(cid for cid, c in cases.items() if c["split"] == "test" and c["cohort"] == cohort)
         b, n = [gb[i] for i in ids], [gc[i] for i in ids]
@@ -525,7 +552,7 @@ def summarize(rows):
     quiet = [x for x in d if not x["expected"]]
     n_exp = sum(len(x["expected"]) for x in d)
     n_hit = sum(len(x["hit"]) for x in d)
-    n_del = sum(len(x["delivered"]) for x in d)
+    n_del = sum(len(x["labelled_delivered"]) for x in d)
     n_false = sum(len(x["false"]) for x in d)
     events = sum(x["events"] for x in d)
     return {
@@ -624,6 +651,12 @@ def load_run(variant, split=None):
     path = os.path.join(RUNS, variant, "results.jsonl")
     with open(path, "r", encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
+    expectations = load_expectations()
+    labelled = set(expectations["labelled"])
+    for row in rows:
+        detail = row["detail"]
+        row["detail"] = grade_observation(expectations["cases"][row["prompt_id"]],
+                                         dict(detail, prompt_delivered=detail["prompt_false"]), labelled)
     return [r for r in rows if split in (None, "all", r["split"])]
 
 

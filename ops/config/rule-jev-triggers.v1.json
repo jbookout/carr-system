@@ -1,10 +1,11 @@
 {
  "counts": {
-  "residual": 3,
-  "rules": 106,
+  "residual": 4,
+  "rules": 107,
   "triggered": 103
  },
  "generated_note": "Written only by ops/rule-trigger-compile.py: one Jev request per pack-layer rule, keyed to the rule's statement digest. ops/rule-jit-compile.py turns these into rows of ops/config/rule-jit-triggers.v1.json. Never hand-edit.",
+ "proposals": {},
  "rules": {
   "015183f5": {
    "always_on_probability": 0.33,
@@ -1399,6 +1400,26 @@
      "our vendor network": 0.71,
      "vendor network": 0.55
     },
+    "paths": {},
+    "tools": {},
+    "verbs": {}
+   }
+  },
+  "729770dd": {
+   "always_on_probability": null,
+   "id": "729770dd",
+   "mode": "residual",
+   "model": null,
+   "negatives": {},
+   "no_cue_probability": null,
+   "packs": [
+    "engineering-git",
+    "governance-rules"
+   ],
+   "statement_sha256": "0bb1b35537576b90b5fc167365c4855c9541e0250b4358e8b7e0bb914d962b7a",
+   "triggers": {
+    "commands": {},
+    "keywords": {},
     "paths": {},
     "tools": {},
     "verbs": {}

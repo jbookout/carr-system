@@ -17,4 +17,9 @@ for case in cases:
     if ("729770dd" in ids) != case["must_deliver"]:
         failures.append(case["id"])
 assert not failures, f"delivery mismatch: {failures}"
+from lib.rule_delivery_preuse import semantic_delivery
+kept, packs = semantic_delivery(ROOT, ["729770dd"])
+assert kept == ["729770dd"], (kept, packs)
+assert packs == ["engineering-git", "governance-rules"], packs
+assert world.hook._route_packs(["729770dd"]) == ["engineering-git", "governance-rules"]
 print(f"PASS every-finding delivery: {len(cases)} production-route cases")

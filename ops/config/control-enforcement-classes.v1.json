@@ -22,6 +22,7 @@
     "egress_guard": "deny_gate",
     "escalation": "deny_gate",
     "executor_tier": "deny_gate",
+    "findings_coverage": "deny_gate",
     "gate_edit": "deny_gate",
     "gate_integrity": "stop_gate",
     "glanceable_lead": "schema",
@@ -130,17 +131,6 @@
       ],
       "test": [
         "ops/check-eval-receipt-selftest.py"
-      ]
-    },
-    "findings_coverage": {
-      "enforcement_class": "deny_gate",
-      "failure_mode": "required CI refuses a declared findings source whose PR report omits IDs, the full count, or justified dispositions; explicit brief validation rejects severity exclusions",
-      "implementation": [
-        "ops/findings-coverage-gate.py",
-        "ops/ci.sh"
-      ],
-      "test": [
-        "ops/findings-coverage-gate-selftest.py"
       ]
     }
   },

@@ -1178,13 +1178,43 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
             self.assertEqual(manifests[0], manifests[1])
             self.assertIn("hooks/rule-pack-preuse-reselection.py", manifests[1])
 
+    def test_unlabelled_deliveries_cannot_improve_precision(self):
+        spec = importlib.util.spec_from_file_location("precision_runner", ROOT / RD / "run_eval.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        label = {"expected": ["known"], "allowed": ["known"]}
+        def precision(delivered):
+            obs = {"delivered": delivered, "prompt_delivered": [], "events": 1,
+                   "tokens": 0, "over_cap_events": 0}
+            detail = runner.grade_observation(label, obs, {"known", "false"})
+            return runner.summarize([{"detail": detail}])["precision"]
+        self.assertEqual(precision(["known", "false"]), 0.5)
+        self.assertEqual(precision(["known", "false", "unknown"]), 0.5)
+
+    def test_saved_rounds_regrade_precision_against_frozen_labels(self):
+        spec = importlib.util.spec_from_file_location("saved_precision_runner", ROOT / RD / "run_eval.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        labels = runner.load_expectations()
+        cid, label = next((cid, label) for cid, label in labels["cases"].items() if label["expected"])
+        false = next(rid for rid in labels["labelled"] if rid not in label["allowed"])
+        obs = {"delivered": [label["expected"][0], false, "unknown"],
+               "prompt_delivered": [], "events": 1, "tokens": 0, "over_cap_events": 0}
+        detail = runner.grade_observation(label, obs, set(labels["labelled"]))
+        detail.pop("labelled_delivered")
+        folder = self.root / "runs" / "saved"
+        folder.mkdir(parents=True)
+        (folder / "results.jsonl").write_text(json.dumps({"prompt_id": cid, "split": label["split"], "detail": detail}) + "\n")
+        runner.RUNS = str(folder.parent)
+        self.assertEqual(runner.summarize(runner.load_run("saved"))["precision"], 0.5)
+
     def test_verified_input_hashes_carry_forward(self):
         """Frozen labels and unchanged compiler inputs retain their verified bytes."""
         deps = self.r["evidence"]["dependencies"]
         for path, digest in {
             "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
             "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
-            "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
+            "ops/rule_trigger_compile.py": "26e0595e793aaba54df070f206edfa9d72f33d861f77741e0f3947bf7dbccdce",
         }.items():
             self.assertEqual(deps.get(path), digest, path)
 

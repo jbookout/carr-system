@@ -19,6 +19,9 @@ with tempfile.TemporaryDirectory() as tmp:
         assert (result.returncode == 0) == success, (body, result.stdout, result.stderr)
     good = "Findings-source: findings.json\nFindings-total: 2\nFinding: F1 | fixed | Regression test passes.\nFinding: F2 | not_a_defect | Spacing is required by the design.\n"
     run(good, True)
+    for declaration in ("Findings-source:", "Findings-total: banana", "Findings-total:", "Findings-total: 2", "Findings-total: 2.0"):
+        run(good + declaration + "\n", False)
+    run(good.replace("Findings-source: findings.json", "Findings-source:"), False)
     run(good.replace("Finding: F2 | not_a_defect | Spacing is required by the design.\n", ""), False)
     run(good.replace("not_a_defect", "deferred"), False)
     run(good.replace("Spacing is required by the design.", ""), False)

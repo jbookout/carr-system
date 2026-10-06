@@ -71,6 +71,46 @@
         "command": "gh pr comment 123 --body-file out/fix-report.txt"
       },
       "must_deliver": true
+    },
+    {
+      "id": "fixer-task-alias",
+      "tool_name": "Task",
+      "tool_input": {
+        "prompt": "Fix all review findings."
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "report-global-repo",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "gh --repo owner/repo pr comment 123 --body-file out/fix-report.txt"
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "report-global-host",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "gh --hostname github.com --repo=owner/repo pr edit 123 --body-file out/fix-report.txt"
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "report-compact-repo",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "gh -Rowner/repo pr comment 123 --body-file out/fix-report.txt"
+      },
+      "must_deliver": true
+    },
+    {
+      "id": "read-global-repo",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "gh --repo owner/repo pr view 123"
+      },
+      "must_deliver": false
     }
   ]
 }

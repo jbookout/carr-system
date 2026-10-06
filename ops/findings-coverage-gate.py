@@ -24,7 +24,10 @@ ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*")
 
 
 def check(body: str, root: Path, phase: str) -> int:
-    sources = re.findall(r"^Findings-source:\s*(.+?)\s*$", body, re.M)
+    sources = [line.removeprefix("Findings-source:").strip()
+               for line in body.splitlines() if line.startswith("Findings-source:")]
+    if any(not source for source in sources):
+        raise ValueError("Findings-source must name a repository-relative JSON path")
     if not sources:
         if re.search(r"^Findings-(?:source|total):|^Finding:", body, re.M):
             raise ValueError("findings report lacks Findings-source")
@@ -44,8 +47,10 @@ def check(body: str, root: Path, phase: str) -> int:
             if not isinstance(fid, str) or not ID.fullmatch(fid) or fid in expected:
                 raise ValueError("finding IDs must be valid and unique across sources")
             expected.add(fid)
-    totals = re.findall(r"^Findings-total:\s*(\d+)\s*$", body, re.M)
-    if len(totals) != 1 or int(totals[0]) != len(expected):
+    totals = [line.removeprefix("Findings-total:").strip()
+              for line in body.splitlines() if line.startswith("Findings-total:")]
+    if (len(totals) != 1 or not re.fullmatch(r"[0-9]+", totals[0])
+            or int(totals[0]) != len(expected)):
         raise ValueError(f"Findings-total must equal the full count {len(expected)}")
     seen = set()
     allowed = {"planned", "not_a_defect"} if phase == "brief" else {"fixed", "not_a_defect"}

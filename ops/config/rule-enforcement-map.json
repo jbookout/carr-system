@@ -212,7 +212,8 @@
       "204391be",
       "a2e78f48",
       "b7ec8f3b",
-      "ede4b241"
+      "ede4b241",
+      "729770dd"
     ]
   },
   "categories": {
@@ -309,7 +310,8 @@
       "ab814a26",
       "faae6748",
       "9b081605",
-      "25fab860"
+      "25fab860",
+      "729770dd"
     ],
     "post_action_verification": [
       "2271e684",
@@ -977,6 +979,17 @@
       "test": [
         "ops/chat-lint-gate-selftest.py",
         "baselines/writing-lint.txt"
+      ]
+    },
+    "findings_coverage": {
+      "enforcement_class": "deny_gate",
+      "failure_mode": "required CI refuses a declared findings source whose PR report omits IDs, the full count, or justified dispositions; explicit brief validation rejects severity exclusions",
+      "implementation": [
+        "ops/findings-coverage-gate.py",
+        "ops/ci.sh"
+      ],
+      "test": [
+        "ops/findings-coverage-gate-selftest.py"
       ]
     }
   },
@@ -2322,6 +2335,14 @@
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "The task-specific instruction is delivered by its rule pack; no deterministic predicate can decide every application."
+    },
+    "729770dd": {
+      "category": "hard_pre_action",
+      "control": "findings_coverage",
+      "enforcement_class": "deny_gate",
+      "binding_moment": "CI report validation or explicit brief validation",
+      "note": "Declared manifest completeness is enforced; fix truth, non-defect reasons and undeclared findings remain judgment obligations. Store admission and activation remain separate.",
+      "exceptions": "Every declared ID needs a fixed/planned disposition or a reasoned non-defect disposition. Undeclared findings and semantic truth remain judgment obligations."
     }
   },
   "rule_load_layers": {
@@ -3584,6 +3605,13 @@
       "load_layer": "pack",
       "packs": [
         "surface-doctrine"
+      ]
+    },
+    "729770dd": {
+      "load_layer": "pack",
+      "packs": [
+        "engineering-git",
+        "governance-rules"
       ]
     }
   },
