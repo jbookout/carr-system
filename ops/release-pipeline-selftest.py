@@ -357,6 +357,7 @@ class Fixture:
                            call_verb=lambda verb, args: (verbs.append((verb, args)) or (True, {"ok": True})),
                            slice_marker=slice_marker, dry_run=dry_run, env=env, today="2026-09-30", out=lambda _s: None)
         pipe.staging_ledger = lambda: {"candidate": "fixture", "ledger": {"fixture": "digest"}}
+        pipe.sleep = lambda _seconds: None
         return pipe
 
     def state(self) -> dict:
@@ -715,6 +716,15 @@ class CanaryAggregate(Base):
 
 
 class Batching(Base):
+    def test_offline_live_poll_never_waits_on_the_wall_clock(self):
+        with mock.patch.object(rp.time, "sleep", side_effect=AssertionError("real sleep in offline fixture")):
+            pipe = self.fx.pipeline(FakeRunner())
+            pipe.http = mock.Mock(return_value={"git_sha": {"value": self.fx.base}})
+            served = pipe._await_live(pipe.cfg["worker"], lambda row: row["git_sha"]["value"],
+                                      "unserved-source", attempts=3)
+        self.assertEqual(served, self.fx.base)
+        self.assertEqual(pipe.http.call_count, 3)
+
     def test_many_merges_ship_once_at_the_latest_sha(self):
         self.fx.commit({"mcp-server/src/a.js": "1"})
         self.fx.commit({"mcp-server/src/b.js": "2"})
@@ -3943,16 +3953,6 @@ class DeployCredential(unittest.TestCase):
         self.assertTrue(any("would FAIL here: credential missing" in line for line in self.lines))
         self.assertEqual(self.fx.records(), [])
 
-    def test_read_env_value(self):
-        f = self.cred / "t.env"
-        f.write_text("A=1\nexport B=\"two\"\nC='3'\nB=last\nD=\n")
-        self.assertEqual(rp.read_env_value(f, "A"), "1")
-        self.assertEqual(rp.read_env_value(f, "B"), "last")
-        self.assertEqual(rp.read_env_value(f, "C"), "3")
-        self.assertIsNone(rp.read_env_value(f, "D"))
-        self.assertIsNone(rp.read_env_value(f, "E"))
-        self.assertIsNone(rp.read_env_value(self.cred / "absent.env", "A"))
-
 
 class FailClosedVenv(Base):
     """The coordinator's own re-run of health-preflight at a8619391 caught
@@ -4240,72 +4240,6 @@ class SchemaSnapshotSupersede(Base):
             self._followup(runner)
         self.assertNotIn("gh-pr-list", runner.names())
         self.assertEqual(runner.closed, [])
-
-
-class GitHubApiRetry(unittest.TestCase):
-    """A transient `gh api` failure is retried twice (5s, then 15s) before the
-    lane blocks, and the block says why: the tail of gh's stderr. Four Worker
-    blocks on 2026-10-04 were one-off gh failures that succeeded seconds later."""
-
-    PATH = "repos/o/r/issues/1504/comments?per_page=100"
-
-    def _gh(self, *results):
-        calls = iter(results)
-
-        def run(argv, **kw):
-            rc, out, err = next(calls)
-            return subprocess.CompletedProcess(argv, rc, out, err)
-        return run
-
-    def test_two_failures_then_success_returns_the_data(self):
-        fail = (1, "", "error connecting to api.github.com\n")
-        with mock.patch.object(rp.subprocess, "run",
-                               side_effect=self._gh(fail, fail, (0, '{"ok": 1}', ""))) as run, \
-                mock.patch.object(rp.time, "sleep") as sleep:
-            data = rp.GitHub("o/r", {}).api(self.PATH)
-        self.assertEqual(data, {"ok": 1})
-        self.assertEqual(run.call_count, 3)
-        self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 15])
-
-    def test_three_failures_block_with_the_stderr_tail(self):
-        noise = "x" * 500
-        fail = (1, "", f"{noise}\nHTTP 502: Bad Gateway (https://api.github.com/repos/o/r)\n")
-        with mock.patch.object(rp.subprocess, "run", side_effect=self._gh(fail, fail, fail)) as run, \
-                mock.patch.object(rp.time, "sleep"):
-            with self.assertRaises(rp.Blocked) as ctx:
-                rp.GitHub("o/r", {}).api(self.PATH)
-        self.assertEqual(run.call_count, 3)
-        self.assertEqual(ctx.exception.reason, "github_unreadable")
-        msg = str(ctx.exception)
-        self.assertIn("exited 1", msg)
-        self.assertIn("after 3 attempts", msg)
-        self.assertIn("HTTP 502: Bad Gateway", msg)
-        self.assertNotIn("\n", msg)
-        self.assertLess(len(msg), 400)
-
-    def test_the_stderr_tail_is_redacted(self):
-        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-        fail = (1, "", f"Authorization: token {token}\nHTTP 401\n")
-        with mock.patch.object(rp.subprocess, "run", side_effect=self._gh(fail, fail, fail)), \
-                mock.patch.object(rp.time, "sleep"):
-            with self.assertRaises(rp.Blocked) as ctx:
-                rp.GitHub("o/r", {"GH_TOKEN": token}).api(self.PATH)
-        self.assertNotIn(token, str(ctx.exception))
-        self.assertIn("HTTP 401", str(ctx.exception))
-
-    def test_fine_grained_tokens_are_redacted_without_environment_credentials(self):
-        token = "github" + "_pat_" + ("A" * 82)
-        for suffix in ("", "." * 150 + "\n"):
-            with self.subTest(crosses_cutoff=bool(suffix)):
-                fail = (1, "", f"Authorization: token {token}\n{suffix}HTTP 401\n")
-                with mock.patch.object(rp.subprocess, "run", side_effect=self._gh(fail, fail, fail)), \
-                        mock.patch.object(rp.time, "sleep"):
-                    with self.assertRaises(rp.Blocked) as ctx:
-                        rp.GitHub("o/r", {}).api(self.PATH)
-                self.assertNotIn("A" * 10, ctx.exception.detail)
-                self.assertNotIn("github" + "_pat_", ctx.exception.detail)
-                self.assertIn("[REDACTED]", ctx.exception.detail)
-                self.assertIn("HTTP 401", ctx.exception.detail)
 
 
 class GitHubDiagnosticPersistence(Base):

@@ -15,8 +15,9 @@ from statistics import median
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ops'))
-from jev_spend_health import _loop_lock, _save_state, _run_verb, USAGE_LOG, FACTORY_USAGE_LOG, LOOP_STATE, ACTION
+from jev_spend_health import _loop_lock, _save_state, USAGE_LOG, FACTORY_USAGE_LOG, LOOP_STATE, ACTION
 from credential_env import load_carr_tokens
+from lib import record_call
 
 SCHEMA = 'carr-system-costs.v1'
 ROOT = Path(__file__).resolve().parents[1]
@@ -282,7 +283,15 @@ def report_order(report):
 
 
 def cost_verb(name, payload):
-    return _run_verb(name, payload, allow_refusal=True)
+    """A confirmed reply, or a named refusal marked ok:false; anything uncertain raises."""
+    result = record_call.call_verb(name, payload, timeout=35)
+    answer = result.reply
+    if result.kind == record_call.REFUSED and isinstance(answer, dict) \
+            and isinstance(answer.get('error'), str) and answer['error']:
+        return {**answer, 'ok': False}
+    if not result.ok or not isinstance(answer, dict):
+        raise RuntimeError(result.describe())
+    return answer
 
 
 def reconcile(report, path, run_verb=cost_verb, *, legacy_path=None):

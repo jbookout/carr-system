@@ -242,7 +242,7 @@ class ReviewRegressions(unittest.TestCase):
                         answer = {'ok': True, 'loop_id': 'loop-1'}
                     return subprocess.CompletedProcess(args, 0, json.dumps(answer), '')
                 path = Path(tmp) / 'loops.json'
-                with patch('jev_spend_health.subprocess.run', side_effect=transport):
+                with patch('lib.record_call.subprocess.run', side_effect=transport):
                     costs.reconcile(self.report(), path)
                     costs.reconcile(self.report(9), path)
                     costs.reconcile(self.report(9), path)
@@ -270,7 +270,7 @@ class ReviewRegressions(unittest.TestCase):
                         return subprocess.CompletedProcess(args, 1, '', stderr)
                     return subprocess.CompletedProcess(args, 0, '{"ok":true,"loop_id":"loop-1"}', '')
                 path = Path(tmp) / 'loops.json'
-                with patch('jev_spend_health.subprocess.run', side_effect=transport):
+                with patch('lib.record_call.subprocess.run', side_effect=transport):
                     with self.assertRaises((RuntimeError, subprocess.TimeoutExpired)):
                         costs.reconcile(self.report(), path)
                     self.assertIsNotNone(json.loads(path.read_text())['pending'])
@@ -280,7 +280,7 @@ class ReviewRegressions(unittest.TestCase):
 
     def test_transport_nonzero_cannot_confirm_success_or_rpc_refusal(self):
         for stderr in ('TOOL ERROR {"ok":true}', 'RPC ERROR {"error":"version_conflict"}'):
-            with self.subTest(stderr=stderr), patch('jev_spend_health.subprocess.run', return_value=
+            with self.subTest(stderr=stderr), patch('lib.record_call.subprocess.run', return_value=
                     subprocess.CompletedProcess([], 1, '{"ok":true}', stderr)):
                 with self.assertRaises(RuntimeError):
                     costs.cost_verb('update-loop', {})
@@ -288,7 +288,7 @@ class ReviewRegressions(unittest.TestCase):
     def test_transport_tool_error_overrides_success_flag_and_ignores_guidance(self):
         result = subprocess.CompletedProcess([], 1, '',
             'local-verb identity\nTOOL ERROR {"ok":true,"error":"version_conflict"}\nhelp text\n')
-        with patch('jev_spend_health.subprocess.run', return_value=result):
+        with patch('lib.record_call.subprocess.run', return_value=result):
             self.assertEqual(costs.cost_verb('update-loop', {}), {'ok': False, 'error': 'version_conflict'})
 
     def test_partial_jev_daily_warning_has_one_owner_and_cannot_clear(self):
