@@ -89,6 +89,10 @@ for h in ("https://npiregistry.cms.hhs.gov/api/?version=2.1",
           "https://raw.githubusercontent.com/a/b"):
     case(f"known host {h[:48]}", fetch(h), ALLOW)
 
+# CMS public PECOS catalog and resources are the code routine's read source.
+case("public PECOS catalog GET is allowed", bash("curl https://data.cms.gov/data.json"), ALLOW)
+case("CMS host lookalike stays denied", bash("curl https://data.cms.gov.evil.example/data.json"), DENY)
+
 # claude.com, added 2026-08-14. anthropic.com was already here; claude.com was
 # not, and the standard Claude Code attribution line links to it. So EVERY `gh
 # pr create` carrying the documented attribution was refused as "network send to

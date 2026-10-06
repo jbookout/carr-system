@@ -230,6 +230,12 @@ TOKENS = [(tok, real) for tok, real in
 
 from lib.launchd_scope import PRIMARY_ONLY, SECONDARY_ONLY
 
+DEDICATED_INSTALL = {
+    "com.carr.routine-lead-signals-weekly.plist",
+    "com.carr.routine-contact-enrichment-weekly.plist",
+    "com.carr.routine-social-weekly.plist",
+}
+
 
 
 
@@ -2369,6 +2375,9 @@ def cmd_install(apply):
     if apply:
         os.makedirs(LAUNCHD_SRC, exist_ok=True)
     for f in sorted(os.listdir(LAUNCHD_REPO)) if os.path.isdir(LAUNCHD_REPO) else []:
+        if f in DEDICATED_INSTALL:
+            print(f"  SKIP  {f} (orchestrator installs via bin/install-routines.sh)")
+            continue
         if f in DEFINITION_ONLY:
             print(f"  SKIP  {f} (definition only: {DEFINITION_ONLY[f]})")
             continue
@@ -2636,6 +2645,9 @@ def launchd_calendar_reinstall_plan(templates_dir, agents_dir):
         refusal = launchd_template_refusal(source)
         if refusal:
             row.update(action="fail", why=f"template refused: {refusal}")
+            continue
+        if name in DEDICATED_INSTALL:
+            row["why"] = "dedicated routine installer owns activation"
             continue
         if name in DEFINITION_ONLY:
             row["why"] = "definition only"

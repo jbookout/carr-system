@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Hermetic refusal checks for unattended database credential boundaries."""
 from __future__ import annotations
 
 import importlib.util

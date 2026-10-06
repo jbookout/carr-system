@@ -4319,9 +4319,18 @@ export const TOOLS = {
       idempotency_key: { type: "string" },
       party_id: { type: "string", description: "from add-party or find" },
       stage: { type: "string" }, lane: { type: "string" }, segment: { type: "string" },
+      score: { type: "number", minimum: 0, maximum: 10, description: "Estimated score for ordering the board; Joe qualifies every lead." },
+      score_basis: { type: "string", minLength: 1, maxLength: 2000, description: "Evidence explaining the estimate; required with score." },
       source_type: { type: "string" }, source_detail: { type: "string" } },
       required: ["idempotency_key","party_id","stage"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "new-lead", args, async () => {
+      const scored = args.score !== undefined;
+      if ((scored && (typeof args.score !== "number" || !Number.isFinite(args.score) || args.score < 0 || args.score > 10 ||
+          typeof args.score_basis !== "string" || !args.score_basis.trim() || args.score_basis.length > 2000)) ||
+          (!scored && args.score_basis !== undefined)) {
+        throw new ToolError({ error: "invalid_estimated_score", hint: "A score must be finite, between 0 and 10, and accompanied by its evidence basis." });
+      }
+      const sourceDetail = scored ? [args.source_detail, `Estimated score ${args.score}/10: ${args.score_basis}`].filter(Boolean).join("\n") : args.source_detail || null;
       // stage and lane are FOREIGN KEYS (lead_stage.slug, lead_lane.slug). They used
       // to go straight into the insert, so a plausible-but-wrong value — `lane:
       // "referral"`, which reads like an obvious lane and is not one — came back as
@@ -4342,13 +4351,13 @@ export const TOOLS = {
       }
       const ref = (await c.query("select 'L-' || lpad(nextval('ref_lead_seq')::text, 3, '0') as r")).rows[0].r;
       const r = await c.query(
-        `insert into lead (registry_ref, party_id, stage, lane, segment, source_type, source_detail,
+        `insert into lead (registry_ref, party_id, stage, lane, segment, source_type, source_detail, score,
            owner_id, owner_label, created_by, updated_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$8,$8) returning id`,
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$9) returning id`,
         [ref, args.party_id, args.stage, args.lane || null, args.segment || null,
-         args.source_type || null, args.source_detail || null, actor.id, actor.display]);
+         args.source_type || null, sourceDetail, scored ? args.score : null, actor.id, actor.display]);
       await writeEvent(c, actor, "new-lead", "lead", r.rows[0].id,
-        { new: { ref }, idempotency_key: args.idempotency_key });
+        { new: { ref, ...(scored ? { score: args.score, score_basis: args.score_basis } : {}) }, idempotency_key: args.idempotency_key });
       return { ok: true, lead_id: r.rows[0].id, ref };
     }),
   },

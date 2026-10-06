@@ -120,7 +120,7 @@ STRUCTURAL_KEYS = {
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
 }
-ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity"}
+ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity", "routine_drift"}
 
 
 def _find_function(name: str) -> ast.FunctionDef:
@@ -580,7 +580,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         ns.update(os=os, re=re, sys=sys, time=time, REPO_ROOT=str(HEALTH_CHECK_PATH.parent.parent),
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
-                  _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
+                  _canonical_snapshot=lambda: {}, _routine_drift_rows=lambda: ([], "OK routine drift fixture"), _jev_spend_row=lambda: (None, "OK spend"),
                   _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
                   flashlib=Mock(health_row=Mock(return_value="OK Flash stopped")),

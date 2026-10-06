@@ -108,8 +108,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "routines"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|routines")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -125,6 +125,19 @@ def _headless_rows():
     from pathlib import Path
     from lib.headless_tasks import health_rows
     return health_rows(Path(REPO_ROOT), Path.home())
+
+
+def _routine_drift_rows():
+    sys.path.insert(0, REPO_ROOT)
+    from tools.routines.drift import check, render
+    rows = check()
+    return rows, render(rows)
+
+
+if CANONICAL_SECTION == "routines":
+    _rows, _line = _routine_drift_rows()
+    print(_line)
+    sys.exit(int(bool(_rows)))
 
 
 if CANONICAL_SECTION == "headless":
@@ -1333,6 +1346,11 @@ def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        routine_rows, routine_line = _routine_drift_rows()
+        print("  " + routine_line)
+        if routine_rows:
+            rc = _red("routine_drift", routine_line, hard_error=True)
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)

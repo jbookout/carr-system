@@ -16,7 +16,7 @@ from pathlib import Path
 import psycopg
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
-from scac_mutation_db_inventory import project, summarize
+from scac_mutation_db_inventory import manifest_job_definition_catalog, project, summarize
 from registry_chain import registry_chain
 
 REPO = Path(__file__).resolve().parents[1]
@@ -24,10 +24,9 @@ sys.path.insert(0, str(REPO))
 from lib.control_plane_scheduler_cutover import scheduler_launchd_rows  # noqa: E402
 
 
-JOB_DEFINITION_CATALOG = {
-    "count": 26,
-    "digest": "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
-}
+JOB_DEFINITION_CATALOG = manifest_job_definition_catalog(
+    json.loads((REPO / "ops/config/control-plane-workflows.v1.json").read_text(encoding="utf-8"))
+)
 
 def fail(message: str) -> int:
     print(f"siep11-mutation-registry-local-pg-gate: FAIL — {message}", file=sys.stderr)

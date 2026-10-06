@@ -39,6 +39,9 @@
 # com.carr.fetch-allowlist.plist exists as its own job rather than being
 # inherited from the nightly chain.
 PRIMARY_ONLY = {
+    "com.carr.routine-lead-signals-weekly.plist",
+    "com.carr.routine-contact-enrichment-weekly.plist",
+    "com.carr.routine-social-weekly.plist",
     "com.carr.job-watchdog.plist",
     "com.carr.videopipeline.plist",
     # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched

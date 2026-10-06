@@ -210,6 +210,50 @@ def digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def manifest_job_definition_catalog(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Expected JOB_DEFINITIONS_SQL census after fresh manifest synchronization.
+
+    Historical SCAC seals describe their original pre-sync database. The local
+    gates also verify today's synchronized definitions against source, with the
+    same canonical serializer used for the observed database projection. The
+    manifest's disabled bootstrap defaults stay binding here; this is not a
+    production authority-managed activation comparison.
+    """
+    rows = []
+    identities = set()
+    for workflow in manifest["workflows"]:
+        identity = (workflow["key"], workflow["version"])
+        if identity in identities:
+            raise ValueError(f"duplicate manifest job definition: {identity}")
+        identities.add(identity)
+        execution = {key: value for key, value in workflow["execution"].items() if key != "kind"}
+        inventory = workflow.get("inventory", {})
+        entrypoint = execution.get("entrypoint")
+        if entrypoint is None:
+            entrypoint = execution.get("cognition_job")
+        row = {
+            "ingress_key": f"job-definition:{identity[0]}:{identity[1]}",
+            "ingress_kind": "job_definition",
+            "key": identity[0], "version": identity[1],
+            "enabled": workflow["enabled"], "risk": workflow["risk"],
+            "owner_actor": inventory.get("owner", "system"),
+            "execution_kind": workflow["execution"]["kind"],
+            "entrypoint": entrypoint,
+            "execution_contract": execution, "inventory_contract": inventory,
+        }
+        for column, field in (
+            ("recurrence", "recurrence"), ("state_contract", "state"),
+            ("routing_contract", "routing"), ("filtering_contract", "filtering"),
+            ("validation_contract", "validation"), ("retry_policy", "retry"),
+            ("deduplication", "deduplication"), ("completion_contract", "completion"),
+            ("legacy_schedule", "legacy_schedule"),
+        ):
+            row[column] = workflow[field]
+        rows.append(row)
+    rows.sort(key=lambda row: (row["key"], row["version"]))
+    return summarize({"job_definitions": rows})["categories"]["job_definitions"]
+
+
 def project(cur: Any) -> dict[str, list[dict[str, Any]]]:
     return {name: [row[0] for row in cur.execute(query)] for name, query in QUERIES.items()}
 
