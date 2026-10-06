@@ -174,6 +174,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -1465,13 +1466,50 @@ class Pipeline:
         env[CLOUDFLARE_TOKEN_NAME] = token
         return env
 
-    def wrangler_auth(self, wrangler: Path, cwd: Path) -> None:
+    def deploy_tool(self, name: str) -> Path:
+        """The pipeline's own install of mcp-server's pinned CLI tools, made
+        from this checkout's mcp-server lockfile into the state dir and keyed
+        by the lockfile digest. Never the shared checkout's
+        mcp-server/node_modules: other sessions link and `npm ci` against that
+        folder, and an emptied one stopped the app lane at wrangler-auth with
+        exit 127 (47c63aa0122f, 2026-10-06). The install writes only the state
+        dir, so it may run before any worktree exists."""
+        src = self.repo / "mcp-server"
+        lock = src / "package-lock.json"
+        if not lock.is_file():
+            raise StepFailed("deploy-tools", 1, "", f"{lock} is missing; cannot install the pinned {name}")
+        root = self.store.root / "deploy-tools"
+        home = root / hashlib.sha256(lock.read_bytes()).hexdigest()[:16]
+        tool = home / "node_modules" / ".bin" / name
+        installed = home / ".installed"
+        if installed.is_file() and tool.exists():
+            return tool
+        if not self.dry_run:
+            home.mkdir(parents=True, exist_ok=True)
+            installed.unlink(missing_ok=True)
+            shutil.copyfile(src / "package.json", home / "package.json")
+            shutil.copyfile(lock, home / "package-lock.json")
+        self.step("deploy-tools", ["npm", "ci", "--no-audit", "--no-fund"], home, timeout=1800)
+        if self.dry_run:
+            return tool
+        if not tool.exists():
+            raise StepFailed("deploy-tools", 1, "", f"npm ci finished but {tool} is missing")
+        installed.write_text(lock.name + "\n", encoding="utf-8")
+        for old in root.iterdir():
+            if old != home and old.is_dir():
+                shutil.rmtree(old, ignore_errors=True)
+        return tool
+
+    def wrangler_auth(self) -> None:
         """Before any worktree exists: the deploy token must be present and
         accepted. Either failure stops the lane and dispatches; neither is a
-        silent hold, because a missing token never heals itself."""
+        silent hold, because a missing token never heals itself. The token is
+        checked before the tool install so a missing one runs no subprocess."""
+        env = self.deploy_env()
+        wrangler = self.deploy_tool("wrangler")
         try:
-            who = self.step("wrangler-auth", [str(wrangler), "whoami"], cwd, timeout=120,
-                            env=self.deploy_env())
+            who = self.step("wrangler-auth", [str(wrangler), "whoami"], self.repo / "mcp-server",
+                            timeout=120, env=env)
         except StepFailed as failure:
             if failure.step != "wrangler-auth":
                 raise
@@ -1863,7 +1901,7 @@ class Pipeline:
         # before the release worktree for that failure to stay a clean,
         # zero-subprocess failure (existing DeployCredential selftests pin
         # `runner.calls == []` for it).
-        self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
+        self.wrangler_auth()
 
         # 1. the release worktree at exactly S, venv-linked, `npm ci`'d — a
         # checkout and install only, no --apply yet, created BEFORE the
@@ -2137,7 +2175,7 @@ class Pipeline:
         rev = self.dry_tolerant("app review", lambda: self.review_evidence(gh, lane_cfg, repo_dir, base, sha),
                                 {"prs": [], "pre_pipeline_prs": [], "verifier_evidence": "<approval>"})
         self.out(f"  evidence: PRs {rev['prs']} approved; head approval {rev['verifier_evidence']}")
-        self.wrangler_auth(self.repo / "mcp-server/node_modules/.bin/wrangler", self.repo / "mcp-server")
+        self.wrangler_auth()
         wt = self.store.release_worktree("app", sha)
         self.add_worktree("app-worktree", repo_dir, wt, sha)
         self.step("app-npm-ci", ["npm", "ci", "--no-audit", "--no-fund"], wt, timeout=1800)

@@ -25,6 +25,7 @@ What is pinned, one test class each:
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -267,7 +268,8 @@ class Fixture:
         # post-base commit, so a commit meant to be docs-only was no longer
         # canary-ignored; and it swept the pipeline's own out/release-pipeline
         # state into any commit made after a tick.
-        (self.repo / ".git" / "info" / "exclude").write_text(".venv\nout/\n")
+        (self.repo / ".git" / "info" / "exclude").write_text(
+            ".venv\nout/\nmcp-server/package.json\nmcp-server/package-lock.json\n")
         self.cred = tmp / "cred"
         self.cred.mkdir()
         (self.cred / "db.env").write_text(
@@ -285,6 +287,29 @@ class Fixture:
         venv_python.parent.mkdir(parents=True, exist_ok=True)
         venv_python.write_text("#!/bin/sh\nexit 0\n")
         venv_python.chmod(0o755)
+        # mcp-server's manifest and lockfile, and the pipeline's own wrangler
+        # install made from them (Pipeline.deploy_tool), as on a machine that
+        # has already run once. DeployTools removes the install to test it.
+        (self.repo / "mcp-server").mkdir(exist_ok=True)
+        (self.repo / "mcp-server" / "package.json").write_text('{"name": "carr-mcp"}\n')
+        self.write_lock("v1")
+        self.seed_deploy_tools()
+
+    def write_lock(self, version: str) -> None:
+        (self.repo / "mcp-server" / "package-lock.json").write_text(
+            json.dumps({"name": "carr-mcp", "lockfileVersion": 3, "fixture": version}) + "\n")
+
+    def deploy_tools_home(self) -> Path:
+        lock = (self.repo / "mcp-server" / "package-lock.json").read_bytes()
+        return self.repo / "out/release-pipeline/deploy-tools" / hashlib.sha256(lock).hexdigest()[:16]
+
+    def seed_deploy_tools(self) -> Path:
+        home = self.deploy_tools_home()
+        tool = home / "node_modules" / ".bin" / "wrangler"
+        tool.parent.mkdir(parents=True, exist_ok=True)
+        tool.write_text("#!/bin/sh\nexit 0\n")
+        (home / ".installed").write_text("package-lock.json\n")
+        return home
 
     def commit(self, files: dict[str, str]) -> str:
         for rel, text in files.items():
@@ -2776,6 +2801,90 @@ class Blockers(Base):
         self.assertEqual([v for v, _ in verbs], ["add-loop", "add-room-turn"])
         self.assertIn("credential rejected", verbs[0][1]["blocker_detail"])
         self.assertTrue(self.fx.records()[-1]["loop_filed"])
+
+
+class DeployTools(Base):
+    """wrangler-auth runs the pipeline's own wrangler, installed from the
+    mcp-server lockfile into the state dir, never the shared checkout's
+    mcp-server/node_modules (47c63aa0122f failed with exit 127 when another
+    session emptied that folder)."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.rmtree(self.fx.repo / "out/release-pipeline/deploy-tools")
+
+    @staticmethod
+    def installing(runner):
+        orig = runner.run
+
+        def run(argv, **kw):
+            res = orig(argv, **kw)
+            if kw["log"].stem.endswith("deploy-tools"):
+                tool = Path(kw["cwd"]) / "node_modules" / ".bin" / "wrangler"
+                tool.parent.mkdir(parents=True, exist_ok=True)
+                tool.write_text("#!/bin/sh\nexit 0\n")
+            return res
+        runner.run = run  # type: ignore[method-assign]
+        return runner
+
+    def test_installs_once_per_lockfile_and_never_reads_the_shared_checkout(self):
+        live = {"sha": self.fx.base}
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = self.installing(FakeRunner(live=live))
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        home = self.fx.deploy_tools_home()
+        self.assertEqual(runner.names()[:2], ["deploy-tools", "wrangler-auth"])
+        self.assertEqual(runner.calls[0][1], ["npm", "ci", "--no-audit", "--no-fund"])
+        self.assertEqual(runner.cwds["deploy-tools"], str(home))
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", runner.envs["deploy-tools"])
+        self.assertEqual(runner.calls[1][1], [str(home / "node_modules/.bin/wrangler"), "whoami"])
+        self.assertEqual((home / "package-lock.json").read_bytes(),
+                         (self.fx.repo / "mcp-server/package-lock.json").read_bytes())
+        self.assertFalse((self.fx.repo / "mcp-server/node_modules").exists())
+
+        self.fx.commit({"mcp-server/src/a.js": "2"})
+        runner = self.installing(FakeRunner(live=live))
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(runner.names()[0], "wrangler-auth")
+
+        self.fx.write_lock("v2")
+        self.fx.commit({"mcp-server/src/a.js": "3"})
+        runner = self.installing(FakeRunner(live=live))
+        self.assertEqual(self.fx.pipeline(runner, live=live).tick(["worker"]), 0)
+        self.assertEqual(runner.names()[:2], ["deploy-tools", "wrangler-auth"])
+        self.assertEqual(runner.cwds["deploy-tools"], str(self.fx.deploy_tools_home()))
+        self.assertFalse(home.exists())
+
+    def test_app_lane_uses_the_same_install(self):
+        cfg = self.fx.config()
+        cfg["worker"]["enabled"] = False
+        cfg["app"]["enabled"] = True
+        cfg["app"]["review_required_after"] = "2000-01-01T00:00:00Z"
+        self.fx.commit({"src/worker.js": "1"})
+        runner = self.installing(FakeRunner())
+        pipe = self.fx.pipeline(runner, cfg=cfg)
+        pipe.http = lambda _u: {"source_commit": self.fx.base, "environment": "production"}
+        pipe.tick(["app"])
+        self.assertEqual(runner.names()[:2], ["deploy-tools", "wrangler-auth"])
+        self.assertEqual(runner.calls[1][1][0], str(self.fx.deploy_tools_home() / "node_modules/.bin/wrangler"))
+
+    def test_install_without_wrangler_fails_at_deploy_tools(self):
+        sha = self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        self.assertEqual(self.fx.pipeline(runner).tick(["worker"]), 1)
+        self.assertEqual(runner.names(), ["deploy-tools"])
+        rec = self.fx.records()[-1]
+        self.assertEqual((rec["status"], rec["step"], rec["sha"]), ("failed", "deploy-tools", sha))
+        self.assertIn("node_modules/.bin/wrangler is missing", rec["detail"])
+        self.assertFalse((self.fx.deploy_tools_home() / ".installed").exists())
+
+    def test_missing_token_still_runs_no_subprocess(self):
+        (self.fx.cred / "tokens.env").write_text("")
+        self.fx.commit({"mcp-server/src/a.js": "1"})
+        runner = FakeRunner()
+        self.fx.pipeline(runner).tick(["worker"])
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.fx.records()[-1]["step"], "credential-missing")
 
 
 class CapabilityRecovery(Base):
