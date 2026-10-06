@@ -1,4 +1,5 @@
 -- Preserve approved private placeholder facts without publishing contact literals.
+-- rollback: delete from public.system_config where key = 'contacts.protected_phone_numbers' (only if this migration created the key; otherwise restore its prior value from the nightly backup).
 insert into public.system_config(key, value, note)
 select 'contacts.protected_phone_numbers',
        jsonb_agg(distinct regexp_replace(found.phone[1], '[^0-9]', '', 'g')),

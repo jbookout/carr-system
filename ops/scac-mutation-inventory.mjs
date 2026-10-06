@@ -19654,8 +19654,13 @@ export const WORKER_REGISTRATION_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v113",
 });
 
+// ops/migration-safety-gate.py reads these declarations from the header that precedes the first statement.
+const WORKER_REGISTRATION_SAFETY_HEADER =
+  "-- rollback: forward-only — sealed registry versions are append-only; a correction ships as the next successor registry version.\n" +
+  "-- lock-review: the re-added checks validate ops.scac_mutation_registry_version and ops.scac_policy_epoch, which hold one row per registry version, so the exclusive lock is momentary.\n";
+
 export function renderWorkerRegistrationRegistrySql(rows, predecessorSql = null) {
-  return renderAppendedRegistrySql(rows, {
+  const sql = renderAppendedRegistrySql(rows, {
     predecessorSql,
     predecessorPath: "migrations/0846_leads_scac_successor.sql",
     predecessorDigest: "39c22acce1c8d94d693f0b6f858f8a6d68c20f3f9edb8314832a0a0e35aa5a78",
@@ -19667,6 +19672,8 @@ export function renderWorkerRegistrationRegistrySql(rows, predecessorSql = null)
     oldTag: "leads", newTag: "worker_registration",
     oldLabel: "Leads", newLabel: "Worker registration",
   });
+  const firstLineEnd = sql.indexOf("\n") + 1;
+  return sql.slice(0, firstLineEnd) + WORKER_REGISTRATION_SAFETY_HEADER + sql.slice(firstLineEnd);
 }
 
 export function renderInvoiceTrackerRegistrySql(rows, predecessorSql = null) {
