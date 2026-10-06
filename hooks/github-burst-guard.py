@@ -23,12 +23,19 @@ WHAT IT REFUSES (PreToolUse, Bash and the Codex exec shapes):
      hook saw start. One shared window: shepherd ticks the pipeline itself.
   3. During a fifteen-minute cooldown after a recorded GitHub rate-limit answer:
      every gh call and the release tick, except `gh api rate_limit`.
+  4. Two or more gh calls where one is sent to the background with a single
+     `&` (`gh a & gh b`): they run at the same time, which is a parallel burst.
+     One backgrounded gh on its own, and `;` / `&&` / `||` chains, which run
+     one call at a time, are allowed.
 
-WHAT IT RECORDS (PostToolUse / PostToolUseFailure, same file): when a command
-that touches GitHub (gh, the release tick, shepherd, api.github.com) prints
-"API rate limit exceeded" or "secondary rate limit", the time goes to the state
-file and starts the cooldown. Output of any other command is ignored, so
-reading this file or its selftest cannot lock the account's sessions out.
+WHAT IT RECORDS (PostToolUse / PostToolUseFailure, same file): the time of a
+GitHub rate-limit answer, which starts the cooldown. All three must hold:
+the command touches GitHub (gh, the release tick, shepherd, api.github.com);
+the command FAILED (a PostToolUseFailure event, or a non-zero exit code in the
+payload); and "API rate limit exceeded" or "secondary rate limit" sits on gh's
+own error line, one carrying `HTTP 403` / `HTTP 429` or starting `gh:` or
+`GraphQL:`. A successful `gh pr diff`, PR body or run log that merely mentions
+the phrase therefore records nothing, and neither does reading this file.
 
 ALWAYS ALLOWED outside the cooldown, when not inside a loop: a single gh
 command, gh --paginate, and gh api graphql. One paginated call is the cheap
@@ -81,6 +88,10 @@ COOLDOWN = 15 * 60
 GH_RE = re.compile(r"(?<![\w./-])gh\s+(?=[a-z])")
 SLEEP_RE = re.compile(r"(?<![\w.-])sleep\s+(\d+(?:\.\d+)?)([smhd]?)\b")
 RATE_LIMIT_TEXT = re.compile(r"api rate limit exceeded|secondary rate limit", re.I)
+# gh's own error line: `HTTP 403: ...` / `HTTP 429: ...` anywhere on the line,
+# or a line that starts with `gh:` or `GraphQL:`.
+GH_ERROR_LINE = re.compile(r"\bHTTP (?:403|429)\b|^\s*(?:gh|GraphQL):", re.I)
+EXIT_CODE_LINE = re.compile(r"^\s*Exit code (\d+)\b", re.M)
 
 # Where a command word can start: string or line start, after a shell
 # separator (an escaped `\|` inside a grep pattern is not one), inside a
@@ -277,6 +288,58 @@ def gh_calls(text):
     return found
 
 
+def backgrounded(cmd, pos):
+    """True when the statement starting at pos is sent to the background by a
+    single `&`. A pipeline is followed to its end (`gh x | jq . &` runs gh in
+    the background too); `&&`, `||`, `;` and a newline end it in the
+    foreground; `2>&1`, `>&2`, `&>file` and `|&` are redirections. A `)` or
+    backtick closing the substitution the call sits in also ends it, so the
+    `&` in `"...?head=$(gh ...)&per_page=50"` is not read as backgrounding."""
+    quote = None
+    depth = 0
+    i = pos
+    while i < len(cmd):
+        c = cmd[i]
+        nxt = cmd[i + 1] if i + 1 < len(cmd) else ""
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "\\":
+            i += 2
+            continue
+        elif c == "(":
+            depth += 1
+        elif c in ")`":
+            if depth == 0:              # end of the `$( )` / subshell holding it
+                return False
+            depth -= 1
+        elif c in ";\n" or (c == "|" and nxt == "|"):
+            return False
+        elif c == "&":
+            prev = cmd[i - 1] if i else ""
+            if nxt == "&":
+                return False
+            if prev in ">|" or nxt == ">":
+                i += 1
+                continue
+            return True
+        i += 1
+    return False
+
+
+def background_reason(cmd):
+    calls = sorted(gh_calls(cmd))
+    if len(calls) < 2 or not any(backgrounded(cmd, pos) for pos in calls):
+        return None
+    return (f"{len(calls)} gh calls with at least one sent to the background by `&`, "
+            f"so they run at the same time")
+
+
 def loop_reason(cmd):
     for keyword, header, body in loop_regions(cmd):
         gh_header = len(gh_calls(header))
@@ -336,6 +399,15 @@ def pre_verdict(cmd, now):
                 f"(rule 74ddb23c, never burst GitHub).")
 
     if has_gh:
+        why = background_reason(scan)
+        if why:
+            return (f"GITHUB BURST GUARD: this command is {why}. Parallel calls "
+                    f"trip GitHub's short-window rate limit for the whole shared "
+                    f"account, which every session, CI watcher and the release "
+                    f"pipeline use. Run them one at a time with `;` or `&&` (a "
+                    f"`sleep {MIN_LOOP_SLEEP}` between them for more than a few), "
+                    f"or use one `gh api --paginate` / `gh api graphql` call "
+                    f"(rule 74ddb23c, never burst GitHub).")
         why = loop_reason(scan)
         if why:
             return (f"GITHUB BURST GUARD: this command is {why}. A burst like that "
@@ -360,20 +432,70 @@ def pre_verdict(cmd, now):
     return None
 
 
-def response_text(payload):
+def _int(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def call_failed(payload, event):
+    """The call failed: a PostToolUseFailure event, or a non-zero exit code
+    in the payload (top level or inside the tool response), or an
+    `Exit code N` line with N != 0 in the error text."""
+    if event == "PostToolUseFailure":
+        return True
+    places = [payload]
+    for key in ("tool_response", "tool_output", "toolResponse"):
+        if isinstance(payload.get(key), dict):
+            places.append(payload[key])
+    for place in places:
+        for key in ("exit_code", "exitCode", "returncode", "returnCode", "status_code"):
+            code = _int(place.get(key))
+            if code is not None:
+                return code != 0
+    error = payload.get("error")
+    if isinstance(error, str):
+        m = EXIT_CODE_LINE.search(error)
+        if m:
+            return int(m.group(1)) != 0
+    return False
+
+
+def rate_limit_error_line(text):
+    """True when a rate-limit phrase sits on gh's own error line."""
+    for line in text.splitlines():
+        if RATE_LIMIT_TEXT.search(line) and GH_ERROR_LINE.search(line):
+            return True
+    return False
+
+
+def response_lines(payload):
+    """The response as plain text lines: JSON-escaped newlines are undone, so
+    a stderr field's lines are lines here too."""
     parts = []
     for key in ("tool_response", "tool_output", "toolResponse", "error"):
         value = payload.get(key)
         if value is None:
             continue
-        parts.append(value if isinstance(value, str) else json.dumps(value))
+        if isinstance(value, dict):
+            parts.extend(v for v in value.values() if isinstance(v, str))
+        elif isinstance(value, str):
+            parts.append(value)
+        else:
+            parts.append(json.dumps(value))
     return "\n".join(parts)
 
 
-def observe(payload, cmd, now):
+def observe(payload, cmd, now, event):
     if not touches_github(mask_quoted_data(inert_stripped(cmd))):
         return
-    if RATE_LIMIT_TEXT.search(response_text(payload)):
+    if not call_failed(payload, event):
+        return
+    if rate_limit_error_line(response_lines(payload)):
         write_state(rate_limited_at=now)
         log(f"RECORDED rate-limit answer :: {cmd[:200]}")
 
@@ -402,7 +524,7 @@ def main():
         event = payload.get("hook_event_name") or "PreToolUse"
         now = time.time()
         if event in ("PostToolUse", "PostToolUseFailure"):
-            observe(payload, cmd, now)
+            observe(payload, cmd, now, event)
             return 0
         reason = pre_verdict(cmd, now)
         if reason:

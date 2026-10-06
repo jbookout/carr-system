@@ -57,12 +57,14 @@ def pre(cmd, tool="Bash"):
                 "tool_input": {"command": cmd}, "session_id": "selftest"})
 
 
-def post(cmd, stdout="", stderr="", event="PostToolUse", error=None):
+def post(cmd, stdout="", stderr="", event="PostToolUse", error=None, exit_code=None):
     payload = {"hook_event_name": event, "tool_name": "Bash",
                "tool_input": {"command": cmd}, "session_id": "selftest"}
     if event == "PostToolUse":
         payload["tool_response"] = {"stdout": stdout, "stderr": stderr,
                                     "interrupted": False}
+        if exit_code is not None:
+            payload["tool_response"]["exit_code"] = exit_code
     else:
         payload["error"] = error or ""
     return run(payload)
@@ -115,6 +117,29 @@ LOOP_DENY = [
     ("for-over-quoted-args", 'for n in "$@"; do gh pr view $n; done'),
     ("until-poll-two-gh",
      "until gh run view 1 --exit-status; do gh run list -L 5; done"),
+]
+
+# Backgrounded gh: two or more calls where one is sent to the background with
+# a single `&` run at the same time, which is a parallel burst.
+BG_DENY = [
+    ("three-backgrounded",
+     "gh pr view 1 --json state & gh pr view 2 --json state & gh pr view 3 --json state & wait"),
+    ("two-backgrounded", "gh pr view 1 & gh pr view 2"),
+    ("backgrounded-multiline", "gh run view 1 &\ngh run view 2 &\nwait"),
+    ("backgrounded-pipeline", "gh pr list --json number | jq . & gh run list"),
+]
+BG_ALLOW = [
+    ("and-chain", "gh pr view 1 && gh pr view 2"),
+    ("one-backgrounded-then-sleep", "gh pr view 1 & sleep 3"),
+    ("other-cmd-backgrounded", "npm run dev & gh pr view 1"),
+    ("single-backgrounded", "gh run watch 123 &"),
+    ("redirects-not-background", "gh pr view 1 2>&1 | head; gh pr view 2 &>/dev/null"),
+    ("semicolon-chain", "gh pr view 1; gh pr view 2"),
+    ("or-chain", "gh pr view 1 || gh pr view 2"),
+    # From the replay: the `&` is a URL query separator after a substitution.
+    ("ampersand-in-url-after-substitution",
+     'gh api "repos/x/y/actions/runs?head_sha=$(gh pr view 1398 --json headRefOid '
+     '-q .headRefOid)&per_page=50"'),
 ]
 
 LOOP_ALLOW = [
@@ -202,7 +227,7 @@ def tick_cases(failures):
 # ---- class 3: rate-limit cooldown -----------------------------------------
 def cooldown_cases(failures):
     clear_state()
-    post("gh pr list -L 50",
+    post("gh pr list -L 50", exit_code=1,
          stderr="HTTP 403: API rate limit exceeded for user ID 64207374.")
     expect(failures, "403-recorded",
            0 if isinstance(read_state().get("rate_limited_at"), (int, float)) else 1, 0)
@@ -233,8 +258,8 @@ def cooldown_cases(failures):
     expect(failures, "cooldown-ten-minutes-in-denied", code, 2)
 
     clear_state()
-    post("python3 ops/release-pipeline.py tick",
-         stdout="gh: You have exceeded a secondary rate limit. Please wait a few minutes.")
+    post("python3 ops/release-pipeline.py tick", event="PostToolUseFailure",
+         error="Exit code 1\ngh: You have exceeded a secondary rate limit. Please wait a few minutes.")
     expect(failures, "secondary-limit-from-tick-recorded",
            0 if "rate_limited_at" in read_state() else 1, 0)
 
@@ -253,6 +278,42 @@ def cooldown_cases(failures):
     clear_state()
     post("gh pr view 12", stdout='{"state":"OPEN"}')
     expect(failures, "clean-output-not-recorded",
+           0 if "rate_limited_at" not in read_state() else 1, 0)
+
+    # A successful command whose OUTPUT merely mentions the phrase (a diff of
+    # this very guard, a PR body, a run log) must not start a lockout.
+    clear_state()
+    post("gh pr diff 1630",
+         stdout='+    stderr="HTTP 403: API rate limit exceeded for user ID 1."\n'
+                '+RATE = "secondary rate limit"\n')
+    expect(failures, "successful-diff-mentioning-phrase-not-recorded",
+           0 if "rate_limited_at" not in read_state() else 1, 0)
+    clear_state()
+    post("gh pr diff 1630", exit_code=0,
+         stdout="HTTP 403: You have exceeded a secondary rate limit\n")
+    expect(failures, "exit-zero-with-error-line-not-recorded",
+           0 if "rate_limited_at" not in read_state() else 1, 0)
+    clear_state()
+    post("gh run view 99 --log", event="PostToolUseFailure",
+         error="Exit code 1\nstep 3: the docs say a secondary rate limit may apply\n"
+               "some later failure")
+    expect(failures, "failed-call-mentioning-phrase-off-error-line-not-recorded",
+           0 if "rate_limited_at" not in read_state() else 1, 0)
+    clear_state()
+    post("gh api repos/x/y/pulls", event="PostToolUseFailure",
+         error="Exit code 1\nHTTP 403: You have exceeded a secondary rate limit. "
+               "Please wait a few minutes before you try again.")
+    expect(failures, "failed-call-secondary-403-recorded",
+           0 if "rate_limited_at" in read_state() else 1, 0)
+    clear_state()
+    post("gh api repos/x/y/pulls", exit_code=1,
+         stderr="HTTP 429: secondary rate limit (https://api.github.com/graphql)")
+    expect(failures, "nonzero-exit-code-429-recorded",
+           0 if "rate_limited_at" in read_state() else 1, 0)
+    clear_state()
+    post("gh api repos/x/nope", event="PostToolUseFailure",
+         error="Exit code 1\nHTTP 404: Not Found (https://api.github.com/repos/x/nope)")
+    expect(failures, "failed-call-unrelated-404-not-recorded",
            0 if "rate_limited_at" not in read_state() else 1, 0)
 
 
@@ -299,6 +360,17 @@ def main():
         code, _ = pre(cmd)
         expect(failures, f"loop-allow/{name}", code, 0)
 
+    for name, cmd in BG_DENY:
+        clear_state()
+        code, err = pre(cmd)
+        expect(failures, f"bg-deny/{name}", code, 2)
+        if code == 2 and "&" not in err:
+            failures.append(f"bg-deny/{name}: reason does not name the backgrounding")
+    for name, cmd in BG_ALLOW:
+        clear_state()
+        code, _ = pre(cmd)
+        expect(failures, f"bg-allow/{name}", code, 0)
+
     tick_cases(failures)
     cooldown_cases(failures)
     pending_install_cases(failures)
@@ -318,7 +390,7 @@ def main():
     code, _ = pre("gh pr view 1")
     expect(failures, "corrupt-state-fails-open", code, 0)
 
-    total = len(LOOP_DENY) + len(LOOP_ALLOW) + 40
+    total = len(LOOP_DENY) + len(LOOP_ALLOW) + len(BG_DENY) + len(BG_ALLOW) + 46
     if failures:
         print(f"FAIL github-burst-guard: {len(failures)} failure(s)")
         for f in failures:
