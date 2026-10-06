@@ -304,11 +304,13 @@ def run_request(task: str, *, retrieval=False, prefix="", cwd=None, effort=EFFOR
                 receipt_path=None) -> dict:
     """One execution owns URL validation, provider outcome codes and private receipts.
 
-    URL text alone never changes the caller's contract. Retrieval requires an
-    explicit opt-in and source text; local files cannot establish provenance.
+    Every prompt URL must be public and free of embedded credentials before
+    invocation. Retrieval output requires explicit opt-in and source text;
+    local files cannot establish provenance.
     """
-    urls = requested_urls(task) if retrieval else []
-    outcome = retrieval_request_error(urls) if retrieval else None
+    prompt_urls = requested_urls(task)
+    outcome = retrieval_request_error(prompt_urls) if prompt_urls or retrieval else None
+    urls = prompt_urls if retrieval else []
     cli_version = None
     if outcome is None:
         try:

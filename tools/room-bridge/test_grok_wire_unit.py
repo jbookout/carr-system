@@ -33,6 +33,26 @@ def output(end=None, text="Safe Methods", before=None):
 
 
 class GrokTests(unittest.TestCase):
+    def test_default_desk_refuses_unsafe_urls_without_provider_invocation(self):
+        for url in ("https://fixture-user:fixture-secret@example.com/post",
+                    "https://example.com/post?access_token=fixture-secret",
+                    "http://127.0.0.1/source", "http://[::1]/source",
+                    "http://service.internal/source"):
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as td:
+                reg = desks.Registry(Path(td) / "desks.json")
+                grok_desk.install(reg, td)
+                provider = mock.Mock(return_value=subprocess.CompletedProcess([], 0, output(), ""))
+                execute = grok_wire.run_task
+                with mock.patch.object(grok_wire, "run_task", side_effect=
+                        lambda e, t: execute(e, t, run=provider)):
+                    result = dispatch.dispatch("grok-desk", "Explain " + url,
+                        registry=reg, results_path=Path(td) / "results.jsonl")
+                self.assertEqual((result["status"], result["code"], result.get("detail")),
+                                 ("failed", 6, "invalid_retrieval_url"))
+                provider.assert_not_called()
+                self.assertNotIn("fixture-user", json.dumps(result["receipt"]))
+                self.assertNotIn("fixture-secret", json.dumps(result["receipt"]))
+
     def test_linked_explanation_remains_prose_through_model_room(self):
         with tempfile.TemporaryDirectory() as td:
             reg = desks.Registry(Path(td) / "desks.json")

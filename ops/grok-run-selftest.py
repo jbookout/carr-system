@@ -25,6 +25,35 @@ spec.loader.exec_module(runner)
 
 
 class GrokRunTests(unittest.TestCase):
+    def test_default_runner_refuses_unsafe_urls_before_preflight_or_invocation(self):
+        for writable in (False, True):
+            for url in ("https://fixture-user:fixture-secret@example.com/post",
+                        "https://example.com/post?access_token=fixture-secret",
+                        "http://127.0.0.1/source", "http://[::1]/source",
+                        "http://service.internal/source"):
+                with self.subTest(writable=writable, url=url), tempfile.TemporaryDirectory() as td:
+                    receipt_path = Path(td) / "receipt.json"
+                    argv = ["grok-run", "--prompt", "Explain " + url]
+                    if writable:
+                        argv.append("--writable")
+                    with mock.patch.object(sys, "argv", argv), \
+                            mock.patch.dict(os.environ, {"GROK_RUN_RECEIPT": str(receipt_path)}, clear=True), \
+                            mock.patch.object(runner, "preflight", return_value="1.0.0") as preflight, \
+                            mock.patch.object(runner, "invoke_cli", return_value=subprocess.CompletedProcess(
+                                [], 0, (FIXTURES / "good.ndjson").read_text(), "")) as provider, \
+                            mock.patch.object(sys, "stdout", io.StringIO()) as stdout, \
+                            mock.patch.object(sys, "stderr", io.StringIO()) as stderr:
+                        self.assertEqual(runner.main(), 6)
+                        preflight.assert_not_called()
+                        provider.assert_not_called()
+                        self.assertEqual(stdout.getvalue(), "")
+                        receipt = json.loads(receipt_path.read_text())
+                        self.assertEqual((receipt["status"], receipt["code"], receipt["detail"]),
+                                         ("failed", 6, "invalid_retrieval_url"))
+                        diagnostics = stdout.getvalue() + stderr.getvalue() + receipt_path.read_text()
+                        self.assertNotIn("fixture-user", diagnostics)
+                        self.assertNotIn("fixture-secret", diagnostics)
+
     def test_link_in_prose_prompt_does_not_enable_retrieval_even_when_writable(self):
         for writable in (False, True):
             run, receipt = self.run_fixture("good.ndjson", "--prompt",
