@@ -209,6 +209,13 @@ KNOWN_HOSTS = (
     # vanished from the queue, and with no route to Blotato nobody could see
     # that it had happened.
     "backend.blotato.com",
+    # Social-batch primary sources, added 2026-10-06 on Joe's ruling ("Yes
+    # unblock them"). The catch-up batch that day had to verify public-post
+    # figures through a fetch tool's summary because curl to these was refused;
+    # rule 94806da2 needs raw bytes for anything durable. Read-only: CBRE
+    # research pages, CARR's own site, the AAVMC veterinary workforce study, and
+    # Blotato's API docs.
+    "www.cbre.com", "carr.us", "aavmc.org", "help.blotato.com",
     # huggingface.co: whisper.cpp model downloads for the dictation rig
     # (ggml-large-v3-turbo). Added 2026-08-07 on Joe's explicit go in the
     # dictation-rig build session; read-only model fetches into ~/.cache.

@@ -108,6 +108,19 @@ case("bash curl to the Slack Web API is allowed",
 case("bash curl to an unrelated unknown API host is still blocked",
      bash("curl https://unlisted-api-host.example/api/auth.test"), DENY)
 
+# Social-batch primary sources, added 2026-10-06 on Joe's ruling ("Yes unblock
+# them"), so public-post figures are verified from raw bytes, not a summary.
+case("CBRE research page is allowed",
+     bash("curl -sL https://www.cbre.com/insights/figures/us-healthcare-figures-q2-2026"), ALLOW)
+case("CARR's own blog is allowed",
+     bash("curl -sL https://carr.us/blog/"), ALLOW)
+case("AAVMC study PDF is allowed",
+     bash("curl -sLO https://aavmc.org/wp-content/uploads/study.pdf"), ALLOW)
+case("Blotato API docs are allowed",
+     bash("curl -sL https://help.blotato.com/api"), ALLOW)
+case("a lookalike of an allowed source host is still blocked",
+     bash("curl https://cbre.com.evil.example/"), DENY)
+
 case("DoctorCRE staging app Worker is allowed",
      bash("curl https://doctorcre-app-staging.joe-bookout-carr-us.workers.dev/"), ALLOW)
 case("unrelated workers.dev Worker is still blocked",
