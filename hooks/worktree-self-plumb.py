@@ -138,7 +138,6 @@ def emit_delivery_policy(repo):
 
 # ── orphan reaper thresholds — the 2026-08-18 sweep's proven rules ─────────
 REAP_MIN_IDLE_S = 6 * 3600     # index younger than this = possibly-live session
-REAP_LOCK_STALE_S = 2 * 3600   # a lock older than this belongs to a dead reaper
 
 
 def resolve_cwd(payload):
@@ -316,16 +315,17 @@ def reap_main(argv):
     def value(flag):
         return argv[argv.index(flag) + 1] if flag in argv else None
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-    from branch_retirement import DEFAULT_ROOTS, health
+    from branch_retirement import health, repository_roots
+    roots = repository_roots()
     canon = Path(canonical_root(value("--repo") or REPO))
-    if "--fleet" in argv and canon.resolve() != DEFAULT_ROOTS["jbookout/carr-system"].resolve():
+    if "--fleet" in argv and canon.resolve() != roots["jbookout/carr-system"].resolve():
         print("fleet retirement requires the canonical CARR repository")
         return 1
     if "--health-row" in argv:
         line, failed = health(canon)
         print(line)
         return int(failed)
-    roots = DEFAULT_ROOTS if "--fleet" in argv else {"jbookout/carr-system": canon}
+    roots = roots if "--fleet" in argv else {"jbookout/carr-system": canon}
     report = fleet_reaper(canon).run(roots, execute="--dry-run" not in argv,
                                     skip=[value("--skip")] if value("--skip") else [])
     print(json.dumps({k: v for k, v in report.items() if k != "rows"}, sort_keys=True))
@@ -356,12 +356,13 @@ def maybe_spawn_reaper(canon, current_wt):
             cands += 1
     if not cands:
         return 0
-    lock = os.path.join(canon, "out", "worktree-reap.lock")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+    from branch_retirement import maintenance
     try:
-        if time.time() - os.path.getmtime(lock) < REAP_LOCK_STALE_S:
-            return 0                         # a reaper is already on it
-    except OSError:
-        pass
+        with maintenance(Path(canon)):
+            pass
+    except RuntimeError:
+        return 0
     log = os.path.join(canon, "out", "worktree-reap.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
     try:

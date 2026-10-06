@@ -1,5 +1,6 @@
 """Evidence and recoverable actions for the existing worktree reaper."""
 from contextlib import contextmanager, nullcontext
+import fcntl
 import hashlib
 import json
 import os
@@ -13,10 +14,10 @@ import uuid
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "ops"))
 from git_env import scrubbed_env
+import job_watchdog
+from job_watchdog import protected_branch, repository_roots
 
 CLASSES = ("merged", "superseded", "abandoned", "live")
-DEFAULT_ROOTS = {f"jbookout/{name}": Path.home() / name
-                 for name in ("carr-system", "doctorcre-app", "software-factory")}
 
 
 def command(argv, cwd=None, *, input=None, allowed=(0,), timeout=120, environment=None):
@@ -56,7 +57,7 @@ def append(path, row):
 
 def save(path, row):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
+    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     temp.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
     temp.replace(path)
 
@@ -166,44 +167,33 @@ def ownership(root, path):
 
 
 @contextmanager
-def maintenance(root, stale_seconds):
+def maintenance(root):
     lock = root / "out/worktree-reap.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        stat = lock.stat()
-        dead = False
+    # Keep this inode permanently. Renaming or unlinking an acquired flock
+    # would allow a second caller to lock a different inode at the same path.
+    with lock.open("a+") as stream:
         try:
-            pid = int(lock.read_text())
-            if pid > 0:
-                os.kill(pid, 0)
-        except ProcessLookupError:
-            dead = True
-        except (ValueError, PermissionError):
-            pass
-        if not dead or time.time() - stat.st_mtime < stale_seconds or lock.stat().st_ino != stat.st_ino:
-            raise RuntimeError("repository maintenance lock held; preserve pending run")
-        stage = root / "out/_to_delete"
-        stage.mkdir(parents=True, exist_ok=True)
-        lock.rename(stage / ("worktree-reap-lock-" + uuid.uuid4().hex))
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "w") as stream:
-        stream.write(str(os.getpid()))
-    try:
-        yield
-    finally:
-        lock.unlink()
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("repository maintenance lock held; preserve pending run") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 class FleetReaper:
     def __init__(self, root, hook, *, provider=None, process_probe=process_paths,
-                 ownership_probe=None, clock=time.time, branch_idle=10800, tree_idle=21600):
+                 ownership_probe=None, clock=time.time, config=None):
         self.root, self.hook = Path(root), hook
         self.provider = provider or GitHub()
         self.process_probe = process_probe
         self.ownership_probe = ownership_probe or (lambda p: ownership(self.root, p))
-        self.clock, self.branch_idle, self.tree_idle = clock, branch_idle, tree_idle
+        self.config = config or job_watchdog.load_config(SOURCE / "ops/config/job-watchdog.json")
+        self.clock = clock
+        self.branch_idle = self.config["thresholds"]["branch_idle_seconds"]
+        self.tree_idle = hook.REAP_MIN_IDLE_S
         self.patches = {}
         self.ancestors = {}
 
@@ -230,7 +220,21 @@ class FleetReaper:
                 self.patches[key] = None
         return self.patches[key]
 
+    def change_present(self, root, landed, target):
+        names = git(root, "diff", "--no-renames", "--name-only", "-z", landed + "^", landed).split("\0")
+        names = [n for n in names if n]
+        return bool(names) and not git(root, "diff", "--no-renames", landed, target, "--", *names)
+
+    def pr_identity(self, pr):
+        return json.loads(json.dumps({"head": pr["head"], "base": pr["base"], "body": pr.get("body") or ""}))
+
+    def target_matches(self, pr, repo):
+        return pr["base"]["ref"] == "main" and pr["base"]["repo"]["full_name"] == repo
+
     def successor(self, root, repo, pr, merged, main):
+        if not self.target_matches(pr, repo):
+            return None
+        merged = [p for p in merged if self.target_matches(p, repo)]
         for candidate in merged:
             n = candidate["number"]
             url = f"https://github.com/{repo}/pull/{n}"
@@ -241,7 +245,7 @@ class FleetReaper:
                                 r"\b|" + re.escape(pr.get("html_url", "NO-URL")) + r"\b)",
                                 candidate.get("body") or "", re.I)
             landed = candidate.get("merge_commit_sha")
-            if not landed or not self.ancestor(root, landed, main):
+            if not landed or not self.ancestor(root, landed, main) or not self.change_present(root, landed, main):
                 continue
             if declared or reverse:
                 return {"number": n, "head": candidate["head"]["sha"],
@@ -254,7 +258,7 @@ class FleetReaper:
         if patch:
             for candidate in merged:
                 landed = candidate.get("merge_commit_sha")
-                if not landed or not self.ancestor(root, landed, main):
+                if not landed or not self.ancestor(root, landed, main) or not self.change_present(root, landed, main):
                     continue
                 # Compare the complete PR diff with the entire landed change.
                 if patch == self.patch(root, landed + "^", landed):
@@ -292,7 +296,7 @@ class FleetReaper:
             landed = self.ancestor(root, head, main) or bool(merge_pr)
             classification = branch_verdict(merged=landed, successor=successor,
                 open_pr=bool(active), idle=self.clock() - int(updated) >= self.branch_idle)
-            protected = name in {"main", "master", "develop"}
+            protected = protected_branch(self.config, name)
             if protected:
                 classification = "live"
             row = {"kind": "branch", "repo": repo, "name": name, "ref": ref, "head": head,
@@ -305,13 +309,15 @@ class FleetReaper:
         for pr in opens:
             successor = successors[pr["number"]]
             rows.append({"kind": "pr", "repo": repo, "number": pr["number"],
-                "head": pr["head"]["sha"], "main": main, "successor": successor,
+                "head": pr["head"]["sha"], "identity": self.pr_identity(pr), "main": main, "successor": successor,
                 "class": "superseded" if successor else "live",
                 "action": "close_pr" if successor else None})
         entries = self.hook.worktree_entries(str(root))
         if not entries:
             raise RuntimeError("worktree collection unreadable")
         busy = self.process_probe([e["path"] for e in entries])
+        if busy is None:
+            raise RuntimeError("process evidence unavailable; preserve repository candidates")
         protected_paths = {str(root), *(str(Path(p).resolve()) for p in skip)}
         for entry in entries:
             rows.append(self.worktree_row(repo, root, entry, main, by_branch, busy, protected_paths))
@@ -320,7 +326,7 @@ class FleetReaper:
     def worktree_row(self, repo, root, entry, main, by_branch, busy, protected_paths):
         path = Path(entry["path"]).resolve()
         row = {"kind": "worktree", "repo": repo, "path": str(path), "head": entry.get("head"),
-               "branch": entry.get("branch"), "main": main, "class": "live", "action": None}
+               "branch": entry.get("branch"), "detached": bool(entry.get("detached")), "main": main, "class": "live", "action": None}
         reasons = []
         if str(path) in protected_paths or "_to_delete" in path.parts:
             reasons.append("canonical, invoking or staged tree")
@@ -340,8 +346,8 @@ class FleetReaper:
                 reasons.append("recent writes or unknown age")
             elif classification == "live":
                 reasons.append("open PR or recent commits")
-            elif row["ownership"] == "owned" or (status and row["ownership"] != "orphaned"):
-                reasons.append("session owns work or dirty ownership unknown")
+            elif row["ownership"] != "orphaned":
+                reasons.append("session owns work or ownership unknown")
             elif entry.get("detached") and classification != "merged":
                 reasons.append("detached work without a surviving branch")
             else:
@@ -351,19 +357,41 @@ class FleetReaper:
         return row
 
     def work_content(self, path):
-        digest = hashlib.sha256(git(path, "-c", "diff.autoRefreshIndex=false", "diff", "HEAD", "--binary").encode())
+        digest = hashlib.sha256()
+        def frame(value):
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+        frame(git(path, "-c", "diff.autoRefreshIndex=false", "diff", "HEAD", "--binary").encode())
         for name in git(path, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
             if not name:
                 continue
             item = path / name
-            digest.update(name.encode())
+            frame(os.fsencode(name))
             if item.is_symlink():
-                digest.update(os.readlink(item).encode())
+                frame(b"symlink")
+                frame(os.fsencode(os.readlink(item)))
             elif item.is_file():
+                frame(b"file")
+                content = hashlib.sha256()
                 with item.open("rb") as stream:
                     for chunk in iter(lambda: stream.read(65536), b""):
-                        digest.update(chunk)
+                        content.update(chunk)
+                frame(content.digest())
+            else:
+                raise RuntimeError("orphan file type unreadable; preserve tree")
         return digest.hexdigest()
+
+    def tree_identity(self, root, path):
+        entry = next((e for e in self.hook.worktree_entries(str(root)) if
+                      str(Path(e["path"]).resolve()) == str(path)), None)
+        if not entry or entry.get("locked") or entry.get("bare"):
+            return None
+        return {"head": entry.get("head"), "branch": entry.get("branch"),
+                "detached": bool(entry.get("detached"))}
+
+    def tree_fresh(self, path):
+        ages = (self.hook.index_age_s(str(path)), self.hook.tree_age_s(str(path)))
+        return any(age is None or age < self.tree_idle for age in ages)
 
     def stage(self, root, row):
         path = Path(row["path"])
@@ -382,10 +410,12 @@ class FleetReaper:
         # before the move so a session starting during verification wins.
         busy = self.process_probe([str(path)])
         if busy is None or str(path) in busy or self.ownership_probe(path) != row["ownership"] or \
-                git(path, "status", "--porcelain=v1", "--untracked-files=all") != row["status"]:
+                git(path, "status", "--porcelain=v1", "--untracked-files=all") != row["status"] or \
+                self.tree_identity(root, path) != {k: row[k] for k in ("head", "branch", "detached")} or \
+                self.tree_fresh(path):
             raise RuntimeError("worktree became live before move; preserve it")
         git(root, "worktree", "move", str(path), str(target / "worktree"))
-        if git(target / "worktree", "rev-parse", "HEAD") != row["head"] or \
+        if self.tree_identity(root, target / "worktree") != {k: row[k] for k in ("head", "branch", "detached")} or \
                 self.work_content(target / "worktree") != row["content"]:
             raise RuntimeError("staged worktree HEAD readback mismatch")
         manifest["state"] = "staged"
@@ -411,7 +441,7 @@ class FleetReaper:
                 target = root.parent / "_to_delete" / root.name / token
                 staged = target / "worktree"
                 if staged.exists() and not Path(row["path"]).exists():
-                    if git(staged, "rev-parse", "HEAD") != row["head"] or self.work_content(staged) != row["content"]:
+                    if self.tree_identity(root, staged) != {k: row[k] for k in ("head", "branch", "detached")} or self.work_content(staged) != row["content"]:
                         raise RuntimeError("pending staged effect has changed; preserve it")
                     manifest = json.loads((target / "manifest.json").read_text())
                     manifest["state"] = "staged"
@@ -423,7 +453,10 @@ class FleetReaper:
                 refs = git(root, "ls-remote", "--heads", "origin", "refs/heads/" + row["name"]).split()
                 status = "observed_retired" if not refs else "verified_no_effect"
             elif row["action"] == "close_pr":
-                status = "observed_closed" if self.provider.pull(repo, row["number"])["state"] != "open" else "verified_no_effect"
+                observed = self.provider.pull(repo, row["number"])
+                if self.pr_identity(observed) != row["identity"]:
+                    raise RuntimeError("pending PR identity changed; preserve it")
+                status = "observed_closed" if observed["state"] != "open" else "verified_no_effect"
             receipt = {**event, "status": status, "observed_at": self.clock()}
             append(ledger, receipt)
             recovered.append(receipt)
@@ -437,9 +470,9 @@ class FleetReaper:
         if row["action"] == "stage_worktree":
             entry = next((e for e in self.hook.worktree_entries(str(root)) if
                           str(Path(e["path"]).resolve()) == row["path"]), None)
-            if not entry or entry.get("head") != row["head"]:
+            if not entry or self.tree_identity(root, Path(row["path"])) != {k: row[k] for k in ("head", "branch", "detached")}:
                 return {"status": "preserved", "reason": "worktree moved or HEAD changed"}
-            active = self.provider.open_pulls(repo, row["branch"]) if row["branch"] else []
+            active = self.provider.open_pulls(repo, entry["branch"]) if entry.get("branch") else []
             if active:
                 return {"status": "preserved", "reason": "open PR protects tree"}
             # The previously proved class can only grant staging after the same
@@ -447,20 +480,26 @@ class FleetReaper:
             by_branch = {row["branch"]: [{"head": row["head"], "class": row["class"]}]}
             current = self.worktree_row(repo, root, entry, row["main"], by_branch,
                 self.process_probe([row["path"]]), {str(root), *(str(Path(p).resolve()) for p in skip)})
-            if any(current.get(k) != row.get(k) for k in ("action", "status", "ownership", "content")):
+            if any(current.get(k) != row.get(k) for k in ("action", "status", "ownership", "content", "branch", "detached", "head")):
                 return {"status": "preserved", "reason": "worktree became live or content changed"}
             return {"status": "staged", **self.stage(root, row)}
         if row["action"] == "close_pr":
             successor = row["successor"]
-            live = self.provider.pull(repo, row["number"])
             landed = self.provider.pull(repo, successor["number"])
-            if live["state"] != "open" or live["head"]["sha"] != row["head"] or \
+            live = self.provider.pull(repo, row["number"])
+            if live["state"] != "open" or self.pr_identity(live) != row["identity"] or \
                     not landed.get("merged_at") or landed.get("merge_commit_sha") != successor["merge"]:
                 return {"status": "preserved", "reason": "PR changed before close"}
             if self.successor(root, repo, live, [landed], row["main"]) != successor:
                 return {"status": "preserved", "reason": "supersession proof changed before close"}
+            advertised = git(root, "ls-remote", "--heads", "origin", "refs/heads/main").split()
+            current = self.provider.pull(repo, row["number"])
+            if not advertised or advertised[0] != row["main"] or current["state"] != "open" or \
+                    self.pr_identity(current) != row["identity"]:
+                return {"status": "preserved", "reason": "source identity changed at close"}
             self.provider.close(repo, row["number"], successor["number"])
-            if self.provider.pull(repo, row["number"])["state"] != "closed":
+            observed = self.provider.pull(repo, row["number"])
+            if observed["state"] != "closed" or self.pr_identity(observed) != row["identity"]:
                 raise RuntimeError("PR close readback failed")
             return {"status": "closed", "successor": successor["url"]}
         ref = "refs/heads/" + row["name"]
@@ -490,11 +529,11 @@ class FleetReaper:
         report = {"schema": "branch-retirement/v1", "at": self.clock(), "execute": execute,
                   "rows": [], "counts": {}, "errors": [], "actions": [], "recovered": []}
         try:
-            with maintenance(self.root, self.hook.REAP_LOCK_STALE_S):
+            with maintenance(self.root):
                 for repo, path in roots.items():
                     root = Path(path).expanduser().resolve()
                     try:
-                        with nullcontext() if root == self.root else maintenance(root, self.hook.REAP_LOCK_STALE_S):
+                        with nullcontext() if root == self.root else maintenance(root):
                             if execute:
                                 report["recovered"].extend(self.recover_pending(repo, root))
                             rows = self.snapshot(repo, root, skip)
@@ -513,11 +552,11 @@ class FleetReaper:
                                     report["actions"].append({**intent, **result})
                     except Exception as exc:
                         report["errors"].append({"repo": repo, "error": str(exc)})
+                save(self.root / "out/orch/branch-janitor-report.json", report)
+                append(self.root / "out/orch/branch-janitor-runs.jsonl",
+                       {k: v for k, v in report.items() if k != "rows"})
         except Exception as exc:
             report["errors"].append({"repo": "fleet", "error": str(exc)})
-        save(self.root / "out/orch/branch-janitor-report.json", report)
-        append(self.root / "out/orch/branch-janitor-runs.jsonl",
-               {k: v for k, v in report.items() if k != "rows"})
         return report
 
 
@@ -526,7 +565,7 @@ def health(root, now=None):
               "· verify out/orch/branch-janitor-report.json · auto-clear after a complete scheduled run")
     try:
         report = json.loads((Path(root) / "out/orch/branch-janitor-report.json").read_text())
-        if not report.get("execute") or set(report.get("counts", {})) != set(DEFAULT_ROOTS) or \
+        if not report.get("execute") or set(report.get("counts", {})) != set(repository_roots()) or \
                 (time.time() if now is None else now) - report["at"] > 7200:
             raise ValueError("scheduled evidence absent or stale")
         failures = len(report["errors"])

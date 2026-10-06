@@ -60,6 +60,15 @@ def load_config(path):
     return config
 
 
+def repository_roots(config=None):
+    config = config or load_config(SOURCE / "ops/config/job-watchdog.json")
+    return {repo: Path(config["repository_roots"][repo]).expanduser() for repo in config["repositories"]}
+
+
+def protected_branch(config, name):
+    return name in config["protected_branches"]
+
+
 def epoch(value):
     if isinstance(value, (float, int)):
         return float(value)
@@ -159,7 +168,8 @@ def detect(facts, config, now):
         evidence = "\nLog evidence: " + tail if tail else ""
         if any(re.search(p, tail) for p in config["hang_patterns"]):
             emit("jobs", "job_hang", subject, "interactive hang signature in log tail" + evidence, **fields)
-        elif now - epoch(job.get("log_mtime", job["start"])) >= t["silent_seconds"]:
+        elif config.get("job_silence_policies", {}).get(job.get("card")) != "until_run_limit" and \
+                now - epoch(job.get("log_mtime", job["start"])) >= t["silent_seconds"]:
             emit("jobs", "job_silent", subject, "log silent for at least the configured limit" + evidence, **fields)
         if now - epoch(job["start"]) >= job["limit"]:
             emit("jobs", "job_over_limit", subject, "registered run exceeded its time limit" + evidence, **fields)
@@ -211,7 +221,7 @@ def detect(facts, config, now):
         if log["type"] == "release" and now - epoch(log["mtime"]) >= t["pipeline_stale_seconds"]:
             emit(source, "pipeline_stale", log["path"], "release log stopped updating")
     for branch in facts.get("branches", []):
-        if branch["name"] not in {"main", "master", "develop"} and not branch.get("open_pr") and \
+        if not protected_branch(config, branch["name"]) and not branch.get("open_pr") and \
                 now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
             emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "branch idle for configured limit")
     for error in facts.get("errors", []):
@@ -694,7 +704,7 @@ def collect(root, config, now=None):
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
                 for branch in page:
-                    if branch["name"] not in {"main", "master", "develop"}:
+                    if not protected_branch(config, branch["name"]):
                         sha = branch["commit"]["sha"]
                         key = repo + ":" + sha
                         date = dates.get(key)

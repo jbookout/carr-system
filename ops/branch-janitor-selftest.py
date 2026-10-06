@@ -12,6 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ops"))
+sys.path.insert(0, str(ROOT / "lib"))
 from git_env import fixture_env
 
 spec = importlib.util.spec_from_file_location("reaper", ROOT / "hooks/worktree-self-plumb.py")
@@ -22,6 +23,278 @@ spec.loader.exec_module(hook)
 
 
 class ReaperTest(unittest.TestCase):
+    def successor_fixture(self, body=""):
+        fixture = Fixture()
+        base = fixture.git("rev-parse", "main")
+        tree = fixture.tree("old")
+        old = fixture.commit("feature", cwd=tree)
+        landed = fixture.commit("feature")
+        fixture.git("push", "origin", "main")
+        provider = FakeProvider([pull(1, old, base, body=body), pull(2, landed, base, merged=landed)])
+        return fixture, provider
+
+    def test_startup_or_ignored_write_at_final_probe_preserves_tree(self):
+        for startup in (True, False):
+            with self.subTest(startup=startup):
+                fixture = Fixture()
+                tree = fixture.tree("old")
+                fixture.git("config", "core.excludesFile", str(fixture.base / "ignore"))
+                (fixture.base / "ignore").write_text("ignored\n")
+                calls = []
+                def probe(paths):
+                    calls.append(paths)
+                    if len(calls) == 3:
+                        if startup:
+                            hook.mark_alive(str(tree))
+                        else:
+                            (tree / "ignored").write_text("session work")
+                    return set()
+                fixture.reaper(process_probe=probe).run({"fixture/repo": fixture.repo}, execute=True)
+                self.assertTrue(tree.exists())
+
+    def test_rebound_branch_at_same_head_preserves_tree(self):
+        fixture = Fixture()
+        tree = fixture.tree("old")
+        provider = FakeProvider()
+        reaper = fixture.reaper(provider=provider)
+        row = next(r for r in reaper.snapshot("fixture/repo", fixture.repo) if r.get("path") == str(tree))
+        fixture.git("branch", "other")
+        fixture.git("symbolic-ref", "HEAD", "refs/heads/other", cwd=tree)
+        pr = pull(1, row["head"], row["main"])
+        pr["head"]["ref"] = "other"
+        provider.rows.append(pr)
+        self.assertEqual(reaper.apply("fixture/repo", fixture.repo, row, [])["status"], "preserved")
+        self.assertTrue(tree.exists())
+
+    def test_reverted_successor_cannot_close_restoration_pr(self):
+        for body in ("", "Superseded by #2"):
+            with self.subTest(body=body):
+                fixture, provider = self.successor_fixture(body)
+                fixture.git("revert", "--no-edit", "HEAD")
+                fixture.git("push", "origin", "main")
+                fixture.reaper(provider=provider).run({"fixture/repo": fixture.repo}, execute=True)
+                self.assertFalse(provider.closed)
+
+    def test_other_target_ref_or_repository_cannot_be_superseded(self):
+        for field, value in (("ref", "release"), ("repo", {"full_name": "other/repo"})):
+            with self.subTest(field=field):
+                fixture, provider = self.successor_fixture()
+                provider.rows[0]["base"][field] = value
+                fixture.reaper(provider=provider).run({"fixture/repo": fixture.repo}, execute=True)
+                self.assertFalse(provider.closed)
+
+    def test_source_change_during_successor_read_preserves_pr(self):
+        import copy
+        for field in ("head", "base"):
+            with self.subTest(field=field):
+                fixture, provider = self.successor_fixture("Superseded by #2")
+                reaper = fixture.reaper(provider=provider)
+                row = next(r for r in reaper.snapshot("fixture/repo", fixture.repo) if r["kind"] == "pr")
+                original = provider.pull
+                def changing(repo, number):
+                    result = copy.deepcopy(original(repo, number))
+                    if number == 2:
+                        provider.rows[0][field]["sha" if field == "head" else "ref"] = "changed"
+                    return result
+                provider.pull = changing
+                self.assertEqual(reaper.apply("fixture/repo", fixture.repo, row, [])["status"], "preserved")
+                self.assertFalse(provider.closed)
+
+    def test_close_readback_checks_source_identity(self):
+        fixture, provider = self.successor_fixture()
+        reaper = fixture.reaper(provider=provider)
+        row = next(r for r in reaper.snapshot("fixture/repo", fixture.repo) if r["kind"] == "pr")
+        original = provider.close
+        def changed(repo, number, successor):
+            original(repo, number, successor)
+            provider.rows[0]["head"]["sha"] = "changed"
+        provider.close = changed
+        with self.assertRaisesRegex(RuntimeError, "readback"):
+            reaper.apply("fixture/repo", fixture.repo, row, [])
+
+    def test_interrupted_close_recovery_checks_source_identity(self):
+        from branch_retirement import append
+        fixture, provider = self.successor_fixture()
+        reaper = fixture.reaper(provider=provider)
+        row = next(r for r in reaper.snapshot("fixture/repo", fixture.repo) if r["kind"] == "pr")
+        append(fixture.repo / "out/orch/branch-janitor-actions.jsonl", {"candidate": row, "status": "intent"})
+        provider.rows[0]["state"] = "closed"
+        provider.rows[0]["head"]["sha"] = "changed"
+        with self.assertRaisesRegex(RuntimeError, "identity"):
+            reaper.recover_pending("fixture/repo", fixture.repo)
+
+    def test_configured_protected_branch_binds_census_watchdog_and_guard(self):
+        import io
+        import runpy
+        from unittest.mock import patch
+        import job_watchdog as watchdog
+        fixture = Fixture()
+        fixture.git("branch", "reserved")
+        fixture.git("push", "origin", "reserved")
+        head = fixture.git("rev-parse", "reserved")
+        config = watchdog.load_config(ROOT / "ops/config/job-watchdog.json")
+        config["protected_branches"].append("reserved")
+        config["repositories"] = ["fixture/repo"]
+        config["repository_roots"] = {"fixture/repo": str(fixture.repo)}
+        self.assertEqual(watchdog.repository_roots(config), {"fixture/repo": fixture.repo})
+        rows = fixture.reaper(config=config).snapshot("fixture/repo", fixture.repo)
+        reserved = [r for r in rows if r.get("name") == "reserved"]
+        self.assertTrue(reserved)
+        self.assertTrue(all(r["class"] == "live" and r["action"] is None for r in reserved))
+        self.assertFalse(watchdog.detect({"branches": [{"repo": "fixture/repo", "name": "reserved", "updated": 0}]}, config, 100000))
+        env = {"CARR_RETIRE_REF": "refs/heads/reserved", "CARR_RETIRE_HEAD": head}
+        with patch.object(watchdog, "load_config", return_value=config), patch.dict(os.environ, env), \
+                patch.object(sys, "stdin", io.StringIO(f"(delete) {'0' * 40} refs/heads/reserved {head}\n")):
+            with self.assertRaises(SystemExit) as refused:
+                runpy.run_path(str(ROOT / "ops/branch-janitor-hooks/pre-push"))
+        self.assertEqual(refused.exception.code, 1)
+
+    def test_locked_and_unmerged_detached_tree_survive(self):
+        for locked in (True, False):
+            with self.subTest(locked=locked):
+                fixture = Fixture()
+                tree = fixture.tree("old")
+                fixture.commit("unique work", cwd=tree)
+                if locked:
+                    fixture.git("worktree", "lock", str(tree))
+                else:
+                    fixture.git("checkout", "--detach", cwd=tree)
+                fixture.age(tree)
+                report = fixture.reaper().run({"fixture/repo": fixture.repo}, execute=True)
+                self.assertFalse(report["errors"])
+                self.assertTrue(tree.exists())
+
+    def test_stale_lock_recovery_cannot_replace_a_new_live_lock(self):
+        import threading
+        from unittest.mock import patch
+        from branch_retirement import maintenance
+        fixture = Fixture()
+        lock = fixture.repo / "out/worktree-reap.lock"
+        lock.parent.mkdir()
+        lock.write_text("99999999")
+        os.utime(lock, (0, 0))
+        rendezvous = threading.Barrier(2)
+        entered, release = threading.Event(), threading.Event()
+        original = Path.rename
+        def racing_rename(path, target):
+            if path == lock:
+                rendezvous.wait(timeout=2)
+                if threading.current_thread().name == "second":
+                    entered.wait(timeout=2)
+            return original(path, target)
+        overlaps, errors = [], []
+        def caller():
+            try:
+                with maintenance(fixture.repo):
+                    overlaps.append(entered.is_set())
+                    entered.set()
+                    release.wait(timeout=3)
+            except RuntimeError:
+                pass
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(Path, "rename", racing_rename):
+            first = threading.Thread(target=caller, name="first")
+            second = threading.Thread(target=caller, name="second")
+            first.start()
+            second.start()
+            second.join(timeout=2.5)
+            release.set()
+            first.join(timeout=4)
+            second.join(timeout=4)
+        self.assertFalse(errors, errors)
+        self.assertEqual(overlaps, [False])
+
+    def test_contended_run_cannot_replace_accepted_receipts(self):
+        from branch_retirement import maintenance
+        fixture = Fixture()
+        reaper = fixture.reaper()
+        reaper.run({"fixture/repo": fixture.repo})
+        paths = [fixture.repo / "out/orch" / name for name in
+                 ("branch-janitor-report.json", "branch-janitor-runs.jsonl")]
+        before = [p.read_bytes() for p in paths]
+        with maintenance(fixture.repo):
+            refused = reaper.run({"fixture/repo": fixture.repo})
+        self.assertTrue(refused["errors"])
+        self.assertEqual([p.read_bytes() for p in paths], before)
+
+    def test_receipts_publish_while_maintenance_is_held(self):
+        from unittest.mock import patch
+        import branch_retirement as retirement
+        fixture = Fixture()
+        original = retirement.save
+        held = []
+        def observe(path, row):
+            if path.name == "branch-janitor-report.json":
+                try:
+                    with retirement.maintenance(fixture.repo):
+                        held.append(False)
+                except RuntimeError:
+                    held.append(True)
+            return original(path, row)
+        with patch.object(retirement, "save", observe):
+            fixture.reaper().run({"fixture/repo": fixture.repo})
+        self.assertEqual(held, [True])
+
+    def test_orphan_digest_frames_path_type_and_content(self):
+        fixture = Fixture()
+        tree = fixture.tree("old")
+        (tree / "a").write_bytes(b"b")
+        (tree / "b").write_bytes(b"c")
+        reaper = fixture.reaper()
+        first = reaper.work_content(tree)
+        (tree / "a").write_bytes(b"")
+        (tree / "b").write_bytes(b"bc")
+        self.assertNotEqual(reaper.work_content(tree), first)
+
+    def test_orphan_digest_preserves_tracked_trailing_whitespace(self):
+        fixture = Fixture()
+        tree = fixture.tree("old")
+        reaper = fixture.reaper()
+        (tree / "file").write_text("value\n \n")
+        first = reaper.work_content(tree)
+        (tree / "file").write_text("value\n  \n")
+        self.assertNotEqual(reaper.work_content(tree), first)
+
+    def test_janitor_has_deliberate_silence_policy_until_registered_limit(self):
+        import job_watchdog as watchdog
+        config = watchdog.load_config(ROOT / "ops/config/job-watchdog.json")
+        job = {"id": "janitor", "card": "branch-janitor", "start": 1000, "log_mtime": 1000,
+               "limit": 3600, "alive": True, "log_tail": ""}
+        self.assertFalse(watchdog.detect({"jobs": [job]}, config, 1601))
+        self.assertIn("job_over_limit", {f["kind"] for f in watchdog.detect({"jobs": [job]}, config, 4601)})
+        job["card"] = "ordinary"
+        self.assertIn("job_silent", {f["kind"] for f in watchdog.detect({"jobs": [job]}, config, 1601)})
+
+    def test_reaper_uses_loaded_branch_idle_policy(self):
+        from unittest.mock import patch
+        import job_watchdog as watchdog
+        fixture = Fixture()
+        tree = fixture.tree("old")
+        head = fixture.commit("unmerged", cwd=tree)
+        config = watchdog.load_config(ROOT / "ops/config/job-watchdog.json")
+        config["thresholds"]["branch_idle_seconds"] = 1
+        now = int(fixture.git("show", "-s", "--format=%ct", head)) + 2
+        with patch.object(watchdog, "load_config", return_value=config):
+            reaper = fixture.reaper(clock=lambda: now)
+            row = next(r for r in reaper.snapshot("fixture/repo", fixture.repo) if r.get("ref") == "refs/heads/old")
+        self.assertEqual(row["class"], "abandoned")
+
+    def test_unknown_owner_preserves_clean_tree(self):
+        fixture = Fixture()
+        tree = fixture.tree("old")
+        fixture.reaper(ownership_probe=lambda path: "unknown").run({"fixture/repo": fixture.repo}, execute=True)
+        self.assertTrue(tree.exists())
+
+    def test_missing_process_evidence_keeps_health_incomplete(self):
+        from branch_retirement import health
+        fixture = Fixture()
+        fixture.tree("old")
+        roots = {repo: fixture.repo for repo in ("jbookout/carr-system", "jbookout/doctorcre-app", "jbookout/software-factory")}
+        report = fixture.reaper(process_probe=lambda paths: None).run(roots, execute=True)
+        self.assertTrue(report["errors"])
+        self.assertTrue(health(fixture.repo)[1])
+
     def test_interrupted_staging_is_read_back_before_another_run(self):
         fixture = Fixture()
         tree = fixture.tree("old")
@@ -38,18 +311,15 @@ class ReaperTest(unittest.TestCase):
         self.assertFalse(second["errors"])
         self.assertEqual([r["status"] for r in second["recovered"]], ["observed_staged"])
 
-    def test_dead_stale_maintenance_lock_recovers_but_live_owner_lock_survives(self):
-        for pid, should_fail in ((99999999, False), (os.getpid(), True)):
-            with self.subTest(pid=pid):
-                fixture = Fixture()
-                lock = fixture.repo / "out/worktree-reap.lock"
-                lock.parent.mkdir()
-                lock.write_text(str(pid))
-                old = time.time() - 12 * 3600
-                os.utime(lock, (old, old))
-                report = fixture.reaper().run({"fixture/repo": fixture.repo})
-                self.assertEqual(bool(report["errors"]), should_fail)
-                self.assertEqual(lock.exists(), should_fail)
+    def test_dead_stale_lock_file_does_not_block_and_inode_survives(self):
+        fixture = Fixture()
+        lock = fixture.repo / "out/worktree-reap.lock"
+        lock.parent.mkdir()
+        lock.write_text("99999999")
+        inode = lock.stat().st_ino
+        report = fixture.reaper().run({"fixture/repo": fixture.repo})
+        self.assertFalse(report["errors"])
+        self.assertEqual(lock.stat().st_ino, inode)
 
     def test_inherited_git_location_cannot_redirect_census(self):
         from unittest.mock import patch
@@ -268,7 +538,7 @@ class ReaperTest(unittest.TestCase):
         self.assertEqual(latest[found[0]["key"]]["cleared_at"], watchdog.stamp(100100))
 
     def test_health_row_has_bound_action_and_clears_on_complete_evidence(self):
-        from branch_retirement import health, save, DEFAULT_ROOTS
+        from branch_retirement import health, save, repository_roots
         fixture = Fixture()
         line, failed = health(fixture.repo, now=1000)
         self.assertTrue(failed)
@@ -276,7 +546,7 @@ class ReaperTest(unittest.TestCase):
         self.assertIn("auto-clear", line)
         save(fixture.repo / "out/orch/branch-janitor-report.json", {
             "execute": True, "at": 1000, "errors": [], "rows": [], "actions": [],
-            "counts": {repo: {} for repo in DEFAULT_ROOTS}})
+            "counts": {repo: {} for repo in repository_roots()}})
         line, failed = health(fixture.repo, now=1001)
         self.assertFalse(failed)
         self.assertTrue(line.startswith("OK"))
@@ -348,7 +618,7 @@ class FakeProvider:
 
     def close(self, repo, number, successor):
         self.closed.append((number, successor))
-        self.pull(repo, number)["state"] = "closed"
+        next(r for r in self.rows if r["number"] == number)["state"] = "closed"
 
     def verify_repository(self, repo, path):
         pass

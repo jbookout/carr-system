@@ -1,5 +1,7 @@
 {
   "schema_version": 1,
+  "protected_branches": ["main", "master", "develop"],
+  "job_silence_policies": {"branch-janitor": "until_run_limit"},
   "thresholds": {
     "scan_seconds": 120,
     "scan_grace_seconds": 300,
