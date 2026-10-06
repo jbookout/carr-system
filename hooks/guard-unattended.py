@@ -56,8 +56,7 @@ from urllib.parse import urlsplit
 # for the reason its own docstring gives: two copies of "what counts as inert"
 # drift silently, because each copy still passes its own tests.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cmd_text import (COMMAND_POSITION, executable_text, strip_data_heredocs,  # noqa: E402
-                      strip_inert_text)
+from cmd_text import runs, strip_data_heredocs, strip_inert_text  # noqa: E402
 # Shared with hooks/record-home-gate.py, which refuses the FILE-TOOL spelling of
 # the same write. One memory, so a record refused through either door is
 # recognised at the other (rule 76a53dfe).
@@ -1175,11 +1174,11 @@ def delegation_control_plane_write(cmd):
 
 
 _METERED_DISPATCH = (
-    (re.compile(COMMAND_POSITION + r"wrangler(?:@\S*)?\s+(?:deploy|versions\s+(?:upload|deploy))\b", re.I),
+    (re.compile(r"\bwrangler(?:@\S*)?\s+(?:deploy|versions\s+(?:upload|deploy))\b", re.I),
      "direct Cloudflare release bypasses bin/deploy-worker.sh"),
-    (re.compile(COMMAND_POSITION + r"neonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
+    (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
      "direct Neon branch create bypasses neon-disposable-branch admission"),
-    (re.compile(COMMAND_POSITION + r"gh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
+    (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
      "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
 )
 
@@ -1191,14 +1190,13 @@ def direct_metered_dispatch(cmd):
     issued by the session; reviewed scripts perform their own in-process
     admission before reaching the vendor.
 
-    Each pattern counts only at a command position in executable_text(): a
-    grep pattern or an agent prompt that NAMES the command is data (two false
-    refusals on 2026-10-05), while bash -c, ssh, python -c, substitutions and
+    cmd_text.runs() decides what the shell would run: a grep pattern or an
+    agent prompt that NAMES the command is data (two false refusals on
+    2026-10-05), while wrappers, bash -c, ssh, python -c, substitutions and
     a heredoc fed to a shell are still read as commands.
     """
-    executable = executable_text(cmd)
     for pattern, reason in _METERED_DISPATCH:
-        if pattern.search(executable):
+        if runs(cmd, pattern):
             return reason + " — blocked by the CARR metering gate"
     return None
 

@@ -108,27 +108,52 @@ _DASH_M_RE = re.compile(
     r"\s+(?:'[^']*'|\"[^\"]*\")")
 
 
-def _command_head(words):
+# Prefix words that run the command after them, each with the options that
+# consume the following word. An unlisted option-with-value leaves the value as
+# the head, which is not a data command, so a gap here fails closed.
+_WRAPPERS = {
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"},
+    "doas": {"-u", "-C"}, "env": {"-u", "-C", "-S"}, "nice": {"-n"},
+    "ionice": {"-c", "-n", "-p"}, "caffeinate": {"-t", "-w"}, "time": {"-f", "-o"},
+    "xargs": {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"},
+    "exec": {"-a"}, "stdbuf": set(), "setsid": set(), "nohup": set(), "command": set(),
+    "npx": set(), "bunx": set(), "yarn": set(), "pnpm": set(),
+}
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish", "ssh", "eval", "source"})
+
+
+def _command_words(words):
+    """`words` from the command head on, past assignments and wrappers."""
     words = list(words)
     while words:
         word = words[0]
+        name = word.rsplit("/", 1)[-1]
         if re.match(r"^\w+=", word) or word in {"if", "then", "elif", "else", "do", "!", "{"}:
             words.pop(0)
-        elif word.rsplit("/", 1)[-1] in {"sudo", "env", "exec", "nohup", "command", "time", "xargs", "npx", "bunx", "yarn", "pnpm"}:
+        elif name in _WRAPPERS:
             words.pop(0)
             while words and words[0].startswith("-"):
-                words.pop(0)
+                if words.pop(0) in _WRAPPERS[name] and words:
+                    words.pop(0)
             if words and words[0] in {"exec", "dlx"}:
                 words.pop(0)
         elif word == "timeout" and len(words) > 1:
             words = words[2:]
         else:
-            return word
-    return ""
+            return words
+    return []
+
+
+def _command_head(words):
+    return next(iter(_command_words(words)), "")
 
 
 def feeds_shell(line):
-    """Identify command words after lexing, so quoted pipes remain data."""
+    """Identify command words after lexing, so quoted pipes remain data.
+
+    Behind a wrapper, any bare shell word counts: `sudo -u x bash` and an
+    option this module has never seen both still feed a shell.
+    """
     try:
         tokens = shell_tokens(line)
     except ValueError:
@@ -136,8 +161,9 @@ def feeds_shell(line):
     segment = []
     for token in tokens + [";"]:
         if token in SHELL_BOUNDARIES:
-            word = _command_head(segment).rsplit("/", 1)[-1]
-            if word in {"bash", "sh", "zsh", "dash", "ksh", "fish", "ssh", "eval", "source"}:
+            names = [word.rsplit("/", 1)[-1] for word in segment]
+            if _command_head(segment).rsplit("/", 1)[-1] in _SHELLS or (
+                    names and names[0] in _WRAPPERS and _SHELLS.intersection(names)):
                 return True
             segment = []
         else:
@@ -210,6 +236,11 @@ def strip_inert_text(cmd):
 #   * a heredoc body fed to a shell stays; a quoted one fed to anything else is
 #     dropped; an unquoted one keeps only its substitutions.
 #
+# runs() is what a rule calls. A match in that text counts unless its segment is
+# headed by a data command carrying no executable option, so a wrapper or an
+# option this module has never seen keeps the match. Requiring a recognised
+# command position instead failed open on `nice -n 5` and `sudo -u x` (PR 1578).
+#
 # It FAILS CLOSED like the rest of this module: an unterminated quote leaves the
 # remainder raw, and only commands named below make their arguments inert.
 DATA_COMMANDS = frozenset({
@@ -220,15 +251,14 @@ DATA_COMMANDS = frozenset({
 })
 # Wrappers whose prompt argument is handed to an agent, not to this shell.
 DATA_COMMAND_SUFFIXES = ("grok-run.sh",)
-
-# A command position: start of text, after a separator, quote or substitution
-# opener, past env assignments and the prefix words that run their argument.
-COMMAND_POSITION = (
-    r"(?:^|[|;&(){}\n`'\"]|\$\(|&&|\|\|)\s*(?:(?:if|then|elif|else|do|!)\s+)*(?:\w+=\S*\s+)*"
-    r"(?:(?:sudo|env|exec|nohup|command|time|xargs|npx|bunx|yarn|pnpm(?:\s+(?:exec|dlx))?"
-    r"|timeout\s+\S+)\s+(?:-\S+\s+|\w+=\S*\s+)*)*(?:[\w./~-]*/)?")
+# Options that make a data command run one of its arguments: git config
+# (alias.*, core.pager, core.sshCommand, ...), a search preprocessor, a sort
+# compressor. Their presence makes every argument executable.
+_EXECUTABLE_OPTION_RE = re.compile(
+    r"(?:^|\s)(?:-c\s*\S+=|--config-env[=\s]|--pre[=\s]|--compress-program[=\s])")
 
 _BOUNDARY_RE = re.compile(r"(?:[;&|(\n`]|\$\()")
+_SEGMENT_RE = re.compile(r"[;&|(){}\n`]|\$\(")
 def _substitution_end(text, start):
     depth, i = 1, start + 2
     while i < len(text):
@@ -340,8 +370,36 @@ def executable_text(cmd):
         if feeds_shell(opener):
             return None
         return "\n".join(_substitutions(body))
-    executable_args = feeds_shell(cmd) or bool(re.search(r"\balias\.[^=\s]+=", cmd))
-    return _unwrap_quotes(_rewrite_heredocs(strip_inert_text(cmd), substitutions_only), executable_args)
+    return _unwrap_quotes(_rewrite_heredocs(strip_inert_text(cmd), substitutions_only),
+                          _executes_arguments(cmd))
+
+
+def _executes_arguments(cmd):
+    return feeds_shell(cmd) or bool(_EXECUTABLE_OPTION_RE.search(cmd))
+
+
+def runs(cmd, pattern):
+    """True when the shell would run text matching `pattern`.
+
+    Fails closed: a match counts unless its segment is headed by a data command
+    that executes none of its arguments. An unknown wrapper, an option this
+    module has not modelled, or text piped into a shell all keep the match.
+    """
+    # The shell drops an escaping backslash: `wrangler\ deploy` is one word
+    # inside an alias value and the same command once that alias runs.
+    text = re.sub(r"\\(.)", r"\1", executable_text(cmd), flags=re.S)
+    if _executes_arguments(cmd):
+        return bool(pattern.search(text))
+    for segment in _SEGMENT_RE.split(text):
+        if not pattern.search(segment):
+            continue
+        try:
+            words = _command_words(shell_tokens(segment))
+        except ValueError:
+            return True
+        if not words or not _is_data_command(words[0]) or pattern.match(" ".join(words)):
+            return True
+    return False
 
 
 # A quoted heredoc whose only reader is `cat > file` or `tee file` is text being

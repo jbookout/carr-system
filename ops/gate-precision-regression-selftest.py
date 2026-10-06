@@ -86,8 +86,21 @@ class Regressions(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNotNone(guard.check(command))
 
+    def test_unknown_or_optioned_wrappers_fail_closed(self):
+        for command in ['nice -n 5 wrangler deploy', 'sudo -u x wrangler deploy',
+                        'stdbuf -o0 gh workflow run ci.yml', 'caffeinate -i wrangler deploy',
+                        "printf '%s' 'wrangler deploy' | sudo -u x bash",
+                        "printf '%s' 'wrangler deploy' | nice bash",
+                        'echo wrangler deploy | bash']:
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard.check(command))
+
     def test_executable_data_modes(self):
         for command in ["git -c alias.ship='!wrangler deploy' ship",
+                        "git -c alias.ship=!wrangler\\ deploy ship",
+                        "git -c core.pager='wrangler deploy' log",
+                        "git -c core.sshCommand='gh workflow run ci.yml' fetch",
+                        "rg --pre 'wrangler deploy' x",
                         "printf '%s' 'wrangler deploy' | bash",
                         "printf '%s' 'gh workflow run ci.yml' | bash"]:
             with self.subTest(command=command):
@@ -95,6 +108,13 @@ class Regressions(unittest.TestCase):
 
     def test_quoted_substitution_delimiter(self):
         self.assertIsNotNone(guard.check('echo "$(printf \')\'; wrangler deploy)"'))
+
+    def test_naming_a_dispatch_as_data_is_allowed(self):
+        for command in ['grep -rn "wrangler deploy" hooks', "git grep 'gh workflow run'",
+                        'git commit -m "wrangler deploy"', "echo 'x | bash'",
+                        "grok-run.sh 'does wrangler deploy have a successor?'"]:
+            with self.subTest(command=command):
+                self.assertIsNone(guard.check(command))
 
     def test_quoted_pipe_is_inert(self):
         for body in ['wrangler deploy', 'rm -rf /repo/protected']:
