@@ -74,7 +74,6 @@ export function featureSwitchTools({ withEnvelope, writeEvent, executeRegistered
   return {
     'check-feature-switches':{
       write:true,
-      delegatesTo:['add-loop','update-loop','close-loop'],
       description:'Check overdue feature switch removal dates. Create or update one owner retirement loop per overdue switch and clear it when retired or its reviewed date advances. Does not toggle or deploy a feature.',
       inputSchema:{type:'object',additionalProperties:false,properties:{idempotency_key:{type:'string'}},required:['idempotency_key']},
       handler:async(c,actor,args)=>withEnvelope(c,actor,'check-feature-switches',args,async()=>{

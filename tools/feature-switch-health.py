@@ -11,6 +11,8 @@ BOUND='on breach: create/update deduplicated owner loop; retire and remove gates
 def render(payload):
     if not isinstance(payload,dict) or payload.get('ok') is not True or not isinstance(payload.get('overdue'),list):
         raise ValueError('feature switch check unavailable')
+    if any(not isinstance(row,dict) for row in payload['overdue']):
+        raise ValueError('feature switch overdue row unavailable')
     lines=[payload.get('line')]+[row.get('line') for row in payload['overdue']]
     if any(not isinstance(line,str) or not all(word in line for word in ('on breach:','owner','retire','verify','auto-clear')) for line in lines):
         raise ValueError('feature switch response has no bound action')
@@ -21,7 +23,10 @@ def main():
     try:
         if args.fixture:
             print('FIXTURE-DERIVED feature switch health; no record writes or live evidence.')
-            payload=json.loads(Path(args.fixture).read_text()).get('feature_switches')
+            fixture=json.loads(Path(args.fixture).read_text())
+            if not isinstance(fixture,dict):
+                raise ValueError('feature switch fixture unavailable')
+            payload=fixture.get('feature_switches')
         else:
             root=Path(__file__).resolve().parents[1]
             result=subprocess.run([str(root/'run.sh'),'call','check-feature-switches',json.dumps({'idempotency_key':str(uuid.uuid4())})],

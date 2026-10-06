@@ -165,6 +165,8 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "flip-feature-switch",
+    "check-feature-switches",
     "undo-invoice-close",
     "undo-lead-move",
     "advance-leads",  # evidence-driven stages and approval-only drafts

@@ -27,7 +27,10 @@ test('worker reads the switch anew and refuses a disabled verb with its name', a
 });
 
 
-import { executeRegisteredTool } from '../src/tools.js';
+import { executeRegisteredTool, TOOLS } from '../src/tools.js';
+test('retirement tool does not advertise unused delegation metadata', () => {
+  assert.equal(Object.hasOwn(TOOLS['check-feature-switches'], 'delegatesTo'), false);
+});
 test('worker dispatch refuses both suggestion writes before their handlers run',async()=>{
   const c={query:async(sql)=>{assert.match(sql,/from feature_switch/);return {rows:[]};}};
   const actor={slug:'joe',human:true,via:'dealroom-cookie',client_id:'dealroom-pwa'};

@@ -100,6 +100,32 @@ test('Feature switch record lifecycle on disposable PostgreSQL', { skip: !bin &&
     await c.query("insert into loop_block(id,kind,block_key,rel_path,seq,col_order,renders_closed,created_by,updated_by) values(gen_random_uuid(),'open_loop','backlog','synthetic',1,array[]::text[],false,$1,$1)",[actor.id]);
     const input = { idempotency_key:randomUUID(), name:'synthetic-feature', description:'Show a synthetic test control',
       base_version:0, default_enabled:false, audience:'joe', owner:'claude', expected_removal_on:'2099-01-01' };
+    await t.test('invalid switch input rolls back without records or audit writes', async () => {
+      const counts = {};
+      for (const table of ['feature_switch','event','tool_call']) {
+        counts[table] = (await c.query(`select count(*)::integer n from ${table}`)).rows[0].n;
+      }
+      const invalid = [
+        {name:'Invalid Name'}, {audience:'public'}, {owner:'unregistered'},
+        {expected_removal_on:'2099-02-29'}, {description:'   '}, {description:'x'.repeat(1001)},
+        {default_enabled:'false'}, {retired:'false'}, {base_version:-1}, {base_version:0.5},
+      ];
+      for (const patch of invalid) {
+        await assert.rejects(invoke('set-feature-switch',{...input,...patch,idempotency_key:randomUUID()}),
+          error => error.payload.error === 'feature_switch_input_invalid', JSON.stringify(patch));
+      }
+      for (const patch of [{name:'Invalid Name'}, {audience:'public'}, {enabled:'true'}, {base_version:-1}]) {
+        await assert.rejects(invoke('flip-feature-switch',{...input,enabled:true,...patch,idempotency_key:randomUUID()}),
+          error => error.payload.error === 'feature_switch_input_invalid', JSON.stringify(patch));
+      }
+      await assert.rejects(invoke('set-feature-switch',{...input,retired:true,idempotency_key:randomUUID()}),
+        error => error.payload.error === 'feature_switch_cannot_create_retired');
+      await assert.rejects(invoke('flip-feature-switch',{name:input.name,base_version:0,enabled:true,idempotency_key:randomUUID()}),
+        error => error.payload.error === 'feature_switch_version_conflict' && error.payload.current_version === 0);
+      for (const table of ['feature_switch','event','tool_call']) {
+        assert.equal((await c.query(`select count(*)::integer n from ${table}`)).rows[0].n,counts[table],table);
+      }
+    });
     const created = await invoke('set-feature-switch',input);
     assert.equal(created.switch.version,1);
     assert.ok(created.switch.created_at);
@@ -132,6 +158,17 @@ test('Feature switch record lifecycle on disposable PostgreSQL', { skip: !bin &&
     assert.equal(cleared.overdue.length,0);
     assert.deepEqual(cleared.cleared,[health.overdue[0].loop_id]);
     assert.equal((await invoke('list-feature-switches',{name:input.name})).switches[0].available,false);
+    await t.test('retired switches refuse flips and may be explicitly restored', async () => {
+      await assert.rejects(invoke('flip-feature-switch',{...flip,base_version:5,idempotency_key:randomUUID()}),
+        error => error.payload.error === 'feature_switch_retired');
+      assert.equal((await invoke('list-feature-switches',{name:input.name})).switches[0].version,5);
+      const restored=await invoke('set-feature-switch',{...input,base_version:5,retired:false,idempotency_key:randomUUID()});
+      assert.equal(restored.switch.retired_at,null);
+      assert.equal(restored.switch.version,6);
+      const turnedOn=await invoke('flip-feature-switch',{...flip,base_version:6,idempotency_key:randomUUID()});
+      assert.equal(turnedOn.switch.enabled,true);
+      assert.equal((await invoke('list-feature-switches',{name:input.name})).switches[0].available,true);
+    });
   } finally {
     if(c) await c.end();
     if(admin) await admin.end();
