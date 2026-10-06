@@ -24,6 +24,8 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
 import jev_outage_health as _jev_outage
+import flashlib
+from lib.credential_file import read_env_file
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
 # (tests) and c4d040d (gates). This is the ONLY caller of ops/renders-verify.py,
@@ -1387,6 +1389,11 @@ def _canonical_health():
         return 1
 
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        flash_line = flashlib.health_row()
+        print("  " + flash_line)
+        if flash_line.startswith("WARN"):
+            rc = _red("flash_residency", flash_line)
     for error in snap.get("errors", []):
         print(f"  ⚠︎ canonical source UNREADABLE — {error}")
         rc = _red("source_unreadable", str(error), hard_error=True)
@@ -1801,7 +1808,7 @@ def _canonical_health():
             _action = _jev_outage.action(_joh.get("reason"))
             _outcome = _jev_outage.reconcile(
                 _joh, _loop_state,
-                lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+                _jev_outage.call_verb)
             if _joh["status"] == "warn":
                 _last = (f"last success {_joh['age_hours']}h ago"
                          if _joh["age_hours"] is not None else "no usable call recorded")
@@ -2095,12 +2102,10 @@ GATES = {
 
 
 def _keys_in_env_file():
-    """Key names declared in db.env, parsed as text. Never sources, never stores values."""
+    """Key names whose value LOADS from db.env through lib/credential_file, the
+    reader every Python job uses. Never sources, never stores values."""
     try:
-        with open(DB_ENV) as fh:
-            return {ln.split("=", 1)[0].strip()
-                    for ln in fh
-                    if "=" in ln and not ln.lstrip().startswith("#") and ln.split("=", 1)[1].strip()}
+        return {name for name, value in read_env_file(DB_ENV).items() if value}
     except OSError:
         return set()
 
