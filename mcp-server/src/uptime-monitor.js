@@ -108,20 +108,21 @@ function incidentText(incident) {
 async function deliverAlerts(storage, state, env, fetcher) {
   state.alert_error = null;
   try {
-    const pending = state.incidents.find((incident) => !incident.down_sent || (incident.recovered_at && !incident.recovery_sent));
-    if (pending) {
-      if (!pending.down_sent) {
-        await ping(env, fetcher, true, incidentText(pending));
-        pending.down_sent = true;
-        await storage.put(STATE_KEY, state);
+    const active = state.incidents.find((incident) => incident.id === state.active_incident);
+    const pending = (active ? [active] : state.incidents).filter((incident) => !incident.down_sent);
+    if (pending.length) {
+      await ping(env, fetcher, true, pending.map(incidentText).join("\n"));
+      for (const incident of pending) incident.down_sent = true;
+      await storage.put(STATE_KEY, state);
+    }
+    if (!active) {
+      const recovered = state.incidents.filter((incident) => incident.recovered_at && !incident.recovery_sent);
+      if (state.probes_ok && recovered.length) {
+        await ping(env, fetcher, false, `RECOVERED. ${recovered.map(incidentText).join("\n")}`);
+        for (const incident of recovered) incident.recovery_sent = true;
+      } else if (!recovered.length) {
+        await ping(env, fetcher, false, `Monitor alive; failure streak ${state.failures}/3. ${ACTION}`);
       }
-      if (pending.recovered_at && !pending.recovery_sent) {
-        await ping(env, fetcher, false, `RECOVERED. ${incidentText(pending)}`);
-        pending.recovery_sent = true;
-      }
-    } else if (state.probes_ok && !state.active_incident) {
-      // This also lets Healthchecks alarm if this independent monitor stops running.
-      await ping(env, fetcher, false, `Monitor alive; failure streak ${state.failures}/3. ${ACTION}`);
     }
   } catch {
     state.alert_error = "Healthchecks delivery unavailable; verify UPTIME_HEALTHCHECKS_PING_URL and its notification integration";
@@ -131,35 +132,36 @@ async function deliverAlerts(storage, state, env, fetcher) {
 
 async function deliverRecord(storage, state, env, fetcher) {
   state.record_error = null;
-  const incident = state.incidents.find((item) => !item.loop_id || (item.recovered_at && !item.loop_closed));
-  if (!incident) return;
-  try {
-    if (!incident.loop_id) {
-      const value = await callRecord(env, fetcher, "add-loop", {
-        idempotency_key: `uptime:${incident.id}:open`, kind: "open_loop", domain: "system",
-        owner: "claude", marker: "none", body: incident.open_body,
-        source_note: "carr-uptime Cron monitor; orchestrator owns remediation; immutable incident timings are retained in the monitor ledger",
-        blocker: "other_lane", blocker_detail: "The orchestrator production-recovery lane must restore the failed DoctorCRE route or contract; this observer has no deployment authority",
-      });
-      if (value.ok !== true || !text(value.loop_id)) throw new Error("loop_shape");
-      incident.loop_id = value.loop_id;
-      await storage.put(STATE_KEY, state);
-    }
-    if (incident.recovered_at && !incident.loop_closed) {
-      const loop = await callRecord(env, fetcher, "read-loop", { loop_id: incident.loop_id });
-      if (loop.loop_id !== incident.loop_id || !Number.isInteger(loop.version)) throw new Error("loop_shape");
-      if (loop.status === "open") {
-        const seconds = (Date.parse(incident.recovered_at) - Date.parse(incident.first_failure_at)) / 1000;
-        const value = await callRecord(env, fetcher, "close-loop", {
-          idempotency_key: `uptime:${incident.id}:close`, loop_id: incident.loop_id, base_version: loop.version,
-          resolution: "done", outcome: `${incidentText(incident)} Observed outage ${seconds} seconds; all three production JSON probes passed on recovery.`,
+  for (const incident of state.incidents.filter((item) => !item.loop_id || (item.recovered_at && !item.loop_closed))) {
+    try {
+      if (!incident.loop_id) {
+        const value = await callRecord(env, fetcher, "add-loop", {
+          idempotency_key: `uptime:${incident.id}:open`, kind: "open_loop", domain: "system",
+          owner: "claude", marker: "none", body: incident.open_body,
+          source_note: "carr-uptime Cron monitor; orchestrator owns remediation; immutable incident timings are retained in the monitor ledger",
+          blocker: "other_lane", blocker_detail: "The orchestrator production-recovery lane must restore the failed DoctorCRE route or contract; this observer has no deployment authority",
         });
-        if (value.ok !== true) throw new Error("close_shape");
-      } else if (loop.status !== "done") throw new Error("loop_status");
-      incident.loop_closed = true;
+        if (value.ok !== true || !text(value.loop_id)) throw new Error("loop_shape");
+        incident.loop_id = value.loop_id;
+        await storage.put(STATE_KEY, state);
+      }
+      if (incident.recovered_at && !incident.loop_closed) {
+        const loop = await callRecord(env, fetcher, "read-loop", { loop_id: incident.loop_id });
+        if (loop.loop_id !== incident.loop_id || !Number.isInteger(loop.version)) throw new Error("loop_shape");
+        if (loop.status === "open") {
+          const seconds = (Date.parse(incident.recovered_at) - Date.parse(incident.first_failure_at)) / 1000;
+          const value = await callRecord(env, fetcher, "close-loop", {
+            idempotency_key: `uptime:${incident.id}:close`, loop_id: incident.loop_id, base_version: loop.version,
+            resolution: "done", outcome: `${incidentText(incident)} Observed outage ${seconds} seconds; all three production JSON probes passed on recovery.`,
+          });
+          if (value.ok !== true) throw new Error("close_shape");
+        } else if (!["done", "dropped"].includes(loop.status)) throw new Error("loop_status");
+        incident.loop_status = loop.status === "open" ? "done" : loop.status;
+        incident.loop_closed = true;
+      }
+    } catch {
+      state.record_error = "Incident loop pending; verify UPTIME_RECORD_TOKEN and CARR record availability";
     }
-  } catch {
-    state.record_error = "Incident loop pending; verify UPTIME_RECORD_TOKEN and CARR record availability";
   }
   await storage.put(STATE_KEY, state);
 }
@@ -170,45 +172,49 @@ export async function runMinute(storage, env, scheduledTime, fetcher = fetch, no
     failures: 0, first_failure_at: null, active_incident: null, incidents: [],
   };
   const slot = Math.floor(scheduledTime / 60000);
-  if (slot <= state.last_slot) return state;
-  if (slot > state.last_slot + 1) { state.failures = 0; state.first_failure_at = null; }
-  const sample = await probeProduction(env, fetcher);
-  state.last_slot = slot;
-  state.scheduled_at = iso(scheduledTime);
-  state.checked_at = iso(now());
-  state.probes_ok = sample.ok;
-  state.checks = sample.checks;
-  if (sample.ok) {
-    state.failures = 0;
-    state.first_failure_at = null;
-    if (state.active_incident) {
-      state.incidents.find((item) => item.id === state.active_incident).recovered_at = state.checked_at;
-      state.active_incident = null;
+  if (slot < state.last_slot || (slot === state.last_slot && state.finalized_slot === slot)) return state;
+  if (slot > state.last_slot) {
+    if (slot > state.last_slot + 1) { state.failures = 0; state.first_failure_at = null; }
+    const sample = await probeProduction(env, fetcher);
+    state.last_slot = slot;
+    state.scheduled_at = iso(scheduledTime);
+    state.checked_at = iso(now());
+    state.probes_ok = sample.ok;
+    state.checks = sample.checks;
+    state.ok = false;
+    if (sample.ok) {
+      state.failures = 0;
+      state.first_failure_at = null;
+      if (state.active_incident) {
+        state.incidents.find((item) => item.id === state.active_incident).recovered_at = state.checked_at;
+        state.active_incident = null;
+      }
+    } else {
+      if (!state.failures) state.first_failure_at = state.checked_at;
+      state.failures++;
+      if (state.failures >= 3 && !state.active_incident) {
+        const incident = {
+          id: `production-${slot}`, first_failure_at: state.first_failure_at, confirmed_at: state.checked_at,
+          recovered_at: null, checks: sample.checks, down_sent: false, recovery_sent: false, loop_id: null, loop_closed: false,
+        };
+        incident.open_body = incidentText(incident);
+        state.active_incident = incident.id;
+        state.incidents.push(incident);
+      }
     }
-  } else {
-    if (!state.failures) state.first_failure_at = state.checked_at;
-    state.failures++;
-    if (state.failures >= 3 && !state.active_incident) {
-      const incident = {
-        id: `production-${slot}`, first_failure_at: state.first_failure_at, confirmed_at: state.checked_at,
-        recovered_at: null, checks: sample.checks, down_sent: false, recovery_sent: false, loop_id: null, loop_closed: false,
-      };
-      incident.open_body = incidentText(incident);
-      state.active_incident = incident.id;
-      state.incidents.push(incident);
-    }
+    // Persist the incident before contacting either provider. Their transition/idempotency contracts make replay safe.
+    await storage.put(STATE_KEY, state);
   }
-  // Persist the incident before contacting either provider. Their transition/idempotency contracts make replay safe.
-  await storage.put(STATE_KEY, state);
   await deliverAlerts(storage, state, env, fetcher);
-  if (sample.checks.find((check) => check.name === "verb-round-trip").ok) await deliverRecord(storage, state, env, fetcher);
+  if (state.checks.find((check) => check.name === "verb-round-trip").ok) await deliverRecord(storage, state, env, fetcher);
   const finished = state.incidents.filter(complete).slice(-20);
   state.incidents = state.incidents.filter((incident) => !complete(incident) || finished.includes(incident));
   state.pending_records = state.incidents.filter((incident) => !incident.loop_id || (incident.recovered_at && !incident.loop_closed)).length;
   state.pending_alerts = state.incidents.filter((incident) => !incident.down_sent || (incident.recovered_at && !incident.recovery_sent)).length;
   state.configuration_missing = ["CARR_MCP_PROBE_TOKEN", "UPTIME_RECORD_TOKEN", "UPTIME_HEALTHCHECKS_PING_URL"].filter((key) => !env[key]);
-  state.ok = sample.ok && !state.alert_error && !state.record_error && !state.pending_records &&
+  state.ok = state.probes_ok && !state.alert_error && !state.record_error && !state.pending_records &&
     !state.pending_alerts && !state.configuration_missing.length;
+  state.finalized_slot = state.last_slot;
   await storage.put(STATE_KEY, state);
   return state;
 }

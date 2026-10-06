@@ -2,8 +2,9 @@
 import json
 import os
 import fcntl
-import uuid
 import subprocess
+import sys
+from http.client import HTTPException
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.error import HTTPError
@@ -38,49 +39,49 @@ def reconcile_monitor(fault, healthy, state_path=None, verb=None):
                 temporary.replace(path)
 
             if fault and not state:
-                at = datetime.now(timezone.utc).isoformat()
-                state = {"key": f"uptime-monitor:{uuid.uuid4()}", "first_observed": at,
-                         "body": f"DoctorCRE uptime monitoring unavailable; first observed {at}. {ACTION}"}
+                state = {"key": "uptime-monitor:availability:v1"}
                 save()
             if not state:
                 return "none"
-            if not state.get("loop_id"):
-                response = verb("add-loop", {
-                    "idempotency_key": state["key"], "kind": "open_loop", "owner": "claude",
-                    "domain": "system", "body": state["body"], "marker": "none",
-                    "blocker": "other_lane", "blocker_detail": "The orchestrator must restore carr-uptime scheduling, route, credentials, or notification delivery; this health reader has no deployment authority",
-                })
-                if response.get("ok") is not True or not isinstance(response.get("loop_id"), str):
-                    return "error"
-                state["loop_id"] = response["loop_id"]
-                save()
-            if healthy:
+            while True:
+                if not state.get("loop_id"):
+                    response = verb("add-loop", {
+                        "idempotency_key": state["key"], "kind": "open_loop", "owner": "claude",
+                        "domain": "system", "body": f"DoctorCRE uptime monitoring unavailable. {ACTION}", "marker": "none",
+                        "blocker": "other_lane", "blocker_detail": "The orchestrator must restore carr-uptime scheduling, route, credentials, or notification delivery; this health reader has no deployment authority",
+                    })
+                    if response.get("ok") is not True or not isinstance(response.get("loop_id"), str):
+                        return "error"
+                    state["loop_id"] = response["loop_id"]
+                    save()
+                    if not healthy and not response.get("replayed"):
+                        return "open"
                 loop = verb("read-loop", {"loop_id": state["loop_id"]})
                 if loop.get("loop_id") != state["loop_id"] or type(loop.get("version")) is not int:
                     return "error"
-                if loop.get("status") == "open":
-                    if not state.get("outcome"):
-                        state["outcome"] = (f"Uptime monitor recovered {datetime.now(timezone.utc).isoformat()}; "
-                                            f"first observed {state['first_observed']}. Fresh status proves three passing JSON probes and no pending alerts or incident loops.")
+                if loop.get("status") in ("done", "dropped"):
+                    if fault:
+                        state = {"key": f"uptime-monitor:after:{loop['loop_id']}"}
                         save()
+                        continue
+                    return "clear"
+                if loop.get("status") != "open":
+                    return "error"
+                if healthy:
                     response = verb("close-loop", {
                         "idempotency_key": state["key"] + ":close", "loop_id": state["loop_id"],
-                        "base_version": loop["version"], "resolution": "done", "outcome": state["outcome"],
+                        "base_version": loop["version"], "resolution": "done",
+                        "outcome": "Uptime monitor recovered. Fresh status proves three passing JSON probes and no pending alerts or incident loops.",
                     })
                     if response.get("ok") is not True:
                         return "error"
-                elif loop.get("status") != "done":
-                    return "error"
-                state = {}
-                save()
-                return "clear"
-            return "open"
+                    return "clear"
+                return "open"
     except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
         return "error"
 
 
-def read_status():
-    url = os.environ.get("CARR_UPTIME_STATUS_URL", STATUS_URL)
+def _read_status(url):
     try:
         response = urlopen(url, timeout=10)
     except HTTPError as error:
@@ -88,7 +89,20 @@ def read_status():
             raise
         response = error
     with response:
-        return json.loads(response.read(65536))
+        body = response.read(65537)
+        if len(body) > 65536:
+            raise ValueError("oversized status")
+        if response.headers.get("Content-Length") is not None and len(body) != int(response.headers["Content-Length"]):
+            raise ValueError("partial status")
+        return json.loads(body)
+
+
+def read_status(timeout=10):
+    """Kill a stalled fetch across headers and streaming body within one deadline."""
+    url = os.environ.get("CARR_UPTIME_STATUS_URL", STATUS_URL)
+    result = subprocess.run([sys.executable, str(Path(__file__).resolve()), url],
+                            capture_output=True, timeout=timeout, check=True)
+    return json.loads(result.stdout)
 
 
 def row(read=read_status, now=None, respond=reconcile_monitor):
@@ -105,7 +119,12 @@ def row(read=read_status, now=None, respond=reconcile_monitor):
             check.get("name") for check in checks if isinstance(check, dict)
         } != {"api-release", "app-release", "verb-round-trip"}:
             raise ValueError("shape")
-        checked = datetime.fromisoformat(status["checked_at"].replace("Z", "+00:00"))
+        timestamp = status.get("checked_at")
+        if not isinstance(timestamp, str):
+            raise ValueError("timestamp")
+        checked = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if checked.tzinfo is None:
+            raise ValueError("timestamp timezone")
         age = (now - checked).total_seconds()
         passing = all(check.get("ok") is True for check in checks)
         healthy = (status.get("ok") is True and passing and -30 <= age < 180
@@ -117,7 +136,7 @@ def row(read=read_status, now=None, respond=reconcile_monitor):
                          or passing and (counts[1] > 0 or counts[2] > 0))
         detail = (f"last sample {max(0, int(age))}s ago; {counts[0]}/3 failures; "
                   f"{counts[1]} loops pending; {counts[2]} alerts pending")
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, HTTPException, subprocess.SubprocessError):
         healthy = False
         monitor_fault = True
         detail = "monitor unreachable or response invalid; activation and phone delivery unverified"
@@ -126,3 +145,7 @@ def row(read=read_status, now=None, respond=reconcile_monitor):
         healthy = False
         detail += "; monitor response loop pending (record or local state unavailable)"
     return f"{'OK' if healthy else 'WARN'} production uptime · {detail} · {ACTION}", not healthy
+
+
+if __name__ == "__main__":
+    print(json.dumps(_read_status(sys.argv[1])))

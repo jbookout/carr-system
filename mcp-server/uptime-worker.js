@@ -3,7 +3,8 @@ import { ACTION, runMinute, STATE_KEY } from "./src/uptime-monitor.js";
 function summary(state) {
   const fresh = state?.checked_at && Date.now() - Date.parse(state.checked_at) < 180000;
   return {
-    schema: "carr-uptime.v1", ok: Boolean(fresh && state?.ok), checked_at: state?.checked_at || null,
+    schema: "carr-uptime.v1", ok: Boolean(fresh && state?.ok && state?.probes_ok &&
+      state.finalized_slot === state.last_slot), checked_at: state?.checked_at || null,
     failures: state?.failures || 0, active_incident: state?.active_incident || null,
     pending_records: state?.pending_records || 0, pending_alerts: state?.pending_alerts || 0,
     checks: state?.checks || [], configuration_missing: state?.configuration_missing || [],

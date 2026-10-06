@@ -250,6 +250,144 @@ test("real workerd Cron and SQLite ledger retain the incident across Worker relo
     assert.equal(status.pending_records, 0);
     assert.equal(status.active_incident, null);
     assert.equal(h.calls.filter((call) => call.url.endsWith("/fail")).length, 1);
-    assert.equal(h.calls.filter((call) => call.url.startsWith("https://hc-ping.com/") && !call.url.endsWith("/fail")).length, 1);
+    assert.equal(h.calls.filter((call) => call.url.startsWith("https://hc-ping.com/") && !call.url.endsWith("/fail")).length, 3);
   } finally { await mf.dispose(); }
+});
+
+test("historical recovery never clears a newer confirmed outage", async () => {
+  const h = harness();
+  let rejectSuccess = false;
+  let channel = "up";
+  const accepted = [];
+  const fetcher = async (url, options) => {
+    if (url.startsWith("https://hc-ping.com/")) {
+      if (!url.endsWith("/fail") && rejectSuccess) throw new Error("offline");
+      channel = url.endsWith("/fail") ? "down" : "up";
+      accepted.push(channel);
+    }
+    return h.fetch(url, options);
+  };
+  h.api = {};
+  for (let minute = 0; minute < 3; minute++) await runMinute(h.storage, env, START + minute * 60000, fetcher);
+  h.api = API; rejectSuccess = true;
+  await runMinute(h.storage, env, START + 180000, fetcher);
+  h.api = {};
+  for (let minute = 4; minute < 6; minute++) await runMinute(h.storage, env, START + minute * 60000, fetcher);
+  rejectSuccess = false;
+  const before = accepted.length;
+  const state = await runMinute(h.storage, env, START + 360000, fetcher);
+  assert.ok(state.active_incident);
+  assert.equal(channel, "down");
+  assert.deepEqual(accepted.slice(before), ["down"]);
+  assert.equal(state.incidents[1].down_sent, true);
+  h.api = API;
+  const recovered = await runMinute(h.storage, env, START + 420000, fetcher);
+  assert.equal(channel, "up");
+  assert.equal(recovered.pending_alerts, 0);
+});
+
+test("provider clock stays alive below three failures without clearing a confirmed incident", async () => {
+  const h = harness();
+  let providerTime = 0;
+  let expires = -1;
+  let channel = "up";
+  const fetcher = async (url, options) => {
+    if (url.startsWith("https://hc-ping.com/")) {
+      channel = url.endsWith("/fail") ? "down" : "up";
+      expires = providerTime + 180000;
+    }
+    return h.fetch(url, options);
+  };
+  const tick = async (minute, duration = 0) => {
+    providerTime = minute * 60000 + duration;
+    return tickMinute(h.storage, env, START + minute * 60000, fetcher, () => START + providerTime);
+  };
+  await tick(0);
+  h.api = {};
+  await tick(1); await tick(2);
+  assert.ok(expires > 188000, `dead-man expires at ${expires}`);
+  h.api = API;
+  assert.equal((await tick(3, 8000)).incidents.length, 0);
+  h.api = {};
+  await tick(4); await tick(5); await tick(6);
+  assert.equal(channel, "down");
+  await tick(7);
+  assert.equal(channel, "down");
+});
+
+test("reload after every persisted effect boundary is non-green and the same slot resumes", async () => {
+  for (const boundary of [2, 3, 4, 5]) {
+    const h = harness();
+    await runMinute(h.storage, env, START, h.fetch);
+    h.api = {};
+    await runMinute(h.storage, env, START + 60000, h.fetch);
+    await runMinute(h.storage, env, START + 120000, h.fetch);
+    const put = h.storage.put;
+    let writes = 0;
+    h.storage.put = async (...args) => {
+      if (++writes >= boundary) throw new Error("storage interruption");
+      await put(...args);
+    };
+    const original = globalThis.fetch;
+    globalThis.fetch = h.fetch;
+    try {
+      await assert.rejects(runMinute(h.storage, env, START + 180000, h.fetch), /storage interruption/);
+      const saved = await h.storage.get(STATE_KEY);
+      assert.equal(saved.ok, false);
+      const ledger = new UptimeLedger({ storage: h.storage }, env);
+      assert.equal((await ledger.fetch(new Request("https://ledger/healthz"))).status, 503);
+      const count = h.calls.filter((call) => call.url.endsWith("/release")).length;
+      h.storage.put = put;
+      const resumed = await ledger.fetch(new Request("https://ledger/tick", {
+        method: "POST", body: JSON.stringify({ scheduledTime: START + 180000 }),
+      }));
+      assert.equal(resumed.status, 503);
+      const finished = await h.storage.get(STATE_KEY);
+      assert.equal(finished.finalized_slot, finished.last_slot);
+      assert.equal(finished.failures, 3);
+      assert.equal(finished.pending_alerts, 0);
+      assert.equal(finished.pending_records, 0);
+      assert.equal(h.calls.filter((call) => call.url.endsWith("/release")).length, count);
+    } finally { globalThis.fetch = original; }
+  }
+});
+
+test("interruption after a healthy tick cannot persist false green on its first failed sample", async () => {
+  const h = harness();
+  await runMinute(h.storage, env, START, h.fetch);
+  h.api = {};
+  const put = h.storage.put;
+  let writes = 0;
+  h.storage.put = async (...args) => {
+    if (++writes > 1) throw new Error("storage interruption");
+    await put(...args);
+  };
+  await assert.rejects(runMinute(h.storage, env, START + 60000, h.fetch));
+  assert.equal((await h.storage.get(STATE_KEY)).ok, false);
+});
+
+test("terminal dropped records and refused older records do not starve later incidents", async () => {
+  for (const status of ["dropped", "unrecognized"]) {
+    const h = harness();
+    let opens = 0;
+    const fetcher = async (url, options) => {
+      const params = url.endsWith("/mcp") ? JSON.parse(options.body).params : null;
+      if (params?.name === "add-loop") return Response.json(rpc({ ok: true, loop_id: `fixture-${++opens}` }));
+      if (params?.name === "read-loop") return Response.json(rpc({ loop_id: params.arguments.loop_id, version: 2, status }));
+      return h.fetch(url, options);
+    };
+    h.api = {};
+    for (let minute = 0; minute < 3; minute++) await runMinute(h.storage, env, START + minute * 60000, fetcher);
+    h.api = API;
+    await runMinute(h.storage, env, START + 180000, fetcher);
+    h.api = {};
+    for (let minute = 4; minute < 7; minute++) await runMinute(h.storage, env, START + minute * 60000, fetcher);
+    const state = await h.storage.get(STATE_KEY);
+    assert.equal(opens, 2);
+    assert.equal(state.incidents[1].loop_id, "fixture-2");
+    if (status === "dropped") {
+      assert.equal(state.incidents[0].loop_closed, true);
+      assert.equal(state.incidents[0].loop_status, "dropped");
+    } else assert.ok(state.record_error);
+  }
 });

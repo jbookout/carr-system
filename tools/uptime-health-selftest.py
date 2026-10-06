@@ -5,7 +5,9 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import unittest
@@ -19,6 +21,158 @@ NOW = datetime(2026, 10, 5, 19, 0, 0, tzinfo=timezone.utc)
 
 
 class UptimeHealthTests(unittest.TestCase):
+    def test_dropped_monitor_loop_does_not_block_a_new_fault(self):
+        state = Path(__file__).resolve().parents[1] / "out/_to_delete" / f"uptime-dropped-{uuid.uuid4()}.json"
+        opens = []
+
+        def verb(name, payload):
+            if name == "add-loop":
+                opens.append(payload)
+                return {"ok": True, "loop_id": f"loop-{len(opens)}"}
+            if name == "read-loop":
+                return {"loop_id": payload["loop_id"], "version": 2, "status": "dropped"}
+            self.fail("must preserve the dropped disposition")
+
+        self.assertEqual(module.reconcile_monitor(True, False, state, verb), "open")
+        self.assertEqual(module.reconcile_monitor(False, True, state, verb), "clear")
+        self.assertEqual(module.reconcile_monitor(True, False, state, verb), "open")
+        self.assertEqual(len(opens), 2)
+
+    def test_two_readers_share_record_identity_across_checkout_state_and_recovery(self):
+        root = Path(__file__).resolve().parents[1] / "out/_to_delete" / f"uptime-readers-{uuid.uuid4()}"
+        paths = [root / "worktree-a.json", root / "machine-b.json"]
+        loops = {}
+        replay = {}
+
+        def verb(name, payload):
+            if name == "add-loop":
+                key = payload["idempotency_key"]
+                if key in replay:
+                    self.assertEqual(payload, replay[key][0])
+                    return {**replay[key][1], "replayed": True}
+                loop_id = f"loop-{len(loops) + 1}"
+                loops[loop_id] = {"loop_id": loop_id, "status": "open", "version": 1}
+                result = {"ok": True, "loop_id": loop_id}
+                replay[key] = (payload.copy(), result)
+                return result
+            if name == "read-loop":
+                return loops[payload["loop_id"]].copy()
+            loops[payload["loop_id"]]["status"] = "done"
+            return {"ok": True}
+
+        for path in paths:
+            self.assertEqual(module.reconcile_monitor(True, False, path, verb), "open")
+        self.assertEqual(len(loops), 1)
+        loops["loop-1"]["status"] = "dropped"
+        for path in paths:
+            self.assertEqual(module.reconcile_monitor(False, True, path, verb), "clear")
+        for path in paths:
+            self.assertEqual(module.reconcile_monitor(True, False, path, verb), "open")
+        self.assertEqual(len(loops), 2)
+        self.assertEqual(loops["loop-1"]["status"], "dropped")
+        fresh = root / "new-machine.json"
+        self.assertEqual(module.reconcile_monitor(True, False, fresh, verb), "open")
+        self.assertEqual(len(loops), 2)
+
+    def test_partial_protocol_read_reports_bound_failure(self):
+        def partial():
+            raise IncompleteRead(b"fixture", 100)
+        responses = []
+        line, failed = module.row(read=partial, now=NOW, respond=lambda *args: responses.append(args))
+        self.assertTrue(failed)
+        self.assertIn("unreachable", line)
+        self.assertEqual(responses, [(True, False)])
+
+    def test_invalid_timestamps_and_truncated_body_preserve_health_cli_completion(self):
+        good = {
+            "schema": "carr-uptime.v1", "ok": True, "failures": 0,
+            "pending_records": 0, "pending_alerts": 0,
+            "checks": [{"name": name, "ok": True} for name in (
+                "api-release", "app-release", "verb-round-trip")],
+        }
+        mode = {"timestamp": None, "partial": False}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                body = json.dumps({**good, "checked_at": mode["timestamp"]}).encode()
+                self.send_header("Content-Length", str(len(body) + (100 if mode["partial"] else 0)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        root = Path(__file__).resolve().parents[1]
+        destination = root / "out/_to_delete" / f"uptime-invalid-{uuid.uuid4()}"
+        destination.mkdir(parents=True)
+        # Refuse local state before any record call; this fixture never contacts production.
+        state = destination / "response.json"
+        state.write_text("not-json")
+        try:
+            for timestamp in (None, 4, [], {}, "2026-10-05T19:00:00Z"):
+                mode.update(timestamp=timestamp, partial=isinstance(timestamp, str))
+                output = destination / "findings.json"
+                result = subprocess.run([
+                    sys.executable, str(root / "tools/health-check.py"), "--section", "uptime",
+                    "--findings-json", str(output),
+                ], env={**os.environ, "CARR_UPTIME_STATUS_URL": f"http://127.0.0.1:{server.server_port}/healthz",
+                        "CARR_UPTIME_RESPONSE_STATE": str(state)}, capture_output=True, text=True, timeout=15)
+                with self.subTest(timestamp=timestamp):
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(result.stdout.splitlines()[-1],
+                                     "Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>.")
+                    self.assertEqual(json.loads(output.read_text())["findings"][0]["key"], "production_uptime")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_status_deadline_covers_streaming_headers_and_body(self):
+        mode = {"headers": False}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                try:
+                    if mode["headers"]:
+                        time.sleep(0.8)
+                    self.send_response(200)
+                    self.send_header("Content-Length", "12")
+                    self.end_headers()
+                    for byte in b'{"ok":true} ':
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.08)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        original = os.environ.get("CARR_UPTIME_STATUS_URL")
+        os.environ["CARR_UPTIME_STATUS_URL"] = f"http://127.0.0.1:{server.server_port}/healthz"
+        try:
+            for headers in (False, True):
+                mode["headers"] = headers
+                started = time.monotonic()
+                with self.assertRaises((TimeoutError, subprocess.TimeoutExpired)):
+                    module.read_status(timeout=0.25)
+                self.assertLess(time.monotonic() - started, 0.7)
+        finally:
+            if original is None:
+                os.environ.pop("CARR_UPTIME_STATUS_URL")
+            else:
+                os.environ["CARR_UPTIME_STATUS_URL"] = original
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_monitor_failure_has_one_loop_and_verified_recovery_closes_it(self):
         root = Path(__file__).resolve().parents[1]
         state = root / "out/_to_delete" / f"uptime-response-{uuid.uuid4()}.json"
@@ -34,11 +188,11 @@ class UptimeHealthTests(unittest.TestCase):
 
         for _ in range(2):
             self.assertEqual(module.reconcile_monitor(True, False, state, verb), "open")
-        self.assertEqual([name for name, _ in calls], ["add-loop"])
+        self.assertEqual(sum(name == "add-loop" for name, _ in calls), 1)
         self.assertEqual(module.reconcile_monitor(False, False, state, verb), "open")
         self.assertEqual(module.reconcile_monitor(False, True, state, verb), "clear")
-        self.assertEqual([name for name, _ in calls], ["add-loop", "read-loop", "close-loop"])
-        self.assertIn("first observed", calls[0][1]["body"])
+        self.assertEqual(sum(name == "close-loop" for name, _ in calls), 1)
+        self.assertIn("monitoring unavailable", calls[0][1]["body"])
         self.assertIn("recovered", calls[-1][1]["outcome"])
 
     def test_monitor_loop_replays_after_lost_acknowledgement_and_refuses_corrupt_state(self):
