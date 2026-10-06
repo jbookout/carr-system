@@ -5,6 +5,7 @@
 // from the record that owns it, so it leaves the list when that record closes.
 // Fake-client suite: one fixture per source, no Worker or database.
 
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TOOLS } from "../src/tools.js";
@@ -89,9 +90,9 @@ function client({ fail = null, local = localPage, localUpdatedAt = "2026-10-05T1
   };
 }
 
-async function read(options) {
+async function read(options, actor = joe) {
   const c = client(options);
-  const result = await TOOLS["governance-queue"].handler(c, joe, {}, { now: NOW });
+  const result = await TOOLS["governance-queue"].handler(c, actor, {}, { now: NOW });
   return { result, list: result.needs_joe, calls: c.calls };
 }
 
@@ -124,7 +125,7 @@ test("every source contributes, each item carries the six fields Joe needs", asy
 test("human-only classes come from the existing gates, most specific first", async () => {
   const { list } = await read();
   const byKey = Object.fromEntries(list.items.map(item => [item.key, item]));
-  assert.equal(byKey["loop:A17"].why.class, "money");
+  assert.equal(byKey["loop:A17"].why.class, "human_only");
   assert.equal(byKey["loop:412"].why.class, "credential");
   assert.equal(byKey["loop:413"].why.class, "ruling");
   assert.equal(byKey["pr:jbookout/carr-system#1244"].why.class, "money");
@@ -215,4 +216,78 @@ test("the existing governance lanes are unchanged", async () => {
     pending_rule_approvals: 1, pending_guidance_import_batches: 0,
     pending_retrieval_proposals: 1, total: 2,
   });
+});
+
+
+test("NULL-tenant general and program Work Requests are included without including other tenants", async () => {
+  const c = client();
+  const query = c.query;
+  const rows = [
+    { ...workRequests[0], organization_tenant_id: null, kind: "general" },
+    { ...workRequests[0], ref: "WR-000202", title: "Second request", organization_tenant_id: "carr-internal" },
+    { ...workRequests[0], ref: "WR-000203", title: "Other tenant", organization_tenant_id: "other-tenant" },
+    { ...workRequests[0], ref: "WR-000204", title: "Program request", organization_tenant_id: null, kind: "program" },
+  ];
+  c.query = async (sql, params) => {
+    if (!sql.includes("from ops.work_request")) return query(sql, params);
+    const admitsNull = /organization_tenant_id is null/i.test(sql);
+    return { rows: rows.filter(row => row.organization_tenant_id === params[0]
+      || (admitsNull && row.organization_tenant_id === null)) };
+  };
+  const result = await TOOLS["governance-queue"].handler(c, joe, {}, { now: NOW });
+  assert.deepEqual(result.needs_joe.items.filter(item => item.source === "work_request")
+    .map(item => item.key).sort(), ["work-request:WR-000201", "work-request:WR-000202", "work-request:WR-000204"]);
+});
+
+test("Joe's list is not applicable for readers without Joe partner authority", async () => {
+  for (const actor of [
+    { slug: "grok-reviewer", human: false },
+    { slug: "hermes", human: false, sponsoring_human_slug: "joe" },
+    { slug: "dell", human: true },
+    { slug: "codex", human: false, native_agent_verified: true, sponsoring_human_slug: "dell" },
+    { slug: "codex", human: false, native_agent_verified: false, sponsoring_human_slug: "joe" },
+  ]) {
+    const { list, calls } = await read({}, actor);
+    assert.equal(list.state, "not_applicable", actor.slug);
+    assert.deepEqual(list.items, []);
+    assert.ok(calls.every(call => call.sql.includes("read_governance_queue")));
+  }
+  const { list } = await read({}, { slug: "codex", human: false,
+    native_agent_verified: true, sponsoring_human_slug: "joe" });
+  assert.ok(list.items.some(item => item.source === "board_question"));
+});
+
+test("flagged loops always appear and explicit classifications win over keywords", async () => {
+  const c = client();
+  const query = c.query;
+  c.query = async (sql, params) => sql.includes("from loop_item") ? { rows: [
+    { number: "1", kind: "action_required", label: "Review the Q4 roadmap and pick the order" },
+    { number: "2", kind: "open_loop", blocker_class: "capability", label: "needs the Mac Studio GPU upgrade installed" },
+    { number: "3", kind: "open_loop", marker: "decision", label: "Decide whether the lease abstraction schema keeps tenant_id" },
+    { number: "4", kind: "open_loop", blocker_class: "ruling", label: "Rule on the post-merge CI order" },
+    { number: "5", kind: "open_loop", blocker_class: "human_only", label: "Rotate the secret scanning baseline" },
+  ] } : query(sql, params);
+  const result = await TOOLS["governance-queue"].handler(c, joe, {}, { now: NOW });
+  assert.deepEqual(Object.fromEntries(result.needs_joe.items.filter(item => item.source === "loop"
+    || item.source === "action_required").map(item => [item.key, item.why.class])), {
+    "loop:1": "human_only", "loop:2": "human_only", "loop:3": "ruling",
+    "loop:4": "ruling", "loop:5": "human_only",
+  });
+});
+
+test("display classes cover the conduct gate vocabulary and watchdog credential phrases", () => {
+  const conduct = readFileSync(new URL("../../hooks/conduct_patterns.py", import.meta.url), "utf8");
+  const protectedBlock = conduct.split("PROTECTED = re.compile(")[1].split("re.I)")[0];
+  const literals = [...protectedBlock.matchAll(/r"([^"\n]*)"/g)].map(match => match[1]);
+  const words = literals.join("").match(/client\|(.*?)\)\\b/)[0]
+    .replace(/\)\\b$/, "").split("|");
+  for (const word of words) {
+    const sample = word.replace("[- ]", "-").replace("s?", "s");
+    assert.ok(classifyHumanOnly(sample), `conduct gate: ${sample}`);
+  }
+  for (const text of ["$240", "£20", "€30", "10 usd", "10 dollars", "per month", "a year", "per seat", "a user"])
+    assert.equal(classifyHumanOnly(text), "money", text);
+  const watchdog = JSON.parse(readFileSync(new URL("../../ops/config/job-watchdog.json", import.meta.url)));
+  for (const phrase of watchdog.needs_joe_patterns.credentials)
+    assert.equal(classifyHumanOnly(phrase), "credential", phrase);
 });
