@@ -286,33 +286,35 @@ check(
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
     and child_envs[continuity_event].get("CARR_CONTINUITY_DATABASE_DRIVER_MODULE") == "pg",
 )
+check("Leads PostgreSQL regressions run after continuity", events[12][-1].endswith("mcp-server/test/lead-workspace-pg.test.mjs"))
+check("Leads PostgreSQL regressions receive the disposable DSN", child_envs[12].get("LEAD_WORKSPACE_TEST_DATABASE_URL") == "postgres://carr_ci@127.0.0.1:55432/carr_ci")
 check(
     "atomic Joe lifecycle runs after canonical CI",
-    events[12][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+    events[13][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
 )
 check(
     "atomic rule-delivery cutover runs after authority acceptance",
-    events[13][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+    events[14][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
 )
 check(
     "scoped engineering claim runs after the authority acceptances",
-    events[14][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+    events[15][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
     "Engineering terminalization race runs after the scoped claim",
-    events[15][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+    events[16][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
 )
 check(
     "canonical ownership lease runs after the Engineering race proof",
-    events[16][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
+    events[17][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
 )
 check(
     "assurance persistence runs immediately after canonical ownership",
-    events[17][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
+    events[18][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
 )
 check(
     "source-merge reader projection runs immediately after assurance persistence",
-    events[18][-1].endswith("ops/source-merge-authority-local-pg-gate.py"),
+    events[19][-1].endswith("ops/source-merge-authority-local-pg-gate.py"),
 )
 completion_event = next(
     index for index, event in enumerate(events)
@@ -336,9 +338,9 @@ check(
 )
 check(
     "authority acceptance receives only the local disposable DSN",
-    child_envs[12].get("CARR_LOCAL_PG_DSN")
+    child_envs[13].get("CARR_LOCAL_PG_DSN")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
-    and "CARR_CI_DATABASE_URL" not in child_envs[12],
+    and "CARR_CI_DATABASE_URL" not in child_envs[13],
 )
 check(
     "fingerprint reads only the isolated pre-0450 database",
@@ -348,8 +350,8 @@ check(
 )
 check(
     "post-CI gates receive the exact pre-0450 fingerprint",
-    child_envs[12].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}"
-    and child_envs[16].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}",
+    child_envs[13].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}"
+    and child_envs[17].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}",
 )
 check("server always stops", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
 check("temporary cluster is always removed", remove.call_count == 1)
@@ -380,31 +382,31 @@ check("strict lane runs the F03 PostgreSQL acceptance", events[10][-1].endswith(
 check("strict lane runs the Codex continuity real-PostgreSQL proof", continuity_event == 11)
 check(
     "strict lane also proves atomic Joe lifecycle",
-    events[12][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+    events[13][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
 )
 check(
     "strict lane also proves atomic rule-delivery cutover",
-    events[13][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+    events[14][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
 )
 check(
     "strict lane also proves the scoped engineering claim",
-    events[14][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+    events[15][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
     "strict lane also proves the Engineering terminalization race",
-    events[15][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+    events[16][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
 )
 check(
     "strict lane also proves canonical ownership leases",
-    events[16][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
+    events[17][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
 )
 check(
     "strict lane also proves assurance persistence",
-    events[17][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
+    events[18][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
 )
 check(
     "strict lane also proves source-merge reader projection",
-    events[18][-1].endswith("ops/source-merge-authority-local-pg-gate.py"),
+    events[19][-1].endswith("ops/source-merge-authority-local-pg-gate.py"),
 )
 
 missing_gate = mod.run_required_local_gate(

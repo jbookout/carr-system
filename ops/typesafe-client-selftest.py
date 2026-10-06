@@ -67,6 +67,10 @@ def setUpModule():
     patcher = patch.object(client, "JEV_DAILY_CAP_LOG", os.path.join(_CAP_ROOT.name, "calls.jsonl"))
     patcher.start()
     unittest.addModuleCleanup(patcher.stop)
+    # Paid Worker attempts sign with a fixture admission secret, never a real one.
+    secret = patch.object(client, "read_admission_secret", lambda: "offline-admission")
+    secret.start()
+    unittest.addModuleCleanup(secret.stop)
 
 
 class FakeResponse(io.BytesIO):
@@ -1572,12 +1576,13 @@ class OfflineBudgetIsolationTests(unittest.TestCase):
                                 "fake transport must use a disposable quota")
             return reserve(*args, **kwargs)
 
-        suite = unittest.TestSuite(DispatchOwnershipTests(name) for name in (
-            "test_runtime_router_preserves_explicit_transcript_owner",
-            "test_ask_discovers_exact_native_session_and_keeps_unknown_owner_unbound"))
         result = unittest.TestResult()
+        # TestCase.run, not a top-level TestSuite.run: the latter runs this
+        # module's cleanups and would undo setUpModule's isolation mid-run.
         with patch.object(client, "_reserve_paid_call", isolated_reservation):
-            suite.run(result)
+            for name in ("test_runtime_router_preserves_explicit_transcript_owner",
+                         "test_ask_discovers_exact_native_session_and_keeps_unknown_owner_unbound"):
+                DispatchOwnershipTests(name).run(result)
         self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
         self.assertEqual(len(destinations), 5)
 
@@ -1775,7 +1780,7 @@ class CallReceiptTests(unittest.TestCase):
             self.assertFalse(row["ok"])
             self.assertFalse(row["schema_valid"])
 
-    def test_new_receipts_hash_question_ids_and_preserve_facet_credit(self):
+    def test_new_receipts_hash_question_ids_and_preserve_facet_labels(self):
         name = "private_semantic_creation_question"
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "calls.jsonl"
@@ -1789,12 +1794,7 @@ class CallReceiptTests(unittest.TestCase):
         self.assertNotIn(name, raw)
         self.assertNotIn("question_ids", row)
         self.assertEqual(row["question_ids_sha256"], [hashlib.sha256(name.encode()).hexdigest()])
-        reader_path = MODULE_PATH.parent.parent / "lib" / "jev_required_actions.py"
-        spec = importlib.util.spec_from_file_location("jev_required_actions", reader_path)
-        assert spec and spec.loader
-        reader = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(reader)
-        self.assertTrue(reader._call_covers_facet(row, "semantic_creation"))
+        self.assertIn("semantic_creation", row["facets"])
 
     def test_real_call_receipt_includes_usage_and_no_response_id(self):
         # This exercises _append_call_receipt directly with a real-shaped
@@ -1939,7 +1939,7 @@ class CallReceiptTests(unittest.TestCase):
         """A call made through `opener` (the offline selftest/mock path) must
         NOT leave a receipt — a mock response was never actually seen by the
         vendor, and a receipt for it would let running THIS selftest suite
-        count as a real turn's Jev evidence in lib/jev_required_actions.py."""
+        count as vendor evidence in the diagnostic ledger."""
         with tempfile.TemporaryDirectory() as d:
             log = str(Path(d) / "jev-calls.jsonl")
             client.ask("s", {"q": client.noul("?")}, api_key="k",

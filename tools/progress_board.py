@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import sys
 import tempfile
 import urllib.request
@@ -67,6 +68,17 @@ SNAPSHOT_SCHEMA = "carr-progress-board.v2"
 # publish-board-snapshot refuses JSON.stringify(snapshot).length > 262144
 # (mcp-server/src/board-answers.js): compact JSON, counted in UTF-16 units.
 SNAPSHOT_LIMIT = 262144
+SNAPSHOT_BUDGET = SNAPSHOT_LIMIT * 9 // 10
+# The app card contract, not the local job/PR diagnostic record. In particular,
+# note duplicates watchdog stderr already carried in blocked_reason.
+SNAPSHOT_TASK_FIELDS = frozenset("""
+    title status stage executor provider model effort health repo pr pr_url
+    pr_phase pr_head pr_checks pr_links question review_verdict summary blocked_reason next_action evidence
+    release_wait created_at updated_at completed_at merged_at manual_stage
+    stage_entered_at stage_history question_ids human_ref kind related
+    work_request work_request_ref
+""".split())
+BLOCKER_EXCERPT_LIMIT = 192
 
 ALL_REPOS_BOARD = "all-repos"
 GITHUB_OWNER = "jbookout"
@@ -693,6 +705,14 @@ def rest_checks(repo: str, head: str) -> list[dict[str, Any]]:
             for c in checks] + list(contexts.values())
 
 
+def pr_fresh_seconds() -> float:
+    """Seconds an open-PR observation is reused (PROGRESS_BOARD_PR_FRESH_SECONDS, default 120; 0 disables)."""
+    try:
+        return max(0.0, float(os.environ.get("PROGRESS_BOARD_PR_FRESH_SECONDS", "120")))
+    except ValueError:
+        return 120.0
+
+
 class GitHubReadPass:
     def __init__(self) -> None:
         self.path = board_dir() / ".github-pr-cache.json"
@@ -763,13 +783,33 @@ class GitHubReadPass:
                           "author": {"login": task.get("author") or ""}, "mergeCommit": None,
                           "statusCheckRollup": [], "comments": [], "reviewDecision": "", "mergeable": "UNKNOWN"})
 
+    def result(self, info: dict[str, Any] | None, repo: str,
+               error: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        # Raw observations are reusable; review trust belongs to the current policy.
+        if info and "_reviews" in info:
+            info = {**info, "reviewDecision": rest_review_decision(
+                info["_reviews"], {"mergeable_state": info.get("_mergeable_state")}, review_rules(repo))}
+        return info, error or (info.get("_refresh_error") if info else None)
+
+    @staticmethod
+    def matches_discovery(info: dict[str, Any] | None, raw: dict[str, Any] | None) -> bool:
+        return raw is None or (info is not None
+            and raw.get("state") == ("open" if info["state"] == "OPEN" else "closed")
+            and raw.get("updated_at") == info.get("updatedAt")
+            and (not isinstance(raw.get("head"), dict)
+                 or raw["head"].get("sha") == info.get("headRefOid")))
+
     def read(self, number: int, repo: str, raw: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:
         repo = safe_repo(repo)
         identity = f"{repo}#{number}"
         self.reconcile()
         old = self.saved.get(identity)
         if old and old.get("state") == "MERGED" and not old.get("_legacy_terminal"):
-            return old, None
+            return self.result(old, repo)
+        # An open PR read moments ago is reused instead of re-fetched. Every board
+        # mutation renders every open PR, so one job-watchdog scan (100+ mutations)
+        # spent the whole 5,000/hr REST pool in minutes on 2026-10-04. Discovery
+        # rows (raw) still carry their own version evidence and are checked below.
         cached = self.results.get(identity)
         if cached:
             info, error = cached
@@ -777,14 +817,24 @@ class GitHubReadPass:
                 info, error = old, None
             # Discovery rows are evidence: a different state, version or head
             # invalidates even an earlier result from this same render pass.
-            matches = (raw is None or (info is not None
-                       and raw.get("state") == ("open" if info["state"] == "OPEN" else "closed")
-                       and raw.get("updated_at") == info.get("updatedAt")
-                       and (not isinstance(raw.get("head"), dict)
-                            or raw["head"].get("sha") == info.get("headRefOid"))))
-            if matches:
-                return info, error
+            if self.matches_discovery(info, raw):
+                return self.result(info, repo, error)
+        window = pr_fresh_seconds()
+        # Payload and observation time come from the same atomic cache snapshot.
+        # A losing writer never changes the winner's time; failed refreshes miss.
+        if (window and raw is None and old and not old.get("_legacy_terminal")
+                and not old.get("_refresh_error")
+                and isinstance(old.get("_observed_at"), (int, float))
+                and 0 <= time.time() - old["_observed_at"] < window):
+            return self.result(old, repo)
         observation = self.observe()
+        observed_at = time.time()
+        discovery = raw if raw is not None else (old.get("_discovery") if old else None)
+        if old and discovery is not None and not self.matches_discovery(old, discovery):
+            hint = {key: discovery[key] for key in ("state", "updated_at", "head") if key in discovery}
+            old = self.save(identity, {**old, "_observation": observation, "_observed_at": None,
+                                      "_discovery": hint,
+                                      "_refresh_error": "PR discovery invalidated cached observation"})
         result: tuple[dict[str, Any] | None, str | None]
         try:
             # Mergeability changes with the base and CI changes independently
@@ -792,6 +842,10 @@ class GitHubReadPass:
             raw = gh_json(["api", f"repos/{repo}/pulls/{number}"], timeout=30)
             info = rest_pr(raw)
             assert isinstance(raw, dict)  # rest_pr has validated the response
+            if (discovery is not None and not self.matches_discovery(info, discovery)
+                    and str(info.get("updatedAt") or "") <= str(discovery.get("updated_at") or "")):
+                kind = "closed discovery" if discovery.get("state") == "closed" else "discovery"
+                raise RuntimeError(f"PR detail disagrees with {kind}")
             head = info["headRefOid"]
             base = f"repos/{repo}"
             if old and old.get("_legacy_terminal") and old["state"] == "MERGED":
@@ -817,6 +871,7 @@ class GitHubReadPass:
                 if reviews is None:
                     reviews = rest_rows(f"{base}/pulls/{number}/reviews")
                 info["_reviews"] = reviews
+                info["_mergeable_state"] = raw.get("mergeable_state")
                 info["reviewDecision"] = rest_review_decision(reviews, raw, review_rules(repo))
             if info["state"] == "MERGED":
                 files = rest_rows(f"{base}/pulls/{number}/files")
@@ -827,11 +882,17 @@ class GitHubReadPass:
             if validated_pr(info) is None:
                 raise RuntimeError("gh returned a malformed PR payload")
             info["_observation"] = observation
-            result = (self.save(identity, info), None)
+            info["_observed_at"] = observed_at
+            result = self.result(self.save(identity, info), repo)
         except (RuntimeError, TypeError, ValueError, AttributeError, KeyError) as exc:
             self.reconcile()
             old = self.saved.get(identity) or old
-            result = (old, str(exc))
+            if old:
+                old = self.save(identity, {**old, "_observation": observation,
+                                          "_observed_at": None, "_refresh_error": str(exc)})
+                result = self.result(old, repo)
+            else:
+                result = (None, str(exc))
         self.results[identity] = result
         return result
 
@@ -1856,8 +1917,8 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                  history, key=lambda k: (str(history[k].get("updated_at") or ""), k))]
     size = snapshot_size(snapshot)
     index = 0
-    while size > SNAPSHOT_LIMIT and index < len(order):
-        freed, excess = 0, size - SNAPSHOT_LIMIT
+    while size > SNAPSHOT_BUDGET and index < len(order):
+        freed, excess = 0, size - SNAPSHOT_BUDGET
         while freed < excess and index < len(order):
             kind, section, key = order[index]
             index += 1
@@ -1865,22 +1926,29 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             freed += snapshot_size({key: entry}) - 1
             snapshot["omitted"][kind] += 1
         size = snapshot_size(snapshot)
-    if size > SNAPSHOT_LIMIT:
+    if size > SNAPSHOT_BUDGET:
         raise SnapshotTooLarge(f"board {snapshot.get('project')} snapshot is {size} characters after trimming "
-                               f"every Live, Merged and History entry; the server limit is {SNAPSHOT_LIMIT}")
+                               f"every Live, Merged and History entry; the publication budget is {SNAPSHOT_BUDGET} "
+                               f"and the server limit is {SNAPSHOT_LIMIT}")
     return snapshot
 
 
 def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     """The versioned data contract the app page renders. Deterministic for a
-    given state, and always within the server's size limit."""
+    given state. Full diagnostics stay local; the app receives bounded cards."""
     tasks = {}
     all_tasks = state.get("tasks") or {}
     for task_id, task in all_tasks.items():
         if is_retired(task):
             continue
         provider, model, effort = task_identity(task)
-        tasks[task_id] = {**task, "provider": provider, "model": model, "effort": effort}
+        card = {key: value for key, value in task.items()
+                if key in SNAPSHOT_TASK_FIELDS and value is not None}
+        reason = card.get("blocked_reason")
+        if isinstance(reason, str) and len(reason) > BLOCKER_EXCERPT_LIMIT:
+            head = BLOCKER_EXCERPT_LIMIT // 2
+            card["blocked_reason"] = reason[:head] + "…" + reason[-(BLOCKER_EXCERPT_LIMIT - head - 1):]
+        tasks[task_id] = {**card, "provider": provider, "model": model, "effort": effort}
     decisions = [
         {"id": qid, "question": q.get("question"), "answer": q.get("answer"), "default": q.get("default"),
          "answered_at": q.get("answered_at") or q.get("updated_at")}

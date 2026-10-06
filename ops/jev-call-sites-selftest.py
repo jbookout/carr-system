@@ -76,6 +76,7 @@ class Harness(unittest.TestCase):
     def setUp(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.root = root
+        self.enterContext(patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=str(root / "semantic-cache")))
         self.log = root / "calls.jsonl"
         self.registry = root / "sites.json"
         self.write_registry([site("hook_site"), site("job_site", attribution="session_or_job"),
@@ -90,6 +91,11 @@ class Harness(unittest.TestCase):
             return FakeResponse(json.dumps(ANSWER).encode())
         self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
         self.enterContext(patch.object(client, "_launch_spend_alert_worker", lambda *a: None))
+        # Hermetic credentials: a fixture admission secret, and no local vendor
+        # key unless a test supplies one, exactly as on a hosted runner.
+        self.enterContext(patch.object(client, "read_admission_secret", lambda: "offline-admission"))
+        self.enterContext(patch.object(client, "read_api_key", side_effect=client.TypeSafeError(
+            "fixture holds no local vendor key")))
         env = {k: v for k, v in os.environ.items()
                if k not in client.SESSION_ID_ENV_KEYS + ("CARR_JEV_JOB", "XPC_SERVICE_NAME", "CARR_JEV_WORKER",
                                                          "CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE")}
@@ -213,7 +219,7 @@ class RecordingAttributionTests(Harness):
         with patch.object(controller.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
             controller._execute_deterministic(workflow, {"scheduled_for": "2026-10-04T03:00:00Z"},
                                               timeout=10, mode="live")
-        env = run.call_args.kwargs["env"]
+        env = {**run.call_args.kwargs["env"], "CARR_JEV_SEMANTIC_CACHE": str(self.log)+".semantic"}
         self.assertFalse(any(key in env for key in client.SESSION_ID_ENV_KEYS))
         with patch.dict(os.environ, env, clear=True):
             _, entry = client._admit_paid_call("jev_deal_read", None, {}, [], None, None)
@@ -254,7 +260,9 @@ class RecordingAttributionTests(Harness):
                    "details_supported": {"type": "noul", "noul": 0.99}}
         def opener(request, timeout=None):
             self.requests.append(request)
-            return FakeResponse(json.dumps({**ANSWER, "answers": answers}).encode())
+            asked = json.loads(request.data)["questions"]
+            batched = {key: answers[key.split(":")[-1]] for key in asked}
+            return FakeResponse(json.dumps({**ANSWER, "answers": batched}).encode())
         self.enterContext(patch.object(client.urllib.request, "urlopen", opener))
         self.enterContext(patch.dict(client.ask.__kwdefaults__, cache_path=str(self.root / "cache.json"),
                                      calls_log=str(self.log)))
@@ -388,6 +396,18 @@ class BudgetTests(Harness):
             with self.assertRaisesRegex(client.TypeSafeError, "daily paid call cap"):
                 self.ask("2")
 
+    def test_shared_cap_holds_across_overlapping_site_limits(self):
+        self.write_registry([site("hook_site", hourly_budget=3, daily_budget=3),
+                             site("job_site", hourly_budget=3, daily_budget=3)], hourly=100)
+        with patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=2):
+            self.ask("first site")
+            self.ask("second site", caller="job_site")
+            for caller in ("hook_site", "job_site"):
+                with self.assertRaises(client.JevCallRefused) as caught:
+                    self.ask("exhausted", caller=caller)
+                self.assertEqual(caught.exception.code, "daily_paid_call_cap")
+        self.assertEqual(len(self.requests), 2)
+
 
 class QuietNoticeTests(Harness):
     def test_cap_reached_surfaces_one_line_per_session_per_window(self):
@@ -482,181 +502,34 @@ class AlarmMailTests(unittest.TestCase):
         self.assertEqual([r["sink"] for r in rows], ["notification", "mail"])
 
 
-class ChangeTollsDedupeTests(unittest.TestCase):
-    """pre-push asked the same diff twice per push (owed, then verify) and again
-    on every re-push. One paid question per distinct diff per day now."""
 
-    def setUp(self):
-        spec = importlib.util.spec_from_file_location("tolls_under_test", REPO / "ops" / "jev_change_tolls.py")
-        self.tolls = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.tolls)
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(self.tolls, "CACHE_PATH", str(root / "tolls-cache.json")))
-        self.asked = []
-        tolls = self.tolls
 
-        class Client:
-            noul = staticmethod(client.noul)
+class ChangeTollsPredicateTests(unittest.TestCase):
+    def test_repeated_changed_paths_are_pure_and_do_not_transport(self):
+        spec = importlib.util.spec_from_file_location('tolls_under_test', REPO/'ops/jev_change_tolls.py')
+        tolls = importlib.util.module_from_spec(spec); spec.loader.exec_module(tolls)
+        class Explosive:
+            def __getattr__(self, name): raise AssertionError(name)
+        state = {'files':['ops/ci.sh']}
+        first = tolls.owed(state, client=Explosive())
+        self.assertEqual(first,tolls.owed(state,client=Explosive()))
+        self.assertEqual([n for _,n,_ in first],['ci_sh_reseal','inventory_reseal'])
 
-            @staticmethod
-            def ask(state, questions, **kwargs):
-                self_ref.asked.append(state)
-                return {"answers": {name: {"type": "noul", "noul": 0.9 if name == "gate_rebless" else 0.1}
-                                    for name in tolls.TOLLS}}
-        self_ref = self
-        self.enterContext(patch.object(self.tolls, "_client", lambda: Client))
-
-    def test_same_diff_is_asked_once_and_a_new_diff_is_asked_again(self):
-        state = {"files": ["hooks/x.py"], "behind_main": 0}
-        first = self.tolls.owed(state)
-        second = self.tolls.owed(dict(state))
-        self.assertEqual(first, second)
-        self.assertEqual(len(self.asked), 1)
-        self.tolls.owed({"files": ["hooks/y.py"], "behind_main": 0})
-        self.assertEqual(len(self.asked), 2)
-
-    def test_same_name_question_revision_requires_a_fresh_judgment(self):
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        text, fix = self.tolls.TOLLS["gate_rebless"]
-        with patch.dict(self.tolls.TOLLS, gate_rebless=(text + " Revised criterion.", fix)):
-            self.tolls.owed(state)
-        self.assertEqual(len(self.asked), 2)
-
-    def test_changed_file_contents_invalidate_collected_state(self):
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        subprocess.run(["git", "init", "-q", str(root)], env=ENV, check=True)
-        subprocess.run(["git", "remote", "add", "origin", str(root)], cwd=root, env=ENV, check=True)
-        (root / "fixture.py").write_text("old contents")
-        subprocess.run(["git", "add", "fixture.py"], cwd=root, env=ENV, check=True)
-        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                        "commit", "-qm", "fixture"], cwd=root, env=ENV, check=True)
-        (root / "fixture.py").write_text("first revision")
-        first = self.tolls.change(base="HEAD", repo=str(root))
-        self.tolls.owed(first)
-        (root / "fixture.py").write_text("second revision")
-        second = self.tolls.change(base="HEAD", repo=str(root))
-        self.tolls.owed(second)
-        self.assertEqual(len(self.asked), 2)
-
-    def concurrent(self, states):
-        original = self.tolls._client()
-        start = threading.Barrier(2)
-        class SlowClient:
-            noul = original.noul
-            @staticmethod
-            def ask(*args, **kwargs):
-                time.sleep(0.1)
-                return original.ask(*args, **kwargs)
-        def invoke(state):
-            start.wait(timeout=3)
-            return self.tolls.owed(state)
-        with patch.object(self.tolls, "_client", lambda: SlowClient), ThreadPoolExecutor(2) as pool:
-            return list(pool.map(invoke, states))
-
-    def test_concurrent_same_state_pays_once(self):
-        state = {"files": ["hooks/x.py"]}
-        answers = self.concurrent([state, state])
-        self.assertEqual(answers[0], answers[1])
-        self.assertEqual(len(self.asked), 1)
-
-    def test_paused_cache_peer_returns_unavailable_before_request_deadline(self):
-        ctx = multiprocessing.get_context("fork")
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        for candidate in (state, {"files": ["hooks/y.py"]}):
-            with self.subTest(state=candidate), patch.object(self.tolls, "TIMEOUT_SECONDS", 0.15):
-                results = ctx.Queue()
-                def invoke():
-                    try:
-                        self.tolls.owed(candidate)
-                    except TimeoutError as exc:
-                        results.put(str(exc))
-                    else:
-                        results.put("unexpected success")
-                with open(self.tolls.CACHE_PATH + ".lock", "a") as lock:
-                    self.tolls.fcntl.flock(lock, self.tolls.fcntl.LOCK_EX)
-                    worker = ctx.Process(target=invoke)
-                    worker.start()
-                    try:
-                        worker.join(0.8)
-                        self.assertFalse(worker.is_alive(), "a paused peer must not hang the push hook")
-                        self.assertIn("cache lock unavailable", results.get(timeout=1))
-                    finally:
-                        self.tolls.fcntl.flock(lock, self.tolls.fcntl.LOCK_UN)
-                        worker.join(2)
-                        if worker.is_alive():
-                            worker.terminate()
-                            worker.join(2)
-                        results.close()
-        self.assertEqual(len(self.asked), 1, "lock failure must not pay without a claim")
-
-    def test_separate_processes_share_one_cache_claim(self):
-        ctx = multiprocessing.get_context("fork")
-        count, start = ctx.Value("i", 0), ctx.Event()
-        original = self.tolls._client()
-        class ProcessClient:
-            noul = original.noul
-            @staticmethod
-            def ask(*args, **kwargs):
-                with count.get_lock():
-                    count.value += 1
-                time.sleep(0.1)
-                return original.ask(*args, **kwargs)
-        def invoke():
-            start.wait(3)
-            self.tolls.owed({"files": ["hooks/x.py"]})
-        with patch.object(self.tolls, "_client", lambda: ProcessClient):
-            workers = [ctx.Process(target=invoke) for _ in range(2)]
-            for worker in workers:
-                worker.start()
-            start.set()
-            for worker in workers:
-                worker.join(5)
-                self.assertEqual(worker.exitcode, 0)
-        self.assertEqual(count.value, 1)
-
-    def test_concurrent_different_states_preserve_both_entries(self):
-        states = [{"files": ["hooks/x.py"]}, {"files": ["hooks/y.py"]}]
-        self.concurrent(states)
-        for state in states:
-            self.tolls.owed(state)
-        self.assertEqual(len(self.asked), 2)
-
-    def test_readers_never_observe_partial_cache_json(self):
-        self.tolls.owed({"files": ["hooks/x.py"]})
-        entered, release = threading.Event(), threading.Event()
-        original = self.tolls.json.dump
-        def partial(value, fh, **kwargs):
-            fh.write("{")
-            fh.flush()
-            entered.set()
-            release.wait(timeout=3)
-            fh.seek(0)
-            fh.truncate()
-            return original(value, fh, **kwargs)
-        with patch.object(self.tolls.json, "dump", partial), ThreadPoolExecutor(1) as pool:
-            write = pool.submit(self.tolls.owed, {"files": ["hooks/y.py"]})
-            try:
-                self.assertTrue(entered.wait(timeout=3))
-                persisted = json.loads(Path(self.tolls.CACHE_PATH).read_text())
-                self.assertTrue(persisted)
-            finally:
-                release.set()
-                write.result(timeout=3)
-
-    def test_cache_expires_after_a_day(self):
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        with patch.object(self.tolls.time, "time", return_value=self.tolls.time.time() + 86_401):
-            self.tolls.owed(state)
-        self.assertEqual(len(self.asked), 2)
-
-    def test_an_injected_client_bypasses_the_cache(self):
-        state = {"files": ["hooks/x.py"]}
-        self.tolls.owed(state)
-        self.tolls.owed(state, client=self.tolls._client())
-        self.assertEqual(len(self.asked), 2)
+    def test_collector_reads_changed_content_without_model(self):
+        spec = importlib.util.spec_from_file_location('tolls_collector', REPO/'ops/jev_change_tolls.py')
+        tolls = importlib.util.module_from_spec(spec); spec.loader.exec_module(tolls)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            subprocess.run(['git','init','-q',tmp],env=ENV,check=True)
+            subprocess.run(['git','remote','add','origin',tmp],cwd=tmp,env=ENV,check=True)
+            (root/'fixture.py').write_text('old')
+            subprocess.run(['git','add','fixture.py'],cwd=tmp,env=ENV,check=True)
+            subprocess.run(['git','-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'],cwd=tmp,env=ENV,check=True)
+            (root/'fixture.py').write_text('first')
+            first=tolls.change(base='HEAD',repo=tmp)
+            (root/'fixture.py').write_text('second')
+            second=tolls.change(base='HEAD',repo=tmp)
+            self.assertNotEqual(first['file_content_sha256'],second['file_content_sha256'])
 
 
 class WorkerBreakerTests(Harness):
@@ -695,9 +568,293 @@ class WorkerBreakerTests(Harness):
         self.assertEqual(attempts, 4, "one doomed Worker try, then one reservation per call")
 
 
+class TransportAdmissionTests(Harness):
+    def test_concurrent_worktrees_reserve_the_last_shared_slot_once(self):
+        repository = self.root / "repo"
+        repository.mkdir()
+        paths = ["ops/typesafe_client.py", "ops/config/jev-cost-guard.v1.json",
+                 "tools/judge/interface.py", "mcp-server/src/jev-request-contract.v1.json",
+                 "mcp-server/src/judge-providers.v1.json"]
+        for rel in paths:
+            target = repository / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((REPO / rel).read_bytes())
+        target = repository / "ops/config/jev-call-sites.v1.json"
+        target.write_bytes(self.registry.read_bytes())
+        paths.append(str(target.relative_to(repository)))
+        def git(*args):
+            return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], cwd=repository,
+                                  env=ENV, capture_output=True, text=True, check=True)
+        git("init", "-q")
+        git("add", *paths)
+        message = self.root / "fixture-commit.txt"
+        message.write_text("Offline worktree fixture\n")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-F", str(message))
+        worktrees = [self.root / "one", self.root / "two"]
+        for index, tree in enumerate(worktrees):
+            git("worktree", "add", "-q", "-b", f"fixture-{index}", str(tree))
+        program = '''import io,json,os,sys
+sys.path.insert(0, "ops"); import typesafe_client as c
+for flag in ("CARR_JEV_OFFLINE", "CARR_HOOK_FIXTURE", "CARR_JEV_WORKER"):
+    os.environ.pop(flag,None)
+c.JEV_COST_CONFIG["daily_paid_call_cap"]=1
+c._launch_spend_alert_worker=lambda *args: None
+sent=[]
+class Response(io.BytesIO):
+    status=200
+    def __enter__(self): return self
+    def __exit__(self,*args): self.close()
+def transport(*args,**kwargs):
+    sent.append(1)
+    return Response(json.dumps({"model":"m","answers":{"q":{"type":"noul","noul":0.8}},
+                               "usage":{"input_tokens":1,"output_tokens":1}}).encode())
+c.urllib.request.urlopen=transport
+refused=False
+try: c.ask("fixture",{"q":c.noul("fixture")},caller="hook_site",session_id="fixture",
+           api_key="synthetic",cache_ttl_seconds=0)
+except c.JevCallRefused: refused=True
+print(json.dumps({"paid":len(sent),"refused":refused,"budget":c.JEV_DAILY_CAP_LOG}))'''
+        processes = [subprocess.Popen([sys.executable, "-c", program], cwd=tree, env=ENV,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for tree in worktrees]
+        outputs = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            outputs.append((process.returncode, stdout, stderr))
+        results = []
+        for code, stdout, stderr in outputs:
+            self.assertEqual(code, 0, stderr)
+            results.append(json.loads(stdout))
+        self.assertEqual(sum(row["paid"] for row in results), 1)
+        self.assertEqual(sum(row["refused"] for row in results), 1)
+        self.assertEqual({row["budget"] for row in results}, {str(repository.resolve() / "out/jev-calls.jsonl")})
+
+    def test_acceptance_counts_requests_refusals_cache_and_paid_transport_separately(self):
+        cache = self.root / "acceptance-cache.sqlite3"
+        counts = {"attempted": 0, "refused": 0, "cached": 0, "paid": 0}
+        with patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=1):
+            for state, caller in (("s", "hook_site"), ("s", "hook_site"),
+                                  ("new", "hook_site"), ("new", "unknown")):
+                counts["attempted"] += 1
+                try:
+                    result = client.ask(state, {"q": client.noul("Fixture")}, api_key="offline-fixture",
+                                        caller=caller, session_id="s", cache_path=cache,
+                                        cache_ttl_seconds=60, calls_log=str(self.log))
+                except client.JevCallRefused:
+                    counts["refused"] += 1
+                else:
+                    counts["cached"] += result.get("cache_hit") is True
+            counts["paid"] = len(self.requests)
+        self.assertEqual(counts, {"attempted": 4, "refused": 2, "cached": 1, "paid": 1})
+        print("offline admission acceptance: " + json.dumps(counts, sort_keys=True))
+
+    def paid_server_ask(self, runner, **overrides):
+        kwargs = dict(model="jev-1.13.0", facets=[], purpose="call", session_id="s", timeout=2,
+                      transport_mode="paid_once", runner=runner, caller="hook_site")
+        kwargs.update(overrides)
+        return client.server_ask("s", {"q": client.noul("Fixture")}, **kwargs)
+
+    def daily_attempts(self):
+        path = Path(str(self.log) + ".daily-cap.sqlite3")
+        if not path.exists():
+            return 0
+        with client.closing(client.sqlite3.connect(str(path))) as db:
+            row = db.execute("SELECT attempts FROM daily_cap WHERE day='2026-10-04'").fetchone()
+        return row[0] if row else 0
+
+    def test_public_worker_reservation_is_observed_only_by_matching_session(self):
+        calls, runner = WorkerBreakerTests.worker(self, failures=False)
+        with client.capture_paid_reservations(caller='hook_site', session_id='s', run_id='review') as receipt:
+            self.assertIsNone(self.paid_server_ask(runner)[1])
+            self.assertIsNone(self.paid_server_ask(runner, session_id='other')[1])
+        self.assertEqual(sum(receipt['utc_days'].values()), 1)
+        self.assertEqual(self.daily_attempts(), 2)
+        self.assertEqual(calls, ['paid_once', 'paid_once'])
+
+    def test_public_worker_402_holds_the_next_paid_entry(self):
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "",
+                'TOOL ERROR {"error":"jev_upstream_failed","status":402,"reason":"http_status"}')
+        upstream = {}
+        self.assertEqual(self.paid_server_ask(runner, upstream=upstream), (None, "vendor_failed_at_worker"))
+        self.assertIsInstance(upstream["refusal"], client.TypeSafeError)
+        with self.assertRaises(client.JevCallRefused):
+            self.paid_server_ask(runner)
+        self.assertEqual(len(calls), 1)
+
+    def test_public_worker_shares_budget_and_vendor_hold_with_direct_entry(self):
+        calls, runner = WorkerBreakerTests.worker(self, failures=False)
+        for hold in (False, True):
+            with self.subTest(hold=hold), \
+                    patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=0 if not hold else 1000):
+                if hold:
+                    client._open_hold("credit_hold", 60)
+                with self.assertRaises(client.JevCallRefused):
+                    self.paid_server_ask(runner)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.requests, [])
+
+    def test_worker_route_signs_with_the_admission_secret_not_the_vendor_key(self):
+        captured = []
+        def runner(argv, **kwargs):
+            captured.append(json.loads(argv[3]))
+            return subprocess.CompletedProcess(argv, 0, json.dumps({**ANSWER, "ok": True,
+                                                                     "receipt_id": "w"}), "")
+        served, error = self.paid_server_ask(runner)
+        self.assertIsNone(error)
+        self.assertEqual(served["server_receipt"]["receipt_id"], "w")
+        client.read_api_key.assert_not_called()
+        _, payload, signature = captured[0]["idempotency_key"].split(".")
+        self.assertEqual(signature, client.hmac.new(b"offline-admission", payload.encode(),
+                                                    client.hashlib.sha256).hexdigest())
+
+    def test_missing_admission_secret_is_a_transport_gap_that_spends_no_slot(self):
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            raise AssertionError("no Worker dispatch without an admission secret")
+        with patch.object(client, "read_admission_secret",
+                          side_effect=client.TypeSafeError("no admission secret")):
+            self.assertEqual(self.paid_server_ask(runner), (None, "admission_secret_missing"))
+        self.assertEqual(calls, [])
+        self.assertEqual(self.daily_attempts(), 0)
+
+    def test_worker_admission_refusal_is_named_and_never_paid_again_direct(self):
+        def runner(argv, **kwargs):
+            if json.loads(argv[3]).get("transport_mode") == "cache_only":
+                return subprocess.CompletedProcess(argv, 1, "", '{"error":"jev_cache_miss"}')
+            return subprocess.CompletedProcess(argv, 1, "", 'TOOL ERROR {"error":"jev_admission_required"}')
+        upstream = {}
+        self.assertEqual(self.paid_server_ask(runner, upstream=upstream),
+                         (None, "admission_refused_at_worker"))
+        self.assertIsInstance(upstream["refusal"], client.TypeSafeError)
+        with self.assertRaises(client.TypeSafeError):
+            WorkerBreakerTests.ask_worker(self, "s", runner)
+        self.assertEqual(self.requests, [], "a refused proof must not buy a second, direct attempt")
+        self.assertEqual(self.daily_attempts(), 2, "one reservation per entry, none for a fallback")
+
+    def test_worker_vendor_failure_policy_runs_once_per_failure(self):
+        decisions = []
+        original = client._after_worker_vendor_failure
+        def counted(*args):
+            decisions.append(args)
+            return original(*args)
+        calls, runner = WorkerBreakerTests.worker(self, failures=True)
+        with patch.object(client, "_after_worker_vendor_failure", counted):
+            WorkerBreakerTests.ask_worker(self, "s", runner)
+        self.assertEqual(calls, ["cache_only", "paid_once"])
+        self.assertEqual(len(decisions), 1)
+
+    def test_worker_paid_call_is_admitted_once(self):
+        admissions = []
+        original = client._admit_paid_call
+        def counted(*args):
+            admissions.append(args)
+            return original(*args)
+        calls, runner = WorkerBreakerTests.worker(self, failures=False)
+        with patch.object(client, "_admit_paid_call", counted):
+            WorkerBreakerTests.ask_worker(self, "s", runner)
+        self.assertEqual(calls, ["cache_only", "paid_once"])
+        self.assertEqual(len(admissions), 1)
+
+    def test_python_reservation_proof_is_accepted_once_by_worker(self):
+        captured = []
+        def runner(argv, **kwargs):
+            captured.append(json.loads(argv[3]))
+            return subprocess.CompletedProcess(argv, 0, json.dumps({**ANSWER, "ok": True,
+                                                                     "receipt_id": "w"}), "")
+        self.paid_server_ask(runner)
+        script = '''import { jevAskBinding } from "./mcp-server/src/jev-call-receipt.js";
+let text = ""; for await (const chunk of process.stdin) text += chunk;
+const request = JSON.parse(text); let calls = 0, consumed = false;
+const ask = jevAskBinding({ TYPESAFE_API_KEY: "vendor-fixture", JEV_ADMISSION_SECRET: "offline-admission" },
+  async () => { calls++; return new Response(JSON.stringify({model:"m",answers:{q:{noul:0.8}}})); },
+  {cache:null, reserveAttempt:async () => {
+    if(consumed) throw Error("already consumed"); consumed = true;
+    return {key:"fixture",receipt_id:"fixture"};
+  }});
+await ask(request); let refused = false;
+try { await ask(request); } catch { refused = true; }
+console.log(JSON.stringify({calls,refused}));'''
+        proc = subprocess.run(["node", "--input-type=module", "-e", script], cwd=REPO,
+                              input=json.dumps(captured[0]), capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(proc.stdout), {"calls": 1, "refused": True})
+
+    def test_public_worker_transport_cannot_bypass_admission(self):
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({**ANSWER, "ok": True,
+                                                                     "receipt_id": "w"}), "")
+        for cap in (1000, 0):
+            with self.subTest(cap=cap), patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=cap):
+                with self.assertRaises(client.JevCallRefused):
+                    client.server_ask("s", {"q": client.noul("Fixture")}, model="jev-1.13.0",
+                                      facets=[], purpose="call", session_id="s", timeout=2,
+                                      transport_mode="paid_once", runner=runner)
+        self.assertEqual(calls, [])
+
+    def test_vendor_hold_blocks_all_local_entries(self):
+        client._open_hold("credit_hold", 60)
+        for entry in (client.ask, client._ask_jev):
+            with self.subTest(entry=entry.__name__), self.assertRaises(client.JevCallRefused):
+                entry("s", {"q": client.noul("Fixture")}, api_key="offline-fixture",
+                      caller="hook_site", session_id="s", cache_ttl_seconds=0)
+        self.assertEqual(self.requests, [])
+
+    def test_worker_fallback_reserves_again_and_cannot_overrun_last_slot(self):
+        calls, runner = WorkerBreakerTests.worker(self, failures=True)
+        with patch.dict(client.JEV_COST_CONFIG, daily_paid_call_cap=1):
+            with self.assertRaises(client.JevCallRefused):
+                WorkerBreakerTests.ask_worker(self, "s", runner)
+        self.assertEqual(calls, ["cache_only", "paid_once"])
+        self.assertEqual(self.requests, [])
+
+
 # Files that make up the transport itself, or call it only through a site
 # that is registered. Anything else that reaches a paid call must be listed.
 INFRASTRUCTURE = {"ops/typesafe_client.py", "ops/jev_judge.py", "tools/judge/interface.py"}
+
+
+# ask-jev in a dispatch position: an in-Worker callTool, `run.sh call ask-jev`
+# and `local-verb.mjs ask-jev` in shell, or the same words as an argv list.
+_ARG = r"""["']?(?:\s*,\s*["']|\s+)"""
+VERB_DISPATCH = re.compile(
+    r"""callTool(?:Fn)?\([^)]{0,200}?["']ask-jev["']"""
+    rf"""|run\.sh{_ARG}call{_ARG}["']?ask-jev\b"""
+    rf"""|local-verb(?:\.mjs)?{_ARG}["']?ask-jev\b""")
+
+
+def transport_sources(root, paths):
+    """Paid endpoint literals and Worker dispatches, across launcher languages."""
+    found = set()
+    for rel in paths:
+        if (Path(rel).suffix not in {".py", ".sh", ".js", ".mjs"} or
+                "selftest" in rel or "/fixtures/" in rel or "/test" in rel or rel.startswith("test")):
+            continue
+        source = (root / rel).read_text(encoding="utf-8", errors="replace")
+        source = re.sub(r"(?m)^\s*(?:#|//).*?$", "", source)
+        if "https://api.typesafe.ai/" in source or VERB_DISPATCH.search(source):
+            found.add(rel)
+    return found
+
+
+# What each registered control must visibly do in its source. A label whose
+# marker is absent claims a control the source does not implement.
+CONTROL_MARKERS = {
+    "shared_admission": r"= _reserve_paid_call\([\s\S]{0,200}?= _admission_token\(",
+    "worker_reservation_proof": r"verifyAdmission\(",
+    "worker_runtime_class": r'"ask-jev"[\s\S]{0,400}"app_runtime"',
+}
+
+
+def unimplemented_controls(root, transport_controls):
+    """Registered sources whose source text lacks their control's marker."""
+    return sorted(rel for rel, control in transport_controls.items()
+                  if not re.search(CONTROL_MARKERS.get(control, r"(?!)"),
+                                   (root / rel).read_text(encoding="utf-8")))
 
 
 def paid_call_sources():
@@ -733,6 +890,30 @@ def paid_call_sources():
 
 
 class RegistryCoverageTests(unittest.TestCase):
+    def test_inventory_detects_raw_transports_in_every_launcher_language(self):
+        examples = {"new.mjs": 'fetch("https://api.typesafe.ai/v1/systemone")',
+                    "new.sh": 'curl https://api.typesafe.ai/v1/systemone',
+                    "new.py": 'requests.post("https://api.typesafe.ai/v1/systemone")',
+                    "worker.mjs": 'callTool(env, actor, "ask-jev", {})',
+                    "verb.sh": "./run.sh call ask-jev '{\"x\":1}'",
+                    "local.sh": 'node mcp-server/local-verb.mjs ask-jev "$json"',
+                    "quoted.sh": "run.sh call 'ask-jev' '{}'",
+                    "argv.py": 'subprocess.run(["./run.sh", "call", "ask-jev", payload])'}
+        prose = {"doc.py": '"""Reads through ./run.sh call; every receipt has its ask-jev row."""',
+                 "pattern.py": "re.search(r'callTool(?:Fn)?\\(.*[\"]ask-jev[\"]', line)"}
+        with tempfile.TemporaryDirectory() as root:
+            for name, source in {**examples, **prose}.items():
+                Path(root, name).write_text(source)
+            self.assertEqual(transport_sources(Path(root), {**examples, **prose}), set(examples))
+
+    def test_control_labels_need_the_control_in_their_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "proof.js").write_text("await verifyAdmission(secret, token, session, now);")
+            Path(root, "plain.py").write_text('run(["./run.sh", "call", "ask-jev", str(uuid.uuid4())])')
+            labels = {"proof.js": "worker_reservation_proof", "plain.py": "worker_reservation_proof"}
+            self.assertEqual(unimplemented_controls(Path(root), labels), ["plain.py"])
+            self.assertEqual(unimplemented_controls(Path(root), {"proof.js": "decorative"}), ["proof.js"])
+
     def test_scan_covers_paid_imports_and_aliases_without_counting_unrelated_names(self):
         examples = {
             "attribute.py": "import typesafe_client as ts\nts.ask({}, {})",
@@ -755,9 +936,9 @@ class RegistryCoverageTests(unittest.TestCase):
         registry = client.load_call_sites(REGISTRY_PATH)
         self.assertLessEqual(registry["hourly_paid_call_cap"] * 24,
                              client.JEV_COST_CONFIG["daily_paid_call_cap"] * 24)
-        total = sum(e["daily_budget"] for e in registry["sites"].values())
-        self.assertLessEqual(total, client.JEV_COST_CONFIG["daily_paid_call_cap"],
-                             "site daily budgets must fit inside the global daily cap")
+        for entry in registry["sites"].values():
+            self.assertLessEqual(entry["daily_budget"], client.JEV_COST_CONFIG["daily_paid_call_cap"],
+                                 "each site limit sits beneath the shared admission cap")
 
     def test_every_paid_call_source_is_registered(self):
         registry = client.load_call_sites(REGISTRY_PATH)
@@ -765,6 +946,16 @@ class RegistryCoverageTests(unittest.TestCase):
         missing = sorted(paid_call_sources() - registered)
         self.assertEqual(missing, [], "a new paid Jev call path needs an entry in "
                          "ops/config/jev-call-sites.v1.json (caller, trigger, budgets, owner, value)")
+
+    def test_every_transport_is_registered_with_a_control_its_source_implements(self):
+        controls = json.loads(REGISTRY_PATH.read_text())["transport_sources"]
+        tracked = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True,
+                                 text=True, check=True).stdout.splitlines()
+        self.assertEqual(sorted(transport_sources(REPO, tracked) - set(controls)), [],
+                         "new paid transport bypass: use typesafe_client admission before dispatch; "
+                         "register its source and control in jev-call-sites.v1.json")
+        self.assertEqual(unimplemented_controls(REPO, controls), [],
+                         "a registered transport control is not implemented by its source")
 
     def test_every_registered_source_exists(self):
         registry = client.load_call_sites(REGISTRY_PATH)

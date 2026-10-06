@@ -231,17 +231,31 @@ class Regressions(unittest.TestCase):
             stalled = []
             occupied = threading.Event()
             release = threading.Event()
+            cleanup_allowed = threading.Event()
+            workers_finished = threading.Event()
+            stalled_ports = set()
+            shutdown = server.shutdown_request
+            def delay_worker_cleanup(request):
+                stalled_request = request.getpeername()[1] in stalled_ports
+                shutdown(request)
+                if stalled_request:
+                    cleanup_allowed.wait(10)
             lock = threading.Lock()
             started = 0
+            finished = 0
             handle = server.process_request_thread
             def hold_worker(*args):
-                nonlocal started
+                nonlocal started, finished
                 with lock:
                     started += 1
                     if started == 2:
                         occupied.set()
                 release.wait(10)
                 handle(*args)
+                with lock:
+                    finished += 1
+                    if finished == 2:
+                        workers_finished.set()
             def assert_closed(sock):
                 try:
                     while sock.recv(4096):
@@ -249,10 +263,12 @@ class Regressions(unittest.TestCase):
                 except ConnectionResetError:
                     pass
             try:
-                with patch.object(server, 'process_request_thread', hold_worker):
+                with patch.object(server, 'process_request_thread', hold_worker), \
+                        patch.object(server, 'shutdown_request', delay_worker_cleanup):
                     for i in range(2):
                         sock = socket.create_connection(server.server_address, timeout=2)
                         stalled.append(sock)
+                        stalled_ports.add(sock.getsockname()[1])
                         sock.sendall(b'POST /ingest HTTP/1.0\r\n' if i == 0 else
                                      b'POST /ingest HTTP/1.0\r\nAuthorization: Bearer synthetic-token\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{')
                     self.assertTrue(occupied.wait(2), 'both workers must be occupied before overload')
@@ -267,11 +283,16 @@ class Regressions(unittest.TestCase):
                         except (ConnectionResetError, BrokenPipeError):
                             pass
                     release.set()
-                for sock in stalled:
-                    assert_closed(sock)
-                self.assertEqual(post(server, b'{"external_id":"recovered"}')[0], 200)
+                    for sock in stalled:
+                        assert_closed(sock)
+                    # Socket closure precedes the server's semaphore release.
+                    # Observe worker completion before asking for recovery.
+                    cleanup_allowed.set()
+                    self.assertTrue(workers_finished.wait(2), 'both worker slots must be released')
+                    self.assertEqual(post(server, b'{"external_id":"recovered"}')[0], 200)
             finally:
                 release.set()
+                cleanup_allowed.set()
                 for sock in stalled:
                     sock.close()
 
