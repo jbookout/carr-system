@@ -128,6 +128,40 @@ class SQLRegressions(unittest.TestCase):
             c.execute('DELETE FROM c.d_incident WHERE id=%s', (UUID(int=10),))
             self.assertEqual(c.execute('SELECT count(*) FROM c.l_incident_link').fetchone()[0], 0)
 
+    def incident_cascade(self, design, synchronous):
+        with self.cluster.connect() as c:
+            c.autocommit = True
+            self.seed(c)
+            incident, retained, decision = (UUID(int=i) for i in (10, 12, 14))
+            c.execute('INSERT INTO c.d_decision VALUES (%s,%s)', (decision, 'decision'))
+            for source, edge in ((incident, UUID(int=11)), (retained, UUID(int=13))):
+                c.execute('INSERT INTO c.d_incident VALUES (%s,%s)', (source, 'incident'))
+                insert_edge(c, 'c', 'C', FAMILIES[1], (edge, 'incident_link', 'incident', source, 'decision', decision, 'reference'))
+            self.prepare(c, design)
+            self.copy(c, design)
+            if synchronous:
+                c.execute(linkfork_migration.sync_sql('shadow', design))
+            c.execute('DELETE FROM c.d_incident WHERE id=%s', (incident,))
+            if not synchronous:
+                c.execute('SELECT shadow_cdc.replay()')
+            self.assert_equal(c)
+            self.assertEqual(c.execute('SELECT count(*) FROM shadow.relationships WHERE family=%s', ('incident_link',)).fetchone()[0], 1)
+            self.assertEqual(c.execute('SELECT id FROM shadow.d_decision').fetchall(), [(decision,)])
+            if design == 'B':
+                self.assertEqual(c.execute('SELECT count(*) FROM shadow.entity WHERE id=%s', (incident,)).fetchone()[0], 0)
+
+    def test_incident_cascade_sync_a(self):
+        self.incident_cascade('A', True)
+
+    def test_incident_cascade_sync_b(self):
+        self.incident_cascade('B', True)
+
+    def test_incident_cascade_catchup_a(self):
+        self.incident_cascade('A', False)
+
+    def test_incident_cascade_catchup_b(self):
+        self.incident_cascade('B', False)
+
 
 def verify(pg_bin):
     SQLRegressions.pg_bin = pg_bin

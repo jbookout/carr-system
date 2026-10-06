@@ -362,6 +362,7 @@ FOR r IN SELECT 'd_assignment'::text table_name,'INSERT'::text operation,to_json
   INSERT INTO mb.d_format(id,payload) VALUES ((r.row_data->>'id')::uuid,r.row_data->>'payload')
   ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload;
  END IF; WHEN 'd_incident' THEN
+ IF r.operation='DELETE' THEN DELETE FROM mb.edge WHERE family='incident_link' AND src_kind='incident' AND src_id=(r.row_data->>'id')::uuid; END IF;
  IF r.operation='DELETE' OR r.old_id IS DISTINCT FROM (r.row_data->>'id')::uuid AND r.old_id IS NOT NULL THEN
   DELETE FROM mb.d_incident WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);
   DELETE FROM mb.entity WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);
@@ -831,6 +832,7 @@ BEGIN
   INSERT INTO mb.d_format(id,payload) VALUES ((r.row_data->>'id')::uuid,r.row_data->>'payload')
   ON CONFLICT(id) DO UPDATE SET payload=EXCLUDED.payload;
  END IF; WHEN 'd_incident' THEN
+ IF r.operation='DELETE' THEN DELETE FROM mb.edge WHERE family='incident_link' AND src_kind='incident' AND src_id=(r.row_data->>'id')::uuid; END IF;
  IF r.operation='DELETE' OR r.old_id IS DISTINCT FROM (r.row_data->>'id')::uuid AND r.old_id IS NOT NULL THEN
   DELETE FROM mb.d_incident WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);
   DELETE FROM mb.entity WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);

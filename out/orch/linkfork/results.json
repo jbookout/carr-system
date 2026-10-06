@@ -1,6 +1,6 @@
 {
   "schema": "linkfork-bakeoff/v1",
-  "timestamp": "2026-10-06T17:24:40.723435+00:00",
+  "timestamp": "2026-10-06T18:32:46.345666+00:00",
   "seed": 610106,
   "inventory": [
     {
@@ -4004,24 +4004,24 @@
     "cpu": "arm",
     "cores": 18,
     "load_average_before": [
-      11.625,
-      10.890625,
-      12.9951171875
+      12.44677734375,
+      11.8310546875,
+      10.7607421875
     ],
     "python": "3.14.7",
-    "source_revision": "722596f7a25e0b0497a5f59ca3ab142385360144",
+    "source_revision": "a14ea4ccd3611c68f64616a16160ec22905528d4",
     "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
-    "port": 34013,
+    "port": 41302,
     "listen_addresses": "",
     "fsync": true,
     "synchronous_commit": true,
     "shared_buffers": "256MB",
     "load_average_after": [
-      12.08740234375,
-      11.2373046875,
-      12.91357421875
+      11.3505859375,
+      11.6435546875,
+      10.7685546875
     ],
-    "retained_cluster_path": "/private/var/folders/xq/ptrmzd8s13q3wkqp7w74t5lr0000gn/T/_to_delete/linkfork-f3jiqm94"
+    "retained_cluster_path": "/private/var/folders/xq/ptrmzd8s13q3wkqp7w74t5lr0000gn/T/_to_delete/linkfork-q4h2w05v"
   },
   "methodology": "Five repetitions per side, interleaved reference order and shuffled write-side order; one run only in selftest mode. End-to-end SQL fetch/commit timing includes local client overhead. Identical data, indexes in both directions, statistics refreshed, warm cache, fsync on. EXPLAIN separates server execution and planning and exposes index probes plus recursive result aggregation. Graph equality is checked for every reference and all successful write cycles are verified removed. Concurrent hotspot holds intentionally add 1ms; throughput is for the specified workload on this host, not a production capacity estimate. Baseline C preserves identity-relevant constraints from the migration-defined families, including fixed-source FKs, selected kind checks and duplicate checks; metadata, envelopes, per-owner uniqueness, source revision pins, and verb validation are excluded. A and B add explicit relationship uniqueness as a proposed contract. Open target vocabularies use the declared synthetic core set in A/B. Inventory includes broader pointer candidates and is distinct from the timed relationship families. No network database, production census, Neon command, credentials, or paid model call is used.",
   "harness_sha256": {
@@ -4029,7 +4029,7 @@
     "model.py": "e47e573fa622f1aadab24fa1006cc398ddae89477b35a774b84232c735810659",
     "cluster.py": "661d49251d203893b198f188f8d6224f3bcc1fb24a871f981f2cf0a0037e3d2a",
     "bench.py": "d5aea129d9f76725c45995d01c01363b81734409a2f4a877038ac6210ec96619",
-    "linkfork_migration.py": "902176888f7fec789a90df32522b98bb9fefbae648bad501fb977a0379e62c6c",
+    "linkfork_migration.py": "0caa7a6a4efc031f72930bfe65f78f8401ae5e8b022d181adcbf8b57a5190e28",
     "report.py": "5f93914eb10895d28372a06dbbc5c8a4d93aaed1f6405e9227802e8e2da78fe7",
     "run.py": "64e7638d2331109ed267895e587565c4c1eb583812c54081a44d023c1cc54e47"
   },
@@ -4401,39 +4401,39 @@
       "A": {
         "runs": [
           {
-            "p50_ms": 0.40237500000000004,
-            "p95_ms": 3.069416,
-            "min_ms": 0.073958,
-            "max_ms": 81.740542
+            "p50_ms": 0.250271,
+            "p95_ms": 2.169625,
+            "min_ms": 0.061833,
+            "max_ms": 45.440583
           },
           {
-            "p50_ms": 0.398833,
-            "p95_ms": 2.909167,
-            "min_ms": 0.07425,
-            "max_ms": 17.511667
+            "p50_ms": 0.200938,
+            "p95_ms": 1.900334,
+            "min_ms": 0.059125,
+            "max_ms": 10.687583
           },
           {
-            "p50_ms": 0.384313,
-            "p95_ms": 2.960834,
-            "min_ms": 0.07475,
-            "max_ms": 15.813916
+            "p50_ms": 0.2070205,
+            "p95_ms": 1.9735,
+            "min_ms": 0.060375,
+            "max_ms": 13.424583
           },
           {
-            "p50_ms": 0.361562,
-            "p95_ms": 2.989041,
-            "min_ms": 0.072375,
-            "max_ms": 16.898125
+            "p50_ms": 0.2045415,
+            "p95_ms": 1.964209,
+            "min_ms": 0.060834,
+            "max_ms": 10.917083
           },
           {
-            "p50_ms": 0.38177099999999997,
-            "p95_ms": 2.981708,
-            "min_ms": 0.072417,
-            "max_ms": 23.684083
+            "p50_ms": 0.195521,
+            "p95_ms": 1.792875,
+            "min_ms": 0.060625,
+            "max_ms": 9.820917
           }
         ],
         "errors": 0,
-        "p50_ms": 0.384313,
-        "p95_ms": 2.981708,
+        "p50_ms": 0.2045415,
+        "p95_ms": 1.964209,
         "plan": [
           {
             "Plan": {
@@ -4444,8 +4444,8 @@
               "Total Cost": 35192.7,
               "Plan Rows": 930,
               "Plan Width": 52,
-              "Actual Startup Time": 0.043,
-              "Actual Total Time": 0.044,
+              "Actual Startup Time": 0.053,
+              "Actual Total Time": 0.055,
               "Actual Rows": 1.0,
               "Actual Loops": 1,
               "Disabled": false,
@@ -4483,8 +4483,8 @@
                   "Total Cost": 34879.44,
                   "Plan Rows": 9301,
                   "Plan Width": 52,
-                  "Actual Startup Time": 0.001,
-                  "Actual Total Time": 0.034,
+                  "Actual Startup Time": 0.002,
+                  "Actual Total Time": 0.044,
                   "Actual Rows": 1.0,
                   "Actual Loops": 1,
                   "Disabled": false,
@@ -4517,7 +4517,7 @@
                       "Plan Rows": 1,
                       "Plan Width": 52,
                       "Actual Startup Time": 0.0,
-                      "Actual Total Time": 0.001,
+                      "Actual Total Time": 0.0,
                       "Actual Rows": 1.0,
                       "Actual Loops": 1,
                       "Disabled": false,
@@ -4548,8 +4548,8 @@
                       "Total Cost": 3478.64,
                       "Plan Rows": 930,
                       "Plan Width": 52,
-                      "Actual Startup Time": 0.031,
-                      "Actual Total Time": 0.032,
+                      "Actual Startup Time": 0.041,
+                      "Actual Total Time": 0.042,
                       "Actual Rows": 0.0,
                       "Actual Loops": 1,
                       "Disabled": false,
@@ -4583,7 +4583,7 @@
                           "Plan Rows": 3,
                           "Plan Width": 52,
                           "Actual Startup Time": 0.0,
-                          "Actual Total Time": 0.0,
+                          "Actual Total Time": 0.001,
                           "Actual Rows": 1.0,
                           "Actual Loops": 1,
                           "Disabled": false,
@@ -4615,8 +4615,8 @@
                           "Total Cost": 1155.6,
                           "Plan Rows": 310,
                           "Plan Width": 48,
-                          "Actual Startup Time": 0.031,
-                          "Actual Total Time": 0.032,
+                          "Actual Startup Time": 0.04,
+                          "Actual Total Time": 0.041,
                           "Actual Rows": 0.0,
                           "Actual Loops": 1,
                           "Disabled": false,
@@ -4646,8 +4646,8 @@
                               "Total Cost": 1154.05,
                               "Plan Rows": 310,
                               "Plan Width": 48,
-                              "Actual Startup Time": 0.03,
-                              "Actual Total Time": 0.031,
+                              "Actual Startup Time": 0.04,
+                              "Actual Total Time": 0.041,
                               "Actual Rows": 0.0,
                               "Actual Loops": 1,
                               "Disabled": false,
@@ -4684,8 +4684,8 @@
                                   "Total Cost": 1140.44,
                                   "Plan Rows": 310,
                                   "Plan Width": 48,
-                                  "Actual Startup Time": 0.029,
-                                  "Actual Total Time": 0.03,
+                                  "Actual Startup Time": 0.039,
+                                  "Actual Total Time": 0.04,
                                   "Actual Rows": 0.0,
                                   "Actual Loops": 1,
                                   "Disabled": false,
@@ -4749,7 +4749,7 @@
                                           "Plan Rows": 6,
                                           "Plan Width": 25,
                                           "Actual Startup Time": 0.0,
-                                          "Actual Total Time": 0.001,
+                                          "Actual Total Time": 0.0,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -5927,8 +5927,8 @@
                                       "Total Cost": 102.09,
                                       "Plan Rows": 17,
                                       "Plan Width": 48,
-                                      "Actual Startup Time": 0.027,
-                                      "Actual Total Time": 0.027,
+                                      "Actual Startup Time": 0.036,
+                                      "Actual Total Time": 0.037,
                                       "Actual Rows": 0.0,
                                       "Actual Loops": 1,
                                       "Disabled": false,
@@ -5963,8 +5963,8 @@
                                           "Total Cost": 8.31,
                                           "Plan Rows": 1,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.005,
-                                          "Actual Total Time": 0.005,
+                                          "Actual Startup Time": 0.006,
+                                          "Actual Total Time": 0.006,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6001,8 +6001,8 @@
                                           "Total Cost": 8.31,
                                           "Plan Rows": 1,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.002,
-                                          "Actual Total Time": 0.002,
+                                          "Actual Startup Time": 0.003,
+                                          "Actual Total Time": 0.003,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6039,8 +6039,8 @@
                                           "Total Cost": 18.93,
                                           "Plan Rows": 7,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.001,
-                                          "Actual Total Time": 0.002,
+                                          "Actual Startup Time": 0.003,
+                                          "Actual Total Time": 0.003,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6115,8 +6115,8 @@
                                           "Total Cost": 8.31,
                                           "Plan Rows": 1,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.001,
-                                          "Actual Total Time": 0.001,
+                                          "Actual Startup Time": 0.003,
+                                          "Actual Total Time": 0.003,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6153,8 +6153,8 @@
                                           "Total Cost": 8.31,
                                           "Plan Rows": 1,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.001,
-                                          "Actual Total Time": 0.001,
+                                          "Actual Startup Time": 0.002,
+                                          "Actual Total Time": 0.002,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6191,8 +6191,8 @@
                                           "Total Cost": 8.31,
                                           "Plan Rows": 1,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.002,
-                                          "Actual Total Time": 0.002,
+                                          "Actual Startup Time": 0.003,
+                                          "Actual Total Time": 0.003,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6267,8 +6267,8 @@
                                           "Total Cost": 8.31,
                                           "Plan Rows": 1,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.002,
-                                          "Actual Total Time": 0.002,
+                                          "Actual Startup Time": 0.003,
+                                          "Actual Total Time": 0.003,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6305,8 +6305,8 @@
                                           "Total Cost": 8.31,
                                           "Plan Rows": 1,
                                           "Plan Width": 48,
-                                          "Actual Startup Time": 0.002,
-                                          "Actual Total Time": 0.002,
+                                          "Actual Startup Time": 0.003,
+                                          "Actual Total Time": 0.003,
                                           "Actual Rows": 0.0,
                                           "Actual Loops": 1,
                                           "Disabled": false,
@@ -6391,8 +6391,8 @@
                   "Total Cost": 265.08,
                   "Plan Rows": 930,
                   "Plan Width": 52,
-                  "Actual Startup Time": 0.037,
-                  "Actual Total Time": 0.04,
+                  "Actual Startup Time": 0.047,
+                  "Actual Total Time": 0.05,
                   "Actual Rows": 1.0,
                   "Actual Loops": 1,
                   "Disabled": false,
@@ -6433,7 +6433,7 @@
                       "Plan Rows": 9301,
                       "Plan Width": 52,
                       "Actual Startup Time": 0.002,
-                      "Actual Total Time": 0.034,
+                      "Actual Total Time": 0.043,
                       "Actual Rows": 1.0,
                       "Actual Loops": 1,
                       "Disabled": false,
@@ -6478,52 +6478,52 @@
               "Temp I/O Read Time": 0.0,
               "Temp I/O Write Time": 0.0
             },
-            "Planning Time": 1.372,
+            "Planning Time": 0.916,
             "Triggers": [],
-            "Execution Time": 0.134
+            "Execution Time": 0.111
           }
         ],
         "p50_range_ms": [
-          0.361562,
-          0.40237500000000004
+          0.195521,
+          0.250271
         ]
       },
       "B": {
         "runs": [
           {
-            "p50_ms": 0.26058349999999997,
-            "p95_ms": 2.422709,
-            "min_ms": 0.033625,
-            "max_ms": 18.176209
+            "p50_ms": 0.16441699999999998,
+            "p95_ms": 1.773041,
+            "min_ms": 0.028792,
+            "max_ms": 10.981791
           },
           {
-            "p50_ms": 0.25856250000000003,
-            "p95_ms": 2.371959,
-            "min_ms": 0.036458,
-            "max_ms": 13.652292
+            "p50_ms": 0.1345625,
+            "p95_ms": 1.57175,
+            "min_ms": 0.028583,
+            "max_ms": 8.432667
           },
           {
-            "p50_ms": 0.265708,
-            "p95_ms": 2.386083,
-            "min_ms": 0.035542,
-            "max_ms": 12.357291
+            "p50_ms": 0.13043749999999998,
+            "p95_ms": 1.583833,
+            "min_ms": 0.028292,
+            "max_ms": 8.246833
           },
           {
-            "p50_ms": 0.2335415,
-            "p95_ms": 2.351625,
-            "min_ms": 0.0325,
-            "max_ms": 12.169
+            "p50_ms": 0.1344585,
+            "p95_ms": 1.597125,
+            "min_ms": 0.028791,
+            "max_ms": 8.775875
           },
           {
-            "p50_ms": 0.2584375,
-            "p95_ms": 2.277042,
-            "min_ms": 0.037542,
-            "max_ms": 20.885667
+            "p50_ms": 0.130208,
+            "p95_ms": 1.588667,
+            "min_ms": 0.029417,
+            "max_ms": 8.011792
           }
         ],
         "errors": 0,
-        "p50_ms": 0.25856250000000003,
-        "p95_ms": 2.371959,
+        "p50_ms": 0.1344585,
+        "p95_ms": 1.588667,
         "plan": [
           {
             "Plan": {
@@ -6536,8 +6536,8 @@
               "Total Cost": 758.3,
               "Plan Rows": 121,
               "Plan Width": 52,
-              "Actual Startup Time": 0.023,
-              "Actual Total Time": 0.023,
+              "Actual Startup Time": 0.02,
+              "Actual Total Time": 0.02,
               "Actual Rows": 1.0,
               "Actual Loops": 1,
               "Disabled": false,
@@ -6572,8 +6572,8 @@
                   "Total Cost": 749.27,
                   "Plan Rows": 121,
                   "Plan Width": 52,
-                  "Actual Startup Time": 0.002,
-                  "Actual Total Time": 0.018,
+                  "Actual Startup Time": 0.001,
+                  "Actual Total Time": 0.015,
                   "Actual Rows": 1.0,
                   "Actual Loops": 1,
                   "Disabled": false,
@@ -6637,8 +6637,8 @@
                       "Total Cost": 74.81,
                       "Plan Rows": 12,
                       "Plan Width": 52,
-                      "Actual Startup Time": 0.015,
-                      "Actual Total Time": 0.016,
+                      "Actual Startup Time": 0.014,
+                      "Actual Total Time": 0.014,
                       "Actual Rows": 0.0,
                       "Actual Loops": 1,
                       "Disabled": false,
@@ -6672,7 +6672,7 @@
                           "Plan Rows": 3,
                           "Plan Width": 52,
                           "Actual Startup Time": 0.0,
-                          "Actual Total Time": 0.001,
+                          "Actual Total Time": 0.0,
                           "Actual Rows": 1.0,
                           "Actual Loops": 1,
                           "Disabled": false,
@@ -6704,8 +6704,8 @@
                           "Total Cost": 24.81,
                           "Plan Rows": 4,
                           "Plan Width": 48,
-                          "Actual Startup Time": 0.014,
-                          "Actual Total Time": 0.015,
+                          "Actual Startup Time": 0.013,
+                          "Actual Total Time": 0.013,
                           "Actual Rows": 0.0,
                           "Actual Loops": 1,
                           "Disabled": false,
@@ -6735,8 +6735,8 @@
                               "Total Cost": 24.79,
                               "Plan Rows": 4,
                               "Plan Width": 48,
-                              "Actual Startup Time": 0.014,
-                              "Actual Total Time": 0.015,
+                              "Actual Startup Time": 0.013,
+                              "Actual Total Time": 0.013,
                               "Actual Rows": 0.0,
                               "Actual Loops": 1,
                               "Disabled": false,
@@ -6773,8 +6773,8 @@
                                   "Total Cost": 24.74,
                                   "Plan Rows": 4,
                                   "Plan Width": 48,
-                                  "Actual Startup Time": 0.013,
-                                  "Actual Total Time": 0.013,
+                                  "Actual Startup Time": 0.012,
+                                  "Actual Total Time": 0.012,
                                   "Actual Rows": 0.0,
                                   "Actual Loops": 1,
                                   "Disabled": false,
@@ -6807,8 +6807,8 @@
                                       "Total Cost": 16.28,
                                       "Plan Rows": 3,
                                       "Plan Width": 24,
-                                      "Actual Startup Time": 0.008,
-                                      "Actual Total Time": 0.008,
+                                      "Actual Startup Time": 0.007,
+                                      "Actual Total Time": 0.007,
                                       "Actual Rows": 0.0,
                                       "Actual Loops": 1,
                                       "Disabled": false,
@@ -6926,8 +6926,8 @@
                   "Total Cost": 6.91,
                   "Plan Rows": 121,
                   "Plan Width": 52,
-                  "Actual Startup Time": 0.021,
-                  "Actual Total Time": 0.021,
+                  "Actual Startup Time": 0.018,
+                  "Actual Total Time": 0.018,
                   "Actual Rows": 1.0,
                   "Actual Loops": 1,
                   "Disabled": false,
@@ -6966,8 +6966,8 @@
                       "Total Cost": 2.42,
                       "Plan Rows": 121,
                       "Plan Width": 52,
-                      "Actual Startup Time": 0.003,
-                      "Actual Total Time": 0.018,
+                      "Actual Startup Time": 0.002,
+                      "Actual Total Time": 0.015,
                       "Actual Rows": 1.0,
                       "Actual Loops": 1,
                       "Disabled": false,
@@ -7012,52 +7012,52 @@
               "Temp I/O Read Time": 0.0,
               "Temp I/O Write Time": 0.0
             },
-            "Planning Time": 0.125,
+            "Planning Time": 0.133,
             "Triggers": [],
-            "Execution Time": 0.039
+            "Execution Time": 0.033
           }
         ],
         "p50_range_ms": [
-          0.2335415,
-          0.265708
+          0.130208,
+          0.16441699999999998
         ]
       },
       "C": {
         "runs": [
           {
-            "p50_ms": 0.403646,
-            "p95_ms": 2.966541,
-            "min_ms": 0.069208,
-            "max_ms": 16.852166
+            "p50_ms": 0.2500835,
+            "p95_ms": 1.985084,
+            "min_ms": 0.06325,
+            "max_ms": 12.992583
           },
           {
-            "p50_ms": 0.3957705,
-            "p95_ms": 2.864125,
-            "min_ms": 0.088667,
-            "max_ms": 16.362417
+            "p50_ms": 0.206021,
+            "p95_ms": 1.752334,
+            "min_ms": 0.063958,
+            "max_ms": 10.491542
           },
           {
-            "p50_ms": 0.40218750000000003,
-            "p95_ms": 3.086084,
-            "min_ms": 0.075166,
-            "max_ms": 16.199167
+            "p50_ms": 0.208521,
+            "p95_ms": 1.903792,
+            "min_ms": 0.062166,
+            "max_ms": 12.222167
           },
           {
-            "p50_ms": 0.3609795,
-            "p95_ms": 2.65425,
-            "min_ms": 0.069917,
-            "max_ms": 17.361417
+            "p50_ms": 0.2069165,
+            "p95_ms": 1.899542,
+            "min_ms": 0.061292,
+            "max_ms": 10.988125
           },
           {
-            "p50_ms": 0.3887915,
-            "p95_ms": 2.865583,
-            "min_ms": 0.069083,
-            "max_ms": 16.701583
+            "p50_ms": 0.19862449999999998,
+            "p95_ms": 1.789708,
+            "min_ms": 0.059541,
+            "max_ms": 10.033416
           }
         ],
         "errors": 0,
-        "p50_ms": 0.3957705,
-        "p95_ms": 2.865583,
+        "p50_ms": 0.2069165,
+        "p95_ms": 1.899542,
         "plan": [
           {
             "Plan": {
@@ -7068,8 +7068,8 @@
               "Total Cost": 34102.94,
               "Plan Rows": 930,
               "Plan Width": 52,
-              "Actual Startup Time": 0.055,
-              "Actual Total Time": 0.056,
+              "Actual Startup Time": 0.049,
+              "Actual Total Time": 0.051,
               "Actual Rows": 1.0,
               "Actual Loops": 1,
               "Disabled": false,
@@ -7108,7 +7108,7 @@
                   "Plan Rows": 9301,
                   "Plan Width": 52,
                   "Actual Startup Time": 0.001,
-                  "Actual Total Time": 0.047,
+                  "Actual Total Time": 0.043,
                   "Actual Rows": 1.0,
                   "Actual Loops": 1,
                   "Disabled": false,
@@ -7172,8 +7172,8 @@
                       "Total Cost": 3369.67,
                       "Plan Rows": 930,
                       "Plan Width": 52,
-                      "Actual Startup Time": 0.045,
-                      "Actual Total Time": 0.046,
+                      "Actual Startup Time": 0.041,
+                      "Actual Total Time": 0.042,
                       "Actual Rows": 0.0,
                       "Actual Loops": 1,
                       "Disabled": false,
@@ -7207,7 +7207,7 @@
                           "Plan Rows": 3,
                           "Plan Width": 52,
                           "Actual Startup Time": 0.0,
-                          "Actual Total Time": 0.001,
+                          "Actual Total Time": 0.0,
                           "Actual Rows": 1.0,
                           "Actual Loops": 1,
                           "Disabled": false,
@@ -7241,8 +7241,8 @@
                           "Total Cost": 1119.27,
                           "Plan Rows": 310,
                           "Plan Width": 48,
-                          "Actual Startup Time": 0.044,
-                          "Actual Total Time": 0.045,
+                          "Actual Startup Time": 0.04,
+                          "Actual Total Time": 0.041,
                           "Actual Rows": 0.0,
                           "Actual Loops": 1,
                           "Disabled": false,
@@ -7280,8 +7280,8 @@
                               "Total Cost": 1114.62,
                               "Plan Rows": 310,
                               "Plan Width": 48,
-                              "Actual Startup Time": 0.042,
-                              "Actual Total Time": 0.043,
+                              "Actual Startup Time": 0.039,
+                              "Actual Total Time": 0.04,
                               "Actual Rows": 0.0,
                               "Actual Loops": 1,
                               "Disabled": false,
@@ -8523,8 +8523,8 @@
                                   "Total Cost": 102.09,
                                   "Plan Rows": 17,
                                   "Plan Width": 48,
-                                  "Actual Startup Time": 0.04,
-                                  "Actual Total Time": 0.041,
+                                  "Actual Startup Time": 0.037,
+                                  "Actual Total Time": 0.037,
                                   "Actual Rows": 0.0,
                                   "Actual Loops": 1,
                                   "Disabled": false,
@@ -8559,8 +8559,8 @@
                                       "Total Cost": 8.31,
                                       "Plan Rows": 1,
                                       "Plan Width": 48,
-                                      "Actual Startup Time": 0.005,
-                                      "Actual Total Time": 0.005,
+                                      "Actual Startup Time": 0.004,
+                                      "Actual Total Time": 0.004,
                                       "Actual Rows": 0.0,
                                       "Actual Loops": 1,
                                       "Disabled": false,
@@ -8597,8 +8597,8 @@
                                       "Total Cost": 8.31,
                                       "Plan Rows": 1,
                                       "Plan Width": 48,
-                                      "Actual Startup Time": 0.004,
-                                      "Actual Total Time": 0.004,
+                                      "Actual Startup Time": 0.003,
+                                      "Actual Total Time": 0.003,
                                       "Actual Rows": 0.0,
                                       "Actual Loops": 1,
                                       "Disabled": false,
@@ -8825,8 +8825,8 @@
                                       "Total Cost": 8.31,
                                       "Plan Rows": 1,
                                       "Plan Width": 48,
-                                      "Actual Startup Time": 0.004,
-                                      "Actual Total Time": 0.004,
+                                      "Actual Startup Time": 0.003,
+                                      "Actual Total Time": 0.003,
                                       "Actual Rows": 0.0,
                                       "Actual Loops": 1,
                                       "Disabled": false,
@@ -8863,8 +8863,8 @@
                                       "Total Cost": 8.31,
                                       "Plan Rows": 1,
                                       "Plan Width": 48,
-                                      "Actual Startup Time": 0.004,
-                                      "Actual Total Time": 0.004,
+                                      "Actual Startup Time": 0.003,
+                                      "Actual Total Time": 0.003,
                                       "Actual Rows": 0.0,
                                       "Actual Loops": 1,
                                       "Disabled": false,
@@ -8901,8 +8901,8 @@
                                       "Total Cost": 8.31,
                                       "Plan Rows": 1,
                                       "Plan Width": 48,
-                                      "Actual Startup Time": 0.004,
-                                      "Actual Total Time": 0.004,
+                                      "Actual Startup Time": 0.003,
+                                      "Actual Total Time": 0.003,
                                       "Actual Rows": 0.0,
                                       "Actual Loops": 1,
                                       "Disabled": false,
@@ -8985,8 +8985,8 @@
                   "Total Cost": 265.08,
                   "Plan Rows": 930,
                   "Plan Width": 52,
-                  "Actual Startup Time": 0.05,
-                  "Actual Total Time": 0.053,
+                  "Actual Startup Time": 0.045,
+                  "Actual Total Time": 0.048,
                   "Actual Rows": 1.0,
                   "Actual Loops": 1,
                   "Disabled": false,
@@ -9026,8 +9026,8 @@
                       "Total Cost": 186.02,
                       "Plan Rows": 9301,
                       "Plan Width": 52,
-                      "Actual Startup Time": 0.002,
-                      "Actual Total Time": 0.047,
+                      "Actual Startup Time": 0.001,
+                      "Actual Total Time": 0.042,
                       "Actual Rows": 1.0,
                       "Actual Loops": 1,
                       "Disabled": false,
@@ -9072,14 +9072,14 @@
               "Temp I/O Read Time": 0.0,
               "Temp I/O Write Time": 0.0
             },
-            "Planning Time": 0.798,
+            "Planning Time": 0.511,
             "Triggers": [],
-            "Execution Time": 0.109
+            "Execution Time": 0.094
           }
         ],
         "p50_range_ms": [
-          0.3609795,
-          0.403646
+          0.19862449999999998,
+          0.2500835
         ]
       }
     },
@@ -9099,117 +9099,117 @@
       "runs": [
         {
           "insert": {
-            "p50_ms": 0.204541,
-            "p95_ms": 0.369625,
-            "min_ms": 0.168167,
-            "max_ms": 5.518542,
-            "transactions_per_second": 3440.9787327212543
+            "p50_ms": 0.278333,
+            "p95_ms": 0.414167,
+            "min_ms": 0.196583,
+            "max_ms": 2.078,
+            "transactions_per_second": 3315.0433001839497
           },
           "update": {
-            "p50_ms": 0.2010005,
-            "p95_ms": 0.399625,
-            "min_ms": 0.1595,
-            "max_ms": 2.135125,
-            "transactions_per_second": 4041.495979135858
+            "p50_ms": 0.2662915,
+            "p95_ms": 0.430667,
+            "min_ms": 0.201459,
+            "max_ms": 1.141708,
+            "transactions_per_second": 3424.2694894609376
           },
           "delete": {
-            "p50_ms": 0.110292,
-            "p95_ms": 0.283666,
-            "min_ms": 0.087917,
-            "max_ms": 5.996667,
-            "transactions_per_second": 6114.835385574002
+            "p50_ms": 0.159771,
+            "p95_ms": 0.272875,
+            "min_ms": 0.121667,
+            "max_ms": 2.455208,
+            "transactions_per_second": 5337.010604800183
           }
         },
         {
           "insert": {
-            "p50_ms": 0.222875,
-            "p95_ms": 0.523458,
-            "min_ms": 0.164292,
-            "max_ms": 4.225166,
-            "transactions_per_second": 3530.540873212911
+            "p50_ms": 0.2905625,
+            "p95_ms": 0.478709,
+            "min_ms": 0.209459,
+            "max_ms": 1.987625,
+            "transactions_per_second": 3080.7861457663184
           },
           "update": {
-            "p50_ms": 0.22239599999999998,
-            "p95_ms": 0.555125,
-            "min_ms": 0.160417,
-            "max_ms": 2.05775,
-            "transactions_per_second": 3604.7811004787495
+            "p50_ms": 0.28702099999999997,
+            "p95_ms": 0.449875,
+            "min_ms": 0.204625,
+            "max_ms": 0.839084,
+            "transactions_per_second": 3237.7588472853245
           },
           "delete": {
-            "p50_ms": 0.1253745,
-            "p95_ms": 0.325,
-            "min_ms": 0.086417,
-            "max_ms": 5.205,
-            "transactions_per_second": 5778.615073419182
+            "p50_ms": 0.1683125,
+            "p95_ms": 0.287375,
+            "min_ms": 0.122083,
+            "max_ms": 2.570958,
+            "transactions_per_second": 5058.034496857455
           }
         },
         {
           "insert": {
-            "p50_ms": 0.4285215,
-            "p95_ms": 0.6025,
-            "min_ms": 0.175292,
-            "max_ms": 3.950875,
-            "transactions_per_second": 2296.10353755391
+            "p50_ms": 0.32002050000000004,
+            "p95_ms": 0.523792,
+            "min_ms": 0.219,
+            "max_ms": 2.08725,
+            "transactions_per_second": 2809.948961492038
           },
           "update": {
-            "p50_ms": 0.4321875,
-            "p95_ms": 0.668833,
-            "min_ms": 0.1735,
-            "max_ms": 1.707,
-            "transactions_per_second": 2272.2764066098207
+            "p50_ms": 0.3285005,
+            "p95_ms": 0.496542,
+            "min_ms": 0.205334,
+            "max_ms": 0.990541,
+            "transactions_per_second": 2902.615690678347
           },
           "delete": {
-            "p50_ms": 0.232041,
-            "p95_ms": 0.411084,
-            "min_ms": 0.092792,
-            "max_ms": 4.105583,
-            "transactions_per_second": 3911.1362466800565
+            "p50_ms": 0.20247900000000002,
+            "p95_ms": 0.330917,
+            "min_ms": 0.129875,
+            "max_ms": 2.122875,
+            "transactions_per_second": 4368.806615911037
           }
         },
         {
           "insert": {
-            "p50_ms": 0.4814585,
-            "p95_ms": 1.106083,
-            "min_ms": 0.182333,
-            "max_ms": 9.436083,
-            "transactions_per_second": 1614.2615227319259
+            "p50_ms": 0.275042,
+            "p95_ms": 0.447041,
+            "min_ms": 0.202833,
+            "max_ms": 1.565958,
+            "transactions_per_second": 3240.9370800100023
           },
           "update": {
-            "p50_ms": 0.453187,
-            "p95_ms": 1.092667,
-            "min_ms": 0.18025,
-            "max_ms": 15.783291,
-            "transactions_per_second": 1406.9999683565707
+            "p50_ms": 0.277167,
+            "p95_ms": 0.482125,
+            "min_ms": 0.19125,
+            "max_ms": 0.929,
+            "transactions_per_second": 3231.1093795954957
           },
           "delete": {
-            "p50_ms": 0.266417,
-            "p95_ms": 0.641625,
-            "min_ms": 0.094625,
-            "max_ms": 6.864667,
-            "transactions_per_second": 2960.4026313361164
+            "p50_ms": 0.16383399999999998,
+            "p95_ms": 0.300542,
+            "min_ms": 0.10475,
+            "max_ms": 2.65225,
+            "transactions_per_second": 5112.701843077887
           }
         },
         {
           "insert": {
-            "p50_ms": 0.2281665,
-            "p95_ms": 0.78625,
-            "min_ms": 0.168875,
-            "max_ms": 3.814792,
-            "transactions_per_second": 3082.228303116194
+            "p50_ms": 0.226979,
+            "p95_ms": 0.368334,
+            "min_ms": 0.172375,
+            "max_ms": 2.292583,
+            "transactions_per_second": 3923.273097294446
           },
           "update": {
-            "p50_ms": 0.21537499999999998,
-            "p95_ms": 0.753375,
-            "min_ms": 0.159125,
-            "max_ms": 1.953916,
-            "transactions_per_second": 3293.7738468197203
+            "p50_ms": 0.228313,
+            "p95_ms": 0.392833,
+            "min_ms": 0.165833,
+            "max_ms": 0.8905,
+            "transactions_per_second": 3984.3047875227035
           },
           "delete": {
-            "p50_ms": 0.1196665,
-            "p95_ms": 0.499,
-            "min_ms": 0.0875,
-            "max_ms": 5.314583,
-            "transactions_per_second": 5078.650263371185
+            "p50_ms": 0.12593749999999998,
+            "p95_ms": 0.258375,
+            "min_ms": 0.092166,
+            "max_ms": 2.033417,
+            "transactions_per_second": 6692.581905406847
           }
         }
       ],
@@ -9220,12 +9220,594 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 0.34561329206917435,
-          "operations_per_second": 1157.3628942486973,
-          "p50_ms": 6.3071035,
-          "p95_ms": 8.375,
-          "min_ms": 0.954624,
-          "max_ms": 12.063751,
+          "elapsed_s": 0.3567485000239685,
+          "operations_per_second": 1121.2380710027528,
+          "p50_ms": 6.5524375,
+          "p95_ms": 9.200459,
+          "min_ms": 0.993584,
+          "max_ms": 13.577291,
+          "lock_samples": 24,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 0,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.1144096250645816,
+          "operations_per_second": 358.9344447530408,
+          "p50_ms": 17.2051255,
+          "p95_ms": 46.880292,
+          "min_ms": 3.941041,
+          "max_ms": 89.993458,
+          "lock_samples": 80,
+          "samples_with_waiters": 79,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5320
+        },
+        {
+          "repeat": 1,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.36374762502964586,
+          "operations_per_second": 1099.663537232441,
+          "p50_ms": 6.824208499999999,
+          "p95_ms": 9.003791,
+          "min_ms": 0.785541,
+          "max_ms": 13.298708,
+          "lock_samples": 24,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 1,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.0888299169018865,
+          "operations_per_second": 367.3668346091593,
+          "p50_ms": 15.8230835,
+          "p95_ms": 47.016584,
+          "min_ms": 2.988708,
+          "max_ms": 90.978792,
+          "lock_samples": 76,
+          "samples_with_waiters": 75,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 4800
+        },
+        {
+          "repeat": 2,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.3592602499993518,
+          "operations_per_second": 1113.3989914016975,
+          "p50_ms": 6.633479,
+          "p95_ms": 9.543374,
+          "min_ms": 0.898791,
+          "max_ms": 12.928417,
+          "lock_samples": 24,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 2,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.1096030829939991,
+          "operations_per_second": 360.489265152991,
+          "p50_ms": 17.410521,
+          "p95_ms": 44.723958,
+          "min_ms": 2.905167,
+          "max_ms": 107.175,
+          "lock_samples": 81,
+          "samples_with_waiters": 79,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5170
+        },
+        {
+          "repeat": 3,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.3500863329973072,
+          "operations_per_second": 1142.575308711285,
+          "p50_ms": 6.43275,
+          "p95_ms": 8.650792,
+          "min_ms": 1.5137909999999999,
+          "max_ms": 11.924542,
+          "lock_samples": 24,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 3,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.0832639170112088,
+          "operations_per_second": 369.2544298010261,
+          "p50_ms": 17.307457999999997,
+          "p95_ms": 43.583042,
+          "min_ms": 3.1065,
+          "max_ms": 100.124708,
+          "lock_samples": 79,
+          "samples_with_waiters": 78,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5150
+        },
+        {
+          "repeat": 4,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.35155550006311387,
+          "operations_per_second": 1137.8004324443482,
+          "p50_ms": 6.560624499999999,
+          "p95_ms": 9.455416,
+          "min_ms": 1.034458,
+          "max_ms": 12.514417,
+          "lock_samples": 24,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 4,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.0962902089813724,
+          "operations_per_second": 364.8668908314556,
+          "p50_ms": 15.949583,
+          "p95_ms": 45.076667,
+          "min_ms": 2.824167,
+          "max_ms": 204.414125,
+          "lock_samples": 81,
+          "samples_with_waiters": 78,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5010
+        }
+      ]
+    },
+    "B": {
+      "runs": [
+        {
+          "insert": {
+            "p50_ms": 0.468417,
+            "p95_ms": 0.688583,
+            "min_ms": 0.345792,
+            "max_ms": 2.240791,
+            "transactions_per_second": 1968.1980526845286
+          },
+          "update": {
+            "p50_ms": 0.41383349999999997,
+            "p95_ms": 0.618042,
+            "min_ms": 0.309291,
+            "max_ms": 1.379834,
+            "transactions_per_second": 2231.521094596801
+          },
+          "delete": {
+            "p50_ms": 0.35343749999999996,
+            "p95_ms": 0.550417,
+            "min_ms": 0.2125,
+            "max_ms": 5.030583,
+            "transactions_per_second": 2556.1269564356085
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.5010209999999999,
+            "p95_ms": 0.72225,
+            "min_ms": 0.394834,
+            "max_ms": 3.574584,
+            "transactions_per_second": 1796.3877642029445
+          },
+          "update": {
+            "p50_ms": 0.4555625,
+            "p95_ms": 0.651708,
+            "min_ms": 0.350208,
+            "max_ms": 1.11125,
+            "transactions_per_second": 2073.611508178915
+          },
+          "delete": {
+            "p50_ms": 0.4199375,
+            "p95_ms": 0.646125,
+            "min_ms": 0.300291,
+            "max_ms": 4.750791,
+            "transactions_per_second": 2127.1127707128567
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.413896,
+            "p95_ms": 0.644375,
+            "min_ms": 0.341167,
+            "max_ms": 4.329834,
+            "transactions_per_second": 2162.7233713414303
+          },
+          "update": {
+            "p50_ms": 0.3796875,
+            "p95_ms": 0.511875,
+            "min_ms": 0.310416,
+            "max_ms": 1.006333,
+            "transactions_per_second": 2498.4513973626295
+          },
+          "delete": {
+            "p50_ms": 0.281437,
+            "p95_ms": 0.497916,
+            "min_ms": 0.214875,
+            "max_ms": 3.712834,
+            "transactions_per_second": 3064.0193600676066
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.547917,
+            "p95_ms": 0.803167,
+            "min_ms": 0.391208,
+            "max_ms": 1.969125,
+            "transactions_per_second": 1742.6009837487907
+          },
+          "update": {
+            "p50_ms": 0.4983125,
+            "p95_ms": 0.752166,
+            "min_ms": 0.349166,
+            "max_ms": 3.691375,
+            "transactions_per_second": 1863.952284909133
+          },
+          "delete": {
+            "p50_ms": 0.4244795,
+            "p95_ms": 0.742417,
+            "min_ms": 0.264792,
+            "max_ms": 5.023667,
+            "transactions_per_second": 2099.1123829819626
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.424,
+            "p95_ms": 0.648541,
+            "min_ms": 0.348458,
+            "max_ms": 1.676542,
+            "transactions_per_second": 2169.691790182429
+          },
+          "update": {
+            "p50_ms": 0.38514550000000003,
+            "p95_ms": 0.668709,
+            "min_ms": 0.309792,
+            "max_ms": 0.78775,
+            "transactions_per_second": 2443.4209090002246
+          },
+          "delete": {
+            "p50_ms": 0.2987915,
+            "p95_ms": 0.537917,
+            "min_ms": 0.22,
+            "max_ms": 3.667958,
+            "transactions_per_second": 2887.044138256733
+          }
+        }
+      ],
+      "concurrent": [
+        {
+          "repeat": 0,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.3958106670761481,
+          "operations_per_second": 1010.5841839857387,
+          "p50_ms": 6.6028955,
+          "p95_ms": 15.499958000000001,
+          "min_ms": 1.506708,
+          "max_ms": 44.916875000000005,
+          "lock_samples": 27,
+          "samples_with_waiters": 3,
+          "max_waiters": 2,
+          "sampled_waiter_ms": 40
+        },
+        {
+          "repeat": 0,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.1269753749947995,
+          "operations_per_second": 354.9323338159415,
+          "p50_ms": 17.189417,
+          "p95_ms": 48.777167,
+          "min_ms": 2.921834,
+          "max_ms": 96.513583,
+          "lock_samples": 81,
+          "samples_with_waiters": 79,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5290
+        },
+        {
+          "repeat": 1,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.40566608298104256,
+          "operations_per_second": 986.032643056069,
+          "p50_ms": 7.056687999999999,
+          "p95_ms": 10.97225,
+          "min_ms": 1.698416,
+          "max_ms": 18.136582999999998,
+          "lock_samples": 28,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 1,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.1148128749337047,
+          "operations_per_second": 358.80461106424434,
+          "p50_ms": 16.150208,
+          "p95_ms": 47.116375,
+          "min_ms": 2.896,
+          "max_ms": 110.771,
+          "lock_samples": 79,
+          "samples_with_waiters": 78,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 4940
+        },
+        {
+          "repeat": 2,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.37049666699022055,
+          "operations_per_second": 1079.6318445978306,
+          "p50_ms": 6.916874999999999,
+          "p95_ms": 8.953208,
+          "min_ms": 1.927416,
+          "max_ms": 16.444041,
+          "lock_samples": 26,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 2,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.1004455839283764,
+          "operations_per_second": 363.48912280794286,
+          "p50_ms": 17.151729,
+          "p95_ms": 51.625459,
+          "min_ms": 4.355709,
+          "max_ms": 95.057459,
+          "lock_samples": 78,
+          "samples_with_waiters": 77,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5030
+        },
+        {
+          "repeat": 3,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.3559443330159411,
+          "operations_per_second": 1123.7712274016899,
+          "p50_ms": 6.444104,
+          "p95_ms": 8.658415999999999,
+          "min_ms": 2.461083,
+          "max_ms": 16.368666,
+          "lock_samples": 24,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 3,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.1153705000178888,
+          "operations_per_second": 358.6252281135144,
+          "p50_ms": 16.5437085,
+          "p95_ms": 44.32025,
+          "min_ms": 1.651708,
+          "max_ms": 146.771709,
+          "lock_samples": 85,
+          "samples_with_waiters": 83,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5380
+        },
+        {
+          "repeat": 4,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.3724798330804333,
+          "operations_per_second": 1073.883642751805,
+          "p50_ms": 6.956376000000001,
+          "p95_ms": 8.920042,
+          "min_ms": 2.000917,
+          "max_ms": 15.382458999999999,
+          "lock_samples": 26,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
+        },
+        {
+          "repeat": 4,
+          "workload": "hotspot update + links (1ms intentional hold)",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 1.1142172500258312,
+          "operations_per_second": 358.99641653432195,
+          "p50_ms": 16.4014165,
+          "p95_ms": 54.2695,
+          "min_ms": 4.555,
+          "max_ms": 76.162083,
+          "lock_samples": 82,
+          "samples_with_waiters": 81,
+          "max_waiters": 7,
+          "sampled_waiter_ms": 5290
+        }
+      ]
+    },
+    "C": {
+      "runs": [
+        {
+          "insert": {
+            "p50_ms": 0.21479150000000002,
+            "p95_ms": 0.364208,
+            "min_ms": 0.140417,
+            "max_ms": 0.992667,
+            "transactions_per_second": 4298.2244829832325
+          },
+          "update": {
+            "p50_ms": 0.203875,
+            "p95_ms": 0.355667,
+            "min_ms": 0.138417,
+            "max_ms": 0.417292,
+            "transactions_per_second": 4582.466292523569
+          },
+          "delete": {
+            "p50_ms": 0.137917,
+            "p95_ms": 0.237584,
+            "min_ms": 0.0805,
+            "max_ms": 0.480125,
+            "transactions_per_second": 6740.807686947454
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.278146,
+            "p95_ms": 0.383833,
+            "min_ms": 0.139208,
+            "max_ms": 1.371541,
+            "transactions_per_second": 3536.9074077430864
+          },
+          "update": {
+            "p50_ms": 0.2743335,
+            "p95_ms": 0.404125,
+            "min_ms": 0.14025,
+            "max_ms": 0.793084,
+            "transactions_per_second": 3622.0670086018663
+          },
+          "delete": {
+            "p50_ms": 0.1661455,
+            "p95_ms": 0.270875,
+            "min_ms": 0.090917,
+            "max_ms": 1.183125,
+            "transactions_per_second": 5442.022272891077
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.18735400000000002,
+            "p95_ms": 0.332209,
+            "min_ms": 0.139375,
+            "max_ms": 1.160792,
+            "transactions_per_second": 4767.318278825525
+          },
+          "update": {
+            "p50_ms": 0.183313,
+            "p95_ms": 0.317333,
+            "min_ms": 0.134958,
+            "max_ms": 0.48175,
+            "transactions_per_second": 5027.9257279839385
+          },
+          "delete": {
+            "p50_ms": 0.1157705,
+            "p95_ms": 0.212875,
+            "min_ms": 0.0805,
+            "max_ms": 1.667792,
+            "transactions_per_second": 7484.398584041601
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.16893750000000002,
+            "p95_ms": 0.312958,
+            "min_ms": 0.121625,
+            "max_ms": 0.989417,
+            "transactions_per_second": 5200.731732553307
+          },
+          "update": {
+            "p50_ms": 0.169604,
+            "p95_ms": 0.295375,
+            "min_ms": 0.119417,
+            "max_ms": 0.402334,
+            "transactions_per_second": 5408.822465544111
+          },
+          "delete": {
+            "p50_ms": 0.098792,
+            "p95_ms": 0.179958,
+            "min_ms": 0.071916,
+            "max_ms": 1.28875,
+            "transactions_per_second": 8460.91046673005
+          }
+        },
+        {
+          "insert": {
+            "p50_ms": 0.1503335,
+            "p95_ms": 0.222625,
+            "min_ms": 0.121583,
+            "max_ms": 1.057333,
+            "transactions_per_second": 6138.720912169728
+          },
+          "update": {
+            "p50_ms": 0.14931250000000001,
+            "p95_ms": 0.2175,
+            "min_ms": 0.117417,
+            "max_ms": 0.40875,
+            "transactions_per_second": 6366.13825597096
+          },
+          "delete": {
+            "p50_ms": 0.091208,
+            "p95_ms": 0.136792,
+            "min_ms": 0.07,
+            "max_ms": 0.244166,
+            "transactions_per_second": 10528.208650565808
+          }
+        }
+      ],
+      "concurrent": [
+        {
+          "repeat": 0,
+          "workload": "independent insert/update/delete cycles",
+          "writers": 8,
+          "operations": 400,
+          "errors": 0,
+          "elapsed_s": 0.34437795798294246,
+          "operations_per_second": 1161.5145241665339,
+          "p50_ms": 6.567646,
+          "p95_ms": 8.601084,
+          "min_ms": 2.396667,
+          "max_ms": 10.338209,
           "lock_samples": 23,
           "samples_with_waiters": 0,
           "max_waiters": 0,
@@ -9237,16 +9819,16 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 1.1637347909854725,
-          "operations_per_second": 343.7209260206722,
-          "p50_ms": 17.016313,
-          "p95_ms": 50.168667,
-          "min_ms": 2.115583,
-          "max_ms": 111.945833,
-          "lock_samples": 83,
-          "samples_with_waiters": 81,
+          "elapsed_s": 1.0687957920599729,
+          "operations_per_second": 374.2529704659943,
+          "p50_ms": 15.107625,
+          "p95_ms": 45.563959,
+          "min_ms": 2.868875,
+          "max_ms": 91.566708,
+          "lock_samples": 78,
+          "samples_with_waiters": 77,
           "max_waiters": 7,
-          "sampled_waiter_ms": 5190
+          "sampled_waiter_ms": 5050
         },
         {
           "repeat": 1,
@@ -9254,16 +9836,16 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 0.4858301660278812,
-          "operations_per_second": 823.3329833558431,
-          "p50_ms": 7.057083499999999,
-          "p95_ms": 16.844915999999998,
-          "min_ms": 1.284001,
-          "max_ms": 23.153166,
-          "lock_samples": 34,
-          "samples_with_waiters": 1,
-          "max_waiters": 1,
-          "sampled_waiter_ms": 10
+          "elapsed_s": 0.3572837910614908,
+          "operations_per_second": 1119.5582055698617,
+          "p50_ms": 6.602584,
+          "p95_ms": 8.372792,
+          "min_ms": 0.4835,
+          "max_ms": 10.511625,
+          "lock_samples": 24,
+          "samples_with_waiters": 0,
+          "max_waiters": 0,
+          "sampled_waiter_ms": 0
         },
         {
           "repeat": 1,
@@ -9271,16 +9853,16 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 1.1833432910498232,
-          "operations_per_second": 338.02532454055086,
-          "p50_ms": 17.895104,
-          "p95_ms": 52.874792,
-          "min_ms": 3.528542,
-          "max_ms": 96.294833,
-          "lock_samples": 83,
-          "samples_with_waiters": 82,
+          "elapsed_s": 1.0708833750104532,
+          "operations_per_second": 373.5234007121415,
+          "p50_ms": 15.597646000000001,
+          "p95_ms": 47.141917,
+          "min_ms": 2.893375,
+          "max_ms": 79.30325,
+          "lock_samples": 76,
+          "samples_with_waiters": 74,
           "max_waiters": 7,
-          "sampled_waiter_ms": 5290
+          "sampled_waiter_ms": 4700
         },
         {
           "repeat": 2,
@@ -9288,594 +9870,12 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 0.4456439580535516,
-          "operations_per_second": 897.577522978407,
-          "p50_ms": 7.6811875,
-          "p95_ms": 12.446375,
-          "min_ms": 2.085875,
-          "max_ms": 33.441834,
-          "lock_samples": 31,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 2,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.348043708014302,
-          "operations_per_second": 296.7262838897181,
-          "p50_ms": 18.9223125,
-          "p95_ms": 56.50425,
-          "min_ms": 2.9465,
-          "max_ms": 119.75775,
-          "lock_samples": 97,
-          "samples_with_waiters": 89,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 5880
-        },
-        {
-          "repeat": 3,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.5943385829450563,
-          "operations_per_second": 673.0170503451533,
-          "p50_ms": 7.0883745000000005,
-          "p95_ms": 21.084249,
-          "min_ms": 1.254667,
-          "max_ms": 38.596208,
-          "lock_samples": 44,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 3,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.3538133340189233,
-          "operations_per_second": 295.46170801299616,
-          "p50_ms": 19.5120835,
-          "p95_ms": 59.552417,
-          "min_ms": 3.918417,
-          "max_ms": 143.088,
-          "lock_samples": 109,
-          "samples_with_waiters": 106,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 6850
-        },
-        {
-          "repeat": 4,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.35364837490487844,
-          "operations_per_second": 1131.0669817374076,
-          "p50_ms": 6.508437499999999,
-          "p95_ms": 9.252959,
-          "min_ms": 1.1425,
-          "max_ms": 12.088876,
-          "lock_samples": 27,
-          "samples_with_waiters": 1,
-          "max_waiters": 4,
-          "sampled_waiter_ms": 40
-        },
-        {
-          "repeat": 4,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.3464922499842942,
-          "operations_per_second": 297.06817845009186,
-          "p50_ms": 17.825000000000003,
-          "p95_ms": 53.593459,
-          "min_ms": 3.951625,
-          "max_ms": 132.249541,
-          "lock_samples": 110,
-          "samples_with_waiters": 101,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 6510
-        }
-      ]
-    },
-    "B": {
-      "runs": [
-        {
-          "insert": {
-            "p50_ms": 0.490625,
-            "p95_ms": 0.774292,
-            "min_ms": 0.354791,
-            "max_ms": 3.749208,
-            "transactions_per_second": 1846.3412583131399
-          },
-          "update": {
-            "p50_ms": 0.408625,
-            "p95_ms": 0.633375,
-            "min_ms": 0.32,
-            "max_ms": 1.80675,
-            "transactions_per_second": 2233.3291138301943
-          },
-          "delete": {
-            "p50_ms": 0.3145215,
-            "p95_ms": 0.747,
-            "min_ms": 0.229542,
-            "max_ms": 12.720042,
-            "transactions_per_second": 2320.703680985304
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.41647900000000004,
-            "p95_ms": 0.759208,
-            "min_ms": 0.346625,
-            "max_ms": 2.290709,
-            "transactions_per_second": 2076.753378215781
-          },
-          "update": {
-            "p50_ms": 0.37993699999999997,
-            "p95_ms": 0.6205,
-            "min_ms": 0.307833,
-            "max_ms": 1.113667,
-            "transactions_per_second": 2378.3215043549444
-          },
-          "delete": {
-            "p50_ms": 0.2774375,
-            "p95_ms": 0.605167,
-            "min_ms": 0.213083,
-            "max_ms": 5.9915,
-            "transactions_per_second": 2819.5407766004955
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.5543130000000001,
-            "p95_ms": 1.299542,
-            "min_ms": 0.365333,
-            "max_ms": 8.554167,
-            "transactions_per_second": 1412.2423362092284
-          },
-          "update": {
-            "p50_ms": 0.5292085,
-            "p95_ms": 1.145459,
-            "min_ms": 0.317208,
-            "max_ms": 5.545041,
-            "transactions_per_second": 1550.4571871869289
-          },
-          "delete": {
-            "p50_ms": 0.39166650000000003,
-            "p95_ms": 1.082334,
-            "min_ms": 0.252833,
-            "max_ms": 32.823083,
-            "transactions_per_second": 1458.1386156290544
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.45325,
-            "p95_ms": 0.76125,
-            "min_ms": 0.350458,
-            "max_ms": 9.836625,
-            "transactions_per_second": 1749.5031935781196
-          },
-          "update": {
-            "p50_ms": 0.398125,
-            "p95_ms": 0.665958,
-            "min_ms": 0.318333,
-            "max_ms": 1.864083,
-            "transactions_per_second": 2223.844961890914
-          },
-          "delete": {
-            "p50_ms": 0.31543750000000004,
-            "p95_ms": 0.564583,
-            "min_ms": 0.230542,
-            "max_ms": 9.005917,
-            "transactions_per_second": 2482.449608786422
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.4704165,
-            "p95_ms": 0.69275,
-            "min_ms": 0.368,
-            "max_ms": 4.715083,
-            "transactions_per_second": 1906.3104097854418
-          },
-          "update": {
-            "p50_ms": 0.4147505,
-            "p95_ms": 0.657625,
-            "min_ms": 0.32425,
-            "max_ms": 2.459959,
-            "transactions_per_second": 2173.1579655703545
-          },
-          "delete": {
-            "p50_ms": 0.3140625,
-            "p95_ms": 0.558917,
-            "min_ms": 0.24775,
-            "max_ms": 10.432625,
-            "transactions_per_second": 2409.0761655447764
-          }
-        }
-      ],
-      "concurrent": [
-        {
-          "repeat": 0,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.5472576670581475,
-          "operations_per_second": 730.917123829896,
-          "p50_ms": 7.4405,
-          "p95_ms": 9.564083,
-          "min_ms": 1.492334,
-          "max_ms": 29.5005,
-          "lock_samples": 38,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 0,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.4119375000009313,
-          "operations_per_second": 283.2986587577256,
-          "p50_ms": 19.250874500000002,
-          "p95_ms": 64.348667,
-          "min_ms": 1.819833,
-          "max_ms": 120.489958,
-          "lock_samples": 106,
-          "samples_with_waiters": 99,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 6450
-        },
-        {
-          "repeat": 1,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.5191397500457242,
-          "operations_per_second": 770.5054370519099,
-          "p50_ms": 8.3518755,
-          "p95_ms": 17.707291,
-          "min_ms": 1.034917,
-          "max_ms": 43.547207,
-          "lock_samples": 43,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 1,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.1965877920156345,
-          "operations_per_second": 334.28387174684934,
-          "p50_ms": 16.850937000000002,
-          "p95_ms": 55.213625,
-          "min_ms": 5.209625,
-          "max_ms": 93.202833,
-          "lock_samples": 94,
-          "samples_with_waiters": 92,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 6010
-        },
-        {
-          "repeat": 2,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.39465320797171444,
-          "operations_per_second": 1013.5480769452374,
-          "p50_ms": 6.857063,
-          "p95_ms": 9.275751,
-          "min_ms": 2.868208,
-          "max_ms": 22.170499,
-          "lock_samples": 29,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 2,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.3252242910675704,
-          "operations_per_second": 301.8356988293424,
-          "p50_ms": 18.457667,
-          "p95_ms": 61.761083,
-          "min_ms": 3.462,
-          "max_ms": 123.520292,
-          "lock_samples": 111,
-          "samples_with_waiters": 109,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 7140
-        },
-        {
-          "repeat": 3,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.4205495410133153,
-          "operations_per_second": 951.1364559718669,
-          "p50_ms": 7.0898125,
-          "p95_ms": 9.751708,
-          "min_ms": 1.9353339999999999,
-          "max_ms": 23.339334,
-          "lock_samples": 31,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 3,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.3638358330354095,
-          "operations_per_second": 293.29043152484377,
-          "p50_ms": 19.261479,
-          "p95_ms": 63.76325,
-          "min_ms": 2.731667,
-          "max_ms": 129.60575,
-          "lock_samples": 110,
-          "samples_with_waiters": 108,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 7230
-        },
-        {
-          "repeat": 4,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.3741367079783231,
-          "operations_per_second": 1069.1279189401948,
-          "p50_ms": 6.6375215,
-          "p95_ms": 8.707916,
-          "min_ms": 1.9665839999999999,
-          "max_ms": 22.383917,
-          "lock_samples": 27,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 4,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.2504821670008823,
-          "operations_per_second": 319.87661284234673,
-          "p50_ms": 17.947145499999998,
-          "p95_ms": 56.900542,
-          "min_ms": 3.145084,
-          "max_ms": 127.390458,
-          "lock_samples": 94,
-          "samples_with_waiters": 92,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 5910
-        }
-      ]
-    },
-    "C": {
-      "runs": [
-        {
-          "insert": {
-            "p50_ms": 0.327854,
-            "p95_ms": 0.593875,
-            "min_ms": 0.138792,
-            "max_ms": 3.1615,
-            "transactions_per_second": 2743.0496265680813
-          },
-          "update": {
-            "p50_ms": 0.319292,
-            "p95_ms": 0.668583,
-            "min_ms": 0.141416,
-            "max_ms": 16.308834,
-            "transactions_per_second": 1853.775727765471
-          },
-          "delete": {
-            "p50_ms": 0.1898965,
-            "p95_ms": 0.374083,
-            "min_ms": 0.082167,
-            "max_ms": 0.864292,
-            "transactions_per_second": 4936.96629542984
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.1560415,
-            "p95_ms": 0.279375,
-            "min_ms": 0.119541,
-            "max_ms": 2.24875,
-            "transactions_per_second": 5182.314202310861
-          },
-          "update": {
-            "p50_ms": 0.15091700000000002,
-            "p95_ms": 0.29875,
-            "min_ms": 0.116458,
-            "max_ms": 1.293583,
-            "transactions_per_second": 5598.365948946822
-          },
-          "delete": {
-            "p50_ms": 0.0858335,
-            "p95_ms": 0.175459,
-            "min_ms": 0.069875,
-            "max_ms": 0.523708,
-            "transactions_per_second": 9687.44101256621
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.1573745,
-            "p95_ms": 0.287167,
-            "min_ms": 0.123208,
-            "max_ms": 2.457333,
-            "transactions_per_second": 5293.239374099851
-          },
-          "update": {
-            "p50_ms": 0.16622900000000002,
-            "p95_ms": 0.317458,
-            "min_ms": 0.117792,
-            "max_ms": 1.115417,
-            "transactions_per_second": 5286.081124641247
-          },
-          "delete": {
-            "p50_ms": 0.0939795,
-            "p95_ms": 0.172125,
-            "min_ms": 0.070875,
-            "max_ms": 0.316875,
-            "transactions_per_second": 9500.091865888344
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.14477099999999998,
-            "p95_ms": 0.335958,
-            "min_ms": 0.122708,
-            "max_ms": 2.605084,
-            "transactions_per_second": 5347.997971611329
-          },
-          "update": {
-            "p50_ms": 0.1408755,
-            "p95_ms": 0.271125,
-            "min_ms": 0.118042,
-            "max_ms": 1.561875,
-            "transactions_per_second": 5809.394295993926
-          },
-          "delete": {
-            "p50_ms": 0.08010400000000001,
-            "p95_ms": 0.22475,
-            "min_ms": 0.070375,
-            "max_ms": 0.72925,
-            "transactions_per_second": 10252.469102133868
-          }
-        },
-        {
-          "insert": {
-            "p50_ms": 0.48947949999999996,
-            "p95_ms": 1.166333,
-            "min_ms": 0.126625,
-            "max_ms": 3.383042,
-            "transactions_per_second": 1816.73178544939
-          },
-          "update": {
-            "p50_ms": 0.461771,
-            "p95_ms": 1.019541,
-            "min_ms": 0.122667,
-            "max_ms": 1.477875,
-            "transactions_per_second": 2013.9295248120197
-          },
-          "delete": {
-            "p50_ms": 0.27797950000000005,
-            "p95_ms": 0.69025,
-            "min_ms": 0.074791,
-            "max_ms": 1.467584,
-            "transactions_per_second": 3057.0868631031462
-          }
-        }
-      ],
-      "concurrent": [
-        {
-          "repeat": 0,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.4436071660602465,
-          "operations_per_second": 901.6986888477717,
-          "p50_ms": 7.340667,
-          "p95_ms": 14.181749,
-          "min_ms": 1.068459,
-          "max_ms": 24.268625,
-          "lock_samples": 34,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 0,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.3185832089511678,
-          "operations_per_second": 303.35590297571696,
-          "p50_ms": 19.4124165,
-          "p95_ms": 60.513417,
-          "min_ms": 1.582375,
-          "max_ms": 135.997625,
-          "lock_samples": 94,
-          "samples_with_waiters": 90,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 5900
-        },
-        {
-          "repeat": 1,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.41312920895870775,
-          "operations_per_second": 968.2200902913645,
-          "p50_ms": 6.940854,
-          "p95_ms": 13.426374,
-          "min_ms": 1.687375,
-          "max_ms": 27.329082,
-          "lock_samples": 29,
-          "samples_with_waiters": 0,
-          "max_waiters": 0,
-          "sampled_waiter_ms": 0
-        },
-        {
-          "repeat": 1,
-          "workload": "hotspot update + links (1ms intentional hold)",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 1.1319422500673681,
-          "operations_per_second": 353.3749181781966,
-          "p50_ms": 17.102604,
-          "p95_ms": 49.555416,
-          "min_ms": 3.32075,
-          "max_ms": 101.518208,
-          "lock_samples": 86,
-          "samples_with_waiters": 83,
-          "max_waiters": 7,
-          "sampled_waiter_ms": 5440
-        },
-        {
-          "repeat": 2,
-          "workload": "independent insert/update/delete cycles",
-          "writers": 8,
-          "operations": 400,
-          "errors": 0,
-          "elapsed_s": 0.35900662501808256,
-          "operations_per_second": 1114.1855668536832,
-          "p50_ms": 6.6532495,
-          "p95_ms": 8.501874,
-          "min_ms": 0.510582,
-          "max_ms": 11.684959,
+          "elapsed_s": 0.3545747089665383,
+          "operations_per_second": 1128.1120448941792,
+          "p50_ms": 6.6781665,
+          "p95_ms": 8.849292,
+          "min_ms": 1.175459,
+          "max_ms": 11.866125,
           "lock_samples": 24,
           "samples_with_waiters": 0,
           "max_waiters": 0,
@@ -9887,16 +9887,16 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 1.1785575000103563,
-          "operations_per_second": 339.3979504576443,
-          "p50_ms": 17.127479,
-          "p95_ms": 51.770292,
-          "min_ms": 2.01075,
-          "max_ms": 105.186375,
-          "lock_samples": 96,
-          "samples_with_waiters": 93,
+          "elapsed_s": 1.0662187499692664,
+          "operations_per_second": 375.15753686711093,
+          "p50_ms": 15.034771,
+          "p95_ms": 49.500292,
+          "min_ms": 1.470583,
+          "max_ms": 91.430166,
+          "lock_samples": 79,
+          "samples_with_waiters": 79,
           "max_waiters": 7,
-          "sampled_waiter_ms": 5950
+          "sampled_waiter_ms": 4790
         },
         {
           "repeat": 3,
@@ -9904,13 +9904,13 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 0.3385469999630004,
-          "operations_per_second": 1181.519848185675,
-          "p50_ms": 6.142729500000001,
-          "p95_ms": 7.6905,
-          "min_ms": 1.487334,
-          "max_ms": 9.357292000000001,
-          "lock_samples": 24,
+          "elapsed_s": 0.3700153750833124,
+          "operations_per_second": 1081.0361594026635,
+          "p50_ms": 6.8646655,
+          "p95_ms": 9.605584,
+          "min_ms": 0.728167,
+          "max_ms": 11.899917,
+          "lock_samples": 25,
           "samples_with_waiters": 0,
           "max_waiters": 0,
           "sampled_waiter_ms": 0
@@ -9921,16 +9921,16 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 1.2105471660615876,
-          "operations_per_second": 330.4290912524838,
-          "p50_ms": 17.269396,
-          "p95_ms": 51.302375,
-          "min_ms": 3.130917,
-          "max_ms": 128.02725,
-          "lock_samples": 102,
-          "samples_with_waiters": 98,
+          "elapsed_s": 1.0638310000067577,
+          "operations_per_second": 375.99957135810024,
+          "p50_ms": 16.238958,
+          "p95_ms": 43.126916,
+          "min_ms": 2.269584,
+          "max_ms": 79.029542,
+          "lock_samples": 77,
+          "samples_with_waiters": 75,
           "max_waiters": 7,
-          "sampled_waiter_ms": 6370
+          "sampled_waiter_ms": 5000
         },
         {
           "repeat": 4,
@@ -9938,13 +9938,13 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 0.4282295840093866,
-          "operations_per_second": 934.0783891082878,
-          "p50_ms": 7.5973334999999995,
-          "p95_ms": 9.719999,
-          "min_ms": 1.063707,
-          "max_ms": 12.245874,
-          "lock_samples": 32,
+          "elapsed_s": 0.3727082080440596,
+          "operations_per_second": 1073.22562628595,
+          "p50_ms": 6.9452505,
+          "p95_ms": 9.688792,
+          "min_ms": 0.855167,
+          "max_ms": 12.580416,
+          "lock_samples": 25,
           "samples_with_waiters": 0,
           "max_waiters": 0,
           "sampled_waiter_ms": 0
@@ -9955,16 +9955,16 @@
           "writers": 8,
           "operations": 400,
           "errors": 0,
-          "elapsed_s": 1.2213967080460861,
-          "operations_per_second": 327.4939234443287,
-          "p50_ms": 19.4294375,
-          "p95_ms": 56.23525,
-          "min_ms": 3.116417,
-          "max_ms": 118.916166,
-          "lock_samples": 102,
-          "samples_with_waiters": 99,
+          "elapsed_s": 1.0523456659866497,
+          "operations_per_second": 380.1032426213028,
+          "p50_ms": 16.0905625,
+          "p95_ms": 42.531666,
+          "min_ms": 4.216625,
+          "max_ms": 89.289417,
+          "lock_samples": 79,
+          "samples_with_waiters": 79,
           "max_waiters": 7,
-          "sampled_waiter_ms": 6450
+          "sampled_waiter_ms": 5260
         }
       ]
     }
@@ -10026,13 +10026,13 @@
       "backfill_statements": 48,
       "backfill_passes": 48,
       "registry_passes": 0,
-      "backfill_s": 6.088175458018668,
-      "total_s": 6.259535999968648,
-      "cutover_attempt_and_lock_ms": 157.00849995482713,
-      "cdc_rows_replayed": 7548,
-      "writer_cycles": 635,
+      "backfill_s": 2.739437291980721,
+      "total_s": 2.811862792004831,
+      "cutover_attempt_and_lock_ms": 68.36883304640651,
+      "cdc_rows_replayed": 3888,
+      "writer_cycles": 331,
       "writer_errors": [],
-      "writer_max_cycle_ms": 160.6300410348922,
+      "writer_max_cycle_ms": 71.23691600281745,
       "source_edges": 315608,
       "edge_sha256": "6f01bdcb0432f7466bdab62731e37b2cccb413c375ce2ff3949619b19f4b7521",
       "matched": true,
@@ -10046,13 +10046,13 @@
       "backfill_statements": 39,
       "backfill_passes": 75,
       "registry_passes": 37,
-      "backfill_s": 6.275945750065148,
-      "total_s": 6.422156541026197,
-      "cutover_attempt_and_lock_ms": 132.45220808312297,
-      "cdc_rows_replayed": 7320,
-      "writer_cycles": 615,
+      "backfill_s": 3.382500415900722,
+      "total_s": 3.46337741590105,
+      "cutover_attempt_and_lock_ms": 76.1173750506714,
+      "cdc_rows_replayed": 4392,
+      "writer_cycles": 372,
       "writer_errors": [],
-      "writer_max_cycle_ms": 140.26487502269447,
+      "writer_max_cycle_ms": 79.8062919639051,
       "source_edges": 315608,
       "edge_sha256": "6f01bdcb0432f7466bdab62731e37b2cccb413c375ce2ff3949619b19f4b7521",
       "matched": true,
@@ -10074,8 +10074,8 @@
           "Total Cost": 598.17,
           "Plan Rows": 1,
           "Plan Width": 10,
-          "Actual Startup Time": 0.007,
-          "Actual Total Time": 0.633,
+          "Actual Startup Time": 0.006,
+          "Actual Total Time": 0.635,
           "Actual Rows": 2.0,
           "Actual Loops": 1,
           "Disabled": false,
@@ -10107,8 +10107,8 @@
               "Total Cost": 598.16,
               "Plan Rows": 1,
               "Plan Width": 10,
-              "Actual Startup Time": 0.006,
-              "Actual Total Time": 0.631,
+              "Actual Startup Time": 0.005,
+              "Actual Total Time": 0.633,
               "Actual Rows": 2.0,
               "Actual Loops": 1,
               "Disabled": false,
@@ -10151,9 +10151,9 @@
           "Temp I/O Read Time": 0.0,
           "Temp I/O Write Time": 0.0
         },
-        "Planning Time": 0.099,
+        "Planning Time": 0.107,
         "Triggers": [],
-        "Execution Time": 0.648
+        "Execution Time": 0.649
       }
     ],
     "after": [
@@ -10166,23 +10166,23 @@
           "Total Cost": 8.31,
           "Plan Rows": 1,
           "Plan Width": 10,
-          "Actual Startup Time": 0.047,
-          "Actual Total Time": 0.048,
+          "Actual Startup Time": 0.012,
+          "Actual Total Time": 0.013,
           "Actual Rows": 2.0,
           "Actual Loops": 1,
           "Disabled": false,
           "Shared Hit Blocks": 4,
           "Shared Read Blocks": 2,
           "Shared Dirtied Blocks": 0,
-          "Shared Written Blocks": 1,
+          "Shared Written Blocks": 0,
           "Local Hit Blocks": 0,
           "Local Read Blocks": 0,
           "Local Dirtied Blocks": 0,
           "Local Written Blocks": 0,
           "Temp Read Blocks": 0,
           "Temp Written Blocks": 0,
-          "Shared I/O Read Time": 0.012,
-          "Shared I/O Write Time": 0.027,
+          "Shared I/O Read Time": 0.008,
+          "Shared I/O Write Time": 0.0,
           "Local I/O Read Time": 0.0,
           "Local I/O Write Time": 0.0,
           "Temp I/O Read Time": 0.0,
@@ -10201,8 +10201,8 @@
               "Total Cost": 8.3,
               "Plan Rows": 1,
               "Plan Width": 10,
-              "Actual Startup Time": 0.046,
-              "Actual Total Time": 0.047,
+              "Actual Startup Time": 0.011,
+              "Actual Total Time": 0.012,
               "Actual Rows": 2.0,
               "Actual Loops": 1,
               "Disabled": false,
@@ -10212,15 +10212,15 @@
               "Shared Hit Blocks": 2,
               "Shared Read Blocks": 2,
               "Shared Dirtied Blocks": 0,
-              "Shared Written Blocks": 1,
+              "Shared Written Blocks": 0,
               "Local Hit Blocks": 0,
               "Local Read Blocks": 0,
               "Local Dirtied Blocks": 0,
               "Local Written Blocks": 0,
               "Temp Read Blocks": 0,
               "Temp Written Blocks": 0,
-              "Shared I/O Read Time": 0.012,
-              "Shared I/O Write Time": 0.027,
+              "Shared I/O Read Time": 0.008,
+              "Shared I/O Write Time": 0.0,
               "Local I/O Read Time": 0.0,
               "Local I/O Write Time": 0.0,
               "Temp I/O Read Time": 0.0,
@@ -10232,32 +10232,32 @@
           "Shared Hit Blocks": 5,
           "Shared Read Blocks": 1,
           "Shared Dirtied Blocks": 0,
-          "Shared Written Blocks": 1,
+          "Shared Written Blocks": 0,
           "Local Hit Blocks": 0,
           "Local Read Blocks": 0,
           "Local Dirtied Blocks": 0,
           "Local Written Blocks": 0,
           "Temp Read Blocks": 0,
           "Temp Written Blocks": 0,
-          "Shared I/O Read Time": 0.002,
-          "Shared I/O Write Time": 0.008,
+          "Shared I/O Read Time": 0.004,
+          "Shared I/O Write Time": 0.0,
           "Local I/O Read Time": 0.0,
           "Local I/O Write Time": 0.0,
           "Temp I/O Read Time": 0.0,
           "Temp I/O Write Time": 0.0
         },
-        "Planning Time": 0.053,
+        "Planning Time": 0.045,
         "Triggers": [],
-        "Execution Time": 0.054
+        "Execution Time": 0.02
       }
     ]
   },
   "cluster_stopped": true,
-  "verdict": "A enforces links to domain rows and rejects cross-kind UUID mixups. B accepts registry-only targets and domain deletion behind live edges. C accepts orphan targets and cross-kind UUID mixups. B's measured context p50 is 0.259 ms versus A's 0.384 ms; p95 is 2.372 versus 2.982 ms. The default is conditional on requiring domain-row existence for every database writer.",
+  "verdict": "A enforces links to domain rows and rejects cross-kind UUID mixups. B accepts registry-only targets and domain deletion behind live edges. C accepts orphan targets and cross-kind UUID mixups. B's measured context p50 is 0.134 ms versus A's 0.205 ms; p95 is 1.589 versus 1.964 ms. The default is conditional on requiring domain-row existence for every database writer.",
   "index_tuning": {
     "nullable_fk_indexes_added": 70,
     "old_A_delete_transactions_per_second": 186.12248249683233,
-    "new_A_delete_transactions_per_second": 5078.650263371185,
+    "new_A_delete_transactions_per_second": 5112.701843077887,
     "old_run_file": "untuned-results.json",
     "old_run_superseded": true
   }

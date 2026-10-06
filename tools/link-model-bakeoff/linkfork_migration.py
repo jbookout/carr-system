@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from bench import digest, write_cycle
-from model import FAMILIES, KINDS, domain_ddl, edge_ddl, edge_columns, edge_table
+from model import FAMILIES, KINDS, domain_ddl, edge_ddl, edge_columns, edge_table, source_fk_actions
 
 
 def plan(s, design):
@@ -44,8 +44,13 @@ def apply_branches(s, design):
     for kind in KINDS:
         registry_insert = f"INSERT INTO {s}.entity(id,kind) VALUES ((r.row_data->>'id')::uuid,'{kind}') ON CONFLICT DO NOTHING;" if design == 'B' else ''
         registry_delete = f"DELETE FROM {s}.entity WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);" if design == 'B' else ''
+        cascade_delete = '\n'.join(
+            f"DELETE FROM {s}.edge WHERE family='{f.name}' AND src_kind='{kind}' AND src_id=(r.row_data->>'id')::uuid;"
+            for f in FAMILIES if design == 'B' and f.source == kind and source_fk_actions().get(f.name) == 'CASCADE')
+        if cascade_delete:
+            cascade_delete = f"IF r.operation='DELETE' THEN {cascade_delete} END IF;\n "
         branches.append(f'''WHEN 'd_{kind}' THEN
- IF r.operation='DELETE' OR r.old_id IS DISTINCT FROM (r.row_data->>'id')::uuid AND r.old_id IS NOT NULL THEN
+ {cascade_delete}IF r.operation='DELETE' OR r.old_id IS DISTINCT FROM (r.row_data->>'id')::uuid AND r.old_id IS NOT NULL THEN
   DELETE FROM {s}.d_{kind} WHERE id=coalesce(r.old_id,(r.row_data->>'id')::uuid);
   {registry_delete}
  END IF;
