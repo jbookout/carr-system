@@ -557,7 +557,10 @@ def main() -> int:
                 and argv[0] == "/bin/bash" and argv[5] == "/bin/launchctl"
                 and argv[4] == str(os.getpgrp()) and argv[7] == fleet_label
                 and argv[8] == str(staged) and argv[9] == str(fleet_dest)
-                and argv[-1] == _sha(old_fleet)
+                and argv[12] == _sha(old_fleet)
+                and argv[13] == sys.executable
+                and argv[14] == str(REPO / "lib/launchd_hold.py")
+                and argv[15] == mod.launchd_repo_path(fleet_dest.name)
                 and "self-reload deferred" in changed_out.getvalue(),
                 (changed, calls, spawned, changed_out.getvalue()),
             ))

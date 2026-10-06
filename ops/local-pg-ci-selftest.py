@@ -177,6 +177,8 @@ check(
 )
 check("true pre-0450 fingerprint is captured", events[8][-1] == "--fingerprint-only")
 check("migration class runs through canonical CI", events[9][-2:] == ("--only", "migration"))
+check("migration gates discover the selected PostgreSQL binaries in the scrubbed child",
+      child_envs[9]["PATH"].split(os.pathsep)[0] == "/fake")
 check(
     "contract probes read initialized reference while migration retains an empty target",
     child_envs[9].get("CARR_CAPTURE_DATABASE_URL")

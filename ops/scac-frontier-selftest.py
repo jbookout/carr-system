@@ -19,9 +19,9 @@ class GeneratedFrontier(unittest.TestCase):
         subprocess.run(['git', 'clone', '-q', '--shared', str(ROOT), str(self.repo)],
                        env=fixture_env(), check=True, capture_output=True)
         shutil.copyfile(ROOT / 'ops/scac-mutation-inventory.mjs', self.repo / 'ops/scac-mutation-inventory.mjs')
+        shutil.copyfile(ROOT / 'ops/config/scac-registry-chain.json', self.repo / 'ops/config/scac-registry-chain.json')
         self.path = self.repo / 'ops/config/scac-registry-source-inventory-fixtures.v1.json'
         shutil.copyfile(ROOT / 'ops/config/scac-registry-source-inventory-fixtures.v1.json', self.path)
-        shutil.copyfile(ROOT / 'ops/config/scac-registry-chain.json', self.repo / 'ops/config/scac-registry-chain.json')
         self.fixture = json.loads(self.path.read_text())
         previous = self.fixture['patches'][-1]
         self.number = int(previous['version'][1:]) + 1

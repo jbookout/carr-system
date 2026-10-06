@@ -1353,7 +1353,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   // DEFINITION-ONLY BY THIS PREDICATE and must not be pinned as if it were:
   // isDefinitionOnlyLaunchd asks whether the plist carries any trigger at all,
   // and the canary carries a real hourly StartInterval. What KEPT it uninstalled
-  // until 2026-09-12 was ops/config-as-code.py's DEFINITION_ONLY list, which is
+  // until 2026-09-12 was the DEFINITION_ONLY list now in lib/launchd_hold.py, which is
   // a different mechanism in a different file, so that is where this asserts it.
   for (const label of ["com.carr.canonical-fast-forward", "com.carr.canonical-dirty-watchdog",
     "com.carr.gate-zero-canary"]) {
@@ -1363,11 +1363,11 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     assert.ok(Object.keys(row.trigger_contract || {}).length > 0 ||
       row.trigger_contract_digest, label);
   }
-  const configAsCode = readRegistryArtifact(
-    new URL("../../ops/config-as-code.py", import.meta.url), "utf8");
-  const definitionOnlyBlock = configAsCode.slice(
-    configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
-    configAsCode.indexOf("\n}\n", configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {")));
+  const launchdHold = readRegistryArtifact(
+    new URL("../../lib/launchd_hold.py", import.meta.url), "utf8");
+  const definitionOnlyBlock = launchdHold.slice(
+    launchdHold.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
+    launchdHold.indexOf("\n}\n", launchdHold.indexOf("DEFINITION_ONLY: dict[str, str] = {")));
   // THE CANARY'S SCHEDULE IS STARTED, so this clause is the mirror of what it
   // was until 2026-09-12: the plist must NOT be a key of DEFINITION_ONLY any
   // more. Joe's blanket approval (decision idempotency

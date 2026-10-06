@@ -7159,6 +7159,17 @@ export const TOOLS = {
           hint: "the loop importer has not run for this kind — nothing to render into" });
       const block = b.rows[0];
 
+      // Monitor incident identity is shared across principals; envelope replay is not.
+      if (args.kind === "open_loop" && args.domain === "system" &&
+          args.source_note === "uptime-monitor:availability:v1") {
+        await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [args.source_note]);
+        const incident = await c.query(
+          "select id, number from loop_item where source_note=$1 and kind='open_loop' and domain='system' and status='open' for update",
+          [args.source_note]);
+        if (incident.rows.length) return { ok: true, loop_id: incident.rows[0].id,
+          number: incident.rows[0].number, kind: args.kind, deduplicated: true };
+      }
+
       const num = args.number || await nextLoopNumber(c, args.kind);
       const seq = await nextRenderSeq(c, block.id);
       const tier = (args.kind === "open_loop" || args.kind === "idea") ? "personal" : "shared";

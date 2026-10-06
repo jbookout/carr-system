@@ -54,7 +54,7 @@
     "worktree_scope.py": "b87c5657bfe748d97064a4ef1db4a76b6853c3c38420e3949a11519529825ebb",
     "write-effect-check.py": "049030d8afaaaad8cbbf56f8a4747b607741449e21a5d56556d04668fa7b753e",
     "canonical-edit-gate.py": "be13c69a727b7b51a6921862afee0e5d3d074483151d819a39c36c1348067b1c",
-    "jev-supervisor.py": "22c947a85879ac6e69296469e08dbb00bc3ed37e45b04ec31a5b89f6953c6e11",
+    "jev-supervisor.py": "bdc11dd28598d674797a0dbf09ef244154b0cedb2799596cf985fe7b8ed12f46",
     "rule-boot-gate.py": "a2cbda4604f7429e3278fae4badce0d33b5e57faa6ae5740ae8247d9f47a5643",
     "session-presence-hook.py": "b2aff9f6b98f611b9e8fc912d0b86ab0e20ed1d6e4905f4a3e8afff3325de268",
     "grok_invocation.py": "adab6dd463dec9fd7ec0cf9703a73364010b18a6477c11edf3e7473f3699d335",
