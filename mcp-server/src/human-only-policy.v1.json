@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "classes": {
+    "credential": "\\b(credentials?|log ?ins?|sign(?:ed)?[- ]?(?:in|out)|authenticat\\w*|oauth|tokens? expired|api keys?|passwords?|face ?id|touch ?id|biometric\\w*|2fa|mfa|keychain|secrets?)\\b|credential-health probe",
+    "money": "\\b(spend|pay|paid|payment|invoices?|budget|purchase|fees?|commission|pricing|subscription|subscribe|renews?|renewal|billing|credits)\\b|[$\u00a3\u20ac]\\s?\\d|\\b\\d+\\s?(usd|dollars?)\\b|\\b(per|a)\\s(month|year|seat|user)\\b",
+    "outbound": "\\b(client|prospect|landlord|listing agent|tenant|vendor|broker|doctor|practice owner|LOI|letter of intent|PSA|lease|proposal|counter|RFP|send|email|publish|post|tweet|linkedin|facebook|instagram)\\b",
+    "irreversible": "\\b(delete|destroy|drop table|force[- ]push|revoke|irreversible)\\b"
+  }
+}

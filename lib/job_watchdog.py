@@ -769,7 +769,7 @@ class Effects:
             episode_key = f["key"] + (":" + f["first_seen"] if f["kind"] == "scheduled_job_drift" else "")
             digest_key = hashlib.sha256(episode_key.encode()).hexdigest()
             payload = {"idempotency_key": "job-watchdog:" + digest_key,
-                       "kind": "open_loop", "owner": "orchestrator", "domain": "system",
+                       "kind": "open_loop", "owner": "claude", "domain": "system",
                        "body": f["reason"] + "\nNext action: " + f["next_action"],
                        "source_note": "job watchdog: " + f["subject"],
                        "marker": "decision" if f.get("needs_joe") and f["needs_joe"] != "credentials" else "none",
@@ -791,8 +791,8 @@ class Effects:
         if f["kind"] == "scheduled_job_drift" and f.get("loop_id"):
             result = command([str(SOURCE / "run.sh"), "call", "read-loop",
                               json.dumps({"loop_id": f["loop_id"]})], self.config)
-            current = json.loads(result[result.find("{"):])
-            if current.get("loop_id") != f["loop_id"] or not isinstance(current.get("version"), int):
+            current = json.loads(result[result.find("{"):]).get("loop", {})
+            if current.get("loop_id") != f["loop_id"] or type(current.get("version")) is not int or current["version"] < 1:
                 raise RuntimeError("scheduled-job loop readback failed")
             if current["status"] == "open":
                 payload = {"loop_id": f["loop_id"], "base_version": current["version"],

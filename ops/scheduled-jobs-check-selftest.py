@@ -46,6 +46,37 @@ class ReportTests(unittest.TestCase):
                      "fix:", "verify:", "auto-clear:", "job-watchdog.py scan"):
             self.assertIn(text, line)
 
+    def test_duration_monitor_is_declared_and_missing_installation_is_detected(self):
+        import plistlib
+        manifest = json.loads((ROOT / "ops/config/scheduled-jobs.v1.json").read_text())
+        job = next((j for j in manifest["jobs"] if j["label"] == "com.carr.build-duration-check"), None)
+        self.assertIsNotNone(job)
+        plist = plistlib.loads((ROOT / "ops/launchd/com.carr.build-duration-check.plist").read_bytes().replace(b"{{REPO}}", str(Path.home() / "carr-system").encode()))
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot.update(machine_role="primary", plists={job["label"]: plist},
+                        launchctl_list=f"-\t0\t{job['label']}\n", launchctl_disabled="",
+                        launchctl_print={}, log_mtimes={jobs.expand(job["activity_path"]): 990})
+        self.assertEqual(jobs.report({**manifest, "jobs": [job]}, snapshot, 1000), [])
+        snapshot["plists"] = {}
+        snapshot["launchctl_list"] = ""
+        self.assertIn("missing_job", [r["code"] for r in jobs.report({**manifest, "jobs": [job]}, snapshot, 1000)])
+
+    def test_shared_scheduler_activity_cannot_refresh_job_specific_completion(self):
+        manifest = json.loads((ROOT / "ops/config/scheduled-jobs.v1.json").read_text())
+        for label in ("com.carr.rules-refresh", "com.carr.local-briefs", "com.carr.videopipeline"):
+            with self.subTest(label=label):
+                job = copy.deepcopy(next(j for j in manifest["jobs"] if j["label"] == label))
+                # Use the declared cadence and activity source with a known matching job fixture.
+                job.update(label="com.carr.test", program_path=self.manifest["jobs"][0]["program_path"],
+                           required_checkout="/machine/carr-system", interval={"StartInterval": 120},
+                           expected_enabled=True, expected_installed=True)
+                snapshot = copy.deepcopy(self.snapshot)
+                snapshot["log_mtimes"][jobs.expand(job["log_path"])] = 999
+                rows = jobs.report({"jobs": [job]}, snapshot, 1000)
+                self.assertIn("stale_log", [r["code"] for r in rows])
+                snapshot["log_mtimes"][jobs.expand(job["activity_path"])] = 999
+                self.assertNotIn("stale_log", [r["code"] for r in jobs.report({"jobs": [job]}, snapshot, 1000)])
+
     def test_working_directory_in_a_nested_worktree_or_symlinked_clone_is_drift(self):
         for actual in ("/machine/carr-system/.claude/worktrees/other", "/tmp/other-clone"):
             with self.subTest(actual=actual):
@@ -214,7 +245,7 @@ class ReportTests(unittest.TestCase):
                "subject": "canonical", "reason": "behind", "next_action": "repair fleet-sync",
                "owner": "orchestrator", "needs_joe": None, "first_seen": "episode-one"}
         responses = [json.dumps({"ok": True, "loop_id": "fixture-loop"}),
-                     json.dumps({"loop_id": "fixture-loop", "status": "open", "version": 4}),
+                     json.dumps({"loop": {"loop_id": "fixture-loop", "status": "open", "version": 4}, "amended": False, "amendments": []}),
                      json.dumps({"ok": True, "status": "done"}),
                      json.dumps({"ok": True, "loop_id": "fixture-loop-two"})]
         with tempfile.TemporaryDirectory() as raw:

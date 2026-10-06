@@ -169,26 +169,27 @@ def spool_receipt(verb: str, args: dict, failure: dict, *,
             "spooled_at": datetime.now(timezone.utc).isoformat()}
     body["hmac_sha256"] = _signature(body)
     encoded = canonical(body) + b"\n"
-    files = spooled()
-    total = sum(path.stat().st_size for path in files)
-    while files and (len(files) >= max_files or total + len(encoded) > max_bytes):
-        oldest = files.pop(0)
-        total -= oldest.stat().st_size
-        _move_to_archive(oldest, "overflow", "spool_cap_reached")
-    fd, temp_name = tempfile.mkstemp(prefix=".receipt-", dir=directory)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, directory / f"{time.time_ns()}-{secrets.token_hex(4)}.json")
-    finally:
+    with _drain_lock(blocking=True):
+        files = spooled()
+        total = sum(path.stat().st_size for path in files)
+        while files and (len(files) >= max_files or total + len(encoded) > max_bytes):
+            oldest = files.pop(0)
+            total -= oldest.stat().st_size
+            _move_to_archive(oldest, "overflow", "spool_cap_reached")
+        fd, temp_name = tempfile.mkstemp(prefix=".receipt-", dir=directory)
         try:
-            os.close(fd)
-        except OSError:
-            pass
-        pathlib.Path(temp_name).unlink(missing_ok=True)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, directory / f"{time.time_ns()}-{secrets.token_hex(4)}.json")
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            pathlib.Path(temp_name).unlink(missing_ok=True)
 
 
 def _not_replayable(body: dict | None) -> str | None:
@@ -206,12 +207,12 @@ def _not_replayable(body: dict | None) -> str | None:
 
 
 @contextmanager
-def _drain_lock():
+def _drain_lock(*, blocking=False):
     lock = spool_dir().with_suffix(".drain.lock")
     lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock.open("a+") as handle:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         except BlockingIOError:
             yield False
             return
@@ -299,6 +300,14 @@ def run_verb(name: str, payload: dict) -> dict:
     result = subprocess.run([str(REPO / "run.sh"), "call", name, json.dumps(payload)], cwd=REPO,
                             env=env, capture_output=True, text=True, timeout=35, check=False)
     if result.returncode:
+        start = result.stderr.find("{")
+        if start >= 0:
+            try:
+                refusal = json.loads(result.stderr[start:])
+            except ValueError:
+                refusal = None
+            if isinstance(refusal, dict) and refusal.get("error") == "version_conflict":
+                return refusal
         raise RuntimeError(f"{name} returned {result.returncode}")
     start = result.stdout.find("{")
     if start < 0:
@@ -309,28 +318,9 @@ def run_verb(name: str, payload: dict) -> dict:
     return answer
 
 
-def _loop_key(action: str, day: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"carr-claude-continuity-spool:{action}:{day}"))
-
-
-def _state(path: pathlib.Path) -> dict:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_state(path: pathlib.Path, state: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
-    os.replace(temp, path)
-
-
 def _loop_version(run_verb, loop_id: str) -> int:
     current = run_verb("read-loop", {"loop_id": loop_id})
-    current = current.get("loop", current)
+    current = current.get("loop", {})
     if current.get("loop_id") != loop_id or type(current.get("version")) is not int:
         raise RuntimeError("read-loop returned no matching version")
     return current["version"]
@@ -347,12 +337,21 @@ def health_row(*, run_verb, state_path: pathlib.Path, now: datetime, drained: di
                f"archived {drained['archived']}")
     line = (f"{'WARN' if breach else 'OK'} claude continuity spool — {count} unsent, {oldest} "
             f"(warn at {WARN_COUNT} or {WARN_AGE_HOURS}h){ran} · {ACTION}")
-    day = now.astimezone(timezone.utc).date().isoformat()
     try:
-        state = _state(state_path)
-        if breach and not state.get("loop_id"):
-            answer = run_verb("add-loop", {
-                "idempotency_key": _loop_key("add", day),
+        from lib.incident_state import locked_state
+        with locked_state(state_path) as store:
+            _reconcile_health_loop(store, run_verb, breach, count, oldest)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        line += f" · loop action FAILED ({type(exc).__name__})"
+    return line
+
+
+def _reconcile_health_loop(store, run_verb, breach, count, oldest):
+    state = store.data
+    if not state.get("loop_id") and (breach or state.get("open_args")):
+        if not state.get("open_args"):
+            state["open_args"] = {
+                "idempotency_key": str(uuid.uuid4()),
                 "kind": "open_loop", "domain": "system", "owner": "claude", "marker": "none",
                 "body": (f"Claude continuity receipts are not reaching the record layer: {count} unsent "
                          f"in ~/.config/carr/claude-continuity-spool, {oldest}. Read each spooled "
@@ -362,18 +361,26 @@ def health_row(*, run_verb, state_path: pathlib.Path, now: datetime, drained: di
                          f"and confirm fewer than {WARN_COUNT} unsent, none older than {WARN_AGE_HOURS}h."),
                 "blocker": "capability",
                 "blocker_detail": "the Worker refusing or not answering claude-record-event "
-                                  "from the claude-continuity token",
-            })
-            if not answer.get("loop_id"):
-                raise RuntimeError("add-loop returned no loop_id")
-            _save_state(state_path, {"loop_id": answer["loop_id"], "day": day})
-        elif not breach and state.get("loop_id"):
-            run_verb("close-loop", {
-                "idempotency_key": _loop_key("clear", day), "loop_id": state["loop_id"],
+                                  "from the claude-continuity token"}
+            store.save()
+        answer = run_verb("add-loop", dict(state["open_args"]))
+        if answer.get("ok") is not True or not answer.get("loop_id"):
+            raise RuntimeError("add-loop returned no loop_id")
+        state["loop_id"] = answer["loop_id"]
+        state.pop("open_args")
+        store.save()
+    if state.get("loop_id") and (not breach or state.get("close_args")):
+        if not state.get("close_args"):
+            state["close_args"] = {
+                "idempotency_key": str(uuid.uuid4()), "loop_id": state["loop_id"],
                 "resolution": "done", "base_version": _loop_version(run_verb, state["loop_id"]),
-                "outcome": f"Auto-cleared: continuity spool holds {count} unsent, {oldest}.",
-            })
-            _save_state(state_path, {})
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        line += f" · loop action FAILED ({type(exc).__name__})"
-    return line
+                "outcome": f"Auto-cleared: continuity spool holds {count} unsent, {oldest}."}
+            store.save()
+        answer = run_verb("close-loop", dict(state["close_args"]))
+        if answer.get("error") == "version_conflict":
+            state.pop("close_args")
+            store.save()
+        if answer.get("ok") is not True:
+            raise RuntimeError("close-loop refused")
+        state.clear()
+        store.save()

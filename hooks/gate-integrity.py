@@ -125,6 +125,7 @@ MODEL_FLOORS = os.path.join(REPO, "ops", "config", "model-floors.json")
 SESSION_CONTEXT_LIFECYCLE = os.path.join(
     REPO, "ops", "config", "session-context-lifecycle.v2.json")
 CONTRACTS = {
+    "human-only-policy.v1.json": os.path.join(REPO, "mcp-server", "src", "human-only-policy.v1.json"),
     "delegation-gate-hook.json": DELEGATION_HOOK_CONFIG,
     "hooks.json": REPO_HOOKS_JSON,
     "codex-hooks.json": CODEX_HOOKS_REPO,
@@ -815,15 +816,16 @@ def main():
             content(f"UNBLESSED: hooks/{name} exists but is not in the baseline")
     for name, want in base_contracts.items():
         got = now_contracts.get(name)
+        contract_path = os.path.relpath(CONTRACTS[name], REPO) if name in CONTRACTS else f"ops/config/{name}"
         if got is None:
-            content(f"MISSING: ops/config/{name} is GONE — its wiring contract is off")
+            content(f"MISSING: {contract_path} is GONE — its wiring contract is off")
         elif not isinstance(want, str) or not re.fullmatch(r"[0-9a-f]{64}", want):
-            content(f"INVALID: ops/config/{name} has no valid SHA-256 baseline")
+            content(f"INVALID: {contract_path} has no valid SHA-256 baseline")
         elif got != want:
-            content(f"CHANGED: ops/config/{name} no longer matches the blessed baseline")
+            content(f"CHANGED: {contract_path} no longer matches the blessed baseline")
     for name, got in now_contracts.items():
         if name not in base_contracts and got:
-            content(f"UNBLESSED: ops/config/{name} exists but is not in the baseline")
+            content(f"UNBLESSED: {os.path.relpath(CONTRACTS[name], REPO)} exists but is not in the baseline")
 
     map_valid, map_err = rule_enforcement_map_matches_inventory()
     if not map_valid:

@@ -116,12 +116,32 @@ _DASH_M_RE = re.compile(
 _SHELL_FEED_RE = re.compile(
     r"(?:^|[|;&(]|&&|\|\|)\s*(?:\w+=\S*\s+)*"
     r"(?:(?:sudo|env|exec|nohup|command|time)\s+(?:-\S+\s+)*)*"
-    r"(?:[\w./-]*/)?(?:bash|sh|zsh|dash|ksh|fish|ssh|eval|source)\b")
+    r"(?:[\w./-]*/)?(?:bash|sh|zsh|dash|ksh|fish|ssh|eval|source"
+    r"|python[\d.]*|node|nodejs|ruby|perl|php|deno|bun|osascript)\b")
 
 
 def feeds_shell(line):
-    """True when this heredoc opener line hands its body to a shell."""
+    """True when the command line hands input to a shell or interpreter."""
     return bool(_SHELL_FEED_RE.search(line))
+
+
+def _feeds_shell_pipeline(suffix):
+    try:
+        tokens = shell_tokens(suffix)
+    except ValueError:
+        return True
+    segment = []
+    piped = False
+    for token in tokens + [";"]:
+        if token in SHELL_BOUNDARIES:
+            if piped and feeds_shell(" ".join(segment)):
+                return True
+            if token not in {"|", "|&"}:
+                return False
+            segment, piped = [], True
+        else:
+            segment.append(token)
+    return False
 
 
 def _rewrite_heredocs(cmd, replace_body):
@@ -274,7 +294,7 @@ def _unwrap_quotes(text):
                 out.append(text[i:])     # unterminated: scan the rest raw
                 break
             inner = text[i + 1:end]
-            if _is_data_command(_command_word("".join(out))):
+            if _is_data_command(_command_word("".join(out))) and not _feeds_shell_pipeline(text[end + 1:]):
                 kept = _substitutions(inner) if c == '"' else []
                 out.append(" " + "".join("\n" + k for k in kept) + ("\n_" if kept else ""))
             else:

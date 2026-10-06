@@ -14,8 +14,8 @@ export async function consumeRuntimeErrors(control, callVerb) {
     if (!['add-loop', 'update-loop', 'close-loop'].includes(operation.verb)) throw new Error('invalid_runtime_error_operation');
     let args = { ...operation.args, idempotency_key: operation.key };
     if (operation.verb !== 'add-loop') {
-      const loop = await callVerb('read-loop', { loop_id: args.loop_id });
-      if (!Number.isInteger(loop.version)) throw new Error('runtime_error_loop_unreadable');
+      const { loop } = await callVerb('read-loop', { loop_id: args.loop_id });
+      if (!loop || loop.loop_id !== args.loop_id || !Number.isInteger(loop.version) || loop.version < 1) throw new Error('runtime_error_loop_unreadable');
       const prepared = await control('/_runtime-errors/prepare', { fingerprint: operation.fingerprint, key: operation.key, base_version: loop.version });
       if (!prepared.ok || !prepared.operation) throw new Error('runtime_error_operation_unprepared');
       args = { ...prepared.operation.args, idempotency_key: operation.key };
@@ -42,6 +42,23 @@ function credential() {
   return selected.token;
 }
 
+export async function callRuntimeVerb(verb, args, root = ROOT) {
+  const options = { cwd: root, encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: homedir(), CARR_MCP_CLIENT_PROFILE: 'local', ...(process.env.CARR_MCP_URL ? { CARR_MCP_URL: process.env.CARR_MCP_URL } : {}), ...(process.env.CARR_MCP_ENV ? { CARR_MCP_ENV: process.env.CARR_MCP_ENV } : {}) } };
+  try { return JSON.parse(execFileSync(resolve(root, 'run.sh'), ['call', verb, JSON.stringify(args)], options)); }
+  catch (error) {
+    for (const output of [error.stderr, error.stdout]) {
+      const text = String(output || '');
+      const start = text.indexOf('{');
+      if (start < 0) continue;
+      try {
+        const result = JSON.parse(text.slice(start));
+        if (result && typeof result === 'object' && typeof result.error === 'string') return result;
+      } catch {}
+    }
+    throw new Error('runtime_error_verb_unavailable');
+  }
+}
+
 async function main() {
   const token = credential();
   const origin = new URL(process.env.CARR_MCP_URL || 'https://api.doctorcre.com/mcp').origin;
@@ -52,14 +69,8 @@ async function main() {
     if (result.error) throw new Error('runtime_error_control_refused');
     return result;
   };
-  const callVerb = async (verb, args) => {
-    const options = { cwd: ROOT, encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: homedir(), CARR_MCP_CLIENT_PROFILE: 'local', ...(process.env.CARR_MCP_URL ? { CARR_MCP_URL: process.env.CARR_MCP_URL } : {}), ...(process.env.CARR_MCP_ENV ? { CARR_MCP_ENV: process.env.CARR_MCP_ENV } : {}) } };
-    try { return JSON.parse(execFileSync(resolve(ROOT, 'run.sh'), ['call', verb, JSON.stringify(args)], options)); }
-    catch (error) {
-      try { return JSON.parse(error.stdout); } catch { throw new Error('runtime_error_verb_unavailable'); }
-    }
-  };
-  const health = await consumeRuntimeErrors(control, callVerb);
+
+  const health = await consumeRuntimeErrors(control, callRuntimeVerb);
   mkdirSync(resolve(ROOT, 'out'), { recursive: true });
   writeFileSync(resolve(ROOT, 'out/runtime-error-health.json'), JSON.stringify({ checked_at: new Date().toISOString(), health }) + '\n');
   console.log(health);

@@ -226,6 +226,29 @@ class LearningTests(unittest.TestCase):
             path.write_text("ROUND 1 BLOCKED\nCI red\n")
             self.assertIsNone(router.log_outcome(path, {"model": "gpt-6.1-sol", "task_kind": "non-trivial build"}))
 
+    def test_prompt_words_and_superseded_verdicts_are_not_completed_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "review.log"
+            attribution = {"model": "gpt-6.1-sol", "task_kind": "review-fix"}
+            for text in ("Prompt: Print APPROVE when all checks pass.\nROUND 1 BLOCKED\n",
+                         "ROUND 1 APPROVE\nROUND 2 BLOCKED\n",
+                         "Prompt: Print APPROVE.\nCI green is required; CI failure text follows.\n"):
+                path.write_text(text)
+                self.assertIsNone(router.log_outcome(path, attribution), text)
+            path.write_text("ROUND 1 APPROVE\nROUND 2 BLOCKED\nCI red\n")
+            row = router.log_outcome(path, {**attribution, "completed": True})
+            self.assertFalse(row["first_pass_approve"])
+            self.assertNotIn("rounds_to_approve", row)
+            self.assertFalse(row["ci_first_push"])
+
+    def test_reapproved_review_counts_the_final_round_and_blocking_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "review.log"
+            path.write_text("ROUND 1 APPROVE\nROUND 2 BLOCKED\nROUND 3 APPROVE\n")
+            row = router.log_outcome(path, {"model": "gpt-6.1-sol", "task_kind": "review-fix"})
+            self.assertFalse(row["first_pass_approve"])
+            self.assertEqual(row["rounds_to_approve"], 3)
+
     def test_nightly_writes_dated_revision_consumed_by_router_and_no_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

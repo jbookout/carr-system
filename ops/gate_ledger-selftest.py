@@ -339,6 +339,10 @@ calls: list[tuple[str, dict]] = []
 
 def fake_verb(name, payload):
     calls.append((name, payload))
+    if name == "read-loop":
+        return {"loop": {"loop_id": "L-1", "status": "open", "version": 4}, "amended": False, "amendments": []}
+    if name == "close-loop" and payload.get("base_version") != 4:
+        return {"error": "missing_base_version"}
     return {"ok": True, "loop_id": "L-1"} if name == "add-loop" else {"ok": True}
 
 
@@ -347,7 +351,7 @@ noisy_one = [{"gate": "noisy.py", "blocks": 5, "labelled": 5, "wrong": 3, "fa_ra
               "top_wrong": [("deploy words", 3)]}]
 first = gv.reconcile_loops(noisy_one, fake_verb, state)
 again = gv.reconcile_loops(noisy_one, fake_verb, state)
-check("a newly noisy gate opens one loop owned by the orchestrator",
+check("a newly noisy gate opens one loop owned by the record agent",
       first == {"noisy.py": "opened"} and calls[0][0] == "add-loop"
       and calls[0][1]["owner"] == "claude" and "deploy words" in calls[0][1]["body"], (first, calls))
 check("a gate still noisy keeps its loop without a second one",
@@ -356,6 +360,67 @@ cleared = gv.reconcile_loops([], fake_verb, state)
 check("a gate that recovered closes its loop",
       cleared == {"noisy.py": "closed"} and calls[-1][0] == "close-loop"
       and calls[-1][1]["loop_id"] == "L-1", (cleared, calls))
+
+
+
+conflict_state = os.path.join(Lab().dir, "conflict.json")
+gv.reconcile_loops(noisy_one, fake_verb, conflict_state)
+close_attempts: list[dict] = []
+def conflict_writer(name, payload):
+    if name == "read-loop":
+        return {"loop": {"loop_id": "L-1", "version": 4 + len(close_attempts), "status": "open"}}
+    close_attempts.append(dict(payload))
+    return {"error": "version_conflict"} if len(close_attempts) == 1 else {"ok": True}
+first_clear = gv.reconcile_loops([], conflict_writer, conflict_state)
+second_clear = gv.reconcile_loops([], conflict_writer, conflict_state)
+check("a close conflict replans with a fresh version and key", first_clear == {"noisy.py": "error"}
+      and second_clear == {"noisy.py": "closed"} and close_attempts[-1].get("base_version") == 5
+      and close_attempts[0]["idempotency_key"] != close_attempts[-1]["idempotency_key"], close_attempts)
+
+from unittest.mock import patch
+import subprocess
+with patch("subprocess.run", return_value=subprocess.CompletedProcess(
+        [], 1, "", 'TOOL ERROR {"error":"version_conflict"}\n')):
+    cli_refusal = gv.call_verb("close-loop", {})
+check("the production CLI adapter preserves conflict errors from stderr",
+      cli_refusal.get("error") == "version_conflict", cli_refusal)
+
+retry_state = os.path.join(Lab().dir, "retry.json")
+retry_calls: list[tuple] = []
+def lost_response(name, payload):
+    retry_calls.append((name, json.loads(json.dumps(payload))))
+    raise TimeoutError("committed then response lost")
+for attempt in range(2):
+    try:
+        gv.reconcile_loops([{**noisy_one[0], "wrong": 3 + attempt}], lost_response, retry_state)
+    except TimeoutError:
+        pass
+check("a lost add response preserves key and exact payload before effects",
+      len(retry_calls) == 2 and retry_calls[0] == retry_calls[1], retry_calls)
+
+bad_state = os.path.join(Lab().dir, "broken.json")
+with open(bad_state, "w") as fh:
+    fh.write('{"partial":')
+corrupt_calls: list[tuple] = []
+def corrupt_writer(*args):
+    corrupt_calls.append(args)
+    return {"ok": True}
+try:
+    gv.reconcile_loops(noisy_one, corrupt_writer, bad_state)
+except (ValueError, RuntimeError):
+    pass
+check("corrupt episode state refuses effects", not corrupt_calls, corrupt_calls)
+
+from concurrent.futures import ThreadPoolExecutor
+race_state = os.path.join(Lab().dir, "race.json")
+race_calls: list[tuple] = []
+def slow_writer(name, payload):
+    race_calls.append((name, payload))
+    time.sleep(0.02)
+    return {"ok": True, "loop_id": "L-race"}
+with ThreadPoolExecutor(max_workers=2) as pool:
+    list(pool.map(lambda _: gv.reconcile_loops(noisy_one, slow_writer, race_state), range(2)))
+check("concurrent health writers open one incident", len(race_calls) == 1, race_calls)
 
 print(f"\ngate_ledger-selftest: {'FAIL' if FAILS else 'all passed'}"
       + (f" — {len(FAILS)} failed: " + "; ".join(FAILS) if FAILS else ""))

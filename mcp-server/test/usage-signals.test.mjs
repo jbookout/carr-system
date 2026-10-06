@@ -44,13 +44,13 @@ test('weekly summary separates partners, paginates, records last use and avoids 
   let releaseStartedAt = new Date(now - 9 * 86400000).toISOString();
   const get = () => usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}&release_started_at=${releaseStartedAt}`), env, session, { now: () => now }, guard);
   let body = await (await get()).json();
-  assert.equal(body.coverage, 'since_release');
+  assert.equal(body.coverage, 'unknown');
   assert.deepEqual(body.features.find(row => row.id === 'home:view').uses, { joe: 1, dell: 1 });
   const deals = body.features.find(row => row.id === 'deals:view');
   assert.deepEqual(deals.uses, { joe: 0, dell: 0 });
   assert.equal(deals.last_used.joe, '2026-09-27T12:00:00.000Z');
   assert.equal(deals.never_used.joe, false);
-  assert.equal(deals.never_used.dell, true);
+  assert.equal(deals.never_used.dell, null);
   releaseStartedAt = new Date(now - 181 * 86400000).toISOString();
   body = await (await get()).json();
   assert.equal(body.coverage, 'retained_window');
@@ -61,7 +61,7 @@ test('server off switch suppresses storage and guard refusals stay refusals', as
   const env = { OAUTH_KV: new Kv(), DOCTORCRE_USAGE_CAPTURE_ENABLED: 'false' };
   const response = await usageResponse(post(event()), env, session, { now: () => now }, guard);
   assert.deepEqual(await response.json(), { captured: false });
-  assert.deepEqual(env.OAUTH_KV.writes, []);
+  assert.deepEqual(env.OAUTH_KV.writes.filter(write => write.key.includes(':event:')), []);
   const refused = await usageResponse(post(event()), env, session, { now: () => now }, async () => ({ error: new Response('', { status: 403 }) }));
   assert.equal(refused.status, 403);
 });
@@ -81,6 +81,26 @@ test('missing release provenance leaves never-used history unknown', async () =>
   assert.equal(body.features[0].never_used.joe, null);
 });
 
+test('disabled capture, late activation and outages leave release observation unknown', async () => {
+  const env = { OAUTH_KV: new Kv(), DOCTORCRE_USAGE_CAPTURE_ENABLED: 'false' };
+  const started = new Date(now - 12 * 3600000).toISOString();
+  let clock = now;
+  const get = async () => (await usageResponse(new Request(`${origin}/api/v1/usage-signals?release_sha=${sha}&release_started_at=${started}`), env, session, { now: () => clock }, guard)).json();
+  let body = await get();
+  assert.equal(body.coverage, 'unknown');
+  assert.equal(body.features[0].never_used.joe, null);
+  env.DOCTORCRE_USAGE_CAPTURE_ENABLED = 'true';
+  body = await get();
+  assert.equal(body.coverage, 'unknown');
+  assert.equal(body.features[0].never_used.dell, null);
+  const beforeOutage = clock;
+  clock += 24 * 3600000;
+  body = await get();
+  assert.equal(body.coverage, 'unknown');
+  assert.equal(body.features[0].never_used.joe, null);
+  assert.ok(clock > beforeOutage);
+});
+
 test('weekly uses and last use survive app releases while never-used describes the current release', async () => {
   const env = { OAUTH_KV: new Kv() }, previous = now - 86400000;
   await usageResponse(post(event({ release_sha: 'b'.repeat(40), screen: 'deals', timestamp: new Date(previous).toISOString() })), env, session, { now: () => previous }, guard);
@@ -88,5 +108,5 @@ test('weekly uses and last use survive app releases while never-used describes t
   const row = (await response.json()).features.find(row => row.id === 'deals:view');
   assert.deepEqual(row.uses, { joe: 1, dell: 0 });
   assert.equal(row.last_used.joe, '2026-10-04T12:00:00.000Z');
-  assert.equal(row.never_used.joe, true);
+  assert.equal(row.never_used.joe, null);
 });

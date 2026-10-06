@@ -94,7 +94,7 @@ export class RuntimeErrorStore {
         if (!group.pending && ((changed && !group.loop_id) || (changed && spike) || (group.loop_id && quiet))) {
           const verb = quiet && group.loop_id ? 'close-loop' : group.loop_id ? 'update-loop' : 'add-loop';
           const args = verb === 'close-loop' ? { loop_id: group.loop_id, resolution: 'done', outcome: `No recurrence for 24h; newer release ${release.sha} observed after the last error.` }
-            : { ...(group.loop_id ? { loop_id: group.loop_id } : { kind: 'open_loop', owner: 'Orchestrator', domain: 'system', marker: 'none', blocker: 'other_lane', blocker_detail: 'The orchestrator repair lane must reproduce and fix this runtime fingerprint.' }), body: evidence(group) };
+            : { ...(group.loop_id ? { loop_id: group.loop_id } : { kind: 'open_loop', owner: 'claude', domain: 'system', marker: 'none', blocker: 'other_lane', blocker_detail: 'The orchestrator repair lane must reproduce and fix this runtime fingerprint.' }), body: evidence(group) };
           group.pending = { fingerprint: key, key: crypto.randomUUID(), verb, args, count: group.count, window_start: group.window_start, window_count: group.window_count };
         }
         if (!group.cleared) active++;

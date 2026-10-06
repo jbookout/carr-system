@@ -20,9 +20,9 @@
 //   human_only  the filer's own blocker class, when no word above matches
 // Lead-outreach loops (domain 'prospecting') are excluded outright: leads live
 // on the Lead Board and never on a glanceable list (rule 17ffd587).
-// The regexes mirror hooks/conduct_patterns.py PROTECTED and
-// ops/config/job-watchdog.json needs_joe_patterns.credentials.
+// The conduct gates and this list consume human-only-policy.v1.json.
 
+import policy from "./human-only-policy.v1.json" with { type: "json" };
 import { organizationTenantForActor } from "./identity.js";
 
 export const NEEDS_JOE_LOCAL_BOARD = "needs-joe-local";
@@ -30,12 +30,7 @@ const JOE = "joe";
 const LOCAL_STALE_MS = 2 * 60 * 60 * 1000; // the board job runs every 15 minutes
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const CLASSES = [
-  ["credential", /\b(credentials?|log ?ins?|sign(?:ed)?[- ]?(?:in|out)|authenticat\w*|oauth|tokens? expired|api keys?|passwords?|face ?id|touch ?id|biometric\w*|2fa|mfa|keychain|secrets?)\b|credential-health probe/i],
-  ["money", /\b(spend|pay|paid|payment|invoices?|budget|purchase|fees?|commission|pricing|subscription|subscribe|renews?|renewal|billing|credits)\b|[$£€]\s?\d|\b\d+\s?(usd|dollars?)\b/i],
-  ["outbound", /\b(client|prospect|landlord|listing agent|tenant|vendor|broker|doctor|practice owner|LOI|letter of intent|PSA|lease|proposal|RFP|send|email|publish|post|tweet|linkedin|facebook|instagram)\b/i],
-  ["irreversible", /\b(delete|destroy|drop table|force[- ]push|revoke|irreversible)\b/i],
-];
+const CLASSES = Object.entries(policy.classes).map(([name, pattern]) => [name, new RegExp(pattern, "i")]);
 
 const WHY = {
   credential: "Needs Joe's own login, credential or biometric; no session can hold it.",
@@ -88,6 +83,7 @@ function item(fields, now) {
     since: fields.since ?? null, age_days: ageDays(fields.since, now),
     blocks: fields.blocks,
     ...(fields.stale ? { stale: true } : {}),
+    ...(fields.pr_state ? { pr_state: fields.pr_state } : {}),
   };
 }
 
@@ -135,7 +131,7 @@ function localItems(page, stale, now, exclude) {
         title: `${row.pr_title || "Pull request"}: ${row.text}`, why,
         link: `https://github.com/${row.repo}/pull/${row.number}`, since: row.at,
         blocks: { tier: "work", text: `Blocks the pull request "${row.pr_title || pr}" from finishing` },
-        stale,
+        stale: stale || row.pr_state === "UNKNOWN", pr_state: row.pr_state,
       }, now));
     } else if (row.kind === "tabled" || row.kind === "needs_joe") {
       out.push(item({
@@ -143,7 +139,7 @@ function localItems(page, stale, now, exclude) {
         blocks: why === "credential"
           ? { tier: "capability", text: "Blocks the automations that use it" }
           : { tier: "pending", text: "Parked until Joe is back" },
-        stale,
+        stale: stale || row.pr_state === "UNKNOWN", pr_state: row.pr_state,
       }, now));
     }
   }
@@ -199,7 +195,7 @@ export async function readNeedsJoe(c, actor, governance, { now = Date.now() } = 
            from loop_item
           where status = 'open' and kind in ('action_required', 'open_loop', 'team_loop')
             and (lower(owner) in ('joe', 'joint') or (owner is null and kind = 'action_required'))
-          order by created_at limit 500 /* needs-joe */`)).rows;
+          order by created_at, number /* needs-joe */`)).rows;
       return { items: loopItems(rows, now, exclude) };
     }),
     ...await source(sources, "work_requests", async () => {
@@ -261,7 +257,8 @@ export async function readNeedsJoe(c, actor, governance, { now = Date.now() } = 
         [tenant, JOE, NEEDS_JOE_LOCAL_BOARD])).rows[0];
       if (!row) throw new Error("local needs-joe sources were never published");
       const stale = now - Date.parse(row.updated_at) > LOCAL_STALE_MS;
-      return { state: stale ? "stale" : "ready", items: localItems(row.snapshot_json, stale, now, exclude) };
+      const unknown = row.snapshot_json?.items?.some(item => item.pr_state === "UNKNOWN");
+      return { state: unknown ? "partial" : stale ? "stale" : "ready", items: localItems(row.snapshot_json, stale, now, exclude) };
     }),
   ];
 

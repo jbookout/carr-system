@@ -1097,7 +1097,7 @@
       "log_path": "~/carr-system/out/run-scheduled.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
-      "done_signal": "Job-specific completion and activity in ~/carr-system/out/run-scheduled.log; primary only",
+      "done_signal": "ops.run local-briefs/launchd.run; local run-scheduled completion receipt ~/carr-system/out/run-scheduled-receipts/26459840b77f5803.fbc9c66faebfd4b4db566c360b68b894.receipt",
       "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
       "expected_enabled_by_role": {
         "primary": true,
@@ -1106,7 +1106,8 @@
       "expected_installed_by_role": {
         "primary": true,
         "secondary": false
-      }
+      },
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/26459840b77f5803.fbc9c66faebfd4b4db566c360b68b894.receipt"
     },
     {
       "label": "com.carr.logitech-keymap",
@@ -1751,7 +1752,7 @@
       "log_path": "~/carr-system/out/run-scheduled.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
-      "done_signal": "Job-specific completion and activity in ~/carr-system/out/run-scheduled.log; primary only",
+      "done_signal": "ops.run rules-refresh/launchd.run; local run-scheduled completion receipt ~/carr-system/out/run-scheduled-receipts/b7f587616eb7bf71.fbc9c66faebfd4b4db566c360b68b894.receipt",
       "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
       "expected_enabled_by_role": {
         "primary": true,
@@ -1760,7 +1761,8 @@
       "expected_installed_by_role": {
         "primary": true,
         "secondary": false
-      }
+      },
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/b7f587616eb7bf71.fbc9c66faebfd4b4db566c360b68b894.receipt"
     },
     {
       "label": "com.carr.run-spool-flush",
@@ -1887,7 +1889,7 @@
       "log_path": "~/carr-system/out/run-scheduled.log",
       "log_max_age_seconds": 172800,
       "owner": "orchestrator",
-      "done_signal": "Job-specific completion and activity in ~/carr-system/out/run-scheduled.log; primary only",
+      "done_signal": "ops.run videopipeline/launchd.run; local run-scheduled completion receipt ~/carr-system/out/run-scheduled-receipts/550c4bf0a3a27bf2.fbc9c66faebfd4b4db566c360b68b894.receipt",
       "expectation_note": "Machine-role placement from lib/launchd_scope.py; primary-only jobs must be absent on this secondary Mac, and present/enabled on the primary.",
       "expected_enabled_by_role": {
         "primary": true,
@@ -1896,7 +1898,8 @@
       "expected_installed_by_role": {
         "primary": true,
         "secondary": false
-      }
+      },
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/550c4bf0a3a27bf2.fbc9c66faebfd4b4db566c360b68b894.receipt"
     },
     {
       "label": "local.carr-progress-board",
@@ -1913,6 +1916,55 @@
       "owner": "orchestrator",
       "done_signal": "Canonical out/boards/*.json and authenticated publish acknowledgement",
       "expectation_note": "Required board publisher named in gap #3; no installed plist at capture. Cadence is declared from the observed 2-minute job, not copied from an absent plist."
+    },
+    {
+      "label": "com.carr.build-duration-check",
+      "scheduler": "launchd",
+      "program_path": "~/carr-system/ops/build-duration-check.py",
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 30
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 50
+          }
+        ],
+        "RunAtLoad": false
+      },
+      "expected_enabled": false,
+      "expected_installed": false,
+      "expected_enabled_by_role": {
+        "primary": true,
+        "secondary": false
+      },
+      "expected_installed_by_role": {
+        "primary": true,
+        "secondary": false
+      },
+      "log_path": "~/carr-system/out/build-duration-check.log",
+      "log_paths": [
+        "~/carr-system/out/build-duration-check.log",
+        "~/carr-system/out/build-duration-check.log"
+      ],
+      "log_max_age_seconds": 1800,
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/bcdce5ddc3cbd926.fbc9c66faebfd4b4db566c360b68b894.receipt",
+      "owner": "orchestrator",
+      "done_signal": "ops.run build-duration-check/launchd.run; local run-scheduled completion receipt ~/carr-system/out/run-scheduled-receipts/bcdce5ddc3cbd926.fbc9c66faebfd4b4db566c360b68b894.receipt",
+      "expectation_note": "Primary-only duration incident monitor; every ten minutes, as declared by lib/launchd_scope.py."
     }
   ],
   "expectations_reviewed_at": "2026-10-05",

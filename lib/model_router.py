@@ -288,19 +288,21 @@ def log_outcome(path, attribution):
     if not attribution.get("model") or not attribution.get("task_kind"):
         return None
     text = Path(path).read_text(encoding="utf-8")
-    reviews = re.findall(r"\b(APPROVE|BLOCKED)\b", text)
-    ci = re.findall(r"\bCI[ :_-]*(red|green)\b", text, re.I)
+    reviews = re.findall(r"^(?:ROUND \d+ )?(?:REVIEW: )?(APPROVE|BLOCKED)\s*$", text, re.M)
+    ci = re.findall(r"^CI[ :_-]+(red|green)\s*$", text, re.I | re.M)
     identity = attribution.get("id") or "log:" + hashlib.sha256(str(Path(path).resolve()).encode()).hexdigest()
     result = {**attribution, "id": identity}
-    if "APPROVE" not in reviews and "NO-PROGRESS" not in text and not attribution.get("completed"):
+    no_progress = bool(re.search(r"^NO-PROGRESS\s*$", text, re.M))
+    approved = bool(reviews and reviews[-1] == "APPROVE")
+    if not approved and not no_progress and not attribution.get("completed"):
         return None
     if reviews:
-        result["first_pass_approve"] = reviews[0] == "APPROVE"
-        if "APPROVE" in reviews:
-            result["rounds_to_approve"] = reviews.index("APPROVE") + 1
+        result["first_pass_approve"] = approved and "BLOCKED" not in reviews
+        if approved:
+            result["rounds_to_approve"] = len(reviews)
     if ci:
         result["ci_first_push"] = ci[0].lower() == "green"
-    if "NO-PROGRESS" in text:
+    if no_progress:
         result["no_progress"] = True
     return result
 

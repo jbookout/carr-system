@@ -79,6 +79,15 @@ def case(name, payload, expect, mention=None):
     names no sanctioned route sends the session looking for a workaround."""
     CASES.append((name, payload, expect, mention))
 
+case("quoted echo pipeline remains executable", bash("echo 'wrangler deploy' | bash"), DENY)
+case("quoted printf pipeline remains executable", bash("printf '%s' 'gh workflow run ci.yml' | sh"), DENY)
+case("inert echo before separate shell", bash("echo 'wrangler deploy'; bash -c 'true'"), ALLOW)
+case("inert echo before conditional shell", bash("echo 'wrangler deploy' && bash -c 'true'"), ALLOW)
+case("quoted echo multistage shell input", bash("echo 'wrangler deploy' | cat | bash"), DENY)
+case("quoted Python pipeline remains executable", bash("echo 'import os; os.system(\"wrangler deploy\")' | python3"), DENY)
+case("quoted Node pipeline remains executable", bash("printf '%s' 'require(\"child_process\").execSync(\"wrangler deploy\")' | node"), DENY)
+
+
 
 # ── 1. KNOWN_HOSTS: the code list still works, including today's additions ────
 for h in ("https://npiregistry.cms.hhs.gov/api/?version=2.1",

@@ -9,7 +9,7 @@ const kv = () => {
 };
 test('usage route requires cookie identity and the existing origin, metadata and CSRF guard', async () => {
   const env = { DEALROOM_HOST: 'app.doctorcre.com', GOOGLE_CLIENT_ID: 'fixture', GOOGLE_CLIENT_SECRET: 'fixture', OAUTH_KV: kv() };
-  const handler = createDealroomHandler({ exchangeGoogleCodeFn: async () => ({ id_token: 'fixture' }), verifyGoogleIdTokenFn: async () => ({ email: 'joe.bookout.carr.us@gmail.com', email_verified: true, sub: 'fixture' }) });
+  const handler = createDealroomHandler({ slugForEmailFn: email => { assert.equal(email, 'joe@example.test'); return 'joe'; }, exchangeGoogleCodeFn: async () => ({ id_token: 'fixture' }), verifyGoogleIdTokenFn: async () => ({ email: 'joe@example.test', email_verified: true, sub: 'fixture' }) });
   const request = (path, options) => handler.fetch(new Request(`${origin}${path}`, options), env, {});
   assert.equal(isDealroomRequest(new Request(`${origin}/api/v1/usage-signals`), env), true);
   assert.equal((await request('/api/v1/usage-signals')).status, 401);

@@ -365,6 +365,14 @@ def call_verb(name, payload, *, repo):
                              cwd=repo, capture_output=True, text=True, timeout=35,
                              stdin=subprocess.DEVNULL)
     if process.returncode:
+        marker = process.stderr.rfind("TOOL ERROR ")
+        if marker >= 0:
+            try:
+                refusal = json.loads(process.stderr[marker + len("TOOL ERROR "):])
+            except ValueError:
+                refusal = None
+            if isinstance(refusal, dict) and isinstance(refusal.get("error"), str):
+                return refusal
         return {"ok": False}
     output = process.stdout
     start = output.find("{")

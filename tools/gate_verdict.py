@@ -28,6 +28,7 @@ import uuid
 from datetime import datetime, timezone
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, REPO)
 
 WINDOW_DAYS = 7
 NOISY_MIN_WRONG = 3
@@ -142,47 +143,65 @@ def _loop_body(n):
 
 
 def reconcile_loops(noisy, verb, state_path=LOOP_STATE):
-    """Open one loop per newly noisy gate; close the loop of a gate that recovered."""
-    try:
-        with open(state_path, encoding="utf-8") as fh:
-            state = json.load(fh)
-    except (FileNotFoundError, ValueError):
-        state = {}
-    outcome = {}
+    from lib.incident_state import locked_state
+    with locked_state(state_path) as store:
+        return _reconcile_loops(noisy, verb, store)
+
+
+def _reconcile_loops(noisy, verb, store):
+    state, outcome = store.data, {}
     current = {n["gate"]: n for n in noisy}
-    for gate, n in current.items():
+    for gate in current.keys() | state.keys():
         entry = state.setdefault(gate, {})
-        if entry.get("loop_id"):
-            outcome[gate] = "open"
-            continue
-        entry.setdefault("open_key", str(uuid.uuid4()))
-        response = verb("add-loop", {
-            "idempotency_key": entry["open_key"], "kind": "open_loop", "owner": "claude",
-            "domain": "system", "blocker": "other_lane",
-            "blocker_detail": "the gates lane (an orchestrator-dispatched platform session) owns the fix",
-            "body": _loop_body(n)})
-        if response.get("ok") and isinstance(response.get("loop_id"), str):
+        if not entry.get("loop_id"):
+            if gate not in current and not entry.get("open_args"):
+                state.pop(gate)
+                store.save()
+                continue
+            if not entry.get("open_args"):
+                entry["open_args"] = {
+                    "idempotency_key": str(uuid.uuid4()), "kind": "open_loop", "owner": "claude",
+                    "domain": "system", "blocker": "other_lane",
+                    "blocker_detail": "the gates lane (an orchestrator-dispatched platform session) owns the fix",
+                    "body": _loop_body(current[gate])}
+                store.save()
+            response = verb("add-loop", dict(entry["open_args"]))
+            if response.get("ok") is not True or not isinstance(response.get("loop_id"), str):
+                outcome[gate] = "error"
+                continue
             entry["loop_id"] = response["loop_id"]
+            entry.pop("open_args")
+            store.save()
             outcome[gate] = "opened"
         else:
-            outcome[gate] = "error"
-    for gate in [g for g in state if g not in current]:
-        entry = state[gate]
-        if not entry.get("loop_id"):
-            state.pop(gate)
+            outcome[gate] = "open"
+        if gate in current and not entry.get("close_args"):
             continue
-        entry.setdefault("close_key", str(uuid.uuid4()))
-        response = verb("close-loop", {
-            "idempotency_key": entry["close_key"], "loop_id": entry["loop_id"], "resolution": "done",
-            "outcome": f"Gate {gate} dropped below the false-alarm threshold on the gate precision row."})
-        if response.get("ok"):
+        if not entry.get("close_args"):
+            loop = verb("read-loop", {"loop_id": entry["loop_id"]}).get("loop", {})
+            if (loop.get("loop_id") != entry["loop_id"] or type(loop.get("version")) is not int
+                    or loop["version"] < 1 or loop.get("status") not in ("open", "done", "dropped")):
+                outcome[gate] = "error"
+                continue
+            if loop["status"] != "open":
+                state.pop(gate)
+                store.save()
+                outcome[gate] = "closed"
+                continue
+            entry["close_args"] = {
+                "idempotency_key": str(uuid.uuid4()), "loop_id": entry["loop_id"],
+                "base_version": loop["version"], "resolution": "done",
+                "outcome": f"Gate {gate} dropped below the false-alarm threshold on the gate precision row."}
+            store.save()
+        response = verb("close-loop", dict(entry["close_args"]))
+        if response.get("ok") is True:
             state.pop(gate)
             outcome[gate] = "closed"
         else:
             outcome[gate] = "error"
-    os.makedirs(os.path.dirname(state_path), exist_ok=True)
-    with open(state_path, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=2, sort_keys=True)
+            if response.get("error") == "version_conflict":
+                entry.pop("close_args")
+        store.save()
     return outcome
 
 

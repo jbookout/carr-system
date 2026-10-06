@@ -186,6 +186,8 @@ def _grok_session_row():
 
 def _claude_continuity_spool_row(drain):
     """Optionally drain the continuity spool, then report what is left."""
+    if CANONICAL_FIXTURE:
+        return "-- claude continuity spool fixture supplies no local receipt state", 0
     sys.path.insert(0, REPO_ROOT)
     from datetime import datetime as _dt, timezone as _tz
     from lib import claude_continuity_spool as continuity_spool
@@ -1373,6 +1375,20 @@ def _runtime_error_row():
     return runtime_health.health_row(REPO_ROOT)
 
 
+def _gate_precision_row():
+    if CANONICAL_FIXTURE:
+        return "-- gate precision fixture supplies no local decision ledger", []
+    spec = importlib.util.spec_from_file_location(
+        "gate_verdict", os.path.join(REPO_ROOT, "tools", "gate_verdict.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    line, noisy = module.health_row(module.default_ledger())
+    if not CANONICAL_FIXTURE and (noisy or os.path.exists(module.LOOP_STATE)):
+        if "error" in module.reconcile_loops(noisy, module.call_verb).values():
+            line += " · loop update FAILED, rerun health"
+    return line, noisy
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
@@ -1956,15 +1972,7 @@ def _canonical_health():
         # wrong. A gate whose false alarms cross the threshold gets one
         # deduplicated loop, closed again when it drops off this row.
         try:
-            _gv_spec = importlib.util.spec_from_file_location(
-                "gate_verdict", os.path.join(REPO_ROOT, "tools", "gate_verdict.py"))
-            _gv = importlib.util.module_from_spec(_gv_spec)
-            _gv_spec.loader.exec_module(_gv)
-            _gp_line, _gp_noisy = _gv.health_row(_gv.default_ledger())
-            if not CANONICAL_FIXTURE and (_gp_noisy or os.path.exists(_gv.LOOP_STATE)):
-                _gp_loops = _gv.reconcile_loops(_gp_noisy, _gv.call_verb)
-                if "error" in _gp_loops.values():
-                    _gp_line += " · loop update FAILED, rerun health"
+            _gp_line, _gp_noisy = _gate_precision_row()
             print("  " + _gp_line)
             if _gp_noisy:
                 rc = _red("gate_precision", _gp_line.split(" · ", 1)[0], count=len(_gp_noisy))

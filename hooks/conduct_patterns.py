@@ -19,7 +19,9 @@ Full rationale for each pattern class, the verification log for blocking Stop,
 and the escape-hatch design are documented in conduct-stop-gate.py's docstring.
 Fixtures: ops/conduct-gate-selftest.py.
 """
+import json
 import re
+from pathlib import Path
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PATTERN CLASSES
@@ -144,16 +146,8 @@ HUMAN_WANTS_CHOICE = re.compile(
 # subscription/renewal/plan/rate word, or a per-month/per-year unit is itself
 # the money signal. Grok's chair made the general form of this point: for a
 # broker, money is not only payment rails, it is any number that binds.
-PROTECTED = re.compile(
-    r"\b(client|prospect|landlord|listing agent|tenant|vendor|broker|doctor|practice owner"
-    r"|LOI|letter of intent|PSA|lease|proposal|counter|RFP"
-    r"|send|email|publish|post|tweet|linkedin|facebook|instagram"
-    r"|spend|pay|paid|invoice|budget|purchase|fee|commission|pricing"
-    r"|subscription|subscribe|renews?|renewal|billing"
-    r"|delete|destroy|drop table|force[- ]push|revoke)\b"
-    r"|[$£€]\s?\d"
-    r"|\b\d+\s?(usd|dollars?)\b"
-    r"|\b(per|a)\s(month|year|seat|user)\b", re.I)
+_POLICY = json.loads((Path(__file__).resolve().parents[1] / "mcp-server/src/human-only-policy.v1.json").read_text())
+PROTECTED = re.compile("|".join(_POLICY["classes"][name] for name in ("money", "outbound", "irreversible")), re.I)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

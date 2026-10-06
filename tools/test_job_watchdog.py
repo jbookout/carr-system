@@ -1147,6 +1147,29 @@ class StateTests(unittest.TestCase):
             self.assertIn("stdin", digest)
             self.assertNotIn("gone", digest)
 
+    def test_scheduled_incident_uses_record_owner_and_nested_read_contract(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        with tempfile.TemporaryDirectory() as directory:
+            effects = w.Effects(Path(directory), c)
+            f = {"kind": "scheduled_job_drift", "key": "scheduled:fixture", "first_seen": "now",
+                 "subject": "fixture", "reason": "stale fixture", "next_action": "repair", "loop_id": "fixture-loop"}
+            calls = []
+            def command(argv, config):
+                name, args = argv[2], json.loads(argv[3])
+                calls.append((name, args))
+                if name == "add-loop":
+                    self.assertIn(args["owner"], ("joe", "dell", "claude"))
+                if name == "read-loop":
+                    return json.dumps({"loop": {"loop_id": "fixture-loop", "version": 4, "status": "open"},
+                                       "amended": False, "amendments": []})
+                return json.dumps({"ok": True, "loop_id": "fixture-loop"})
+            with patch.object(w, "command", side_effect=command):
+                effects.report(f)
+                effects.clear(f, [])
+            self.assertEqual(calls[-1][1]["base_version"], 4)
+
     def test_permission_denied_group_probe_still_reports_presence(self):
         import job_watchdog as w
         from unittest.mock import patch

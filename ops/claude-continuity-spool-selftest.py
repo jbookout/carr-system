@@ -134,6 +134,20 @@ class SpoolTest(unittest.TestCase):
         finally:
             os.environ.pop("SERVER_MODE")
 
+    def test_capacity_scan_coordinates_with_drain_before_stat(self):
+        from unittest.mock import patch
+        spool.spool_receipt("claude-record-event", {"idempotency_key": "old"}, {"kind": "transient"})
+        old = self.spooled()[0]
+        original = pathlib.Path.stat
+        interleaved = []
+        def stat(path, *args, **kwargs):
+            if path == old and not interleaved:
+                interleaved.append(spool.drain(lambda *args: ({"ok": True}, None)))
+            return original(path, *args, **kwargs)
+        with patch.object(pathlib.Path, "stat", stat):
+            spool.spool_receipt("claude-record-event", {"idempotency_key": "new"}, {"kind": "transient"})
+        self.assertTrue(any(json.loads(p.read_text())["args"]["idempotency_key"] == "new" for p in self.spooled()))
+
 
 class RefusalTest(SpoolTest):
     def test_repeat_prompts_at_one_transcript_offset_are_all_accepted(self):
@@ -299,6 +313,37 @@ class HealthRowTest(SpoolTest):
             os.replace(path, self.root / path.name)
         self.row(later)
         self.assertEqual([name for name, _ in self.verbs], ["add-loop", "read-loop", "close-loop"])
+
+    def test_same_day_breaches_have_distinct_episodes(self):
+        from unittest.mock import patch
+        now = datetime.now(timezone.utc)
+        with patch.object(spool, "measure", return_value=(10, 1)):
+            self.row(now)
+        with patch.object(spool, "measure", return_value=(0, None)):
+            self.row(now)
+        with patch.object(spool, "measure", return_value=(11, 2)):
+            self.row(now)
+        adds = [payload for name, payload in self.verbs if name == "add-loop"]
+        self.assertEqual(len(adds), 2)
+        self.assertNotEqual(adds[0]["idempotency_key"], adds[1]["idempotency_key"])
+
+    def test_lost_open_response_retries_exact_payload_after_count_changes(self):
+        from unittest.mock import patch
+        attempts = []
+        def lost(name, payload):
+            attempts.append(json.loads(json.dumps(payload)))
+            raise RuntimeError("committed then disconnected")
+        for count in (10, 12):
+            with patch.object(spool, "measure", return_value=(count, 1)):
+                spool.health_row(run_verb=lost, state_path=self.loop_state, now=datetime.now(timezone.utc))
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+
+    def test_loop_cli_preserves_stderr_version_conflict_for_replan(self):
+        from unittest.mock import patch
+        refused = subprocess.CompletedProcess([], 1, "", 'local-verb identity -> test\nTOOL ERROR {"error":"version_conflict"}\n')
+        with patch.object(spool.subprocess, "run", return_value=refused):
+            self.assertEqual(spool.run_verb("close-loop", {}), {"error": "version_conflict"})
 
     def test_the_nightly_section_drains_then_reports(self):
         self.outage("UserPromptSubmit", "Stop")

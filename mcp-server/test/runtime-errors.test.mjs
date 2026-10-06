@@ -34,6 +34,7 @@ test('grouping is value independent, pending loop creation survives restart, and
   const plan = await call('/plan');
   assert.equal(plan.operations.length, 1);
   assert.equal(plan.operations[0].verb, 'add-loop');
+  assert.equal(plan.operations[0].args.owner, 'claude', 'incident owner must satisfy the record owner contract');
   assert.equal(plan.operations[0].count, 2);
   const replay = await (await new RuntimeErrorStore(store.state, {}).fetch(new Request('https://errors/plan', { method: 'POST', body: '{}' }))).json();
   assert.deepEqual(replay.operations, plan.operations);

@@ -8,7 +8,46 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TOOLS } from "../src/tools.js";
-import { classifyHumanOnly, NEEDS_JOE_LOCAL_BOARD } from "../src/needs-joe.js";
+import { classifyHumanOnly, NEEDS_JOE_LOCAL_BOARD, readNeedsJoe } from "../src/needs-joe.js";
+import { execFileSync } from 'node:child_process';
+
+test('classification agrees with the conduct policy for counters and subscription units', () => {
+  for (const [text, kind] of [['Approve the counter', 'outbound'], ['Approve 15 per seat', 'money']]) {
+    const protectedByConduct = execFileSync('python3', ['-c', 'import sys; sys.path.insert(0,"hooks"); from conduct_patterns import PROTECTED; print(bool(PROTECTED.search(sys.argv[1])))', text], { cwd: new URL('../..', import.meta.url), encoding: 'utf8' }).trim();
+    assert.equal(protectedByConduct, 'True');
+    assert.equal(classifyHumanOnly(text), kind);
+  }
+});
+
+test('shared protected-action policy remains bound to gate integrity', () => {
+  const readback = execFileSync('python3', ['-c', 'import importlib.util; s=importlib.util.spec_from_file_location("gate_integrity","hooks/gate-integrity.py"); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(m.current_contracts()["human-only-policy.v1.json"])'], { cwd: new URL('../..', import.meta.url), encoding: 'utf8' }).trim();
+  assert.match(readback, /^[a-f0-9]{64}$/);
+});
+
+test('the complete loop source includes qualifying rows after the first 500', async () => {
+  const c = client();
+  const query = c.query;
+  c.query = async (sql, args) => {
+    if (!sql.includes('from loop_item')) return query(sql, args);
+    const rows = Array.from({ length: 501 }, (_, number) => ({ number, kind: 'action_required', label: `Approve invoice ${number}`, created_at: '2026-10-01T00:00:00Z' }));
+    const limit = /limit\s+(\d+)/i.exec(sql);
+    return { rows: limit ? rows.slice(0, Number(limit[1])) : rows };
+  };
+  const list = await readNeedsJoe(c, joe, {}, { now: NOW });
+  assert.equal(list.sources.loops.count, 501);
+  assert.ok(list.items.some(item => item.key === 'loop:500'));
+});
+
+test('a fresh snapshot with an unknown PR read remains partial and visible', async () => {
+  const local = structuredClone(localPage);
+  local.items[0].pr_state = 'UNKNOWN';
+  const { list } = await read({ local });
+  assert.equal(list.sources.local.state, 'partial');
+  assert.equal(list.state, 'partial');
+  const item = list.items.find(item => item.source === 'pull_request');
+  assert.equal(item.pr_state, 'UNKNOWN');
+  assert.equal(item.stale, true);
+});
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe",
   human: true, via: "oauth-google", client_id: "fixture" };
