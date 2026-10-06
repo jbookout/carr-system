@@ -1330,6 +1330,9 @@ def _tailscale_row():
 
 
 def _build_duration_row():
+    from lib.machine_role import is_primary
+    if not CANONICAL_FIXTURE and not is_primary(REPO_ROOT):
+        return 'SKIP build duration · primary-only monitor; secondary machine', 0
     checker = os.path.join(REPO_ROOT, 'ops', 'build-duration-check.py')
     args = [sys.executable, checker, '--health']
     if CANONICAL_SECTION == 'builds' and CANONICAL_FIXTURE:
@@ -1345,7 +1348,7 @@ def _build_duration_row():
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
-    build_rc = 0
+    rc = 0
     if CANONICAL_SECTION in ('all', 'builds'):
         try:
             build_line, build_rc = _build_duration_row()
@@ -1355,11 +1358,10 @@ def _canonical_health():
                                    "auto-clear after fresh complete scan", 1)
         print('  ' + build_line)
         if build_rc:
-            _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)
+            rc = _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)
         if CANONICAL_SECTION == 'builds':
             print(_HEALTH_COMPLETION_MARKER)
-            return build_rc
-    rc = build_rc
+            return rc
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)

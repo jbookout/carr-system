@@ -683,6 +683,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                   _canonical_contradiction_alarm=lambda: 0,
                   _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
                   _tailscale_row=lambda: ("OK fixture node", False),
+                  _build_duration_row=lambda: ("OK fixture build duration", 0),
                   _health_sub=Mock(classify_loose_status=Mock(return_value={
                       "actionable_tracked": [], "actionable_untracked": [],
                       "expected_patched_submodules": [], "managed_artifacts": []}),
@@ -693,6 +694,21 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                      "_legacy_scheduled_definitions", "_calendar_prebrief_standing", "_calendar_prebrief_unknowns"):
             ns[name] = lambda *args: []
         return ns
+
+    def test_builds_health_records_failure_and_prints_marker_last(self):
+        import contextlib, io
+        for line, expected in (("OK build duration", 0), ("WARN build duration", 1),
+                               ("UNAVAILABLE build duration", 1)):
+            ns = self.all_namespace()
+            ns.update(CANONICAL_SECTION="builds", _build_duration_row=lambda: (line, expected))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(ns["_canonical_health"](), expected)
+            self.assertEqual(output.getvalue().splitlines()[-1], "HEALTH_COMPLETE")
+            self.assertEqual(len(ns["_FINDINGS"]), expected)
+            if expected:
+                self.assertEqual(ns["_FINDINGS"][0]["key"], "build_duration")
+                self.assertEqual(ns["_FINDINGS"][0]["hard_error"], line.startswith("UNAVAILABLE"))
 
     def test_all_health_sections_report_cap_failure_with_other_checks_clean(self):
         import io, contextlib

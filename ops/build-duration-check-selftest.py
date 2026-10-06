@@ -7,6 +7,8 @@ import importlib.util
 import tempfile
 import subprocess
 import sys
+import os
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -27,7 +29,7 @@ class LoopStore:
     def __call__(self, verb, args):
         if verb == 'loop-board':
             return {'loops': [{'number': l['number'], 'kind': l['kind'],
-                               'label': l['body'].splitlines()[0], 'version': l['version']}
+                               'label': l.get('label', l['body'].splitlines()[0]), 'body': l['body'], 'version': l['version']}
                               for l in self.loops if l['status'] == 'open' and args['search'] in l['body']]}
         if verb == 'read-loop':
             return {'loop': copy.deepcopy(next(l for l in self.loops if l['number'] == args['number']))}
@@ -42,6 +44,254 @@ class LoopStore:
         if verb == 'close-loop':
             loop['status'] = 'done'
         return {'ok': True}
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    def data(self):
+        return json.loads(FIXTURE.read_text())
+
+    def evaluate(self, data):
+        return checker.evaluate(data, '2026-10-05T17:00:00Z')
+
+    def green(self, workflow, ident, start, end):
+        run = copy.deepcopy(workflow['runs'][0])
+        run.update(id=ident, conclusion='success', status='completed', run_started_at=start,
+                   updated_at=end, html_url='green-' + str(ident))
+        workflow['runs'].insert(0, run)
+        return run
+
+    def test_1_health_reads_canonical_receipt_from_another_checkout(self):
+        with tempfile.TemporaryDirectory() as raw:
+            canonical = Path(raw)
+            (canonical / 'out').mkdir()
+            report = {'status': 'OK', 'observed_at': '2026-10-05T16:59:00Z',
+                      'scan_cursor': '2026-10-05T16:59:00Z', 'workflows': [], 'errors': [],
+                      'source_sha256': hashlib.sha256(CHECK.read_bytes()).hexdigest()}
+            receipt = canonical / 'out/build-duration-check.json'
+            receipt.write_text(json.dumps(report))
+            proc = subprocess.run([sys.executable, str(CHECK), '--health', '--now', '2026-10-05T17:00:00Z'],
+                                  env={**os.environ, 'CARR_ROOT': str(canonical)}, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            report['source_sha256'] = '0' * 64
+            receipt.write_text(json.dumps(report))
+            proc = subprocess.run([sys.executable, str(CHECK), '--health', '--now', '2026-10-05T17:00:00Z'],
+                                  env={**os.environ, 'CARR_ROOT': str(canonical)}, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn('UNAVAILABLE', proc.stdout)
+
+    def test_1_secondary_health_skips_primary_monitor(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            (home / '.config/carr').mkdir(parents=True)
+            (home / '.config/carr/machine-role.json').write_text('{"role":"secondary"}')
+            proc = subprocess.run([sys.executable, str(ROOT / 'tools/health-check.py'), '--section', 'builds'],
+                                  env={**os.environ, 'HOME': raw}, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn('secondary', proc.stdout)
+
+    def test_3_later_green_does_not_hide_active_job(self):
+        data = self.data()
+        w = data['workflows'][0]
+        w['runs'][0].update(status='in_progress', conclusion=None)
+        w['jobs']['105'][0].update(status='in_progress', conclusion=None, completed_at=None)
+        self.green(w, 106, '2026-10-05T15:00:00Z', '2026-10-05T15:09:00Z')
+        flags = self.evaluate(data)['workflows'][0]['flags']
+        self.assertTrue(any(f['kind'] == 'near_timeout' and f['run_id'] == 105 for f in flags))
+
+    def test_4_failed_step_at_configured_deadline_is_timeout(self):
+        for named in (True, False):
+            with self.subTest(named=named):
+                data = self.data()
+                w = data['workflows'][0]
+                w['runs'] = w['runs'][:1]
+                w['runs'][0].update(conclusion='failure', updated_at='2026-10-05T13:05:00Z')
+                job = w['jobs']['105'][0]
+                job.update(conclusion='failure', completed_at='2026-10-05T13:05:00Z')
+                job['steps'][0].update(conclusion='failure', started_at=job['started_at'], completed_at=job['completed_at'], number=3)
+                configured = w['definitions'][w['runs'][0]['head_sha']]['jobs']['canary']
+                configured['steps'] = [{'uses': 'actions/checkout@v4'},
+                    {'run': 'canary command', 'timeout-minutes': 5}]
+                if named:
+                    configured['steps'][1]['name'] = job['steps'][0]['name']
+                flags = self.evaluate(data)['workflows'][0]['flags']
+                self.assertEqual(next(f for f in flags if f['kind'] == 'timeout')['timeout_seconds'], 300)
+                job['steps'][0]['completed_at'] = '2026-10-05T13:01:00Z'
+                self.assertEqual(self.evaluate(data)['status'], 'OK')
+
+    def test_5_missing_jobs_are_unavailable(self):
+        data = self.data()
+        w = data['workflows'][0]
+        w['successes'] = []
+        w['jobs'] = {key: [] for key in w['jobs']}
+        self.assertEqual(self.evaluate(data)['status'], 'UNAVAILABLE')
+
+    def test_5_null_incident_note_is_a_named_read_failure(self):
+        store = LoopStore()
+        checker.reconcile(self.evaluate(self.data()), store)
+        store.loops[0]['source_note'] = None
+        with self.assertRaisesRegex(ValueError, 'incident'):
+            checker.reconcile(self.evaluate(self.data()), store)
+
+    def test_6_include_only_and_step_matrix_deadlines(self):
+        for step_limit in (False, True):
+            with self.subTest(step_limit=step_limit):
+                data = self.data()
+                w = data['workflows'][0]
+                for definition in w['definitions'].values():
+                    job = definition['jobs']['canary']
+                    job.update(name='check ${{ matrix.lane }}', strategy={'matrix': {'include': [
+                        {'lane': 'gates', 'limit': 20}, {'lane': 'migration', 'limit': 35}]}})
+                    job['timeout-minutes'] = 60 if step_limit else '${{ matrix.limit }}'
+                    if step_limit:
+                        job['steps'] = [{'name': w['jobs']['105'][0]['steps'][0]['name'],
+                                         'timeout-minutes': '${{ matrix.limit }}'}]
+                for jobs in w['jobs'].values():
+                    jobs[0]['name'] = 'check gates'
+                report = self.evaluate(data)
+                self.assertEqual(report['errors'], [])
+                flag = next(f for f in report['workflows'][0]['flags'] if f['kind'] == 'timeout')
+                self.assertEqual(flag['timeout_seconds'], 1200)
+
+    def test_7_recovery_uses_captured_baseline_for_all_candidates(self):
+        store = LoopStore()
+        checker.reconcile(self.evaluate(self.data()), store)
+        data = self.data()
+        w = data['workflows'][0]
+        w['successes'] = [self.green(w, 200, '2026-10-04T10:00:00Z', '2026-10-04T10:20:00Z')]
+        w['runs'] = [r for r in w['runs'] if r['id'] != 200]
+        self.green(w, 106, '2026-10-05T14:00:00Z', '2026-10-05T14:08:00Z')
+        self.green(w, 107, '2026-10-05T15:00:00Z', '2026-10-05T15:15:00Z')
+        checker.reconcile(self.evaluate(data), store)
+        self.assertEqual(store.loops[0]['status'], 'done')
+        self.assertIn('480s', store.writes[-1][1]['outcome'])
+
+    def test_8_absent_workflow_retains_unresolved_incident(self):
+        store = LoopStore()
+        checker.reconcile(self.evaluate(self.data()), store)
+        report = self.evaluate({'workflows': []})
+        checker.reconcile(report, store)
+        self.assertEqual(report['status'], 'WARN')
+        self.assertTrue(report['workflows'][0]['flags'])
+
+    def test_9_descriptive_label_does_not_defeat_body_marker(self):
+        store = LoopStore()
+        checker.reconcile(self.evaluate(self.data()), store)
+        store.loops[0]['label'] = 'Fix canary duration'
+        report = self.evaluate(self.data())
+        report['workflows'][0]['flags'][0]['duration_seconds'] += 1
+        checker.reconcile(report, store)
+        self.assertEqual([v for v, _ in store.writes], ['add-loop', 'update-loop'])
+
+    def test_6_excluded_axes_keep_their_original_include_binding(self):
+        data = self.data()
+        w = data['workflows'][0]
+        for definition in w['definitions'].values():
+            job = definition['jobs']['canary']
+            job.update(name='check ${{ matrix.lane }}', strategy={'matrix': {
+                'lane': ['gates', 'migration'], 'exclude': [{'lane': 'gates'}],
+                'include': [{'lane': 'migration', 'limit': 35}]}})
+            job['timeout-minutes'] = '${{ matrix.limit }}'
+        for jobs in w['jobs'].values():
+            jobs[0]['name'] = 'check migration'
+        report = self.evaluate(data)
+        self.assertEqual(report['errors'], [])
+        self.assertEqual(next(f for f in report['workflows'][0]['flags'] if f['kind'] == 'timeout')['timeout_seconds'], 2100)
+
+    def test_5_scheduled_failure_replaces_previous_green_and_preserves_cursor(self):
+        from unittest.mock import patch
+        data = self.data()
+        store = LoopStore()
+        checker.reconcile(self.evaluate(data), store)
+        store.loops[0]['source_note'] = None
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / 'receipt.json'
+            path.write_text(json.dumps({'status': 'OK', 'scan_cursor': '2026-10-05T12:00:00Z'}))
+            with patch.object(checker.GitHub, 'collect', return_value=data), patch.object(checker, 'record_verb', lambda verb, args, **kwargs: store(verb, args)), patch.object(sys, 'argv', [str(CHECK), '--record-loops', '--state-file', str(path), '--now', '2026-10-05T17:00:00Z']):
+                self.assertEqual(checker.main(), 1)
+            report = json.loads(path.read_text())
+            self.assertEqual(report['status'], 'UNAVAILABLE')
+            self.assertEqual(report['scan_cursor'], '2026-10-05T12:00:00Z')
+            self.assertIn('incident', report['errors'][0])
+
+    def test_5_malformed_nested_flags_are_unavailable(self):
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / 'receipt.json'
+            report = self.evaluate(self.data())
+            report.update(source_sha256=hashlib.sha256(CHECK.read_bytes()).hexdigest(),
+                          scan_cursor=report['observed_at'])
+            report['workflows'][0]['flags'] = [None]
+            path.write_text(json.dumps(report))
+            proc = subprocess.run([sys.executable, str(CHECK), '--health', '--state-file', str(path),
+                                   '--now', report['observed_at']], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn('UNAVAILABLE', proc.stdout)
+            self.assertNotIn('Traceback', proc.stderr)
+
+    def test_5_malformed_receipt_shapes_never_report_green(self):
+        for data in (None, [], {'status': 'OK', 'workflows': None, 'errors': []},
+                     {'status': 'OK', 'workflows': [], 'errors': ['lost evidence']},
+                     {'status': 'WARN', 'workflows': [{}], 'errors': []}):
+            with self.subTest(data=data), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / 'receipt.json'
+                path.write_text(json.dumps(data))
+                proc = subprocess.run([sys.executable, str(CHECK), '--health', '--state-file', str(path)],
+                                      capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn('UNAVAILABLE', proc.stdout)
+
+    def test_10_exhausted_coverage_budget_is_unavailable(self):
+        data = self.data()['workflows'][0]
+        class Reader(checker.GitHub):
+            def api(self, endpoint):
+                if '/runs?' in endpoint:
+                    return {'workflow_runs': [data['runs'][0]] * 30}
+                return {'workflows': [{'id': 1, 'name': data['name'], 'path': data['path'], 'state': 'active'}]}
+        snapshot = Reader(since='2026-10-05T12:00:00Z').collect()
+        self.assertEqual(self.evaluate(snapshot)['status'], 'UNAVAILABLE')
+        self.assertTrue(any('coverage incomplete' in e for e in snapshot['errors']))
+
+    def test_10_invalid_previous_cursor_cannot_authorize_green_coverage(self):
+        from unittest.mock import patch
+        for previous in (None, {'scan_cursor': '2026-10-06T17:00:00Z'}):
+            with self.subTest(previous=previous), tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / 'receipt.json'
+                path.write_text(json.dumps(previous))
+                with patch.object(checker.GitHub, 'collect', return_value={'workflows': []}), patch.object(checker, 'record_verb', lambda verb, args, **kwargs: {'loops': []}), patch.object(sys, 'argv', [str(CHECK), '--record-loops', '--state-file', str(path), '--now', '2026-10-05T17:00:00Z']):
+                    self.assertEqual(checker.main(), 1)
+                report = json.loads(path.read_text())
+                self.assertEqual(report['status'], 'UNAVAILABLE')
+                self.assertIsNone(report['scan_cursor'])
+
+    def test_10_scan_paginates_completed_non_main_runs(self):
+        data = self.data()['workflows'][0]
+        calls = []
+        class Reader(checker.GitHub):
+            def api(self, endpoint):
+                calls.append(endpoint)
+                if '/contents/' in endpoint:
+                    return {'content': base64.b64encode(json.dumps(data['definitions'][endpoint.split('ref=')[1]]).encode()).decode()}
+                if '/jobs?' in endpoint:
+                    return {'jobs': data['jobs'][endpoint.split('/runs/')[1].split('/')[0]]}
+                if 'status=success' in endpoint:
+                    return {'workflow_runs': data['successes']}
+                if 'branch=main' in endpoint or 'status=in_progress' in endpoint:
+                    return {'workflow_runs': []}
+                if 'page=2' in endpoint:
+                    run = copy.deepcopy(data['runs'][0])
+                    run['head_branch'] = 'timed-out-branch'
+                    return {'workflow_runs': [run]}
+                runs = []
+                for n in range(30):
+                    run = copy.deepcopy(data['runs'][0])
+                    run.update(id=200+n, conclusion='success', head_branch='busy',
+                               run_started_at='2026-10-05T15:00:00Z', updated_at='2026-10-05T15:01:00Z')
+                    runs.append(run)
+                return {'workflow_runs': runs}
+        reader = Reader()
+        reader.since = '2026-10-05T12:00:00Z'
+        report = self.evaluate({'workflows': [reader.workflow(data['repo'], data)]})
+        self.assertTrue(any('page=2' in c for c in calls))
+        self.assertTrue(any(f['kind'] == 'timeout' for f in report['workflows'][0]['flags']))
 
 
 class BuildDurationTests(unittest.TestCase):
@@ -261,8 +511,8 @@ class BuildDurationTests(unittest.TestCase):
         healthy = copy.deepcopy(report)
         row = healthy['workflows'][0]
         row['flags'] = []
-        row['recoveries'] = {'other': {'run_id': 106, 'run_attempt': 1, 'started_at': '2026-10-05T15:00:00Z',
-                                    'duration_seconds': 500, 'baseline_seconds': 600, 'run_url': 'green'}}
+        row['recoveries'] = {'other': [{'run_id': 106, 'run_attempt': 1, 'started_at': '2026-10-05T15:00:00Z',
+                                    'duration_seconds': 500, 'baseline_seconds': 600, 'run_url': 'green'}]}
         checker.reconcile(healthy, store)
         self.assertEqual(store.loops[0]['status'], 'open')
         row['recoveries']['main'] = row['recoveries'].pop('other')
