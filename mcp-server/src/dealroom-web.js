@@ -32,6 +32,7 @@ import { isTourInternalRequest } from "./tour-internal-web.js";
 import { executeRegisteredTool } from "./tools.js";
 import { readDealWithJev } from "./jev-deal-reading.js";
 import { callTool } from "./mcp.js";
+import { isStagingBrowserEnvironment } from "./staging-browser.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../out/doctorcre-artifacts/current"; // mirrors wrangler.toml [assets]
 
@@ -44,8 +45,6 @@ const PENDING_TTL = 600;
 const SESSION_IDLE_TTL = 12 * 60 * 60;
 const SESSION_ABSOLUTE_TTL = 7 * 24 * 60 * 60;
 const SESSION_REFRESH_WINDOW = 60 * 60;
-const E2E_CARR_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev";
-const E2E_APP_HOST = "doctorcre-app-staging.joe-bookout-carr-us.workers.dev";
 const E2E_PRINCIPAL = "e2e-joe";
 const REAUTH_TTL = 10 * 60;
 const ACTION_CHALLENGE_TTL = 5 * 60;
@@ -395,16 +394,8 @@ async function issueBrowserSession(env, dependencies, props, e2ePrincipal = null
   return sessionCookie(opaque, SESSION_IDLE_TTL);
 }
 
-function e2eStagingEnvironment(env) {
-  const primaryHost = env?.PRIMARY_APP_HOST || env?.APP_HOST || env?.DEALROOM_HOST;
-  const host = env?.APP_HOST || env?.DEALROOM_HOST;
-  return env?.CARR_ENV === "staging" && primaryHost === E2E_CARR_HOST &&
-    [E2E_CARR_HOST, E2E_APP_HOST].includes(host) &&
-    (!env.DOCTORCRE_APP_HOST || env.DOCTORCRE_APP_HOST === E2E_APP_HOST);
-}
-
 async function e2eSession(request, env, dependencies) {
-  if (!e2eStagingEnvironment(env)) return json({ error: "not_found" }, 404);
+  if (!isStagingBrowserEnvironment(env)) return json({ error: "not_found" }, 404);
   if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   const secret = env.E2E_SESSION_SECRET;
   if (typeof secret !== "string" || secret.length < 32 || !env.OAUTH_KV) {
@@ -430,7 +421,7 @@ async function sessionFor(request, env, dependencies) {
   const key = SESSION_PREFIX + await sha256(opaque);
   const session = await env.OAUTH_KV.get(key, { type: "json" });
   if (!session) return null;
-  if (session.e2ePrincipal && (session.e2ePrincipal !== E2E_PRINCIPAL || !e2eStagingEnvironment(env))) return null;
+  if (session.e2ePrincipal && (session.e2ePrincipal !== E2E_PRINCIPAL || !isStagingBrowserEnvironment(env))) return null;
   const now = dependencies.now();
   let actor = dependencies.actorFromPropsFn(session.props);
   if (actor && session.e2ePrincipal) {
