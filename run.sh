@@ -109,6 +109,7 @@ case "${1:-}" in
   # session-start brief tells sessions to go read when it reports a failure.
   health)       shift; "$PY" "$REPO/tools/health-check.py" "$@" ;;
   gate-verdict) shift; "$PY" "$REPO/tools/gate_verdict.py" "$@" ;;
+  costs)        shift; PYTHONPATH="$REPO/tools${PYTHONPATH:+:$PYTHONPATH}" "$PY" -c 'import system_costs,sys; sys.exit(system_costs.main(sys.argv[1:]))' "$@" ;;
   config)       shift; python3 "$REPO/ops/config-as-code.py" "$@" ;;
   lint)         shift; python3 "$REPO/tools/writing-lint.py" "$@" ;;
   migrate)      shift; "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "$@" ;;
