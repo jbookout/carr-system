@@ -5,12 +5,11 @@ Evidence contains digests and labels; command, reply and prompt text stays local
 in the native transcript. Session transitions and ledger identity are locked.
 """
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from contextlib import contextmanager
 
 WINDOW_S = 600
-MATCH_CONTAINMENT = 0.8
-MATCH_SIZE_RATIO = 0.5
-MAX_SHINGLES = 512
 STOP_EVENTS = ("Stop", "SubagentStop")
 KIND = {"deny": "block", "ask": "hold"}
 
@@ -126,24 +125,6 @@ def digest(payload, event):
     return "sha256:" + hashlib.sha256((blob or "").encode("utf-8", "replace")).hexdigest()
 
 
-def shingles(text, session):
-    import hashlib
-    import hmac
-    import re
-    words = re.findall(r"[a-z0-9_]+", (text or "").lower())
-    grams = {" ".join(words[i:i + 3]) for i in range(max(1, len(words) - 2))} if words else set()
-    key = (session or "").encode()
-    hashed = sorted(int(hmac.new(key, g.encode(), hashlib.sha256).hexdigest()[:12], 16) for g in grams)
-    return hashed[:MAX_SHINGLES]
-
-
-def same_substance(a, b):
-    small, large = (a, b) if len(a) <= len(b) else (b, a)
-    if len(small) < 3 or len(small) < MATCH_SIZE_RATIO * len(large):
-        return False
-    return len(set(small) & set(large)) / len(small) >= MATCH_CONTAINMENT
-
-
 def _append(path, row):
     import json
     line = json.dumps(row, separators=(",", ":"), ensure_ascii=False) + "\n"
@@ -247,21 +228,18 @@ def write_decision(ledger, record, input_digest=None, headline=None, backfilled=
     return did, True
 
 
-def _operation(payload, tool):
+def _operation(payload, tool, session):
     import hashlib
+    import hmac
     import json
     ti = payload.get("tool_input")
     if not isinstance(ti, dict):
         return None
-    if tool in {"Write", "Edit", "MultiEdit"}:
-        target = ti.get("file_path") or ti.get("path")
-        if not target:
-            return None
-        operation = {"tool": tool, "target": target}
-    else:
-        operation = {"tool": tool, "input": {k: v for k, v in ti.items() if k != "fixture_verdict"},
-                     "cwd": payload.get("cwd")}
-    return hashlib.sha256(json.dumps(operation, sort_keys=True).encode()).hexdigest()
+    if tool in {"Write", "Edit", "MultiEdit"} and not (ti.get("file_path") or ti.get("path")):
+        return None
+    operation = {"tool": tool, "input": {k: v for k, v in ti.items() if k != "fixture_verdict"},
+                 "cwd": payload.get("cwd")}
+    return hmac.new(session.encode(), json.dumps(operation, sort_keys=True).encode(), hashlib.sha256).hexdigest()
 
 
 def _successful(payload, tool):
@@ -295,15 +273,14 @@ def _transition(ledger, pending_path, record, raw, captured_out, captured_err, s
     now = time.time()
     call = record.get("tool_use_id") or record.get("prompt_id") or ""
     payload = _payload(raw)
-    sig = shingles(substance(payload, event), record["session"])
-    operation = _operation(payload, record.get("tool"))
+    reply_digest = digest(payload, event) if event in STOP_EVENTS else None
+    operation = _operation(payload, record.get("tool"), record["session"])
     pending = [p for p in _load_pending(pending_path) if now - p.get("ts", 0) <= _window()]
     keep = []
     for p in pending:
         same_call = bool(call and call == p.get("call"))
-        matches = same_substance(sig, p.get("sig") or [])
-        if event not in STOP_EVENTS:
-            matches = matches and operation is not None and operation == p.get("operation")
+        matches = (reply_digest == p.get("reply_digest") if event in STOP_EVENTS else
+                   operation is not None and operation == p.get("operation"))
         if same_call and event not in STOP_EVENTS and event != "PostToolUse":
             keep.append(p)
             continue
@@ -325,5 +302,5 @@ def _transition(ledger, pending_path, record, raw, captured_out, captured_err, s
                                     record.get("deny_class") or _headline(captured_err, captured_out))
         if added:
             keep.append({"id": did, "hook": record.get("hook"), "event": event,
-                         "call": call, "sig": sig, "operation": operation, "ts": now})
+                         "call": call, "reply_digest": reply_digest, "operation": operation, "ts": now})
     _save_pending(pending_path, keep)

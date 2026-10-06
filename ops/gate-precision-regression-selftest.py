@@ -7,6 +7,9 @@ import multiprocessing
 import os
 from pathlib import Path
 import sys
+import hashlib
+import shlex
+import subprocess
 import tempfile
 import time
 import unittest
@@ -231,6 +234,49 @@ class Regressions(unittest.TestCase):
                 for hook in group['hooks']:
                     with self.subTest(command=hook['command']):
                         self.assertIn('hook-meter-run.py', hook['command'])
+
+    def test_declared_codex_guard_records_refusal(self):
+        config = json.loads((ROOT / 'ops/config/codex-hooks.json').read_text())
+        command = next(h['command'] for group in config['hooks']['PreToolUse']
+                       for h in group['hooks'] if h['command'].endswith('/guard-unattended.py'))
+        payload = {'hook_event_name': 'PreToolUse', 'session_id': 'S', 'tool_name': 'Bash',
+                   'tool_use_id': 'native-guard', 'tool_input': {'command': 'env FOO=x wrangler deploy'}}
+        env = {**os.environ, 'CARR_HOOK_FIXTURE': '1',
+               'CARR_HOOK_TELEMETRY': str(Path(self.tmp.name) / 'telemetry.jsonl')}
+        proc = subprocess.run(shlex.split(command.replace('{{REPO}}', str(ROOT))),
+                              input=json.dumps(payload), text=True, capture_output=True,
+                              cwd=self.tmp.name, env=env, timeout=30)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(self.rows('decision')[0]['gate'], 'guard-unattended.py')
+
+    def test_native_stop_in_meter_outside_checkout(self):
+        transcript = Path(self.tmp.name) / 'native.jsonl'
+        transcript.write_text(json.dumps({'type': 'response_item', 'payload': {
+            'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': TEXT}]}}) + '\n')
+        gate = Path(self.tmp.name) / 'stop.py'
+        gate.write_text('import sys; print("reply refused", file=sys.stderr); sys.exit(2)')
+        proc = subprocess.run([sys.executable, str(ROOT / 'hooks/hook-meter-run.py'), str(gate)],
+            input=json.dumps({'hook_event_name': 'Stop', 'session_id': 'S', 'prompt_id': 'p',
+                              'transcriptPath': str(transcript)}), cwd=self.tmp.name,
+            env={**os.environ, 'CARR_HOOK_FIXTURE': '1', 'PYTHONPATH': '',
+                 'CARR_HOOK_TELEMETRY': str(Path(self.tmp.name) / 'telemetry.jsonl')},
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(self.rows('decision')[0]['input_digest'],
+                         'sha256:' + hashlib.sha256(TEXT.encode()).hexdigest())
+
+    def test_edit_operation_includes_replaced_text(self):
+        before = {'file_path': '/canonical', 'old_string': 'old A', 'new_string': TEXT}
+        fire(self.path, 'A', before, tool='Edit')
+        fire(self.path, 'B', {**before, 'old_string': 'old B'}, 'allow', 'PostToolUse', 'Edit', {'success': True})
+        self.assertEqual(self.rows('verdict'), [])
+
+    def test_empty_or_invalid_verdict_evidence_is_unknown(self):
+        for body in ['', json.dumps({'type': 'verdict', 'decision_id': 'A', 'label': 'invalid'}) + '\n']:
+            self.path.write_text(body)
+            line, noisy = gv.health_row(str(self.path))
+            self.assertIsNone(noisy)
+            self.assertFalse(line.startswith('OK'))
 
     def test_native_stop(self):
         transcript = Path(self.tmp.name) / 'native.jsonl'

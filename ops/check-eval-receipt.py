@@ -195,6 +195,8 @@ def context_emitter(text: str) -> bool:
         return True
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg and CONTEXT_EMITTER.search(node.arg):
+            return True
         if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
             continue
         if not CONTEXT_EMITTER.search(node.value):

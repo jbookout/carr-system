@@ -19,7 +19,6 @@ No CARR verb fits this (checked 2026-10-05: no verb records a verdict on a
 local hook decision), and the ledger is per-machine evidence, so it stays a file.
 """
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -68,7 +67,10 @@ def read(path):
                 if not row.get("id") or not row.get("gate") or not _epoch(row.get("ts")):
                     raise ValueError("incomplete decision ledger record")
                 decisions.append(row)
-            elif row.get("type") == "verdict" and row.get("decision_id"):
+            elif row.get("type") == "verdict":
+                if (not row.get("decision_id") or row.get("label") not in {"right", "wrong"}
+                        or not row.get("by") or not _epoch(row.get("ts"))):
+                    raise ValueError("incomplete verdict record")
                 held = verdicts.get(row["decision_id"])
                 if held and held.get("by") != "auto" and row.get("by") == "auto":
                     continue
@@ -79,6 +81,8 @@ def read(path):
 def precision(path, days=WINDOW_DAYS, now=None):
     now = time.time() if now is None else now
     decisions, verdicts = read(path)
+    if not decisions:
+        raise ValueError("ledger has no decision evidence")
     stats = {}
     for d in decisions:
         if now - _epoch(d.get("ts")) > days * 86400:
@@ -284,11 +288,9 @@ def _open_payload(n):
 
 
 def call_verb(name, payload):
-    spec = importlib.util.spec_from_file_location(
-        "jev_outage_health", os.path.join(REPO, "tools", "jev_outage_health.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.call_verb(name, payload, repo=REPO)
+    from lib.record_call import call_verb as record_call
+    result = record_call(name, payload, timeout=35)
+    return result.reply if isinstance(result.reply, dict) else {"ok": False, "error": result.kind}
 
 
 def _cmd_list(args, path):

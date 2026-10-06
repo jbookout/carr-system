@@ -321,6 +321,12 @@ class Registry(unittest.TestCase):
                 'specific = data.get("hookSpecificOutput")\nprint({"hookSpecificOutput": specific})\n')
             self.assertEqual(cer.unregistered_context_hooks(root, REGISTRY), ["hooks/reader.py"])
 
+    def test_keyword_context_emitter_is_registered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "hooks").mkdir()
+            (Path(tmp) / "hooks" / "writer.py").write_text('print(dict(additionalContext="x"))\n')
+            self.assertEqual(cer.unregistered_context_hooks(Path(tmp), REGISTRY), ["hooks/writer.py"])
+
     def test_every_context_emitting_hook_is_registered(self):
         self.assertEqual(cer.unregistered_context_hooks(ROOT, REGISTRY), [])
 

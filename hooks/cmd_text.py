@@ -229,11 +229,6 @@ COMMAND_POSITION = (
     r"|timeout\s+\S+)\s+(?:-\S+\s+|\w+=\S*\s+)*)*(?:[\w./~-]*/)?")
 
 _BOUNDARY_RE = re.compile(r"(?:[;&|(\n`]|\$\()")
-_PREFIX_RE = re.compile(
-    r"^\s*(?:\w+=\S*\s+)*(?:(?:sudo|env|exec|nohup|command|time|xargs|timeout\s+\S+)"
-    r"\s+(?:-\S+\s+)*)*")
-
-
 def _substitution_end(text, start):
     depth, i = 1, start + 2
     while i < len(text):

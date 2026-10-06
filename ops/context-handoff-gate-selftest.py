@@ -3342,6 +3342,12 @@ def static_contract_cases():
     current_codex = json.loads((REPO / "ops/config/codex-hooks.json").read_text())
     old_hooks = old_codex.get("hooks", {})
     current_hooks = current_codex.get("hooks", {})
+    for groups in old_hooks.values():
+        for group in groups:
+            for hook in group.get("hooks", []):
+                hook["command"] = hook["command"].replace(
+                    "/usr/bin/env python3 ",
+                    "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py ")
     normalized_pretool = json.loads(json.dumps(current_hooks.get("PreToolUse")))
     expected_boot = {
         "matcher": ".*",
@@ -3371,15 +3377,7 @@ def static_contract_cases():
     }
     for group in normalized_pretool:
         group["matcher"] = allowed_exec_matchers.get(group.get("matcher"), group.get("matcher"))
-    # The rule-pack drift gate moved onto the repo interpreter through the hook
-    # meter on 2026-09-23 (ops/rule-delivery-cutover.py HOOK_TEMPLATE). The
-    # historical Stop group is otherwise unchanged; compare it with that one
-    # command spelled the historical way.
     normalized_stop = json.loads(json.dumps(current_hooks.get("Stop")))
-    for group in normalized_stop or []:
-        for hook in group.get("hooks", []):
-            if hook.get("command") == "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-drift-gate.py":
-                hook["command"] = "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py"
     check("Codex historical PreToolUse/Stop groups preserved",
           normalized_pretool == old_hooks.get("PreToolUse")
           and normalized_stop == old_hooks.get("Stop"),
