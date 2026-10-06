@@ -24,7 +24,7 @@ An errored read stays in the denominator and scores no hit. Any read error also 
 
 ## Baseline on October 6, 2026
 
-The command above completed at `2026-10-06T14:40:10.036059+00:00`. [baseline.json](baseline.json) binds observations to the fixture and runner SHA-256 values, the collector source revision, and the routing dependencies. All read calls completed. The live-versus-retired assertions passed.
+The command above completed at `2026-10-06T14:44:41.654417+00:00`. [baseline.json](baseline.json) binds observations to the fixture and runner SHA-256 values, the collector source revision, and the routing dependencies. All read calls completed. The live-versus-retired assertions passed.
 
 | Cause | Top-five hits | Questions | Hit rate |
 | --- | ---: | ---: | ---: |

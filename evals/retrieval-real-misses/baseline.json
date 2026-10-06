@@ -1,15 +1,15 @@
 {
   "version": "retrieval-real-misses-run/v1",
-  "measured_at": "2026-10-06T14:40:10.036059+00:00",
+  "measured_at": "2026-10-06T14:44:41.654417+00:00",
   "runner_sha256": "a66cd32d38f3147da026f471e4bb66fe7f45790830fc95eab6e7216e15021b2c",
-  "source_revision": "b4b912c5152b2a42a22ba1c127e03f8858fd4e25",
+  "source_revision": "55cd03a94a3637154d60d5d16cff37841975a180",
   "routing_sha256": {
     "ops/config/rule-routes.v1.json": "a430be96f45260f858f9ad021064a103d0b80cb32e3fbd04b9c9782b4c64714e",
     "ops/config/rule-jit-triggers.v1.json": "b0b23e68c4121e649b82f5d7f93704f1574e2a7ce798a5e3d823b1322c04dd59",
     "ops/rule_trigger_delivery.py": "773911b40433f70242b7b85eb33c64a487e8be20dd6c9f2ba28ac70daf10edb1",
     "lib/rule_routes.py": "84f227f016caa8424bcd98bf0acb68424f22bc48437965d244de235f44f51d62"
   },
-  "fixture_sha256": "bfc80ca682845493dae49e1055676c76348bfe1293d20aff4b2349710e645b4d",
+  "fixture_sha256": "98a16726aa3c1a94564dfb08eb319d8dd5dc847e748a4868ba91e0c179ddaabe",
   "observations": [
     {
       "case_id": "m01-01",
