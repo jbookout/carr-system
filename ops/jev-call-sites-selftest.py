@@ -310,6 +310,45 @@ class ChangeTollsPredicateTests(unittest.TestCase):
 INFRASTRUCTURE = {"ops/typesafe_client.py", "ops/jev_judge.py", "tools/judge/interface.py"}
 
 
+# ask-jev in a dispatch position: an in-Worker callTool, `run.sh call ask-jev`
+# and `local-verb.mjs ask-jev` in shell, or the same words as an argv list.
+_ARG = r"""["']?(?:\s*,\s*["']|\s+)"""
+VERB_DISPATCH = re.compile(
+    r"""callTool(?:Fn)?\([^)]{0,200}?["']ask-jev["']"""
+    rf"""|run\.sh{_ARG}call{_ARG}["']?ask-jev\b"""
+    rf"""|local-verb(?:\.mjs)?{_ARG}["']?ask-jev\b""")
+
+
+def transport_sources(root, paths):
+    """Paid endpoint literals and Worker dispatches, across launcher languages."""
+    found = set()
+    for rel in paths:
+        if (Path(rel).suffix not in {".py", ".sh", ".js", ".mjs"} or
+                "selftest" in rel or "/fixtures/" in rel or "/test" in rel or rel.startswith("test")):
+            continue
+        source = (root / rel).read_text(encoding="utf-8", errors="replace")
+        source = re.sub(r"(?m)^\s*(?:#|//).*?$", "", source)
+        if "https://api.typesafe.ai/" in source or VERB_DISPATCH.search(source):
+            found.add(rel)
+    return found
+
+
+# What each registered control must visibly do in its source. A label whose
+# marker is absent claims a control the source does not implement.
+CONTROL_MARKERS = {
+    "worker_capability": r"if not _worker_capability\([\s\S]{0,200}jev_spend_authority_unavailable",
+    "worker_attempt_reservation": r"if \(!reserveAttempt \|\| !billingHold\)[\s\S]{0,300}await reserveAttempt\(",
+    "worker_runtime_class": r'"ask-jev"[\s\S]{0,400}"app_runtime"',
+}
+
+
+def unimplemented_controls(root, transport_controls):
+    """Registered sources whose source text lacks their control's marker."""
+    return sorted(rel for rel, control in transport_controls.items()
+                  if not re.search(CONTROL_MARKERS.get(control, r"(?!)"),
+                                   (root / rel).read_text(encoding="utf-8")))
+
+
 def paid_call_sources():
     """Every tracked non-test Python file that invokes the Jev client or judge()."""
     tracked = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True,
@@ -343,6 +382,31 @@ def paid_call_sources():
 
 
 class RegistryCoverageTests(unittest.TestCase):
+    def test_inventory_detects_raw_transports_in_every_launcher_language(self):
+        examples = {"new.mjs": 'fetch("https://api.typesafe.ai/v1/systemone")',
+                    "new.sh": 'curl https://api.typesafe.ai/v1/systemone',
+                    "new.py": 'requests.post("https://api.typesafe.ai/v1/systemone")',
+                    "worker.mjs": 'callTool(env, actor, "ask-jev", {})',
+                    "verb.sh": "./run.sh call ask-jev '{\"x\":1}'",
+                    "local.sh": 'node mcp-server/local-verb.mjs ask-jev "$json"',
+                    "quoted.sh": "run.sh call 'ask-jev' '{}'",
+                    "argv.py": 'subprocess.run(["./run.sh", "call", "ask-jev", payload])'}
+        prose = {"doc.py": '"""Reads through ./run.sh call; every receipt has its ask-jev row."""',
+                 "pattern.py": "re.search(r'callTool(?:Fn)?\\(.*[\"]ask-jev[\"]', line)"}
+        with tempfile.TemporaryDirectory() as root:
+            for name, source in {**examples, **prose}.items():
+                Path(root, name).write_text(source)
+            self.assertEqual(transport_sources(Path(root), {**examples, **prose}), set(examples))
+
+    def test_control_labels_need_the_control_in_their_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "proof.js").write_text("if (!reserveAttempt || !billingHold) refuse(); await reserveAttempt();")
+            Path(root, "plain.py").write_text('run(["./run.sh", "call", "ask-jev", str(uuid.uuid4())])')
+            labels = {"proof.js": "worker_attempt_reservation", "plain.py": "worker_attempt_reservation"}
+            self.assertEqual(unimplemented_controls(Path(root), labels), ["plain.py"])
+            self.assertEqual(unimplemented_controls(Path(root), {"proof.js": "decorative"}), ["proof.js"])
+
+
     def test_scan_covers_paid_imports_and_aliases_without_counting_unrelated_names(self):
         examples = {
             "attribute.py": "import typesafe_client as ts\nts.ask({}, {})",
@@ -376,6 +440,16 @@ class RegistryCoverageTests(unittest.TestCase):
         missing = sorted(paid_call_sources() - registered)
         self.assertEqual(missing, [], "a new paid Jev call path needs an entry in "
                          "ops/config/jev-call-sites.v1.json (caller, trigger, budgets, owner, value)")
+
+    def test_every_transport_is_registered_with_a_control_its_source_implements(self):
+        controls = json.loads(REGISTRY_PATH.read_text())["transport_sources"]
+        tracked = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True,
+                                 text=True, check=True).stdout.splitlines()
+        self.assertEqual(sorted(transport_sources(REPO, tracked) - set(controls)), [],
+                         "new paid transport bypass: use Worker spend authority before dispatch; "
+                         "register its source and control in jev-call-sites.v1.json")
+        self.assertEqual(unimplemented_controls(REPO, controls), [],
+                         "a registered transport control is not implemented by its source")
 
     def test_every_registered_source_exists(self):
         registry = client.load_call_sites(REGISTRY_PATH)

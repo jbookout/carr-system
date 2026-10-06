@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Offline Worker transport regressions; retired prompt gates must stay retired."""
 import importlib.util
-import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
-import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -16,11 +14,6 @@ from unittest.mock import patch
 REPO = str(Path(__file__).resolve().parents[1])
 sys.path.insert(0, REPO)
 NOW = datetime.now(timezone.utc)
-_FIXTURE_STORAGE = tempfile.TemporaryDirectory(prefix="jev-server-receipts-selftest-")
-
-
-def tearDownModule():
-    _FIXTURE_STORAGE.cleanup()
 
 
 def ts(offset_seconds=0):
@@ -45,17 +38,6 @@ def _client():
         "tsc_server_selftest", os.path.join(REPO, "ops", "typesafe_client.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    # Production-shaped fake transports exercise real reservation code, but
-    # their synthetic attempts must never read or change the live counter.
-    mod.JEV_DAILY_CAP_LOG = Path(tempfile.mkdtemp(dir=_FIXTURE_STORAGE.name)) / "jev-calls.jsonl"
-    # Admission (registry, attribution, fixture refusal) is covered by
-    # ops/jev-call-sites-selftest.py; this suite tests the transport beneath it.
-    site = {"caller": "*", "trigger": "selftest", "runs_in": "selftest",
-            "attribution": "session_or_job", "unattended": "allowed",
-            "hourly_budget": 10**9, "daily_budget": 10**9, "owner": "selftest",
-            "value": "selftest", "sources": ["ops/typesafe_client.py"]}
-    mod.load_call_sites = lambda path=None: {"hourly_paid_call_cap": 10**9, "sites": {"*": site}}
-    mod.call_site = lambda caller, registry: site
     return mod
 
 
@@ -81,7 +63,6 @@ def client_routes_through_the_worker():
             "session_id": "s", "model": "jev-1.13.0", "state_sha256": "a" * 64,
             "prompt_sha256": None, "usage": {"input_tokens": 3, "output_tokens": 1},
             "answers": {"diagnosis_q": {"type": "noul", "noul": 0.7}}}))
-    tsc.read_api_key = lambda *a: (_ for _ in ()).throw(AssertionError("server path read a local credential"))
     log = _write([], ".jsonl")
     try:
         result = tsc.ask({"x": 1}, {"diagnosis_q": tsc.noul("is it?")}, facets=["diagnosis"],
@@ -91,7 +72,8 @@ def client_routes_through_the_worker():
     finally:
         os.unlink(log)
     ok = (seen.get("verb") == "ask-jev" and seen["args"]["purpose"] == "call"
-          and seen["args"]["facets"] == ["diagnosis"] and seen["args"]["idempotency_key"]
+          and seen["args"]["facets"] == ["diagnosis"]
+          and str(uuid.UUID(seen["args"]["idempotency_key"])) == seen["args"]["idempotency_key"]
           and result["server_receipt"]["receipt_id"] == "srv-1"
           and result["answers"]["diagnosis_q"]["noul"] == 0.7
           and result["usage"] == {"input_tokens": 3, "output_tokens": 1}

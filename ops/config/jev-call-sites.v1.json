@@ -2,6 +2,11 @@
   "schema": "carr-jev-call-sites/v1",
   "about": "Paid Jev caller policy enforced by the Worker spend authority; local readers observe policy. The Worker reserves every attempt atomically under site hourly/daily limits, a global hourly cap, and jev-cost-guard daily cap (maximum 1000). No local vendor fallback. Worker queue decoration is retired.",
   "hourly_paid_call_cap": 200,
+  "transport_sources": {
+    "ops/typesafe_client.py": "worker_capability",
+    "mcp-server/src/jev-call-receipt.js": "worker_attempt_reservation",
+    "mcp-server/src/dealroom-web.js": "worker_runtime_class"
+  },
   "sites": [
     {
       "caller": "rule_trigger_delivery",

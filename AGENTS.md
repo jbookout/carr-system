@@ -244,11 +244,12 @@ publish exits nonzero with the local state kept and names the retry
 and says so. There is no static HTML copy. The launchd job runs
 `ops/progress-board-render.sh` from a repository checkout, which binds
 `CARR_REPO_ROOT` and the repo's `.venv` Python; never run an extracted copy.
-The installer defaults to the canonical checkout. Before a PR merges,
-`install-progress-board --repo <retained-checkout> --apply` and
-`verify-progress-board --repo <retained-checkout>` can bind and verify its
-runner without changing main. Keep that checkout available until reinstalling
-from canonical main; the installer preserves canonical `out/boards` state.
+The installer uses fleet sync's canonical main checkout.
+`install-progress-board --apply` and `verify-progress-board` preserve canonical
+`out/boards`; `--repo` accepts only that checkout. Feature worktrees are refused,
+including pre-merge verification. Fleet sync rebinds the agent after main
+advances. `check-launchd-main-paths` audits installed WorkingDirectory and
+program paths for non-main worktrees without changing plists.
 A `done` card with no PR is Live (complete). A project card with a merged PR
 stays Merged until production shows it: only `--delivery-target worker`
 (carr-system) or `app` (doctorcre-app) completes from the release readback;
@@ -327,3 +328,5 @@ Before opening or updating any pull request, apply both skills to the diff:
 Both passes are required. Read the skill files before applying them; if either
 is unavailable, report the missing skill instead of claiming the pass.
 This section is the canonical policy for both client entry points.
+
+Rigorous engineering work uses `/poteto-mode` from [pstack](plugins/pstack/skills/poteto-mode/SKILL.md).

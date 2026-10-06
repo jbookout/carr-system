@@ -15,6 +15,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 SOURCE = Path(__file__).resolve().parents[1]
 # Each evidence source and the finding kinds detect derives from it. detect refuses
@@ -59,6 +60,15 @@ def load_config(path):
     return config
 
 
+def repository_roots(config=None):
+    config = config or load_config(SOURCE / "ops/config/job-watchdog.json")
+    return {repo: Path(config["repository_roots"][repo]).expanduser() for repo in config["repositories"]}
+
+
+def protected_branch(config, name):
+    return name in config["protected_branches"]
+
+
 def epoch(value):
     if isinstance(value, (float, int)):
         return float(value)
@@ -83,7 +93,51 @@ def reviewed_head(comment):
     return match.group(1) if match else (comment.get("commit") or {}).get("oid")
 
 
+def current_check_attempts(checks):
+    """Resolve attempts per provider/workflow/context; retain ambiguous evidence."""
+    groups = {}
+    for index, check in enumerate(checks):
+        kind = check.get("__typename") or ("StatusContext" if "state" in check else "CheckRun")
+        suite = check.get("checkSuite") or {}
+        workflow = ((suite.get("workflowRun") or {}).get("workflow") or {})
+        url = check.get("detailsUrl") or check.get("targetUrl") or ""
+        parsed = urlsplit(url)
+        provider = ((suite.get("app") or {}).get("id") or check.get("provider") or
+                    (check.get("creator") or {}).get("login") or parsed.netloc)
+        context = check.get("name") if kind == "CheckRun" else check.get("context")
+        identity = (kind, provider, workflow.get("id") or check.get("workflowName"), context)
+        # Missing identity cannot prove that one check supersedes another.
+        key = identity if provider and context else ("unidentified", index)
+        groups.setdefault(key, []).append(check)
+    current = []
+    for attempts in groups.values():
+        def run_id(check):
+            value = check.get("databaseId")
+            if isinstance(value, int) and value > 0:
+                return value
+            match = re.search(r"/actions/runs/\d+/(?:job|jobs)/(\d+)(?:[/?#]|$)", check.get("detailsUrl") or "")
+            return int(match.group(1)) if match else None
+
+        ids = [run_id(c) for c in attempts]
+        if all(value is not None for value in ids):
+            ranks = ids
+        else:
+            try:
+                ranks = [epoch(c.get("startedAt") or c.get("createdAt")) for c in attempts]
+            except (AttributeError, TypeError, ValueError):
+                # No trustworthy ordering: every attempt must pass.
+                current.extend(attempts)
+                continue
+        latest = max(ranks)
+        current.extend(c for c, rank in zip(attempts, ranks) if rank == latest)
+    return current
+
+
 def green(checks):
+    return _green_current(current_check_attempts(checks))
+
+
+def _green_current(checks):
     if not checks:
         return False
     return all((c.get("conclusion") in {"SUCCESS", "SKIPPED", "NEUTRAL"}
@@ -114,7 +168,8 @@ def detect(facts, config, now):
         evidence = "\nLog evidence: " + tail if tail else ""
         if any(re.search(p, tail) for p in config["hang_patterns"]):
             emit("jobs", "job_hang", subject, "interactive hang signature in log tail" + evidence, **fields)
-        elif now - epoch(job.get("log_mtime", job["start"])) >= t["silent_seconds"]:
+        elif config.get("job_silence_policies", {}).get(job.get("card")) != "until_run_limit" and \
+                now - epoch(job.get("log_mtime", job["start"])) >= t["silent_seconds"]:
             emit("jobs", "job_silent", subject, "log silent for at least the configured limit" + evidence, **fields)
         if now - epoch(job["start"]) >= job["limit"]:
             emit("jobs", "job_over_limit", subject, "registered run exceeded its time limit" + evidence, **fields)
@@ -142,7 +197,7 @@ def detect(facts, config, now):
                            and "exit_code" not in j and j.get("alive") for j in jobs)
         if latest and latest[2] and now - max(head_time, latest[0]) >= t["review_idle_seconds"] and not active_fixer:
             emit("prs", "pr_blocked_review", subject, latest[1].get("body", "CHANGES REQUESTED"), **fields)
-        checks = pr.get("statusCheckRollup") or []
+        checks = current_check_attempts(pr.get("statusCheckRollup") or [])
         if any(c.get("conclusion") in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
                or c.get("state") in {"FAILURE", "ERROR"} for c in checks):
             emit("prs", "pr_ci_red", subject, "hosted CI failed on current head", **fields)
@@ -150,7 +205,7 @@ def detect(facts, config, now):
             emit("prs", "pr_conflict", subject, "current head has merge conflicts", **fields)
         if pr.get("isDraft") and now - epoch(pr["updatedAt"]) >= t["draft_idle_seconds"]:
             emit("prs", "pr_draft_idle", subject, "draft idle for configured limit", **fields)
-        if latest and not latest[2] and green(checks) and not pr.get("isDraft") and pr.get("mergeable") == "MERGEABLE" and (repo, str(number), head) not in queue and not pr.get("mergeQueueEntry"):
+        if latest and not latest[2] and _green_current(checks) and not pr.get("isDraft") and pr.get("mergeable") == "MERGEABLE" and (repo, str(number), head) not in queue and not pr.get("mergeQueueEntry"):
             emit("prs", "pr_ready", subject, "approved current head with green CI outside merge queue", **fields)
     for log in facts.get("logs", []):
         source = log["type"] + "_log"
@@ -166,8 +221,9 @@ def detect(facts, config, now):
         if log["type"] == "release" and now - epoch(log["mtime"]) >= t["pipeline_stale_seconds"]:
             emit(source, "pipeline_stale", log["path"], "release log stopped updating")
     for branch in facts.get("branches", []):
-        if branch["name"].startswith("claude/") and now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
-            emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "claude branch idle for configured limit")
+        if not protected_branch(config, branch["name"]) and not branch.get("open_pr") and \
+                now - epoch(branch["updated"]) >= t["branch_idle_seconds"]:
+            emit("branches", "branch_idle", branch["repo"] + ":" + branch["name"], "branch idle for configured limit")
     for error in facts.get("errors", []):
         found.append(finding(error["kind"], error["source"], error["reason"], config, blinds=error["blinds"]))
     for f in found:
@@ -439,25 +495,45 @@ def reconcile(root, config, found, effects, now, complete=True):
     return list(current.values())
 
 
-PR_FIELDS = "number,headRefOid,headRefName,updatedAt,isDraft,mergeable,comments,reviews,commits,statusCheckRollup,mergeStateStatus"
+PR_FIELDS = "number,headRefOid,headRefName,updatedAt,isDraft,mergeable,comments,reviews,commits,mergeStateStatus"
 
 
 def collect_pr(repo, number, config):
     pr = json.loads(command(["gh", "pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS], config))
     pr["repo"] = repo
-    # gh pr's JSON fields omit queue membership. Only a repository that uses
-    # GitHub's merge queue can have an entry, so others skip the query.
-    pr["mergeQueueEntry"] = None
-    if repo not in config.get("github_merge_queue_repositories", []):
-        return pr
+    # gh's exporter omits check providers and workflow IDs. Read those bound to
+    # the same head, so equal names cannot collide. The PR snapshot cache keeps
+    # this second query to changed or stale PRs. Only a repository that uses
+    # GitHub's merge queue can have a queue entry, so others skip that field.
+    queue_field = "mergeQueueEntry{id}" if repo in config.get("github_merge_queue_repositories", []) else ""
     owner, name = repo.split("/")
-    query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){mergeQueueEntry{id}}}}"
+    query = """query($owner:String!,$name:String!,$number:Int!){
+      repository(owner:$owner,name:$name){pullRequest(number:$number){
+        """ + queue_field + """
+        commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){
+          pageInfo{hasNextPage}
+          nodes{__typename
+            ... on CheckRun{databaseId name status conclusion startedAt completedAt detailsUrl
+              checkSuite{app{id} workflowRun{workflow{id}}}}
+            ... on StatusContext{context state createdAt targetUrl creator{login}}
+          }
+        }}}}}
+      }}
+    }"""
     queued = json.loads(command(["gh", "api", "graphql", "-f", "query=" + query,
                                 "-f", "owner=" + owner, "-f", "name=" + name,
                                 "-F", "number=" + str(number)], config))
     if queued.get("errors"):
         raise RuntimeError(json.dumps(queued["errors"]))
-    pr["mergeQueueEntry"] = queued["data"]["repository"]["pullRequest"]["mergeQueueEntry"]
+    observed = queued["data"]["repository"]["pullRequest"]
+    commit = observed["commits"]["nodes"][0]["commit"]
+    if commit["oid"] != pr["headRefOid"]:
+        raise RuntimeError("PR head changed while collecting CI evidence")
+    contexts = (commit.get("statusCheckRollup") or {}).get("contexts") or {"nodes": []}
+    if (contexts.get("pageInfo") or {}).get("hasNextPage"):
+        raise RuntimeError("CI evidence exceeds the bounded check collection")
+    pr["statusCheckRollup"] = contexts["nodes"]
+    pr["mergeQueueEntry"] = observed.get("mergeQueueEntry")
     return pr
 
 
@@ -585,6 +661,13 @@ def collect(root, config, now=None):
     # head and updated_at, bounded by an age limit for changes that bump neither.
     cache_path = path_at(root, config["paths"]["pr_cache"])
     cache = read_pr_cache(cache_path)
+    dates_path = root / "out/watchdog/branch-dates.json"
+    try:
+        dates = json.loads(dates_path.read_text())
+        if not isinstance(dates, dict):
+            dates = {}
+    except (OSError, ValueError):
+        dates = {}
     t = config["thresholds"]
     for repo in config["repositories"]:
         if limited:
@@ -621,10 +704,31 @@ def collect(root, config, now=None):
             pages = json.loads(command(["gh", "api", "--paginate", "--slurp", f"repos/{repo}/branches?per_page=100"], config))
             for page in pages:
                 for branch in page:
-                    if branch["name"].startswith("claude/"):
-                        commit = json.loads(command(["gh", "api", f"repos/{repo}/commits/{branch['commit']['sha']}"], config))
+                    if not protected_branch(config, branch["name"]):
+                        sha = branch["commit"]["sha"]
+                        key = repo + ":" + sha
+                        date = dates.get(key)
+                        try:
+                            if not isinstance(date, str) or not math.isfinite(epoch(date)):
+                                raise ValueError("invalid cached commit date")
+                        except (AttributeError, TypeError, ValueError):
+                            date = None
+                        if date is None:
+                            # Commit dates are immutable. Prefer already fetched objects;
+                            # still list remote refs every scan so retirement clears facts.
+                            try:
+                                checkout = Path(config["repository_roots"][repo]).expanduser()
+                                date = command(["git", "show", "-s", "--format=%cI", sha], config, checkout).strip()
+                                epoch(date)
+                            except Exception:
+                                commit = json.loads(command(["gh", "api", f"repos/{repo}/commits/{sha}"], config))
+                                date = commit["commit"]["committer"]["date"]
+                                epoch(date)
+                            dates[key] = date
                         facts["branches"].append({"repo": repo, "name": branch["name"],
-                                                  "updated": commit["commit"]["committer"]["date"]})
+                                                  "updated": date,
+                            "open_pr": any(p["repo"] == repo and p.get("headRefName") == branch["name"]
+                                           for p in facts["prs"])})
         except Exception as exc:
             error(repo + " branches", exc, "branches")
     logs = [(p, "queue") for p in config["paths"]["queue_logs"]] + [(config["paths"]["release_log"], "release")]
@@ -642,6 +746,10 @@ def collect(root, config, now=None):
         staged = cache_path.with_suffix(".tmp")
         staged.write_text(json.dumps(cache, separators=(",", ":")))
         staged.replace(cache_path)
+        dates_path.parent.mkdir(parents=True, exist_ok=True)
+        staged = dates_path.with_suffix(".tmp")
+        staged.write_text(json.dumps(dates, separators=(",", ":")))
+        staged.replace(dates_path)
     except OSError:
         pass  # A lost cache only costs the next scan a full collection.
     facts["errors"].extend({**e, "blinds": sorted(e["blinds"])} for e in [*missing.values(), *limited.values()])
@@ -834,6 +942,38 @@ def digest(root, config):
     return "\n".join(lines)
 
 
+def schedule_reaper(root, config, effects, now):
+    policy = config.get("branch_janitor")
+    if not policy:
+        return
+    canonical = config.get("repository_roots", {}).get("jbookout/carr-system")
+    if not canonical or Path(root).resolve() != Path(canonical).expanduser().resolve():
+        return  # A fixture or session checkout must never schedule the live fleet.
+    ledger = root / "out/orch/branch-janitor-schedule.jsonl"
+    previous = read_latest(ledger).get("schedule", {})
+    if now - previous.get("at", 0) < policy["interval_seconds"]:
+        return
+    pid = previous.get("wrapper_pid")
+    identity = process_identity(pid, config) if pid else None
+    if identity and identity == previous.get("process_identity"):
+        return
+    # Read back a possibly interrupted launch before starting another wrapper.
+    jobs = read_latest(path_at(root, config["paths"]["registry"]))
+    active = next((j for j in jobs.values() if j.get("card") == "branch-janitor" and
+                   "exit_code" not in j and j.get("process_identity") and
+                   process_identity(j.get("pid"), config) == j["process_identity"]), None)
+    if active:
+        return
+    job_id = "branch-janitor-" + uuid.uuid4().hex[:12]
+    append(ledger, {"key": "schedule", "at": now, "status": "intent", "job_id": job_id})
+    result = effects.launch({"card": "branch-janitor", "executor": "deterministic reaper",
+                             "limit": policy["limit_seconds"]},
+        [sys.executable, str(SOURCE / "hooks/worktree-self-plumb.py"), "--reap", "--fleet",
+         "--repo", str(root)], root, job_id=job_id)
+    append(ledger, {"key": "schedule", "at": now, "status": "started", **result,
+                    "process_identity": process_identity(result["wrapper_pid"], config)})
+
+
 def scan(root, config, config_path=None):
     try:
         with locked(path_at(root, config["paths"]["scan_lock"]), blocking=False):
@@ -844,6 +984,11 @@ def scan(root, config, config_path=None):
                             "previous_status": prior_runs.get("scan", {}).get("status")})
             effects = Effects(root, config)
             effects.config_path = Path(config_path or SOURCE / "ops/config/job-watchdog.json").resolve()
+            try:
+                schedule_reaper(root, config, effects, now)
+            except Exception as exc:
+                append(root / "out/orch/branch-janitor-schedule.jsonl",
+                       {"key": "schedule_error", "at": now, "error": type(exc).__name__})
             facts = collect(root, config, now)
             found = reconcile(root, config, detect(facts, config, now), effects, now)
             append(ledger, {"key": "scan", "status": "completed", "at": stamp(),

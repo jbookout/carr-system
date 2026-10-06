@@ -157,7 +157,9 @@ class ValueTests(unittest.TestCase):
                 "Previously we suspected a bug, but this investigation did not identify any bug.",
                 "Earlier tests passed and this investigation did not confirm a bug.",
                 "This investigation did not find a bug, though earlier tests failed.",
-                "Before this review we suspected a bug; this investigation did not find a bug."):
+                "Before this review we suspected a bug; this investigation did not find a bug.",
+                "Contrary to the suspicion raised previously, the investigation did not find a bug.",
+                "Despite the suspicion raised earlier, our tests did not confirm a bug."):
             with self.subTest(statement=statement):
                 commit = {"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
                           "subject": "Fix suspected bug Jev flagged", "body": statement}

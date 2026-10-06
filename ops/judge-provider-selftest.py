@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from unittest.mock import patch
 from pathlib import Path
 
@@ -52,6 +53,10 @@ def load(name):
 
 
 class RoutingTests(unittest.TestCase):
+    def setUp(self):
+        storage = self.enterContext(tempfile.TemporaryDirectory(prefix="judge-provider-selftest-"))
+        self.enterContext(patch.dict(os.environ, CARR_JEV_SEMANTIC_CACHE=str(Path(storage) / "cache")))
+
     def test_default_passes_exact_request_options_and_response(self):
         judge = load("interface")
         seen = []
@@ -119,6 +124,11 @@ class RoutingTests(unittest.TestCase):
         with patch.object(deals.ts.JUDGE, "provider_for", side_effect=lambda cls, config=None: "decisions" if cls == "system_work" else "jev"):
             result = deals.read_deal(bundle, server_runner=worker_runner(deals.ts, answer, seen))
         self.assertTrue(result["judged"], result)
+        self.assertEqual(len(seen), 1)
+        # A repeat may reuse this test's answer, never another run's cache.
+        with patch.object(deals.ts.JUDGE, "provider_for", return_value="jev"):
+            cached = deals.read_deal(bundle, server_runner=worker_runner(deals.ts, answer, seen))
+        self.assertEqual(cached, result)
         self.assertEqual(len(seen), 1)
 
 
