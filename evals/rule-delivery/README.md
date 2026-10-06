@@ -2,7 +2,10 @@
 
 Historical experiment: train/test were both used in selection. Preserve its
 `historical-receipt.json` and runs as exploratory evidence. The current
-`receipt.json` from main is preserved separately. Fresh final claims follow the
+`measured-historical-receipt.json` preserves main's replay-bound measurement.
+Its source, dependencies, cohorts and scorer remain authenticated in the receipt
+selftest; neither historical receipt can authorize shipping. Fresh final claims
+follow the
 three-way procedure in `../README.md`; the historical report writer is retired.
 Set `CARR_EVAL_SPLIT` to a fresh frozen manifest for tuning.
 The frozen runner defaults to development, tags results by manifest membership,
@@ -38,7 +41,10 @@ Nothing is written to production logs or caches. `selftest.py` checks that.
    misses (trigger vocabulary without the action), 13 positives.
 
 `split.json` freezes every case id to train or test before any edit;
-`selftest.py` fails if it moves.
+`selftest.py` fails if it moves. `expectations.v1.json` freezes each case's
+grading labels (expected and allowed rules, envelope or human cohort, input
+hash). A change to the routes cannot move its own denominator: grading reads
+the frozen labels, and a relabel is a new expectations version.
 
 ## Grader (programmatic)
 
@@ -64,8 +70,8 @@ python3 evals/rule-delivery/explain.py                        # train split only
 The round command and candidate verdict use development with a frozen manifest,
 and train for historical runs.
 Historical rounds v1-v3 used the test split to decide keep/revert; those test
-intervals are descriptive, not untouched-holdout evidence. The frozen split
-still protects future rounds. `explain.py` reads train only. The system is
+intervals are descriptive, not untouched-holdout evidence. Fresh frozen cohorts
+protect future rounds. `explain.py` reads train only. The system is
 deterministic, so run-to-run noise is zero; paired bootstrap intervals measure
 case-sampling variation only.
 

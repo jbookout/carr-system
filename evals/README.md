@@ -79,12 +79,10 @@ Nothing here is a second evaluation system; extend the kernel, not this file.
    the denial. Inherited final/raw handles are refused before work starts.
    Every attempt, including failures and normal CLI exits, is recorded in
    `tuning-attempts/`; `tuning-access.json` aggregates the entire selection
-   history. A failure or interruption requires a fresh cohort. Unmonitored child/native execution is refused. The rerank runner
-   uses `--split-manifest` and `--partition train|development` with the matching
-   Node guard; only its fixed existing TypeSafe bridge may spawn. Its returned,
-   printed and saved report includes `tuning_access` in the same contract as
-   Python, so either runner can supply final consumption evidence. One change
-   per round; record the reason for keep/revert from development results.
+   history. A failure or interruption requires a fresh cohort. Unmonitored
+   child/native execution is refused. The
+   Node guard in `evals/tuning-access.mjs` provides the matching access contract.
+   One change per round; record the reason for keep/revert from development results.
 9. **Never paste failures into prompts.** Fix the behaviour the failing cases
    share. Copying a failing case's text into the prompt is overfitting with
    extra steps, and the sealed split exists to catch it.
@@ -94,8 +92,9 @@ Nothing here is a second evaluation system; extend the kernel, not this file.
 11. **Consume final once after selection, per dimension, with confidence
     intervals.** `eval_split.final_evaluation()` persists an exclusive final lock
     binding baseline, candidate configuration digest, harness digest, model and
-    clean aggregate tuning access audit covering every selection attempt BEFORE
-   opening final cases. An older clean round cannot cover later work. An interrupted or failed
+    clean aggregate tuning access audit covering every selection attempt before
+    opening final cases. An older clean round cannot cover later work. An interrupted
+    or failed
     final attempt consumes the cohort: verify its lock; never auto-retry or select
     another candidate on those cases. Every dimension gets its own baseline, candidate and paired
     delta interval. A critical dimension that fails or regresses blocks, even
@@ -117,7 +116,7 @@ surface. A receipt carried over from an earlier change does not count.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "surface": "jev-judgments",
   "change": "one sentence naming the single change measured",
   "measured_on": "2026-09-29",
@@ -151,9 +150,43 @@ surface. A receipt carried over from an earlier change does not count.
      "dimension_ids": ["correct-judgment"], "evidence_refs": ["..."]}
   ],
   "cost": {"baseline_usd_per_case": 0.0041, "candidate_usd_per_case": 0.0043},
-  "verdict": {"decision": "ship", "statement": "..."}
+  "verdict": {"decision": "ship", "statement": "..."},
+  "evidence": {
+    "scorer": {"path": "evals/jev-judgments/score.py", "function": "score"},
+    "source": {"evals/jev-judgments/score.py": "<sha256>", "...": "<sha256>"},
+    "dependencies": {"ops/jev_judge.py": "<sha256>", "...": "<sha256>"},
+    "expectations": {"path": "evals/jev-judgments/expectations.v1.json",
+                     "version": "jev-judgments-expectations/v1", "sha256": "<sha256>"},
+    "cohorts": {"baseline": {"path": "evals/jev-judgments/evidence/baseline.jsonl", "sha256": "<sha256>"},
+                "candidate": {"path": "evals/jev-judgments/evidence/candidate.jsonl", "sha256": "<sha256>"}}
+  }
 }
 ```
+
+### The evidence chain
+
+The check recomputes a receipt; it never trusts one. `evidence` binds by sha256:
+
+| field | what it binds |
+|---|---|
+| `source` | the harness and scorer code; `scorer.path` must be one of these |
+| `dependencies` | every file the measured run read (the system under test and its inputs) |
+| `expectations` | the labels, in a file with a `version` and `cases: {id: {split, should_not_fire, input_sha256, ...}}`. The same version must keep the same bytes as at the merge base: relabelling is a new version, never an edit in place |
+| `cohorts` | one JSONL row per case per arm, `{case_id, split, input_sha256, ...}`: raw observations, not grades |
+
+Expectations and cohorts live under `evals/<surface>/`. Both cohorts must be
+exactly the labelled cases, with the labelled split and input, no gaps and no
+repeats. `cases.total/train/test/should_not_fire` must equal the expectations.
+The check then calls `scorer.function(expectations, baseline_rows,
+candidate_rows)`, which returns `{dimensions: {id: {baseline, candidate,
+delta}}, controls: {oracle_pass_rate, null_pass_rate}}`; every dimension the
+scorer measures must be in the receipt with the same numbers, and the
+grader's oracle and null rates must match. Deleting a failing row, shrinking
+the owed denominator, editing result bytes and carrying a stale summary
+forward each fail. The preserved `evals/rule-delivery/measured-historical-receipt.json` exercises
+the replay and scorer chain on historical cohorts; it cannot authorize shipping.
+Fresh receipts use train, development and final membership, with final scores
+computed after the exclusive final lock.
 
 Scores are final-partition numbers in [0, 1]. `direction_vs_baseline` must agree
 with the delta interval: `improved` when it sits above zero, `regressed` below,

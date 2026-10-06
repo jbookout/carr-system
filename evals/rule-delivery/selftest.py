@@ -2,7 +2,8 @@
 """selftest.py — the eval's own health checks (claude-api eval-audit sections 1, 2, 4, 5).
 
 Run before trusting any number from run_eval.py. Exits nonzero on the first
-failed check."""
+failed check. Historical receipt checks authenticate the preserved evidence;
+the shipping gate requires a fresh frozen final split."""
 import hashlib
 import json
 import os
@@ -70,7 +71,21 @@ def main():
     check("receipt rejects changed shipped source", not M.receipt_source_matches(forged))
     before = snapshot()
     cases = R.load_cases("all")
-    world = R.World()
+    expectations = R.load_expectations()
+    world = R.World(expectations)
+    check("frozen expectations match the live labels", not R.expectation_drift(world, cases, expectations))
+    fresh = [R.observe(c, R.replay(world, c)) for c in sorted(cases, key=lambda c: c["id"])]
+    check("fresh observations cover every case", len(fresh) == len(cases))
+    try:
+        R.score_receipt(expectations, fresh, fresh[:-1])
+        check("scorer refuses a candidate cohort with a case deleted", False)
+    except R.CohortError as exc:
+        check("scorer refuses a candidate cohort with a case deleted", "missing" in str(exc))
+    try:
+        R.paired_bootstrap([{"prompt_id": "a"}, {"prompt_id": "b"}], [{"prompt_id": "a"}], lambda rows: len(rows))
+        check("paired bootstrap refuses unequal cohorts", False)
+    except R.CohortError:
+        check("paired bootstrap refuses unequal cohorts", True)
     review_case = {"id": "surface-review-read", "prompt": "",
                    "tool_calls": [{"tool_name": "Read", "tool_input": {
                        "file_path": os.path.join(REPO, "dealroom", "public", "index.html")}}],

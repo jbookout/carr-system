@@ -8,7 +8,6 @@ import { withTuningAccess } from "../../evals/tuning-access.mjs";
 import fs from "node:fs";
 import promises from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { main } from "../../evals/retrieval/jev-rerank-eval.mjs";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 test("Node tuning fails on a caught final read through an alias", async () => {
@@ -53,11 +52,10 @@ test("Node inherited FileHandles and descriptors cannot read final", async () =>
   } finally { rmSync(root, { recursive: true }); }
 });
 
-test("Node frozen rerank produces durable aggregate audits consumable by Python", async () => {
+test("Node tuning produces durable aggregate audits consumable by Python", async () => {
   const root = mkdtempSync(join(tmpdir(), "carr-eval-node-audit-"));
-  const fixture = JSON.parse(readFileSync(resolve(REPO, "evals/retrieval/fixtures/jev-rerank-shortlists.2026-09-29.v1.json"), "utf8"));
-  const cases = Array.from({ length: 6 }, (_, i) => ({ ...fixture.cases[0], id: `fresh-node-${i}`, group: `synthetic-${i}`,
-    situation: `fresh synthetic situation ${i}` }));
+  const cases = Array.from({ length: 6 }, (_, i) => ({ id: `fresh-node-${i}`, group: `synthetic-${i}`,
+    input: `fresh synthetic situation ${i}` }));
   const source = join(root, "cases.json"), seen = join(root, "seen.json"), bundle = join(root, "bundle");
   writeFileSync(source, JSON.stringify(cases)); writeFileSync(seen, "[]");
   try {
@@ -65,13 +63,14 @@ test("Node frozen rerank produces durable aggregate audits consumable by Python"
       "--seed", "test", "--source", "synthetic", "--seen", seen], { cwd: REPO, encoding: "utf8" });
     assert.equal(freeze.status, 0, freeze.stderr);
     const manifest = join(bundle, "manifest.json");
-    let printed;
-    await main(["--split-manifest", manifest], { stdout: () => {} });
-    const report = await main(["--split-manifest", manifest], { stdout: text => { printed = JSON.parse(text); } });
-    assert.equal(report.tuning_access.status, "passed");
-    assert.equal(report.tuning_access.attempts.length, 2);
-    assert.deepEqual(printed.tuning_access, report.tuning_access);
-    assert.deepEqual(report.tuning_access, JSON.parse(readFileSync(join(bundle, "tuning-access.json"), "utf8")));
+    const tune = () => withTuningAccess([source, join(bundle, "final.json")], () =>
+      JSON.parse(readFileSync(join(bundle, "development.json"), "utf8")), [], manifest);
+    await tune();
+    const report = await tune();
+    assert.ok(report.result.length);
+    assert.equal(report.audit.status, "passed");
+    assert.equal(report.audit.attempts.length, 2);
+    assert.deepEqual(report.audit, JSON.parse(readFileSync(join(bundle, "tuning-access.json"), "utf8")));
     const consume = spawnSync("python3", ["-c", `import sys,json;sys.path.insert(0,'ops');import eval_split as E
 p=sys.argv[1]; a=json.load(open(sys.argv[2])); _,v=E.final_evaluation(p,dict(candidate_digest=E.digest('c'),baseline_digest=E.digest('b'),harness_digest=E.digest('h'),model='jev'),a);assert not E.provenance_errors(v)`,
       manifest, join(bundle, "tuning-access.json")], { cwd: REPO, encoding: "utf8" });
@@ -87,8 +86,10 @@ test("Node failed frozen work leaves a failed durable audit", async () => {
     const frozen = spawnSync("python3", ["evals/rule-delivery/freeze_split.py", "freeze", join(root, "cases.json"), join(root, "bundle"),
       "--seed", "test", "--source", "synthetic", "--seen", join(root, "seen.json")], { cwd: REPO, encoding: "utf8" });
     assert.equal(frozen.status, 0, frozen.stderr);
-    await assert.rejects(main(["--split-manifest", join(root, "bundle/manifest.json")], { stdout: () => {} }));
     const manifest = join(root, "bundle/manifest.json");
+    await assert.rejects(withTuningAccess([join(root, "bundle/final.json")], () => {
+      throw new Error("synthetic tuning failure");
+    }, [], manifest), /synthetic tuning failure/);
     await assert.rejects(withTuningAccess([join(root, "bundle/final.json")], () => {
       try { fs.readFileSync(123456); } catch {}
     }, [], manifest), /descriptor/);

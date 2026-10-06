@@ -10,12 +10,13 @@ three selftests claimed in prose while not having it.
     .venv/bin/python ops/git-env-selftest.py
 """
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from git_env import fixture_env, scrubbed_env, GIT_LOCATION_VARS  # noqa: E402
+from git_env import clone_current_fixture, fixture_env, scrubbed_env, GIT_LOCATION_VARS  # noqa: E402
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "lib"))
 from selftest_harness import Checker  # noqa: E402
@@ -140,5 +141,30 @@ if os.path.exists(_hook):
 else:
     check("ops/githooks/pre-push is present to check", False,
           f"expected it at {_hook}")
+
+source = Path(make_repo("gitenv-current-", "source@example.invalid"))
+source_head = git_out(source, "rev-parse", "HEAD", env=fenv)
+(source / "f.txt").unlink()
+(source / "added.txt").write_text("staged addition\n")
+subprocess.run(["git", "add", "added.txt"], cwd=source, env=fenv, check=True)
+(source / "added.txt").write_text("working-tree edit\n")
+(source / "ignored.txt").write_text("untracked\n")
+(source / "vendor/nested").mkdir(parents=True)
+subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                f"160000,{source_head},vendor/nested"], cwd=source, env=fenv, check=True)
+snapshot = Path(tempfile.mkdtemp(prefix="gitenv-current-clone-")) / "repo"
+clone_current_fixture(source, snapshot, env=hostile)
+check("current fixture contains tracked additions and working-tree edits",
+      (snapshot / "added.txt").read_text() == "working-tree edit\n")
+check("current fixture preserves tracked deletions and excludes untracked files",
+      not (snapshot / "f.txt").exists() and not (snapshot / "ignored.txt").exists())
+check("current fixture preserves gitlink pins without copying checkout contents",
+      git_out(snapshot, "ls-files", "--stage", "vendor/nested", env=fenv)
+      == f"160000 {source_head} 0\tvendor/nested")
+check("current fixture starts clean without changing source HEAD or index",
+      git_out(snapshot, "status", "--porcelain", env=fenv) == ""
+      and git_out(source, "rev-parse", "HEAD", env=fenv) == source_head
+      and git_out(source, "diff", "--cached", "--name-only", env=fenv)
+      == "added.txt\nvendor/nested")
 
 sys.exit(CHECKER.summary())

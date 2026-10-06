@@ -11,7 +11,7 @@
       ]
     },
     {
-      "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
+      "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
       "hooks": [
         {
           "type": "command",
@@ -302,11 +302,6 @@
         },
         {
           "type": "command",
-          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/stale-claim-gate.py",
-          "timeout": 20
-        },
-        {
-          "type": "command",
           "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/loose-work-gate.py"
         },
         {
@@ -364,6 +359,15 @@
     }
   ],
   "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "{{REPO}}/.venv/bin/python {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/job-watchdog-digest.py",
+          "timeout": 5
+        }
+      ]
+    },
     {
       "hooks": [
         {

@@ -5,6 +5,7 @@ import { TOOLS } from "../src/tools.js";
 const SAFE_LEAD = Object.freeze({
   id: "30000000-0000-0000-0000-000000000118",
   registry_ref: "L-118",
+  party_id: "20000000-0000-4000-8000-000000000118",
   name: "Example Practice",
   specialty: "Dental",
   city: "Mobile",
@@ -65,6 +66,9 @@ test("lead-board exposes the full safe, versioned worked-lead board", async () =
 
   assert.deepEqual(result.stages.map((stage) => stage.slug), ["new", "nurture_drip", "do_not_contact"]);
   assert.equal(result.leads.length, 2, "suppressed and terminal leads stay visible");
+  assert.equal(result.leads[0].party_id, SAFE_LEAD.party_id);
+  assert.ok(db.queries.some(sql => sql.includes("as party_id")));
+  assert.equal(result.leads[0].score, SAFE_LEAD.score);
   assert.equal(result.leads[0].base_version, 3, "safe writes receive the authoritative row version");
   assert.equal(result.leads[1].suppressed, true);
   assert.match(result.generated_at, /^\d{4}-\d{2}-\d{2}T/);
@@ -81,4 +85,17 @@ test("lead-board contract does not expose contact, notes, or raw-source fields",
   for (const lead of result.leads) {
     for (const field of forbidden) assert.equal(Object.hasOwn(lead, field), false, field);
   }
+});
+
+test("archived leads stay visible but leave nurture and conversion metrics",async()=>{
+  const db=new LeadBoardFake(),query=db.query.bind(db);
+  db.query=async sql=>{
+    const r=await query(sql);
+    if(sql.includes("from v_lead_board\n"))return {rows:[{...SAFE_LEAD,converted:true},{...SAFE_LEAD,id:"archived-example",stage:"archived",converted:true}]};
+    return r;
+  };
+  const result=await TOOLS["lead-board"].handler(db);
+  assert.deepEqual(result.metrics,{nurture_count:1,conversion_denominator:1,converted_count:1});
+  assert.equal(result.leads.length,2);
+  assert.ok(db.queries.some(sql=>sql.includes("'reason',m.reason") && sql.includes("'evidence_ref',m.evidence_ref")));
 });

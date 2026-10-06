@@ -62,21 +62,6 @@
       }
     },
     {
-      "id": "jev-rerank",
-      "readers": [
-        "evals/retrieval/jev-rerank-eval.mjs",
-        "mcp-server/src/jev-rerank.js"
-      ],
-      "case_globs": [
-        "evals/retrieval/fixtures/jev-rerank*.json"
-      ],
-      "use": "development_or_regression",
-      "reason": "Score/Noul/beam variant comparison uses exposed labeled shortlists",
-      "observed_sources": {
-        "evals/retrieval/fixtures/jev-rerank-shortlists.2026-09-29.v1.json": "sha256:723c9dd481efce7a78c6f8dc99d6b6de8e74fe1ea4368d3f9b83b71748468c9f"
-      }
-    },
-    {
       "id": "retrieval-policy",
       "readers": [
         "ops/retrieval_eval.py",
@@ -166,12 +151,14 @@
         "ops/check-eval-receipt.py"
       ],
       "case_globs": [
-        "evals/*/receipt.json"
+        "evals/*/receipt.json",
+        "evals/rule-delivery/*historical-receipt.json"
       ],
       "use": "development_or_regression",
       "reason": "new shipping receipts require final manifest, clean tuning audit and candidate lock; historical receipts remain historical",
       "observed_sources": {
-        "evals/rule-delivery/receipt.json": "sha256:d9934b02d9e3ccf07cbb39ff98e0570a71d8f75e37ea371bb27023936e628953"
+        "evals/rule-delivery/historical-receipt.json": "sha256:d9934b02d9e3ccf07cbb39ff98e0570a71d8f75e37ea371bb27023936e628953",
+        "evals/rule-delivery/measured-historical-receipt.json": "sha256:6cd565a970f224901d0a90bfddde03623a3e86907121a8c198559400e35d96ce"
       }
     }
   ]
