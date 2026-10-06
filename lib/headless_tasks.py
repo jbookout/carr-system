@@ -332,13 +332,17 @@ def _terminate(child: subprocess.Popen) -> None:
         os.killpg(child.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    except PermissionError:
+    except PermissionError as denied:
         # Darwin can return EPERM after the last group member has exited.
         # A live group remains a failure; verify absence instead of swallowing.
-        child.poll()  # Reap an exited leader before asking ps about its group.
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise denied
         probe = subprocess.run(['ps', '-axo', 'pgid='], capture_output=True, text=True, timeout=5)
         if probe.returncode or str(child.pid) in probe.stdout.split():
             raise
+        return
     child.wait(timeout=5)
 
 

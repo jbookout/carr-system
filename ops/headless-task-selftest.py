@@ -519,20 +519,25 @@ print(sys.argv[sys.argv.index('--correlation')+1]+' aa000000-0000-4000-8000-0000
         with patch('os.killpg', side_effect=PermissionError), patch('lib.headless_tasks.subprocess.run',
                 return_value=subprocess.CompletedProcess([],0,stdout='987654\n')):
             with self.assertRaises(PermissionError): _terminate(child)
+        child.wait.side_effect = subprocess.TimeoutExpired('child', 5)
+        with patch('os.killpg', side_effect=PermissionError), patch(
+                'lib.headless_tasks.subprocess.run') as probe:
+            with self.assertRaises(PermissionError): _terminate(child)
+        probe.assert_not_called()
 
-    def test_termination_reaps_exited_child_before_darwin_group_probe(self):
+    def test_termination_reaps_child_exiting_after_nonblocking_poll(self):
         from lib.headless_tasks import _terminate
         from unittest.mock import Mock
         reaped = []
         child = Mock(pid=987654)
-        child.poll.side_effect = lambda: reaped.append(True) or 0
+        child.poll.return_value = None
+        child.wait.side_effect = lambda **kwargs: reaped.append(True) or 0
         def probe(*args, **kwargs):
             return subprocess.CompletedProcess([], 0, stdout='' if reaped else '987654\n')
         with patch('os.killpg', side_effect=PermissionError), patch(
                 'lib.headless_tasks.subprocess.run', side_effect=probe):
             _terminate(child)
-        child.poll.assert_called_once()
-        child.wait.assert_called_once()
+        child.wait.assert_called_once_with(timeout=5)
 
     def test_canonical_zero_exit_without_ack_is_not_recorded(self):
         from lib.headless_tasks import record_run
