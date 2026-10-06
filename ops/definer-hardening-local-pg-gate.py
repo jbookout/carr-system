@@ -3,7 +3,7 @@
 # doctrine: runbook
 """Rollback-only acceptance for SECURITY DEFINER object qualification.
 
-0790 pins every public/ops definer's search_path with pg_temp last, which stops
+0847 pins every public/ops definer's search_path with pg_temp last, which stops
 temporary-object substitution. This gate holds the second half of the review
 finding that followed it: a definer body must not depend on search_path at all
 for the application objects it touches. Every application relation, row type
@@ -29,7 +29,6 @@ for the v100 entry that gate once dropped.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import sys
@@ -159,18 +158,6 @@ def unqualified_definers(cur) -> list[tuple[str, list[str]]]:
     return failures
 
 
-def siep11_gate():
-    spec = importlib.util.spec_from_file_location(
-        "siep11_mutation_registry_local_pg_gate",
-        REPO / "ops/siep11-mutation-registry-local-pg-gate.py",
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, str(REPO / "ops"))
-    spec.loader.exec_module(module)
-    return module
-
-
 def require_loopback(dsn: str) -> None:
     from psycopg.conninfo import conninfo_to_dict
 
@@ -209,7 +196,9 @@ def main() -> int:
                 """select registry_version from ops.scac_mutation_registry_version
                     order by regexp_replace(registry_version,'^.*[.]v','','')::integer desc limit 1"""
             ).fetchall()[0][0]
-            siep11_gate().require_supported_successor(live)
+            from registry_chain import registry_chain
+            if live not in {row['version'] for row in registry_chain()['versions'][1:]}:
+                raise RuntimeError(f"unsupported live successor {live!r}")
             ordinal = int(live.rsplit(".v", 1)[1])
             if cur.execute(f"select ops.scac_mutation_catalog_v{ordinal}_current()").fetchall()[0][0] is not True:
                 raise RuntimeError(f"live catalog no longer matches the {live} seal")

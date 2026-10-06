@@ -17,6 +17,7 @@ import psycopg
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 from scac_mutation_db_inventory import project, summarize
+from registry_chain import registry_chain
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -27,17 +28,6 @@ JOB_DEFINITION_CATALOG = {
     "count": 26,
     "digest": "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
 }
-
-# Reviewed frontiers share this check between the live gate and its regression.
-SUPPORTED_LIVE_SUCCESSORS = frozenset(
-    f"scac-mutation-registry.v{version}" for version in range(2, 106)
-)
-
-
-def require_supported_successor(runtime_version: str) -> None:
-    if runtime_version not in SUPPORTED_LIVE_SUCCESSORS:
-        raise RuntimeError(f"unsupported live successor {runtime_version!r}")
-
 
 def fail(message: str) -> int:
     print(f"siep11-mutation-registry-local-pg-gate: FAIL — {message}", file=sys.stderr)
@@ -228,7 +218,8 @@ def main() -> int:
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
             expected_sealed_service_launchd = sealed_service_launchd(runtime_version)
-            require_supported_successor(runtime_version)
+            if runtime_version not in {row["version"] for row in registry_chain()["versions"][1:]}:
+                raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             # A successor may only ADD a seal. Whatever version is live, the one
             # immediately below it must still be present AND still validate its
             # own entry-set seal -- that is what makes v22 sealed HISTORY under

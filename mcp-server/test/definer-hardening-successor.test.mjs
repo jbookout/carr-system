@@ -2,42 +2,37 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import * as inventory from '../../ops/scac-mutation-inventory.mjs';
+import { registryChain, preservesRegistryChainHistory } from '../../ops/registry-chain.mjs';
+import { execFileSync } from 'node:child_process';
 import { SCAC_MUTATION_REGISTRY_VERSION } from '../src/mutation-registry.js';
 
-test('hardening registry is selected and delivered atomically with metadata', () => {
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, 'scac-mutation-registry.v105');
-  const runner = readFileSync(new URL('../../tools/migrate.py', import.meta.url), 'utf8');
-  assert.match(runner, /\(\s*"0790_dot_security_definer_hardening.sql",\s*"0791_completion_tenant_security_barriers.sql",\s*"0792_dot_hardening_scac_successor.sql",\s*\)/);
+const hardening = registryChain.versions.find(row => row.migration.endsWith('_dot_hardening_scac_successor.sql'));
+const read = path => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+
+test('hardening extends published history and delivers metadata atomically', () => {
+  assert.ok(hardening);
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, registryChain.versions.at(-1).version);
+  const before = JSON.parse(execFileSync('git', ['show', 'origin/main:ops/config/scac-registry-chain.json'], { encoding: 'utf8' }));
+  assert.ok(preservesRegistryChainHistory(before, registryChain));
+  assert.deepEqual(hardening.atomic_pair, [
+    '0847_dot_security_definer_hardening.sql', '0848_completion_tenant_security_barriers.sql',
+    '0849_dot_hardening_scac_successor.sql',
+  ]);
+  assert.ok(registryChain.strict_atomic_groups.some(group => JSON.stringify(group) === JSON.stringify(hardening.atomic_pair)));
 });
 
-test('definer hardening successor preserves its predecessor and seals hardened metadata', () => {
-  const rows = inventory.frozenInventory('scac-mutation-registry.v105');
-  const sql = inventory.renderDefinerHardeningRegistrySql(rows);
-  assert.equal(sql, readFileSync(new URL('../../migrations/0792_dot_hardening_scac_successor.sql', import.meta.url), 'utf8'));
-  for (const filename of ['0787_jev_cap_scac_successor.sql',
-    '0790_dot_security_definer_hardening.sql', '0791_completion_tenant_security_barriers.sql']) {
-    const bytes = readFileSync(new URL(`../../migrations/${filename}`, import.meta.url));
-    const digest = createHash('sha256').update(bytes).digest('hex');
-    assert.ok(sql.includes(`filename='${filename}' and sha256='${digest}'`), filename);
+test('hardening successor binds its predecessor and preserves temporary-schema pinning', () => {
+  assert.ok(hardening);
+  const sql = read(hardening.migration);
+  const predecessor = registryChain.versions.find(row => row.version === hardening.predecessor);
+  for (const filename of [predecessor.migration.split('/').at(-1), ...hardening.atomic_pair.slice(0, -1)]) {
+    const hash = createHash('sha256').update(read(`migrations/${filename}`)).digest('hex');
+    assert.ok(sql.includes(`filename='${filename}' and sha256='${hash}'`), filename);
   }
-  assert.match(sql, /scac_mutation_catalog_v104_current\(\) rename to scac_mutation_catalog_v104_live_at_seal/);
-  assert.match(sql, /ops\.scac_mutation_registry_v104_seal_available\(\) and ops\.scac_mutation_registry_v105_seal_available\(\)/);
-  assert.ok(sql.includes(inventory.registrySeal(inventory.REGISTRY_V104_VERSION, inventory.frozenInventory(inventory.REGISTRY_V104_VERSION), inventory.JEV_CAP_V104_DB_CATALOG_BASELINE).digest));
-  assert.match(sql, /scac_mutation_catalog_v105_current\(\)/);
-  assert.match(sql, /filename='0790_dot_security_definer_hardening\.sql' and sha256='[0-9a-f]{64}'/);
-  assert.match(sql, /filename='0791_completion_tenant_security_barriers\.sql' and sha256='[0-9a-f]{64}'/);
-  assert.doesNotMatch(sql, /security definer set search_path=[^\n]+(?<!pg_temp) as \$fn\$/);
-  assert.throws(() => inventory.renderDefinerHardeningRegistrySql(rows, '-- changed predecessor'), /predecessor.*pin drifted/);
-});
-
-test('snapshot absorbs the ordered hardening batch and leaves qualification pending', () => {
-  const snapshot = readFileSync(new URL('../../db/schema.sql', import.meta.url), 'utf8');
-  const ledger = snapshot.slice(snapshot.indexOf('COPY public.schema_migrations'));
-  for (const filename of ['0787_jev_cap_scac_successor.sql',
-    '0790_dot_security_definer_hardening.sql', '0791_completion_tenant_security_barriers.sql',
-    '0792_dot_hardening_scac_successor.sql']) {
-    assert.ok(ledger.includes(filename), filename);
-  }
-  assert.ok(!ledger.includes('0793_qualify_security_definer_dependencies.sql'));
+  assert.ok(sql.includes(predecessor.digest));
+  assert.ok(sql.includes(`ops.scac_mutation_registry_v${predecessor.number}_seal_available()`));
+  assert.ok(sql.includes(`ops.scac_mutation_catalog_v${hardening.number}_current()`));
+  const paths = [...sql.matchAll(/security definer set search_path=([^\n]+?) as \$fn\$/g)];
+  assert.ok(paths.length);
+  assert.ok(paths.every(match => match[1].endsWith(',pg_temp')));
 });

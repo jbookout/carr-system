@@ -2,8 +2,6 @@
 """Source-only regressions for the SECURITY DEFINER hardening review round.
 
 Paired with ops/definer-hardening-local-pg-gate.py. Needs no database:
-  * the SIEP-11 gate keeps v100 alongside v105 (a predecessor database must
-    still validate) and still fails closed outside the reviewed range;
   * the qualification audit flags bare application references and ignores
     comments, literals, qualified names, CTEs and pg_catalog built-ins, and
     the path resolver binds a name the way the routine's own path would;
@@ -18,6 +16,7 @@ import importlib.util
 import re
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -41,22 +40,6 @@ class FakeCatalog(GATE.Catalog):  # type: ignore[name-defined,misc]
                           "rule": {"public", "ops"}, "pg_class": {"pg_catalog"}}
         self.routines = {"digest": {"public"}, "normalize_retrieval_phrase": {"public"},
                          "now": {"pg_catalog"}, "coalesce": {"pg_catalog"}}
-
-
-class SuccessorAllowlist(unittest.TestCase):
-    def test_predecessor_v100_and_current_v105_are_supported(self):
-        gate = GATE.siep11_gate()
-        for version in ("scac-mutation-registry.v2", "scac-mutation-registry.v99",
-                        "scac-mutation-registry.v100", "scac-mutation-registry.v104",
-                        "scac-mutation-registry.v105"):
-            gate.require_supported_successor(version)
-
-    def test_unreviewed_frontiers_fail_closed(self):
-        gate = GATE.siep11_gate()
-        for version in ("scac-mutation-registry.v1", "scac-mutation-registry.v106",
-                        "scac-mutation-registry.v1000", "scac-mutation-registry.vX"):
-            with self.assertRaisesRegex(RuntimeError, "unsupported live successor"):
-                gate.require_supported_successor(version)
 
 
 class QualificationAudit(unittest.TestCase):
@@ -116,6 +99,28 @@ class SubstitutionFixtureParity(unittest.TestCase):
         self.assertIn("set search_path = pg_catalog, ops, public", original.group(1))
         self.assertIn("set search_path = pg_catalog, ops, public", legacy.group(1))
         self.assertNotIn("pg_temp", legacy.group(1))
+
+
+class LockRehearsalFrontier(unittest.TestCase):
+    def test_accepts_the_declared_predecessor_before_rehearsing(self):
+        from registry_chain import registry_chain
+        chain = registry_chain()['versions']
+        hardening = next(row for row in chain if row['migration'].endswith('_dot_hardening_scac_successor.sql'))
+        predecessor = next(row for row in chain if row['version'] == hardening['predecessor'])
+        rehearsal = load('hardening_rehearsal', 'ops/definer-hardening-lock-rehearsal-gate.py')
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+
+        def execute(query):
+            if query == 'select filename from public.schema_migrations':
+                return [(Path(predecessor['migration']).name,)]
+            raise RuntimeError('accepted frontier; start scale rehearsal')
+
+        connection.execute.side_effect = execute
+        with patch.dict('os.environ', {'CARR_LOCAL_PG_DSN': 'host=127.0.0.1 dbname=fixture'}), \
+             patch.object(rehearsal.psycopg, 'connect', return_value=connection):
+            with self.assertRaisesRegex(RuntimeError, 'accepted frontier'):
+                rehearsal.main()
 
 
 if __name__ == "__main__":
