@@ -184,7 +184,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result["status"], "timed_out")
 
     def test_installer_never_enables_model_or_desk(self):
-        installer = load(HERE.parent / "bin/install-flash-on-demand.py", "fixture_installer")
+        installer = load(HERE / "flash_install.py", "fixture_installer")
         home = self.directory / "home"
         agents = home / "Library/LaunchAgents"
         agents.mkdir(parents=True)

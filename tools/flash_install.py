@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
 """Install the idle watcher and demand launcher without starting either Flash agent."""
-import argparse
 import os
 import plistlib
 import subprocess
@@ -31,14 +29,11 @@ def install(repo, home, *, launch=subprocess.run):
     launch(["/bin/launchctl", "print", f"{domain}/{label}"], check=True, capture_output=True)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true")
-    args = parser.parse_args()
-    repo = Path(__file__).resolve().parents[1]
-    if not args.apply:
+def configure(repo, *, apply=False):
+    repo = Path(repo).resolve()
+    if not apply:
         print("Would install the 5-minute idle watcher, demand desk launcher, and disable login startup.")
-        return
+        return 0
     common = Path(subprocess.check_output(["git", "rev-parse", "--git-common-dir"], cwd=repo, text=True).strip())
     common = (repo / common).resolve()
     branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=repo, text=True).strip()
@@ -46,7 +41,4 @@ def main():
         raise SystemExit("Install from canonical main after merge so launchd retains a stable source path.")
     install(repo, Path.home())
     print("Installed Flash on demand; server and desk were not enabled or started.")
-
-
-if __name__ == "__main__":
-    main()
+    return 0
