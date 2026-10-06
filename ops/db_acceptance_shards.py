@@ -20,7 +20,7 @@ class Program:
 
 # Mutation audit: keep F03's committed engineering fixture, rule-delivery's
 # autocommit rule/authority edits and the engineering/ownership/assurance chain
-# together, in serial order. The other group owns its committed continuity and
+# together, in serial order. The other group owns its committed continuity, Leads and
 # calendar/nightly rows. Renewal/incident/completion probes roll back their own
 # fixtures. Each group starts from the same full migration class and historical
 # fingerprint; no group consumes another group's fixture. Snapshot verification
@@ -28,6 +28,7 @@ class Program:
 PROGRAMS = (
     Program("f03", "tools/test-f03-production-migration.py", 1, "f03"),
     Program("continuity", "mcp-server/test/codex-continuity.test.mjs", 2, "node"),
+    Program("leads", "mcp-server/test/lead-workspace-pg.test.mjs", 2, "node"),
     Program("rule-authority", "ops/atomic-rule-approval-local-pg-acceptance.py", 1),
     Program("rule-delivery", "ops/rule-delivery-local-pg-acceptance.py", 1),
     Program("engineering-claim", "ops/engineering-claim-local-pg-gate.py", 1),

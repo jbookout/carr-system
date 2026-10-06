@@ -42,6 +42,7 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py install-codex-continuity-mcp --apply
     ops/config-as-code.py verify-codex-continuity-mcp
     ops/config-as-code.py install-progress-board [--repo CANONICAL] --apply
+    ops/config-as-code.py install-flash-on-demand [--apply]
     ops/config-as-code.py verify-progress-board [--repo CANONICAL]
     ops/config-as-code.py check-launchd-main-paths
     ops/config-as-code.py remove-codex-continuity --apply
@@ -1549,6 +1550,21 @@ def refused_launchd_templates(repo=None):
     return out
 
 
+def _nearest_git_metadata(directory):
+    """The closest directory at or above `directory` holding a .git entry, or None.
+    Any lstat failure other than absence propagates, so unreadable metadata fails closed."""
+    while True:
+        try:
+            os.lstat(os.path.join(directory, ".git"))
+            return directory
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
 def launchd_path_refusal(body):
     """Verify runtime checkouts for installation and installed-path audits."""
     try:
@@ -1574,13 +1590,20 @@ def launchd_path_refusal(body):
         while not os.path.isdir(directory) and directory != os.path.dirname(directory):
             directory = os.path.dirname(directory)
         try:
+            # Git skips metadata it cannot read (a corrupt HEAD, say) and
+            # either reports no repository or discovers an enclosing one, so
+            # its answer only counts when it names the nearest metadata.
+            nearest = _nearest_git_metadata(directory)
             top = subprocess.run(["git", "-C", directory, "rev-parse", "--show-toplevel"],
                                  capture_output=True, text=True, env=_git_env(), timeout=15)
             if top.returncode:
-                if top.returncode == 128 and top.stderr.strip() == "fatal: not a git repository (or any of the parent directories): .git":
+                if nearest is None and top.returncode == 128 and top.stderr.strip() == "fatal: not a git repository (or any of the parent directories): .git":
                     continue
                 return f"cannot verify repository identity for {path}: {top.stderr.strip()}"
             checkout = top.stdout.strip()
+            if nearest is None or os.path.realpath(checkout) != os.path.realpath(nearest):
+                return (f"cannot verify repository identity for {path}: Git selected {checkout} "
+                        f"but the nearest metadata is at {nearest}")
             dirs = subprocess.run(["git", "-C", checkout, "rev-parse", "--path-format=absolute",
                                    "--git-dir", "--git-common-dir"],
                                   capture_output=True, text=True, env=_git_env(), timeout=15)
@@ -2964,6 +2987,13 @@ def main():
         return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
+    if mode == "install-flash-on-demand":
+        import argparse
+        from tools import flash_install
+        parser = argparse.ArgumentParser(prog=f"config-as-code.py {mode}")
+        parser.add_argument("--apply", action="store_true")
+        options = parser.parse_args(sys.argv[2:])
+        return flash_install.configure(REPO_HERE, apply=options.apply)
     if mode == "check-launchd-main-paths":
         return cmd_check_launchd_main_paths()
     if mode in {"install-progress-board", "verify-progress-board"}:

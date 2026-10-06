@@ -165,6 +165,8 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "undo-invoice-close",
+    "undo-lead-move",
     "advance-leads",  # evidence-driven stages and approval-only drafts
     "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
     "acknowledge-board-answer",  # durable Received receipt for a board answer

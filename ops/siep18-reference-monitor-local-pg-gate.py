@@ -21,22 +21,18 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0842 installs invoice v110 and seals delivered relationship v109 as history.
-# Both are pinned: an unreviewed frontier or a rewritten predecessor must fail closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v110"
-LIVE_REGISTRY_ORDINAL = 110
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v109"
-SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
-SEALED_PREDECESSOR_DIGEST = (
-    "sha256:d44c252c635197522c85a7bb3c589d233d6f9f20f531c8324adf17f8e620a46d"
-)
-SEALED_PREDECESSOR_ENTRY_COUNTS = (2669, 1110)
-SEALED_PREDECESSOR_MIGRATION = (
-    "migrations/0840_relationship_scac_successor.sql"
-)
-LIVE_REGISTRY_MIGRATION = (
-    "migrations/0842_invoice_tracker_scac_successor.sql"
-)
+from registry_chain import registry_chain
+
+_CHAIN = registry_chain()
+_CURRENT, _PREDECESSOR = _CHAIN["versions"][-1], _CHAIN["versions"][-2]
+LIVE_REGISTRY_VERSION = _CURRENT["version"]
+LIVE_REGISTRY_ORDINAL = _CURRENT["number"]
+SEALED_PREDECESSOR_VERSION = _PREDECESSOR["version"]
+SEALED_PREDECESSOR_ORDINAL = _PREDECESSOR["number"]
+SEALED_PREDECESSOR_DIGEST = _PREDECESSOR["digest"]
+SEALED_PREDECESSOR_ENTRY_COUNTS = (_PREDECESSOR["entry_count"], _PREDECESSOR["source_count"])
+SEALED_PREDECESSOR_MIGRATION = _PREDECESSOR["migration"]
+LIVE_REGISTRY_MIGRATION = _CURRENT["migration"]
 
 LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
 LIVE_REGISTRATION_FN = f"ops.scac_mutation_registration_v{LIVE_REGISTRY_ORDINAL}"

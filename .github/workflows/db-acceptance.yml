@@ -60,12 +60,6 @@ on:
     - cron: "45 6 * * *"
   workflow_dispatch:
     inputs:
-      export_candidate:
-        description: "Export and independently restore a disposable PG17 schema candidate"
-        type: boolean
-        required: true
-        default: false
-
       shard_trial:
         description: "Shadow one-versus-two DB trial; retains the serial gate"
         type: boolean
@@ -93,7 +87,7 @@ jobs:
     strategy:
       fail-fast: false # one red must not cancel the other diagnostic reports
       matrix:
-        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.shard_trial && !inputs.export_candidate && '[0,1,2]' || '[0]') }}
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.shard_trial && '[0,1,2]' || '[0]') }}
     runs-on: ubuntu-latest
     # The canonical migration class plus this lane's own acceptance programs
     # routinely took 22-24 minutes by 2026-10-04, and a slow runner pushed six
@@ -104,7 +98,7 @@ jobs:
     steps:
       - name: Record runner setup start
         id: timing
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial && !inputs.export_candidate }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial }}
         run: echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
       # Actions are pinned to commit SHAs, not tags, for the supply-chain reason
       # ci.yml states: a tag is mutable by whoever controls the action repo.
@@ -122,7 +116,7 @@ jobs:
 
       - name: Read trial queue timestamp through GitHub REST
         id: queue
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial && !inputs.export_candidate }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -206,14 +200,14 @@ jobs:
           sudo install -d -m 0775 -o "$USER" -g "$(id -gn)" /var/run/postgresql
 
       - name: Prove private cluster isolation before a shadow trial
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial && !inputs.export_candidate }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial }}
         env:
           CARR_LOCAL_PG_ALLOW_HOSTED: "1"
           CARR_LOCAL_PG_BIN_DIR: /usr/lib/postgresql/17/bin
         run: python ops/db-acceptance-shards-selftest.py --postgres
 
       - name: Run the disposable-Postgres migration lane
-        if: ${{ github.event_name != 'workflow_dispatch' || (!inputs.export_candidate && !inputs.shard_trial) }}
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.shard_trial }}
         env:
           # ops/local-pg-ci.py refuses hosted runners by DEFAULT and still does.
           # This is the declared opt-in — the module additionally requires the
@@ -235,7 +229,7 @@ jobs:
         run: python ops/local-pg-ci.py --class migration
 
       - name: Run exact-source serial or isolated shadow partition
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial && !inputs.export_candidate }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shard_trial }}
         env:
           CARR_LOCAL_PG_ALLOW_HOSTED: "1"
           CARR_LOCAL_PG_BIN_DIR: /usr/lib/postgresql/17/bin
@@ -248,7 +242,7 @@ jobs:
             --report "$RUNNER_TEMP/shard-$SHARD.json" --queued-at "$QUEUED" --job-started-at "$STARTED"
 
       - name: Retain each shadow report even on failure
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.shard_trial && !inputs.export_candidate }}
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.shard_trial }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: db-shadow-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
@@ -256,25 +250,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Export and restore a disposable schema candidate
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.export_candidate }}
-        env:
-          CARR_LOCAL_PG_ALLOW_HOSTED: "1"
-          CARR_LOCAL_PG_BIN_DIR: /usr/lib/postgresql/17/bin
-          LC_ALL: C
-        run: python ops/local-pg-ci.py --export-candidate "$RUNNER_TEMP/carr-schema-candidate"
-
-      - name: Upload verified schema candidate and manifest
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.export_candidate }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: carr-schema-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/carr-schema-candidate/
-          if-no-files-found: error
-          retention-days: 3
-
   shadow-aggregate:
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.shard_trial && !inputs.export_candidate }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.shard_trial }}
     needs: acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -10,10 +10,10 @@ const files = ["ci.yml", "db-acceptance.yml"];
 const read = name => yaml.load(readFileSync(new URL("../../.github/workflows/" + name, import.meta.url), "utf8"));
 // Evaluate the workflows' scalar policy expressions, not a synthetic scheduler.
 // Unknown expressions fail closed; these tests make no claims about runner time.
-function expression(value, github, success = true, inputs = { shard_trial: false, export_candidate: false }) {
+function expression(value, github, success = true, inputs = { shard_trial: false }) {
   if (value === undefined) return success;
   const raw = String(value).replace(/^\$\{\{\s*|\s*\}\}$/g, "");
-  assert.match(raw, /^(?:github\.(?:workflow|ref|run_id|event_name|event\.action|event\.pull_request\.number)|inputs\.(?:shard_trial|export_candidate)|always\(\)|'[^']*'|[\s()=!&|]|true|false)+$/, `unsupported expression: ${raw}`);
+  assert.match(raw, /^(?:github\.(?:workflow|ref|run_id|event_name|event\.action|event\.pull_request\.number)|inputs\.shard_trial|always\(\)|'[^']*'|[\s()=!&|]|true|false)+$/, `unsupported expression: ${raw}`);
   const result = runInNewContext(raw, { github, inputs, always: () => true }, { timeout: 1000 });
   // Actions implicitly adds success() unless a status function is present.
   return raw.includes("always()") || success ? result : false;
@@ -28,7 +28,7 @@ function subscribed(workflow, event) {
   if (event.event_name !== "pull_request") return true;
   return (workflow.on.pull_request?.types ?? ["opened", "synchronize", "reopened"]).includes(event.event.action);
 }
-function policy(workflow, event, success = true, inputs = { shard_trial: false, export_candidate: false }) {
+function policy(workflow, event, success = true, inputs = { shard_trial: false }) {
   const triggers = subscribed(workflow, event);
   const concurrency = workflow.concurrency;
   const group = concurrency.group.replace(/\$\{\{(.*?)\}\}/g,
@@ -76,15 +76,14 @@ for (const file of files) {
   });
 }
 
-test("DB shard aggregate is default-off, collects failed-trial diagnostics, and cannot run on PRs or exports", () => {
+test("DB shard aggregate is default-off, collects failed-trial diagnostics, and cannot run on PRs", () => {
   const db = read("db-acceptance.yml");
   assert.equal(db.on.workflow_dispatch.inputs.shard_trial.default, false);
   assert.deepEqual(policy(db, context("workflow_dispatch"), true).runnable, ["acceptance"]);
-  const enabled = { shard_trial: true, export_candidate: false };
+  const enabled = { shard_trial: true };
   assert.deepEqual(policy(db, context("workflow_dispatch"), true, enabled).runnable, ["acceptance", "shadow-aggregate"]);
   assert.deepEqual(policy(db, context("workflow_dispatch"), false, enabled).runnable, ["shadow-aggregate"]);
   assert.deepEqual(policy(db, context(), true, enabled).runnable, ["acceptance"]);
-  assert.deepEqual(policy(db, context("workflow_dispatch"), true, { ...enabled, export_candidate: true }).runnable, ["acceptance"]);
   assert.throws(() => expression("inputs.unknown", context()), /unsupported expression/);
 });
 

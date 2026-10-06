@@ -32,6 +32,7 @@ spec.loader.exec_module(pg)
 SERIAL = (
     "tools/test-f03-production-migration.py",
     "mcp-server/test/codex-continuity.test.mjs",
+    "mcp-server/test/lead-workspace-pg.test.mjs",
     "ops/atomic-rule-approval-local-pg-acceptance.py",
     "ops/rule-delivery-local-pg-acceptance.py",
     "ops/engineering-claim-local-pg-gate.py",
@@ -47,6 +48,7 @@ SERIAL = (
     "ops/completion-register-schema-local-pg-gate.py",
     "bin/schema-snapshot.sh",
 )
+RULE_AUTHORITY = "ops/atomic-rule-approval-local-pg-acceptance.py"  # a mid-shard-1 program
 
 
 class Runner:
@@ -57,6 +59,12 @@ class Runner:
     def run(self, command, *, env=None, cwd=None, capture=False):
         command = tuple(str(x) for x in command)
         self.events.append((command, dict(env or {})))
+        if command[0] == "/fake/initdb":
+            data = Path(command[command.index("-D") + 1])
+            data.mkdir(parents=True)
+            (data / "PG_VERSION").write_text("17\n")
+        if command[0] == "/fake/pg_ctl" and command[-1] == "status":
+            return pg.CommandResult(3, "", "")  # pg_ctl: no server running
         if command[-1] == "--fingerprint-only":
             return pg.CommandResult(0, "{}", "")
         if self.bad_path and any(x.endswith(self.bad_path) for x in command):
@@ -71,11 +79,12 @@ class ShardTests(unittest.TestCase):
         runner = runner or Runner()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "cluster"
+            root.mkdir()
             bins = pg.PostgresBinaries(*(Path("/fake") / x for x in ("initdb", "pg_ctl", "createdb", "psql")))
             with (patch.dict(os.environ, {}, clear=True),
                   patch.object(pg, "port_is_available", return_value=True),
                   patch.object(pg, "find_postgres_binaries", return_value=bins),
-                  patch.object(pg.tempfile, "mkdtemp", return_value=str(root)),
+                  patch.object(tempfile, "mkdtemp", return_value=str(root)),
                   patch.object(pg, "shadow_source_binding", return_value=(
                       {"head": "a" * 40, "tree": "b" * 40},
                       {"postgres": "17.6", "python": "3.14.0", "node": "v26.0.0"}))):
@@ -116,7 +125,7 @@ class ShardTests(unittest.TestCase):
                 shards.select_programs(n)
 
     def test_signalled_setup_and_acceptance_retain_failure_reports(self):
-        for path in ("initdb", "tools/migrate.py", "ops/ci.sh", SERIAL[0], SERIAL[2]):
+        for path in ("initdb", "tools/migrate.py", "ops/ci.sh", SERIAL[0], RULE_AUTHORITY):
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 with self.subTest(path=path, signal=sig):
                     class Signalled(Runner):
@@ -165,7 +174,8 @@ time.sleep(30)
                 tmp = Path(tmp)
                 pidfile, marker = tmp / "pid", tmp / "completed"
                 report, root = tmp / "report.json", tmp / "cluster"
-                fixture = f"""import importlib.util, os, signal, sys
+                root.mkdir()
+                fixture = f"""import importlib.util, os, signal, sys, tempfile
 from pathlib import Path
 from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('fixture', {str(Path(__file__).resolve())!r})
@@ -186,7 +196,7 @@ signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt
 bins = pg.PostgresBinaries(*(Path('/fake') / x for x in ('initdb', 'pg_ctl', 'createdb', 'psql')))
 with (patch.object(pg, 'port_is_available', return_value=True),
       patch.object(pg, 'find_postgres_binaries', return_value=bins),
-      patch.object(pg.tempfile, 'mkdtemp', return_value={str(root)!r}),
+      patch.object(tempfile, 'mkdtemp', return_value={str(root)!r}),
       patch.object(pg, 'shadow_source_binding', return_value=(
           {{'head': 'a'*40, 'tree': 'b'*40}},
           {{'postgres': '17.6', 'python': '3.14.0', 'node': 'v26.0.0'}}))):
@@ -253,11 +263,12 @@ sys.exit(rc)
                 return super().run(command, **kwargs)
         with tempfile.TemporaryDirectory() as tmp:
             root, report = Path(tmp) / "cluster", Path(tmp) / "report.json"
+            root.mkdir()
             bins = pg.PostgresBinaries(*(Path("/fake") / x for x in ("initdb", "pg_ctl", "createdb", "psql")))
             with (patch.dict(os.environ, {}, clear=True),
                   patch.object(pg, "port_is_available", return_value=True),
                   patch.object(pg, "find_postgres_binaries", return_value=bins),
-                  patch.object(pg.tempfile, "mkdtemp", return_value=str(root)),
+                  patch.object(tempfile, "mkdtemp", return_value=str(root)),
                   patch.object(pg, "shadow_source_binding", return_value=(
                       {"head": "a" * 40, "tree": "b" * 40},
                       {"postgres": "17.6", "python": "3.14.0", "node": "v26.0.0"}))):
@@ -351,7 +362,7 @@ sys.exit(rc)
         for fault in ("nonzero", "exception"):
             errors = io.StringIO()
             with redirect_stderr(errors), redirect_stdout(io.StringIO()):
-                rc, runner = self.run_lane(1, Runner(SERIAL[2], fault), report=True)
+                rc, runner = self.run_lane(1, Runner(RULE_AUTHORITY, fault), report=True)
             self.assertNotEqual(rc, 0)
             for sentinel in ("CANARY_SECRET", "CANARY_CLIENT_IDENTIFIER"):
                 self.assertNotIn(sentinel.encode(), runner.report_bytes)
@@ -408,11 +419,12 @@ sys.exit(rc)
         # destroy a possibly running postmaster's data.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "cluster"
+            root.mkdir()
             bins = pg.PostgresBinaries(*(Path("/fake") / x for x in ("initdb", "pg_ctl", "createdb", "psql")))
             with (patch.dict(os.environ, {}, clear=True),
                   patch.object(pg, "port_is_available", return_value=True),
                   patch.object(pg, "find_postgres_binaries", return_value=bins),
-                  patch.object(pg.tempfile, "mkdtemp", return_value=str(root))):
+                  patch.object(tempfile, "mkdtemp", return_value=str(root))):
                 self.assertEqual(pg.run_local_ci(repo=REPO, ci_class="migration", port=55433,
                                                 runner=UnknownStop(), shard=1), 70)
             self.assertTrue(root.exists())

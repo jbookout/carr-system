@@ -326,9 +326,11 @@ const DECLARED_CHECK_NAMES = Object.freeze([
   "DB shadow shard 2/2",
   "shadow-aggregate",
   "is anything that should be reporting not reporting",
-  "main canary (gates, migration, types, freshness)",
+  "main canary",
+  "Resolve exact-tree PR evidence",
   "merge",
   "measure",
+  "CI flake proposals",
   "Backup artifact",
 ]);
 
