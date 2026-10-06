@@ -178,7 +178,7 @@ class DispatcherTests(unittest.TestCase):
     def test_stop_hides_bare_needs_review_from_joe(self):
         # Joe 2026-10-05: "[jev done_claim] needs_review ... these keep appearing after every
         # response". A needs_review verdict binds no action, so the Stop line Joe sees omits it;
-        # the receipt still records it and PostToolUse context still carries it.
+        # the receipt still records it.
         m = load("advise")
         review = {"check": "done_claim", "verdict": "needs_review",
                   "advice": "Bind the completion claim to explicit criteria and current evidence; needs review."}

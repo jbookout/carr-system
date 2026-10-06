@@ -124,7 +124,8 @@ def _joe_facing(result):
     """Whether a notable result belongs on the Stop line Joe reads.
 
     A bare needs_review names nothing to do; Joe saw one after nearly every reply
-    (2026-10-05). It stays in the receipt and in PostToolUse context for the session.
+    (2026-10-05). This hides it from every Stop check (done_claim, stop_boundary,
+    inspect_stop_boundary); it stays in the receipt.
     """
     return _notable(result) and str(result.get("verdict", "")) != "needs_review"
 
