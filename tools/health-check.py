@@ -24,6 +24,7 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
 import jev_outage_health as _jev_outage
+import flashlib
 from lib.credential_file import read_env_file
 
 # Script-relative, NOT expanduser("~/carr-system") — same fix as commit fad87a4
@@ -1361,6 +1362,11 @@ def _canonical_health():
         return 1
 
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
+    if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
+        flash_line = flashlib.health_row()
+        print("  " + flash_line)
+        if flash_line.startswith("WARN"):
+            rc = _red("flash_residency", flash_line)
     for error in snap.get("errors", []):
         print(f"  ⚠︎ canonical source UNREADABLE — {error}")
         rc = _red("source_unreadable", str(error), hard_error=True)
