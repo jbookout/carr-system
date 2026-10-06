@@ -83,3 +83,28 @@ test('a cache-only capability probe advertises spend authority without vendor fe
     e => e.payload?.error === 'jev_cache_miss' && e.payload.spend_authority === 'carr-jev-spend/v1');
   assert.equal(fetched, 0);
 });
+
+test('the Python capability probe passes real dispatcher admission and can never spend', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { callTool } = await import('../src/mcp.js');
+  const { jevCallSite, unpackJevState } = await import('../src/jev-spend-authority.js');
+  const ops = new URL('../../ops/', import.meta.url).pathname;
+  const probe = JSON.parse(execFileSync('python3', ['-c',
+    'import json, sys; sys.path.insert(0, sys.argv[1]); import typesafe_client; '
+    + 'print(json.dumps(typesafe_client.capability_probe()))', ops], { encoding: 'utf8' }));
+  assert.equal(probe.transport_mode, 'cache_only');
+  const site = jevCallSite(unpackJevState(probe.state).attribution);
+  assert.equal(site.hourly_budget, 0);
+  assert.equal(site.daily_budget, 0);
+  // No DATABASE_URL_WRITER: admission passes, then the writer connection fails.
+  const warning = console.warn;
+  console.warn = () => {};
+  let failure;
+  try {
+    await callTool({ TYPESAFE_API_KEY: 'fixture' },
+      { slug: 'joe-local', profile: 'verified-partner' }, 'ask-jev', probe, 'full');
+  } catch (e) { failure = e; }
+  finally { console.warn = warning; }
+  assert.ok(failure, 'expected the writer connection to fail after admission');
+  assert.equal(failure.payload?.error, undefined, `refused at admission: ${JSON.stringify(failure.payload)}`);
+});

@@ -33,6 +33,14 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(checker.claim_errors(receipt, "jev-judgments"), [])
         self.assertIn("Baseline git ref: fixture", receipt["notes"])
 
+    def test_default_baseline_is_the_recorded_historical_client(self):
+        # Merge-base with main moves as main absorbs the registry; the baseline must not.
+        spec = importlib.util.spec_from_file_location("eval_default_base", HERE / "run_eval.py")
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        with patch.object(runner, "report", side_effect=lambda base: base):
+            self.assertEqual(runner.main(["--report"]), "f5e44115^")
+
     def report(self, candidate, controls_fail=False):
         spec = importlib.util.spec_from_file_location("eval_report", HERE / "run_eval.py")
         runner = importlib.util.module_from_spec(spec)

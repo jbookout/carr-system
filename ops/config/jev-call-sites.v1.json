@@ -250,6 +250,7 @@
     },
     {"caller": "rule_trigger_compile", "trigger": "manual: bounded semantic evaluation", "runs_in": "explicit evaluation session", "attribution": "session", "unattended": "off", "hourly_budget": 5, "daily_budget": 10, "owner": "orchestrator", "value": "bounded advisory/eval only; no automatic promotion", "sources": ["ops/rule_trigger_compile.py"]},
     {"caller": "timebomb-audit", "trigger": "manual: bounded semantic evaluation", "runs_in": "explicit evaluation session", "attribution": "session", "unattended": "off", "hourly_budget": 5, "daily_budget": 10, "owner": "orchestrator", "value": "bounded advisory/eval only; no automatic promotion", "sources": ["ops/timebomb-audit.py"]},
+    {"caller": "jev_spend_authority_probe", "trigger": "before every Worker ask: one cache_only request proving the Worker enforces spend authority", "runs_in": "ops/typesafe_client.py server_ask and worker_ready", "attribution": "session", "unattended": "allowed", "hourly_budget": 0, "daily_budget": 0, "owner": "orchestrator", "value": "zero-spend capability check; zero budgets mean it can never pay", "sources": ["ops/typesafe_client.py"]},
     {
       "caller": "jevlint_review",
       "trigger": "Explicit advisory PR diff check or bounded rule calibration; never a scheduled full-repo run",

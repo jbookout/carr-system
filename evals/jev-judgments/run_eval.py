@@ -50,6 +50,7 @@ import evaluation_kernel as kernel
 
 EXPECTATIONS = HERE / "expectations.v1.json"
 ADMISSION_POLICY = REPO / "evals/jev-judgments/admission-policy.v1.json"
+HISTORICAL_BASELINE = "f5e44115^"
 VERSION = "jev-judgments-expectations/v1"
 WINDOW = ("2026-09-28", "2026-10-05")
 PER_SITE = 14
@@ -416,14 +417,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--build", metavar="JEV_CALLS_LOG")
     parser.add_argument("--report", action="store_true")
-    parser.add_argument("--base", default=None, help="baseline git ref (default: merge base with origin/main)")
+    parser.add_argument("--base", default=HISTORICAL_BASELINE,
+                        help=f"baseline git ref (default: {HISTORICAL_BASELINE}, the daily-cap-only client)")
     args = parser.parse_args(argv)
     if args.build:
         build(args.build)
     if args.report:
-        base = args.base or subprocess.run(["git", "merge-base", "HEAD", "origin/main"], cwd=REPO,
-                                           capture_output=True, text=True, check=True).stdout.strip()
-        return report(base)
+        return report(args.base)
     return 0
 
 

@@ -567,13 +567,22 @@ def _worker_upstream(stderr):
 
 
 SPEND_AUTHORITY = "carr-jev-spend/v1"
+# Registered with zero budgets: the Worker admits it, and it can never pay.
+PROBE_CALLER = "jev_spend_authority_probe"
+
+
+def capability_probe():
+    session_id = "spend-authority-probe"
+    return {"idempotency_key": str(uuid.uuid4()), "session_id": session_id,
+            "purpose": "call", "transport_mode": "cache_only",
+            "state": {"input": "spend authority probe", "jev_attribution": {
+                "caller": PROBE_CALLER, "session_id": session_id,
+                "job_id": None, "unattended": False}},
+            "questions": {"probe": noul("Is this a probe?")}}
 
 
 def _worker_capability(run, node, script, timeout):
-    probe = {"idempotency_key": str(uuid.uuid4()), "session_id": "spend-authority-probe",
-             "purpose": "call", "transport_mode": "cache_only", "state": "spend authority probe",
-             "questions": {"probe": noul("Is this a probe?")}}
-    proc = run([node or "node", script or "local-verb.mjs", SERVER_VERB, json.dumps(probe)],
+    proc = run([node or "node", script or "local-verb.mjs", SERVER_VERB, json.dumps(capability_probe())],
                capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     if proc.returncode == 0:
         payload = json.loads(proc.stdout)
