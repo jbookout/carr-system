@@ -33,6 +33,20 @@ bc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bc)
 
 
+_lock_root = tempfile.TemporaryDirectory()
+_lock_env = patch.dict(os.environ, {"CARR_BRIEF_LOCK_ROOT": _lock_root.name})
+
+
+def setUpModule():
+    # Publication locks and journals never touch the operator's ~/.cache.
+    _lock_env.start()
+
+
+def tearDownModule():
+    _lock_env.stop()
+    _lock_root.cleanup()
+
+
 def brief(name):
     with open(os.path.join(FIX, name), encoding="utf-8") as handle:
         return handle.read()
@@ -214,16 +228,14 @@ class Posting(unittest.TestCase):
     def test_first_post_creates_one_comment(self):
         report = BlockingReview().public_report()
         gh = PublicationGh(report)
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"CARR_BRIEF_LOCK_ROOT": directory}):
-            bc.post_comment("o/r", 7, report, gh=gh)
+        bc.post_comment("o/r", 7, report, gh=gh)
         self.assertEqual(gh.mutations, ["POST"])
 
     def test_second_post_updates_in_place(self):
         report = BlockingReview().public_report()
         gh = PublicationGh(report)
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"CARR_BRIEF_LOCK_ROOT": directory}):
-            bc.post_comment("o/r", 7, report, gh=gh)
-            bc.post_comment("o/r", 7, report, gh=gh)
+        bc.post_comment("o/r", 7, report, gh=gh)
+        bc.post_comment("o/r", 7, report, gh=gh)
         self.assertEqual(gh.mutations, ["POST", "PATCH"])
 
     def test_guard_refuses_deletion_alias(self):
@@ -372,18 +384,16 @@ class BlockingReview(unittest.TestCase):
 
     def test_13_concurrent_runs_converge(self):
         transport = PublicationGh(self.public_report())
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"CARR_BRIEF_LOCK_ROOT": directory}):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                list(pool.map(lambda _: bc.post_comment("o/r", 7, self.public_report(), gh=transport), range(2)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda _: bc.post_comment("o/r", 7, self.public_report(), gh=transport), range(2)))
         self.assertEqual(transport.mutations.count("POST"), 1)
         self.assertEqual(len(transport.comments), 1)
 
     def test_13_uncertain_post_is_read_back_before_retry(self):
         transport = PublicationGh(self.public_report())
         transport.uncertain = True
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"CARR_BRIEF_LOCK_ROOT": directory}):
-            bc.post_comment("o/r", 7, self.public_report(), gh=transport)
-            bc.post_comment("o/r", 7, self.public_report(), gh=transport)
+        bc.post_comment("o/r", 7, self.public_report(), gh=transport)
+        bc.post_comment("o/r", 7, self.public_report(), gh=transport)
         self.assertEqual(transport.mutations.count("POST"), 1)
 
     def test_14_stale_head_is_refused(self):
@@ -443,8 +453,7 @@ class BlockingReview(unittest.TestCase):
     def test_15_other_authors_marker_is_not_updated(self):
         transport = PublicationGh(self.public_report())
         transport.comments = [{"id": 15, "body": bc.MARKER, "user": {"login": "someone-else"}}]
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"CARR_BRIEF_LOCK_ROOT": directory}):
-            bc.post_comment("o/r", 7, self.public_report(), gh=transport)
+        bc.post_comment("o/r", 7, self.public_report(), gh=transport)
         self.assertEqual(transport.mutations, ["POST"])
 
     def test_16_private_untracked_brief_is_never_published(self):
