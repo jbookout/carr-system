@@ -768,17 +768,11 @@ def is_sql_context(cmd):
 def hosts_in(cmd):
     """Every host this command could reach: URL hosts plus remote-copy targets."""
     hosts = []
-    from cmd_text import shell_tokens
-    try:
-        tokens = shell_tokens(cmd)
-    except ValueError:
-        tokens = re.split(r'[\s;&|]', cmd)
-    for token in tokens:
-        for url in re.findall(r'https?://[^\s\'"<>]+', token, re.I):
-            try:
-                hosts.append(urlsplit(url).hostname or "invalid-url")
-            except ValueError:
-                hosts.append("invalid-url")
+    for url in _shell_urls(cmd):
+        try:
+            hosts.append(urlsplit(url).hostname or "invalid-url")
+        except ValueError:
+            hosts.append("invalid-url")
     return hosts + REMOTE_TARGET_RE.findall(cmd)
 
 
@@ -976,6 +970,16 @@ def _execution_tokens(text):
     return tokens, substitutions
 
 
+def _shell_urls(cmd):
+    """Read URL arguments without confusing quoted bytes with shell operators."""
+    tokens, substitutions = _execution_tokens(cmd)
+    for token in tokens:
+        if isinstance(token, _ShellWord):
+            yield from SEND_URL_RE.findall(token)
+    for body in substitutions:
+        yield from _shell_urls(body)
+
+
 def shell_send_analysis(cmd, cwd, inherited_path=None):
     """Return (refusal, sender) without interpreting or executing shell text.
 
@@ -1152,8 +1156,19 @@ def shell_send_analysis(cmd, cwd, inherited_path=None):
             # Any intervening command may mutate variables (read/unset/source
             # or a function). Do not carry guessed values across execution.
             variables.clear()
-            if name in {"export", "unset", "declare", "typeset", "local", "readonly", "read"}:
-                for argument in args[index + 1:]:
+            arguments = args[index + 1:]
+            if name in {"declare", "typeset", "local"} and any(
+                    argument.startswith("-") and not argument.startswith("--") and "n" in argument
+                    for argument in arguments):
+                raise ValueError("unresolved shell variable reference")
+            writer_option = {"printf": "-v", "set": "-A"}.get(name)
+            option_writer = bool(writer_option and arguments and arguments[0].startswith(writer_option))
+            if option_writer and arguments[0] != writer_option:
+                raise ValueError("unsupported attached variable writer option")
+            if option_writer or name in {
+                    "export", "unset", "declare", "typeset", "local", "readonly",
+                    "read", "mapfile", "readarray", "getopts", "vared"}:
+                for argument in arguments:
                     if (re.match(r"^(?:PATH|path)(?:$|=|\+=|\[)", argument) or
                             argument.dynamic and not re.match(r"^[A-Za-z_]\w*\+?=", argument)):
                         raise ValueError("shell executable search path mutation")
@@ -1848,7 +1863,7 @@ def check(cmd, cwd=None):
             return f"{label} — blocked by the CARR unattended guard"
 
     if resolved_sender or is_send_context(cmd):
-        for url in SEND_URL_RE.findall(cmd):
+        for url in _shell_urls(cmd):
             try:
                 target = urlsplit(url)
                 host = (target.hostname or "").lower()

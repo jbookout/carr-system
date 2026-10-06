@@ -84,6 +84,18 @@ for bypass in REVIEW_BYPASSES:
         "curl --noproxy '*' --connect-to 127.0.0.1:8000:127.0.0.1:61078 "
         "http://127.0.0.1:8000/proof")))
 
+MUST_REFUSE.extend(("PATH-writing builtin", command) for command in (
+    "printf -v PATH %s /tmp; git status",
+    "key=PATH; printf -v $key %s /tmp; git status",
+    "mapfile PATH < out/code; git status",
+    "readarray -t PATH < out/code; git status",
+    "getopts x PATH -x; git status",
+    "declare -n selected=PATH; selected=/tmp; git status",
+    "typeset -n selected=path; selected=/tmp; git status",
+    "set -A path /tmp; git status",
+    "vared path; git status",
+))
+
 MUST_ALLOW = [(name, payload) for name, payload, expected in cases.CASES
               if expected == cases.ALLOW]
 # Gate-edit's Bash seam also exercises sanctioned interpreter invocations.
@@ -108,6 +120,13 @@ MUST_ALLOW.extend(("sanctioned static command", cases.bash(command)) for command
     "declare -x MODE=$MODE; git status",
     "read -r MODE <<< test; git status",
     "read -a modes <<< test; git status",
+    "printf -v MODE %s test; git status",
+    "printf '%s' PATH",
+    "mapfile modes < out/code; git status",
+    "readarray -t modes < out/code; git status",
+    "getopts x mode -x; git status",
+    "declare -i COUNT=2; git status",
+    "set -- PATH; git status",
 ))
 
 def main():

@@ -83,6 +83,23 @@ def case(name, payload, expect):
     CASES.append((name, payload, expect))
 
 
+for command in (
+    "curl https://github.com; echo done",
+    "curl https://github.com&&echo done",
+    "curl https://github.com|cat",
+    "curl 'https://github.com/path?x=1&y=2'",
+    "curl 'https://github.com/path;version=1'",
+    'echo "$(curl https://github.com)"',
+):
+    case("URL shell boundary allow: " + command, bash(command), ALLOW)
+for command in (
+    "curl 'https://github.com;untrusted.example/'",
+    "curl https://github.com;curl http://localhost:8000/",
+    'echo "$(curl http://localhost:8000/)"',
+):
+    case("URL shell boundary deny: " + command, bash(command), DENY)
+
+
 # ── 1. KNOWN_HOSTS: the code list still works, including today's additions ────
 # Local inference uses the sanctioned flash-run ask transport, which pins its
 # origin and disables proxies and redirects. A URL cannot vouch for curl,
