@@ -390,7 +390,8 @@ class FleetReaper:
                 "detached": bool(entry.get("detached"))}
 
     def tree_fresh(self, path):
-        ages = (self.hook.index_age_s(str(path)), self.hook.tree_age_s(str(path)))
+        # Startup touches the index; read that signal after the longer tree scan.
+        ages = (self.hook.tree_age_s(str(path)), self.hook.index_age_s(str(path)))
         return any(age is None or age < self.tree_idle for age in ages)
 
     def stage(self, root, row):

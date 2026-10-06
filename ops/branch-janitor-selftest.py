@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ops"))
@@ -51,6 +52,27 @@ class ReaperTest(unittest.TestCase):
                     return set()
                 fixture.reaper(process_probe=probe).run({"fixture/repo": fixture.repo}, execute=True)
                 self.assertTrue(tree.exists())
+
+    def test_startup_during_final_tree_scan_preserves_tree(self):
+        fixture = Fixture()
+        tree = fixture.tree("old")
+        scan = hook.tree_age_s
+        calls = []
+
+        def scan_then_start(path):
+            age = scan(path)
+            calls.append(path)
+            if len(calls) == 3:
+                hook.mark_alive(path)
+            return age
+
+        with patch.object(hook, "tree_age_s", side_effect=scan_then_start):
+            report = fixture.reaper().run({"fixture/repo": fixture.repo}, execute=True)
+
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(tree.exists())
+        self.assertEqual(fixture.git("worktree", "list", "--porcelain").count(str(tree)), 1)
+        self.assertFalse(any(action.get("status") == "staged" for action in report["actions"]))
 
     def test_rebound_branch_at_same_head_preserves_tree(self):
         fixture = Fixture()
