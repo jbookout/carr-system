@@ -190,5 +190,82 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(board.board_snapshot(result)["milestones"]["V1"]["counts"]["live"], 1)
 
 
+class BoardFileCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.env = patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": self.tmp.name})
+        self.env.start()
+        os.environ.pop("PROGRESS_BOARD_SKIP_GH", None)
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+
+class DiscoveryRenderTests(BoardFileCase):
+    PRIOR_VERIFIED = "2026-10-01T00:00:00Z"
+
+    def render(self, discover):
+        board.write_json({"project": board.LAUNCHD_BOARD, "tasks": {},
+                          "github_sync": {"last_verified_at": self.PRIOR_VERIFIED, "failed": []}})
+        release = (Path(self.tmp.name), "d" * 40, "https://release.example")
+        with patch.object(board, "discover_v1", discover), patch.object(board, "latest_release", return_value=None), \
+                patch.object(board, "deployed_release", return_value=release), \
+                patch.object(board, "deployment_evidence", side_effect=lambda info, _: f"verified #{info['number']}"):
+            board.render(board.LAUNCHD_BOARD, discover=True)
+        return board.read_state(board.LAUNCHD_BOARD)
+
+    def test_discovered_slices_become_cards_with_their_delivery_target_and_release_evidence(self):
+        app = "jbookout/doctorcre-app"
+        tasks = self.render(lambda: {(REPO, 15): (pr(15, "MERGED", "W15: Invoices"), None),
+                                     (app, 3): (pr(3, title="W3c: Undo"), None)})["tasks"]
+        self.assertEqual(set(tasks), {"pr-15", "app-pr-3"})
+        self.assertEqual(tasks["pr-15"]["delivery_target"], board.AUTOMATIC_DELIVERY_TARGETS[REPO])
+        self.assertEqual(tasks["app-pr-3"]["delivery_target"], board.AUTOMATIC_DELIVERY_TARGETS[app])
+        self.assertEqual((tasks["pr-15"]["stage"], tasks["pr-15"]["evidence"]), ("live", "verified #15"))
+        self.assertEqual(tasks["app-pr-3"]["milestone"], "V1")
+
+    def test_discovery_failure_marks_sync_stale_and_keeps_last_verified(self):
+        def unavailable():
+            raise RuntimeError("REST unavailable")
+        state = self.render(unavailable)
+        self.assertEqual(state["tasks"], {})
+        self.assertTrue(state["github_sync"]["stale"])
+        self.assertEqual(state["github_sync"]["last_verified_at"], self.PRIOR_VERIFIED)
+        self.assertIn({"card": "V1 discovery", "error": "REST unavailable"}, state["github_sync"]["failed"])
+
+
+class ReconcileApplyTests(BoardFileCase):
+    def setUp(self):
+        super().setUp()
+        board.write_json({"project": "test", "tasks": {
+            "wd-0123456789abcdef": {"status": "blocked", "title": "Watchdog overlay", "executor": "orchestrator"},
+            "pr-1": {"status": "review", "pr": 1, "title": "Keep me", "executor": "codex"}}})
+
+    def apply(self, fetch):
+        with patch.object(board, "discover_v1", return_value={}), patch.object(board, "fetch_pr", fetch), \
+                patch.object(board, "refresh_and_publish") as publish, contextlib.redirect_stdout(io.StringIO()):
+            board.main(["reconcile", "test", "--apply"])
+        return publish
+
+    def test_apply_writes_archives_and_publishes(self):
+        publish = self.apply(lambda number, repo: (pr(number), None))
+        publish.assert_called_once_with("test")
+        state = board.read_state("test")
+        self.assertEqual(set(state["tasks"]), {"pr-1"})
+        self.assertEqual(state["tasks"]["pr-1"]["title"], "Keep me")
+        self.assertIn("wd-0123456789abcdef", state["reconcile_archive"][-1]["tasks"])
+
+    def test_apply_refuses_when_the_board_changes_during_reconcile(self):
+        def concurrent_write(number, repo):
+            board.write_json({**board.read_state("test"), "notes": ["written meanwhile"]})
+            return pr(number), None
+        with self.assertRaisesRegex(SystemExit, "Board changed during reconcile"):
+            self.apply(concurrent_write)
+        state = board.read_state("test")
+        self.assertIn("wd-0123456789abcdef", state["tasks"])
+        self.assertEqual(state["notes"], ["written meanwhile"])
+
+
 if __name__ == "__main__":
     unittest.main()

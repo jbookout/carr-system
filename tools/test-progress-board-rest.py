@@ -351,7 +351,8 @@ class RestRefresh(unittest.TestCase):
             if path.startswith(f"repos/{REPO}/pulls?"):
                 return [details[5], details[6]]
             if path.startswith(f"repos/{REPO}/issues?"):
-                return [{"number": 7, "state": "closed", "updated_at": merged_at, "pull_request": {"url": "pr"}}]
+                return [{"number": 7, "state": "closed", "updated_at": merged_at, "pull_request": {"url": "pr"}},
+                        {"number": 8, "state": "closed", "updated_at": merged_at, "title": "W8: Plain issue"}]
             if "/pulls?" in path or "/issues?" in path:
                 return []
             if re.search(r"/pulls/\d+$", path):
