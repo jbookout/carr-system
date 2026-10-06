@@ -1165,10 +1165,20 @@ def shell_send_analysis(cmd, cwd, inherited_path=None):
             option_writer = bool(writer_option and arguments and arguments[0].startswith(writer_option))
             if option_writer and arguments[0] != writer_option:
                 raise ValueError("unsupported attached variable writer option")
+            if option_writer and name == "printf" and len(arguments) > 2:
+                format_word = arguments[2]
+                # %n writes to a variable named by a value operand. Only a
+                # literal format without that conversion keeps values as data.
+                if format_word.dynamic or re.search(
+                        r"%[-+ #0-9.*']*[hlLjzt]*n", format_word.replace("%%", "")):
+                    raise ValueError("unresolved printf variable writer format")
             if option_writer or name in {
                     "export", "unset", "declare", "typeset", "local", "readonly",
                     "read", "mapfile", "readarray", "getopts", "vared"}:
-                for argument in arguments:
+                # printf -v and set -A name one destination; the remaining
+                # operands are format/value data, including expanded values.
+                destinations = arguments[1:2] if option_writer else arguments
+                for argument in destinations:
                     if (re.match(r"^(?:PATH|path)(?:$|=|\+=|\[)", argument) or
                             argument.dynamic and not re.match(r"^[A-Za-z_]\w*\+?=", argument)):
                         raise ValueError("shell executable search path mutation")
