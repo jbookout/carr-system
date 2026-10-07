@@ -3,6 +3,8 @@
 -- 2026-08-15 but have no franchisee clients or deals. Preserve both client
 -- records and their creation history; remove only the incorrect account role.
 -- This is a reviewed correction path, not an authorization to apply it.
+-- rollback: forward-only; reversing the recorded human correction requires a
+-- reviewed corrective migration with fresh census and linked-work guards.
 
 do $$
 declare
