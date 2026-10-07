@@ -20,6 +20,27 @@ class GitHubReadPaused(RuntimeError):
         super().__init__(f"CARR_GITHUB_LOCAL_HOLD: {reason}; retry at {until:.3f}")
 
 
+def resource_for(args: list[str]) -> str:
+    endpoint = args[1].lstrip('/') if len(args) > 1 and args[0] == 'api' else ''
+    return ('graphql' if endpoint == 'graphql' else 'code_search' if endpoint.startswith('search/code')
+            else 'search' if endpoint.startswith('search/') else 'core' if endpoint and not endpoint.startswith('-') else 'unknown')
+
+
+def split_response_bytes(output: bytes) -> tuple[dict[str, str], bytes]:
+    if not output.startswith(b'HTTP/'):
+        return {}, output
+    match = re.search(rb'\r?\n\r?\n', output)
+    if match is None:
+        raise ValueError('GitHub response headers are incomplete')
+    head = output[:match.start()].decode('latin-1')
+    headers = {}
+    for line in head.splitlines()[1:]:
+        key, separator, value = line.partition(':')
+        if separator:
+            headers[key.lower()] = value.strip()
+    return headers, output[match.end():]
+
+
 def split_response(output: str) -> tuple[dict[str, str], str]:
     if not output.startswith("HTTP/"):
         return {}, output
@@ -79,6 +100,9 @@ class GitHubReadBudget:
         self.scope = f"{env.get('GH_HOST', 'github.com')}:{principal}"
         self.shared = f"{env.get('GH_HOST', 'github.com')}:shared"
         self.clock, self.spacing = clock, spacing
+        legacy_dir = env.get('GH_LIMITER_DIR', str(Path(__file__).resolve().parents[1] / 'out/orch/gh-limiter'))
+        self.legacy = Path(legacy_dir) / 'cooldown'
+        self.legacy_cooldown = float(env.get('GH_LIMITER_COOLDOWN', 900))
 
     @contextmanager
     def state(self):
@@ -107,10 +131,19 @@ class GitHubReadBudget:
 
     def _check(self, data, resource):
         now = self.clock()
+        try:
+            legacy_until = float(self.legacy.read_text().split()[0]) + self.legacy_cooldown
+        except FileNotFoundError:
+            legacy_until = 0
+        except (OSError, ValueError, IndexError):
+            raise RuntimeError('Legacy GitHub hold unreadable; calls stopped') from None
+        if not math.isfinite(legacy_until) or legacy_until < 0:
+            raise RuntimeError('Legacy GitHub deadline invalid; calls stopped')
         row = data.get(self.scope, {})
         pools = (row.get("holds", {}), data.get(self.shared, {}).get("holds", {}))
         until = max((float(v) for holds in pools for k, v in holds.items()
                      if resource == "unknown" or k in (resource, "unknown")), default=0)
+        until = max(until, legacy_until)
         if until > now:
             raise GitHubReadPaused(until)
         return row

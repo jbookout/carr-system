@@ -5,16 +5,56 @@ GET pagination uses one budgeted CLI request per page. Other gh subcommands
 may make several hidden requests; invocation counts are a lower bound. Provider
 holds still apply. Installing it on legacy PATHs is a separate action; the
 wrapper neither installs itself nor changes credentials.
+Native commands inherit stdin and preserve binary stdout. Mutations run once.
 """
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from lib.github_reader import GitHubReader, GitHubUnreadable
+from lib.github_rate_limit import GitHubReadPaused, resource_for, split_response_bytes
+
+
+def native(reader, args):
+    if args and args[0] in ('auth', 'config', 'completion', 'version', '--version', 'help', '--help', '-h'):
+        return subprocess.call([reader.gh, *args])
+    budget = reader.budget
+    if budget is None:
+        print('GitHub budget unavailable; no request made', file=sys.stderr)
+        return 1
+    resource = resource_for(args)
+    try:
+        delay = budget.reserve(resource)
+        if delay:
+            time.sleep(delay)
+        budget.check(resource)
+        observed_at = budget.clock()
+        include = bool(args and args[0] == 'api' and '--include' not in args and '-i' not in args)
+        invocation = [*args, '--include'] if include else args
+        result = subprocess.run([reader.gh, *invocation], capture_output=True)
+        headers, body = split_response_bytes(result.stdout) if args and args[0] == 'api' else ({}, result.stdout)
+        diagnostic = reader._redact(result.stderr.decode('utf-8', errors='replace'))
+        retry_at = budget.observe(resource, headers, diagnostic, observed_at)
+    except GitHubReadPaused as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except (RuntimeError, ValueError, OverflowError):
+        print('GitHub budget unreadable; no retry attempted', file=sys.stderr)
+        return 1
+    except OSError:
+        print('GitHub CLI could not start', file=sys.stderr)
+        return 127
+    sys.stdout.buffer.write(body if include else result.stdout)
+    if diagnostic:
+        print(diagnostic, file=sys.stderr)
+    if result.returncode and retry_at is not None:
+        print(f'CARR_GITHUB_PROVIDER_HOLD: retry at {retry_at:.3f}', file=sys.stderr)
+    return result.returncode if result.returncode >= 0 else 128 - result.returncode
 
 
 def main(argv=None):
@@ -59,7 +99,7 @@ def main(argv=None):
                 outputs.append(output)
             output = "".join(outputs)
         else:
-            output = reader.text(args)
+            return native(reader, args)
         sys.stdout.write(output)
         return 0
     except GitHubUnreadable as exc:

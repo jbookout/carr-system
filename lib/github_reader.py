@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from lib.github_rate_limit import GitHubReadBudget, GitHubReadPaused, split_response
+from lib.github_rate_limit import GitHubReadBudget, GitHubReadPaused, resource_for, split_response
 from lib.secret_redaction import redact_text, sensitive_env_values
 
 GH_FALLBACKS = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
@@ -120,10 +120,13 @@ class GitHubReader:
             data = self._parse(text, args, attempts=attempts)
             if not paginate:
                 return data
-            if not isinstance(data, list):
+            if not isinstance(data, list) and not (slurp and isinstance(data, dict)):
                 raise GitHubUnreadable(f"gh api {path.split('?')[0]} returned no page list", kind="invalid_response")
-            rows.extend(data)
+            if isinstance(data, list):
+                rows.extend(data)
             pages.append(data)
+            if self._next_page is None and isinstance(data, dict):
+                raise GitHubUnreadable('Object pagination requires response headers; no partial result returned', kind='invalid_response')
             if self._next_page is False or (self._next_page is None and len(data) < 100):
                 return pages if slurp else rows
         raise GitHubUnreadable(f"gh api {path.split('?')[0]} exceeded {max_pages} pages; no partial result returned", kind="pagination_limit")
@@ -146,9 +149,7 @@ class GitHubReader:
         attempts = 0
         while True:
             attempts += 1
-            endpoint = args[1].lstrip("/") if len(args) > 1 and args[0] == "api" else ""
-            resource = ("graphql" if endpoint == "graphql" else "code_search" if endpoint.startswith("search/code")
-                        else "search" if endpoint.startswith("search/") else "core" if endpoint and not endpoint.startswith("-") else "unknown")
+            resource = resource_for(args)
             try:
                 if self.budget:
                     delay = self.budget.reserve(resource)
@@ -185,7 +186,7 @@ class GitHubReader:
                     except (RuntimeError, ValueError, OverflowError):
                         raise GitHubUnreadable("GitHub budget response invalid; reads stopped", kind="budget_unreadable", attempts=attempts) from None
                 if proc.returncode == 0:
-                    self._next_page = bool(re.search(r';\s*rel="next"', headers.get("link", ""))) if headers else None
+                    self._next_page = bool(re.search(r';\s*rel="next"', headers.get("link", ""))) if (proc.stdout or '').startswith('HTTP/') else None
                     self._outage = False
                     return (body if include else proc.stdout or ""), attempts
                 detail = diagnostic[-TAIL_LIMIT:]

@@ -610,7 +610,7 @@ def read_pr_cache(path):
 
 def rate_limit_reason(config, original):
     detail = str(original)
-    if "CARR_GITHUB_LOCAL_HOLD:" in detail or re.search(r"rate limited after [0-9]+ attempt", detail):
+    if any(marker in detail for marker in ("CARR_GITHUB_LOCAL_HOLD:", "CARR_GITHUB_PROVIDER_HOLD:")) or re.search(r"rate limited after [0-9]+ attempt", detail):
         return detail
     try:
         resources = json.loads(command(["gh", "api", "rate_limit"], config))["resources"]
