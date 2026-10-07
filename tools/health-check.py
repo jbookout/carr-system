@@ -1263,6 +1263,17 @@ def _calendar_prebrief_unknowns(now, path=CALENDAR_PREBRIEF_LAST_RUN):
              f"on its {when.date()} run · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
 
 
+# MONITORS NOT YET PROVISIONED (Joe 2026-10-06: "don't just leave them in place and let them
+# block things"). Both checks landed with today's batch before their backing services existed,
+# so their "cannot read" state failed every release's health baseline. Until provisioning lands,
+# that state prints as WARN and never as hard_error. A real failure the monitor DOES report
+# (production down, a cost spike) stays hard. Delete an entry the day its service is live.
+PROVISIONING_PENDING = {
+    "production_uptime": "carr-uptime monitor unreachable (Worker/secrets not provisioned)",
+    "system_costs": "billing readers unavailable (cost collector not provisioned)",
+}
+
+
 def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
     print(f"  CANONICAL_FINDING {key} — {detail}")
     for row in _FINDINGS:
@@ -1367,7 +1378,8 @@ def _canonical_health():
         _cost_snapshot, _cost_line = _system_cost_row()
         print("  " + _cost_line)
         if _cost_snapshot['state'] != 'ready' or _cost_snapshot['alerts']:
-            rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable')
+            rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable'
+                      and 'system_costs' not in PROVISIONING_PENDING)
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)
@@ -1947,7 +1959,9 @@ def _canonical_health():
         line, failed = _uptime.row()
         print("  " + line)
         if failed:
-            rc = _red("production_uptime", line, subject="carr-uptime", hard_error=True)
+            _unprovisioned = ("production_uptime" in PROVISIONING_PENDING
+                              and "monitor unreachable" in line)
+            rc = _red("production_uptime", line, subject="carr-uptime", hard_error=not _unprovisioned)
 
     if CANONICAL_SECTION in ("all", "tailscale"):
         try:

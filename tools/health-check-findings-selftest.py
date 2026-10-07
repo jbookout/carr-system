@@ -131,7 +131,7 @@ FINDING_CALL_NAMES = {"_canonical_finding", "_red"}
 STRUCTURAL_KEYS = {
     "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
-    "credential_health", "unrecorded_failure", "tailscale", "production_uptime",
+    "credential_health", "unrecorded_failure", "tailscale",
 }
 ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity", "scheduled_jobs_evidence_unavailable"}
 
@@ -1014,6 +1014,22 @@ class RcAssignedOnlyViaRed(unittest.TestCase):
         overlap = business_keys & hard_error_keys
         self.assertEqual(overlap, set(),
                          f"business-count key(s) wrongly marked hard_error=True: {overlap}")
+
+
+class ProvisioningPendingIsNamedAndTemporary(unittest.TestCase):
+    """production_uptime left ALWAYS_HARD_ERROR_KEYS on 2026-10-06: its "monitor unreachable"
+    state is WARN while carr-uptime is unprovisioned (Joe: unprovisioned monitors must not block
+    releases). This pins the exemption to exactly the named keys, so widening it fails here.
+    When PROVISIONING_PENDING loses production_uptime, put it back in ALWAYS_HARD_ERROR_KEYS."""
+
+    def test_pending_set_is_exactly_the_two_named_monitors(self):
+        source = (ROOT / "tools/health-check.py").read_text() if "ROOT" in globals() else \
+            Path(__file__).resolve().parents[1].joinpath("tools/health-check.py").read_text()
+        tree = ast.parse(source)
+        pending = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(getattr(t, "id", None) == "PROVISIONING_PENDING" for t in node.targets))
+        keys = {k.value for k in pending.value.keys}
+        self.assertEqual(keys, {"production_uptime", "system_costs"})
 
 
 class CanonicalHealthReturnsAreAllowlisted(unittest.TestCase):
