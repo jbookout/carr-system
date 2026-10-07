@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from lib.github_reader import GitHubReader, GitHubUnreadable
+from lib.github_reader import GitHubReader, GitHubUnreadable, resolve_gh
 from lib.github_rate_limit import GitHubReadBudget, GitHubReadPaused, retry_deadline
 
 
@@ -207,6 +207,13 @@ class BudgetReads(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('supports GET paths', result.stderr)
         self.assertFalse(self.path.exists())
+
+    def test_native_reader_avoids_budgeting_its_own_cli_wrapper_twice(self):
+        link = Path(self.tmp.name) / 'gh'
+        link.symlink_to(ROOT / 'ops/github-gh.py')
+        binary = resolve_gh({}, which=lambda *a, **kw: str(link),
+                            executable=lambda path: path == '/opt/homebrew/bin/gh')
+        self.assertEqual(binary, '/opt/homebrew/bin/gh')
 
 
 if __name__ == '__main__':

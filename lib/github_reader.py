@@ -35,11 +35,12 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from lib.secret_redaction import redact_text, sensitive_env_values
 from lib.github_rate_limit import GitHubReadBudget, GitHubReadPaused, split_response
-from urllib.parse import urlencode, urlsplit, parse_qsl
+from lib.secret_redaction import redact_text, sensitive_env_values
 
 GH_FALLBACKS = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
 RETRY_DELAYS = (5, 15)
@@ -72,7 +73,9 @@ def resolve_gh(env: Mapping[str, str] | None = None, *,
     """`gh` when it is on the job's PATH, else a Homebrew install, else `gh`
     (so the read fails as gh-missing rather than silently)."""
     path = (env if env is not None else os.environ).get("PATH")
-    if which("gh", path=path):
+    found = which("gh", path=path)
+    wrapper = Path(__file__).resolve().parents[1] / "ops/github-gh.py"
+    if found and Path(found).resolve() != wrapper:
         return "gh"
     return next((p for p in GH_FALLBACKS if executable(p)), "gh")
 
