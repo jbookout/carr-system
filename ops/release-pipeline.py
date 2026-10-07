@@ -519,6 +519,17 @@ class Store:
             fh.write((json.dumps(row, sort_keys=True) + "\n").encode("utf-8"))
             fh.flush(); os.fsync(fh.fileno())
 
+    def record_durable(self, row: dict) -> None:
+        recorded = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **row}
+        self.record(recorded)
+        directory = os.open(self.root, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        if recorded not in self.records():
+            raise OSError("release proof journal readback did not match the written record")
+
     def records(self) -> list[dict]:
         try:
             lines = self.records_path.read_text(encoding="utf-8").splitlines()
@@ -1936,14 +1947,16 @@ class Pipeline:
             if self.dry_run:
                 self.out(f"release-pipeline[{lane}]: dry run complete; nothing executed")
                 return 0
+            proof = {"lane": lane, "sha": sha, "from_sha": base, "run_id": self.run_id,
+                     "paths": hits[:50], **result}
+            self.store.record_durable({**proof, "status": "release_verified"})
+            if lane == "worker" and result.get("release_key"):
+                result["slice_marker"] = self.mark_slices(result["release_key"], sha)
+            self.store.record_durable({**proof, **result, "status": "shipped"})
             lane_state.pop("rejection", None)
             lane_state.update({"last_released_sha": sha, "failed_sha": None, "failed_step": None,
                                "last_shipped_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
             self.store.save(state)
-            if lane == "worker" and result.get("release_key"):
-                result["slice_marker"] = self.mark_slices(result["release_key"], sha)
-            self.store.record({"lane": lane, "sha": sha, "from_sha": base, "status": "shipped",
-                               "run_id": self.run_id, "paths": hits[:50], **result})
             self.out(f"release-pipeline[{lane}]: SHIPPED {sha[:12]}")
             return 0
         except Blocked as b:

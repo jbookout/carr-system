@@ -724,6 +724,70 @@ class CanaryAggregate(Base):
         self.assertEqual(pipeline.canary_verdict(gh, cfg, 'a'*40), 'pending')
 
 
+
+class DurableReleaseEvidence(Base):
+    def test_failed_proof_append_cannot_advance_release_or_slices(self):
+        latest = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        pipe = self.fx.pipeline(FakeRunner(live=live), live=live)
+        original = pipe.store.record
+
+        def record(row):
+            if row["status"] == "release_verified":
+                raise OSError("owned fixture proof append failed")
+            original(row)
+
+        pipe.store.record = record
+        self.assertEqual(pipe.tick(["worker"]), 1)
+        self.assertNotEqual(self.fx.state()["worker"].get("last_released_sha"), latest)
+        self.assertEqual(self.fx.slice_marks, [])
+
+    def test_proof_is_durable_before_release_checkpoint_or_slice_marker(self):
+        latest = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        pipe = self.fx.pipeline(FakeRunner(live=live), live=live)
+        original = pipe.store.record
+        observations = []
+
+        def record(row):
+            if row["status"] == "release_verified":
+                observations.append((self.fx.state().get("worker", {}).get("last_released_sha"),
+                                     list(self.fx.slice_marks)))
+            original(row)
+
+        pipe.store.record = record
+        self.assertEqual(pipe.tick(["worker"]), 0)
+        self.assertEqual(observations, [(None, [])])
+        self.assertEqual(self.fx.state()["worker"]["last_released_sha"], latest)
+
+    def test_failed_terminal_append_keeps_checkpoint_open_after_verified_proof(self):
+        latest = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        pipe = self.fx.pipeline(FakeRunner(live=live), live=live)
+        original = pipe.store.record
+
+        def record(row):
+            if row["status"] == "shipped":
+                raise OSError("owned fixture terminal append failed")
+            original(row)
+
+        pipe.store.record = record
+        self.assertEqual(pipe.tick(["worker"]), 1)
+        self.assertNotEqual(self.fx.state()["worker"].get("last_released_sha"), latest)
+        verified = [row for row in self.fx.records() if row["status"] == "release_verified"]
+        self.assertEqual([row["sha"] for row in verified], [latest])
+        self.assertEqual(self.fx.slice_marks, [(verified[0]["release_key"], latest)])
+
+    def test_unreadable_written_proof_cannot_advance_release_or_slices(self):
+        latest = self.fx.commit({"mcp-server/src/a.js": "1"})
+        live = {"sha": self.fx.base}
+        pipe = self.fx.pipeline(FakeRunner(live=live), live=live)
+        with mock.patch.object(pipe.store, "records", return_value=[]):
+            self.assertEqual(pipe.tick(["worker"]), 1)
+        self.assertNotEqual(self.fx.state()["worker"].get("last_released_sha"), latest)
+        self.assertEqual(self.fx.slice_marks, [])
+
+
 class Batching(Base):
     def test_offline_live_poll_never_waits_on_the_wall_clock(self):
         with mock.patch.object(rp.time, "sleep", side_effect=AssertionError("real sleep in offline fixture")):
