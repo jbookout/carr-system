@@ -83,7 +83,8 @@ def lifecycle(tree, pages, source, state, stub, session):
     assert held_before and digest_only_held and incomplete_held and allowed_after and delivered is not None
     return {"source": source, "held_before": held_before, "digest_only_held": digest_only_held,
             "incomplete_held": incomplete_held, "allowed_after": allowed_after,
-            "delivered_ids": sorted(delivered)}
+            "delivered_rules": len(delivered),
+            "delivered_ids_sha256": digest(json.dumps(sorted(delivered)).encode())}
 
 
 def measure(baseline_ref, corpus, sponsor):
