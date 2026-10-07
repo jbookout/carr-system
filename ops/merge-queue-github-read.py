@@ -42,12 +42,9 @@ def read_result(repository: str, number: int, approved_head: str, *,
         data = (reader or GitHubReader()).api(f"repos/{repository}/pulls/{number}")
     except GitHubUnreadable as exc:
         diagnostic = str(exc)
-        authentication = bool(re.search(r"\bHTTP 401\b|gh auth login", diagnostic, re.I))
-        rate_limit = bool(re.search(r"\bHTTP 429\b|rate limit|abuse detection", diagnostic, re.I))
-        kind = "authentication" if authentication else "rate_limit" if rate_limit else "github_unreadable"
         result["blocker"] = {
-            "kind": kind,
-            "retryable": False if authentication else exc.transient,
+            "kind": exc.kind,
+            "retryable": exc.transient,
             "attempts": exc.attempts,
             "detail": diagnostic,
         }
