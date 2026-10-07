@@ -63,6 +63,30 @@ import re
 import sys
 
 DOLLAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*|)\$")
+
+# THE OTHER HOT SPOT, alongside EXECUTE_ARGUMENT: scan_sql's main loop advanced
+# one character at a time even through long runs of perfectly ordinary text
+# (identifiers, keywords, whitespace -- the bulk of any SQL file), each such
+# character taking its own trip through append_top and the pending-chunk
+# bookkeeping. Profiling PR #1297's db/schema.sql (24MB, no unusually long
+# comments or literals) showed exactly that: tens of millions of one-character
+# append_top calls.
+#
+# ORDINARY_RUN finds the next position that could possibly start a construct
+# the scan needs to treat specially: a string literal ("'"), a dollar-quote or
+# dollar-quoted string ("$"), a line comment ("--") or a block comment ("/*").
+# Whenever the current position is none of those (the `else` branch below),
+# every character up to that next position is going to be appended verbatim
+# exactly as scan_sql already does one at a time -- so it is appended in one
+# slice instead. This changes nothing about which characters take which
+# branch, only how many Python-level steps it costs to get there: a run of
+# 10,000 ordinary characters becomes one slice-and-append instead of 10,000.
+#
+# A lone "-" or "/" that fails its own branch's more specific test (not part of
+# "--" or "/*") already falls into this same `else` branch today and is
+# appended as ordinary text, so folding it into a bulk slice changes nothing
+# about its handling either.
+ORDINARY_RUN = re.compile(r"'|\$|--|/\*")
 TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
 COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin\s*;", re.I | re.M)
@@ -72,12 +96,13 @@ COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin
 # lands rows, and so does `execute format('insert into t ...', ...)`. The scanner
 # blanked both and detected nothing, while scan_sql's own docstring justified the
 # blanking with "no row-landing statement hides inside a string" -- which is
-# precisely false here. Twelve applied migrations already use EXECUTE.
+# precisely false here. Ordinary and dollar-quoted EXECUTE literals both run SQL.
 #
 # format() is matched as an optional wrapper rather than a separate case because
 # the literal is still the FIRST argument; a table interpolated as %s cannot be
 # recovered by anyone and is not pretended to be, but a literal table name in the
-# format string is read exactly like any other.
+# format string is read exactly like any other. Variables, concatenated fragments,
+# and escape-prefixed EXECUTE literals are not decoded as dynamic SQL.
 EXECUTE_ARGUMENT = re.compile(
     r"(?:^|[^A-Za-z0-9_])execute\s*(?:format\s*\(\s*)?$", re.I)
 
@@ -119,7 +144,7 @@ WRITES_ANYWHERE = (
     # so counting them is a pure false alarm — and a check that cries wolf gets
     # switched off, which is the failure mode this whole file exists to avoid.
     re.compile(r"create\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?"
-               + TABLE + r"[^;]{0,4000}?\bas\s+(?:with|select)", re.I | re.S),
+               + TABLE + r"[^;]*?\bas\s+(?:with|select)", re.I | re.S),
 )
 
 # ROW EVIDENCE IS A NARROWER QUESTION THAN PRESENCE, AND THE TWO DIRECTIONS WANT
@@ -157,11 +182,9 @@ def normalise(table):
     return table[len("public."):] if table.startswith("public.") else table
 
 
-# HOW FAR BACK THE TWO BACKWARD-LOOKING TESTS MAY REACH. Both are anchored to
-# the END of the accumulated buffer, so the cut is always thousands of characters
-# away from what they inspect: the keyword test reads the word immediately before
-# the dollar-quote, and the `do language <lang>` form spans well under a hundred
-# characters. Neither can see the truncation.
+# Prefix checks read an incrementally maintained suffix with every whitespace
+# run collapsed to one space. The supported prefixes are short token sequences;
+# arbitrary padding between any of their tokens cannot consume this window.
 HEAD_TAIL = 4096
 
 # The routine-header scan is bounded far more generously because it looks for the
@@ -257,13 +280,62 @@ def scan_sql(sql):
     Returns (top_level_text, do_bodies, routines) with routines keyed by name.
     """
     top, do_bodies, routines = [], [], {}
+    # Keep the output as bounded chunks while scanning. The backward-looking
+    # checks need only the tail, but appending one character per iteration made
+    # every tail request walk thousands of list entries. Flushing before a tail
+    # request preserves the exact accumulated text while making that walk span
+    # chunks instead of characters.
+    pending_top, pending_size = [], 0
+
+    # Prefix context is separate from output: comments and inert literals add
+    # whitespace to output, but never make the next query revisit old chunks.
+    # Update once per appended run, including whitespace across chunk joins.
+    prefix_tail = ""
+    execute_distance = HEAD_TAIL + 1
+    execute_carry = ""
+
+    def append_top(value):
+        nonlocal pending_size, prefix_tail, execute_distance, execute_carry
+        if value:
+            compact = re.sub(r"\s+", " ", value)
+            if prefix_tail.endswith(" ") and compact.startswith(" "):
+                compact = compact[1:]
+            if compact:
+                # Measure the EXECUTE prefilter in the same normalized text as
+                # the prefix checks; raw padding must not disqualify a literal.
+                combined = execute_carry + compact
+                found = combined.lower().rfind("execute")
+                execute_distance = (execute_distance + len(compact) if found == -1
+                                    else len(combined) - found - len("execute"))
+                execute_carry = combined[-6:]
+                prefix_tail = (prefix_tail + compact)[-HEAD_TAIL:]
+            pending_top.append(value)
+            pending_size += len(value)
+            if pending_size >= 4096:
+                top.append("".join(pending_top))
+                pending_top.clear()
+                pending_size = 0
+
+    def execute_argument():
+        return execute_distance <= HEAD_TAIL and bool(EXECUTE_ARGUMENT.search(prefix_tail))
+
+    def flush_top():
+        nonlocal pending_size
+        if pending_top:
+            top.append("".join(pending_top))
+            pending_top.clear()
+            pending_size = 0
+
+    def tail(count):
+        flush_top()
+        return _tail(top, count)
     i, n = 0, len(sql)
     while i < n:
         ch = sql[i]
         if ch == "-" and sql.startswith("--", i):                 # line comment
             end = sql.find("\n", i)
             i = n if end == -1 else end
-            top.append(" ")
+            append_top(" ")
         elif ch == "/" and sql.startswith("/*", i):               # block comment, nestable
             depth, i = 1, i + 2
             while i < n and depth:
@@ -273,7 +345,7 @@ def scan_sql(sql):
                     depth, i = depth - 1, i + 2
                 else:
                     i += 1
-            top.append(" ")
+            append_top(" ")
         elif ch == "'":                                           # string literal
             # E'...' takes BACKSLASH escapes; a plain literal does not (server
             # default standard_conforming_strings). Knowing only the '' form let
@@ -281,11 +353,11 @@ def scan_sql(sql):
             # the rest of the migration was read inside-out and a plainly top-level
             # INSERT went unreported. That is the apostrophe class of R4 one escape
             # form over, and it swallowed real DML rather than only a call.
-            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", _tail(top, 4)))
+            escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", tail(4)))
             # IS THIS LITERAL AN ARGUMENT TO EXECUTE? If so its text is not inert
             # -- it is SQL that runs. Decided BEFORE the literal is consumed,
             # because `top` still ends at the character before the quote here.
-            dynamic = bool(EXECUTE_ARGUMENT.search(_tail(top, HEAD_TAIL)))
+            dynamic = execute_argument()
             opened = i
             i += 1
             while i < n:
@@ -303,22 +375,22 @@ def scan_sql(sql):
                 # The literal's own doubled quotes are how a quote is spelled
                 # inside it; undo that before reading the text as SQL.
                 inner = sql[opened + 1:i - 1].replace("''", "'")
-                top.append(" " + _scanned(inner) + " ")
+                append_top(" " + _scanned(inner) + " ")
             else:
-                top.append(" ")
+                append_top(" ")
         elif ch == "$":
             match = DOLLAR.match(sql, i)
             if not match:
-                top.append(ch)
+                append_top(ch)
                 i += 1
                 continue
             tag = match.group(0)
             end = sql.find(tag, match.end())
             if end == -1:                                         # unterminated: keep verbatim
-                top.append(sql[i:])
+                append_top(sql[i:])
                 break
             body = sql[match.end():end]
-            head = _tail(top, HEAD_TAIL)
+            head = prefix_tail
             previous = re.search(r"([A-Za-z_]+)\s*$", head)
             keyword = previous.group(1).lower() if previous else ""
             # `do language plpgsql $$ ... $$` is the same statement as `do $$ ... $$`.
@@ -329,24 +401,27 @@ def scan_sql(sql):
             # `execute $$ ... $$` is the same statement as `execute '...'`, with the
             # other spelling of a string. Handled here rather than by widening the
             # literal branch, because a dollar-quote is consumed by this branch.
-            if keyword == "execute" or EXECUTE_ARGUMENT.search(head):
-                top.append(" " + _scanned(body) + " ")
+            if keyword == "execute" or execute_argument():
+                append_top(" " + _scanned(body) + " ")
                 i = end + len(tag)
                 continue
             if keyword == "as":
-                headers = list(CREATE_ROUTINE.finditer(_tail(top, ROUTINE_TAIL)))
+                headers = list(CREATE_ROUTINE.finditer(tail(ROUTINE_TAIL)))
                 if headers:
                     routines.setdefault(normalise(headers[-1].group(1)), []).append(_scanned(body))
                 else:
-                    top.append(" " + _scanned(body) + " ")
+                    append_top(" " + _scanned(body) + " ")
             elif keyword == "do":
                 do_bodies.append(_scanned(body))
             else:
-                top.append(" ")                                   # dollar-quoted string literal
+                append_top(" ")                                   # dollar-quoted string literal
             i = end + len(tag)
         else:
-            top.append(ch)
-            i += 1
+            match = ORDINARY_RUN.search(sql, i)
+            end = match.start() if match else n
+            append_top(sql[i:end])
+            i = end
+    flush_top()
     return "".join(top), do_bodies, routines
 
 
@@ -515,21 +590,20 @@ def copy_blocks(region):
     vanish if one ever appeared.
     """
     blocks, unterminated = [], []
-    for head in COPY_BLOCK.finditer(region):
-        end = region.find("\n\\.", head.end())
-        if end == -1:
-            # NOT blanked to end of file, which is what this used to do. A COPY with
-            # no terminator swallowed everything after it, so a truncated artifact
-            # hid every later statement -- including an excluded table's rows, the
-            # one thing the presence direction exists to catch. Silence is the worst
-            # available answer to a malformed artifact, so it is reported instead and
-            # the block contributes nothing.
+    cursor = 0
+    terminator = re.compile(r"^\\\.\r?$", re.M)
+    while (head := COPY_BLOCK.search(region, cursor)) is not None:
+        end = terminator.search(region, head.end())
+        if end is None:
+            # Preserve the SQL text for conservative presence scanning, and
+            # refuse the malformed outer block. Its data cannot open new blocks.
             unterminated.append(normalise(head.group(1)))
-            continue
-        body = region[head.end():end]
+            break
+        body = region[head.end():end.start()]
         blocks.append((normalise(head.group(1)),
                        any(line.strip() for line in body.split("\n")),
-                       head.start(), end + 3))
+                       head.start(), end.end()))
+        cursor = end.end()
     return blocks, unterminated
 
 

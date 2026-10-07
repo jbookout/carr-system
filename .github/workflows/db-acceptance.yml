@@ -42,9 +42,16 @@ on:
     paths:
       - "migrations/**"
       - "db/**"
+      - "bin/schema-snapshot.sh"
       - "ops/**"
       - "lib/**"
       - "tools/**"
+      - "mcp-server/src/**"
+      - "mcp-server/test/codex-continuity.test.mjs"
+      - "mcp-server/test/codex-continuity-migration.test.mjs"
+      - "mcp-server/test/codex-continuity-postgres.sql"
+      - "mcp-server/package.json"
+      - "mcp-server/package-lock.json"
       - "run.sh"
       - ".github/workflows/db-acceptance.yml"
   schedule:
@@ -54,8 +61,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: db-acceptance-${{ github.ref }}
-  cancel-in-progress: true
+  # PR validation supersedes by workflow + PR. Non-PR verdicts are independent:
+  # sharing a non-cancelling group would still replace older pending runs.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -64,7 +73,11 @@ jobs:
   acceptance:
     name: local-db-ci --class migration
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The canonical migration class plus this lane's own acceptance programs
+    # routinely took 22-24 minutes by 2026-10-04, and a slow runner pushed six
+    # all-green runs past a 25-minute cap. ci.yml's migration budget must stay
+    # at least this one (ops/ci-selftest.py checks both).
+    timeout-minutes: 35
 
     steps:
       # Actions are pinned to commit SHAs, not tags, for the supply-chain reason
@@ -84,6 +97,22 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: .python-version
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install Node dependencies from the lock
+        run: npm --prefix mcp-server ci
+
+      - name: Install zsh
+        # ops/gate-zero-scheduler-canary-gate.py runs the Gate Zero canary
+        # LaunchAgent's own ProgramArguments, and both the wrapper
+        # (bin/run-scheduled.sh) and the canary carry a #!/bin/zsh shebang. A
+        # runner without zsh would fail that gate for the environment rather
+        # than for the code — the same three seconds of apt ci.yml already
+        # spends for bin/review-council-runner.sh.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
 
       - name: Install Python dependencies from the lock
         # The lock, not requirements.txt — same reasoning as ci.yml. The
@@ -112,6 +141,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-17
           /usr/lib/postgresql/17/bin/initdb --version
+          # THE SERVER IS 17; THE DUMP CLIENT IS 18, AND THEY ARE NOT THE SAME
+          # DECISION. The disposable cluster this lane initdbs stays on 17,
+          # because matching the local lane is what makes a hosted red mean the
+          # same thing as a local red. But bin/schema-snapshot.sh pins the
+          # pg_dump MAJOR (see its PG_DUMP_MAJOR) so db/schema.sql is
+          # reproducible rather than decided by whichever client a machine
+          # happened to resolve first: pg_dump 18 emits every NOT NULL as a
+          # named table constraint and 17 emits a bare one, a 256-line diff with
+          # no schema change behind it. main's committed snapshot is an 18 dump,
+          # so a runner carrying only 17 fails the pin and exits 69 — which is
+          # exactly what happened on run 35375307125. Installing the 18 CLIENT
+          # satisfies the pin without moving the server. The script probes this
+          # absolute path by major, so no PATH change is needed. Same PGDG repo
+          # already configured above; backup-nightly.yml does the same thing.
+          sudo apt-get install -y -qq postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
           # THE SOCKET DIRECTORY IS THE ONE REAL PLATFORM DIFFERENCE.
           # ops/local-pg-ci.py starts the server with only -h/-p and leaves
           # unix_socket_directories at the build default. Homebrew compiles that

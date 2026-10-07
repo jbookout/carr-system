@@ -57,15 +57,12 @@ import tempfile
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 GATE = os.path.join(REPO, "hooks", "unread-artifact-gate.py")
 
-failures: list[str] = []
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "lib"))
+from selftest_harness import Checker  # noqa: E402
 
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  ok   {name}")
-    else:
-        print(f"  FAIL {name} {detail}")
-        failures.append(name)
+CHECKER = Checker()
+failures = CHECKER.failures
+check = CHECKER.check
 
 
 def transcript(tmp, tool_calls, assistant_text, name=None):
@@ -230,15 +227,15 @@ def main():
         check("a malformed payload fails OPEN", p10.returncode == 0,
               f"exit {p10.returncode}")
     finally:
-        subprocess.run(["rm", "-rf", tmp])
+        __import__("shutil").rmtree(tmp)
 
-    print()
-    if failures:
-        print(f"FAIL {len(failures)} check(s): {', '.join(failures)}")
-        return 1
-    print("OK all checks passed")
-    return 0
+    return CHECKER.summary()
 
+
+
+# Independently reproduced Dot cases share the offline behavioral fixtures.
+import runpy as _dot_runpy
+_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b23'])
 
 if __name__ == "__main__":
     raise SystemExit(main())

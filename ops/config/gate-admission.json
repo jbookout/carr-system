@@ -22,6 +22,26 @@
       "scarce_resource_cost": "One reopened model turn only after a measured threshold or conservative fallback cap; PostToolUse notices are one-shot and PreCompact never blocks.",
       "unique_bind": "No other gate preserves precompact high-water, validates cross-surface ownership and evidence bindings, detects stale worker heartbeats, or refuses Stop until the exact predecessor-to-successor takeover is verified.",
       "matcher_test": "ops/context-handoff-gate-selftest.py"
+    },
+    "rule-boot-gate.py": {
+      "parent_incident": "On 2026-09-26 the rule-delivery audit found that no SessionStart hook loaded any rule: 195 active rules existed, and a session or subagent reached its first tool call having read none of them unless it chose to call standing-context. Joe demanded 100% recall of relevant rules.",
+      "landing_harm": "A session or subagent acts (edits, commits, sends, spawns) without having read the always-on rules or the index that tells it which rule applies, so a known rule is broken for want of being read.",
+      "bind_moment": "PreToolUse on every tool, from SessionStart (startup, resume, clear, compact, fork) or subagent start until that context has every page of standing-context detail=boot for the armed digest confirmed (PostToolUse reads each fetch's answer; a new digest or page count re-arms the session).",
+      "consumer": "The session or subagent itself: the always-on full text and the rule index land in its own context before it acts.",
+      "self_serve_remedy": "Make the calls the deny names: standing-context {\"detail\":\"boot\",\"page\":N} for each missing page, over the CARR MCP connector or as `./run.sh call standing-context '{\"detail\":\"boot\",\"page\":N}'`. The fetch is always allowed. No context can be locked out: a fetch that errors unlocks it with RULES UNAVAILABLE; a Worker that does not serve the boot yet holds nothing (RULE BOOT NOT DEPLOYED YET); a hold that cannot be recorded is not made (STATE UNWRITABLE); and after 3 holds without progress the gate stops holding that context (RULES UNREAD).",
+      "scarce_resource_cost": "About 34k tokens of rule text per context, once per session start or subagent, plus at most 3 denied calls per context. The hook reads a few marker files on each call and parses the fetch answer on PostToolUse: no network, no model.",
+      "unique_bind": "No other gate stops a context from acting before it has read the rules; SessionStart context is capped at 10,000 characters, so the rules cannot be pushed in, and every other rule-delivery path is advisory.",
+      "matcher_test": "ops/rule-boot-gate-selftest.py"
+    },
+    "github-burst-guard.py": {
+      "parent_incident": "On 2026-10-06 a session ran a shell loop making about 55 gh calls within seconds, then ran ops/release-pipeline.py tick by hand three times in five minutes. GitHub's short-window (secondary) rate limit answered 403 for the shared account and an urgent production release stopped behind the lockout. Joe ordered a rule (74ddb23c, never burst GitHub) and enforcement.",
+      "landing_harm": "A 403 lockout of the one GitHub account every session, CI watcher, review loop and the release pipeline share, which stops merges and production releases for everyone until GitHub lifts it.",
+      "bind_moment": "PreToolUse on Bash, before the burst command runs: a gh loop or xargs/parallel fan-out with no sleep of 2s or more, a release tick or shepherd run within 5 minutes of the last one, or any gh call within 15 minutes of a recorded rate-limit answer (recorded on PostToolUse/PostToolUseFailure from a GitHub-touching command's output).",
+      "consumer": "The session issuing the command, and through the shared account every other session and the release pipeline, which would otherwise receive the 403.",
+      "self_serve_remedy": "Every refusal names the cheaper call: one gh api --paginate or gh api graphql call instead of a per-item loop, or a sleep of 2s or more inside the loop; wait out the 5-minute tick window, or read the pipeline's state instead of ticking it; during the cooldown, gh api rate_limit stays allowed and shows when the limit resets. A short literal list (items x gh calls per pass <= 10) and an until-gh poll with a sleep pass unrefused.",
+      "scarce_resource_cost": "One more hook process per Bash call (a Python cold start under hook-meter-run.py), then a regex pass over the command and one small state-file read when the command runs gh or the release tick. No network, no model, no Stop reopen. A refusal costs one model turn to rewrite the command.",
+      "unique_bind": "No other gate looks at GitHub call volume: guard-unattended.py refuses destructive and exfiltrating commands and the egress allowlist, and nothing records a rate-limit answer or spaces release ticks.",
+      "matcher_test": "ops/github-burst-guard-selftest.py"
     }
   }
 }

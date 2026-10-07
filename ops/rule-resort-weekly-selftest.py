@@ -36,15 +36,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "ops" / "rule-resort-weekly.py"
 
-failures: list[str] = []
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "lib"))
+from selftest_harness import Checker  # noqa: E402
 
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  ok   {name}")
-    else:
-        print(f"  FAIL {name} {detail}")
-        failures.append(name)
+CHECKER = Checker()
+failures = CHECKER.failures
+check = CHECKER.check
 
 
 def load_module(name, path):
@@ -164,13 +161,18 @@ def test_gate_downgrade_proposals(mod, tmp):
         },
     }}
     (lifecycle_repo / "ops" / "config" / "gate-lifecycle.json").write_text(json.dumps(meta))
-    # no log file at all -> zero true positives -> after enough quiet windows, a proposal
+    # An absent log is a data gap, never evidence of quiet windows.
 
     os.environ["CARR_LIFECYCLE_REPO"] = str(lifecycle_repo)
     lc_mod = load_module("gate_lifecycle_report_resort_test",
                          REPO / "ops" / "gate-lifecycle-report.py")
     del os.environ["CARR_LIFECYCLE_REPO"]
 
+    missing = mod.gate_downgrade_proposals(lc_mod, 7)
+    check("an absent catch log is a data gap and produces no proposal",
+          missing["data_gaps"] == ["quiet-gate.py"] and not missing["proposals"], missing)
+    # An existing empty log supplies the quiet-window fixture.
+    (lifecycle_repo / "out" / "quiet.jsonl").touch()
     direct = lc_mod.build(7)
     via_resort = mod.gate_downgrade_proposals(lc_mod, 7)
     check("rule-resort-weekly reproduces gate-lifecycle-report.build() verbatim",
@@ -274,13 +276,7 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print()
-    if failures:
-        print(f"FAIL {len(failures)} check(s): {', '.join(failures[:10])}"
-              + (" …" if len(failures) > 10 else ""))
-        return 1
-    print("OK all checks passed")
-    return 0
+    return CHECKER.summary(limit=10)
 
 
 if __name__ == "__main__":

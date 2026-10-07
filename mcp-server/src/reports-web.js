@@ -17,15 +17,18 @@ const STATIC_ASSETS = new Map([
   ["/share-bootstrap.js", "/reports/share-bootstrap.js"],
   ["/share.js", "/reports/share.js"],
   ["/share.css", "/reports/share.css"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl-shared.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl-shared.mjs"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl.css", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl.css"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl.mjs", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl.mjs"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl-shared.mjs", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl-shared.mjs"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl-worker.mjs", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl-worker.mjs"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl.css", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl.css"],
 ]);
 const API_METHODS = new Map([
   ["/api/share/exchange", "POST"],
   ["/api/share/report", "GET"],
   ["/api/share/map", "GET"],
+  ["/api/share/feedback", "GET"],
+  ["/api/share/shortlist", "POST"],
+  ["/api/share/comment", "POST"],
 ]);
 const REPORTS_CSP = [
   "default-src 'none'",
@@ -94,6 +97,8 @@ function isJsonContentType(value) {
 }
 
 const SHARE_BEARER = /^[A-Za-z0-9_-]{43}$/;
+const PUBLIC_REF = /^(?:property|projection):public:[A-Za-z0-9_-]{16,128}$/;
+const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function isPlainRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
@@ -179,6 +184,32 @@ async function read(request, env, ctx, dependencies, dependencyName) {
   return publicResponse(result);
 }
 
+async function writeFeedback(request, env, ctx, dependencies, pathname) {
+  if (!sameOriginPost(request)) return json({ error: "forbidden" }, 403);
+  const session = cookieValue(request, SESSION_COOKIE);
+  if (!session) return json({ error: "unauthorized" }, 401);
+  const parsed = await jsonBody(request);
+  if (parsed.error) return parsed.error;
+  const value = parsed.value;
+  const kind = pathname === "/api/share/shortlist" ? "shortlist" : "comment";
+  const expected = kind === "shortlist" ? ["projection_ref", "property_ref", "shortlisted", "idempotency_key"] : ["projection_ref", "property_ref", "comment", "idempotency_key"];
+  if (Object.keys(value).sort().join(",") !== expected.sort().join(",") ||
+      !PUBLIC_REF.test(value.projection_ref) || !value.projection_ref.startsWith("projection:public:") ||
+      !PUBLIC_REF.test(value.property_ref) || !value.property_ref.startsWith("property:public:") ||
+      !REQUEST_ID.test(value.idempotency_key) ||
+      (kind === "shortlist" ? typeof value.shortlisted !== "boolean" :
+        typeof value.comment !== "string" || !value.comment.trim() || value.comment.length > 1000 || /[\u0000-\u001f\u007f]/.test(value.comment)))
+    return json({ error: "invalid_request" }, 400);
+  const dependencyName = kind === "shortlist" ? "shortlistFn" : "commentFn";
+  if (typeof dependencies[dependencyName] !== "function") return json({ error: "not_found" }, 404);
+  let result;
+  try {
+    result = await dependencies[dependencyName]({ env, ...(ctx ? { ctx } : {}), sessionDigest: await sha256Digest(session), ...value });
+  } catch { return json({ error: "share_unavailable" }, 503); }
+  if (!result?.ok || !isPlainRecord(result.data)) return dependencyFailure(result);
+  return publicResponse(result);
+}
+
 function withSecurityHeaders(response) {
   const headers = new Headers(response.headers);
   // An injected asset implementation must not accidentally widen this public
@@ -205,7 +236,8 @@ async function handleRequest(request, env, ctx, dependencies) {
   if (!method) return json({ error: "not_found" }, 404);
   if (request.method !== method) return methodNotAllowed(method);
   if (pathname === "/api/share/exchange") return exchange(request, env, ctx, dependencies);
-  return read(request, env, ctx, dependencies, pathname === "/api/share/map" ? "readMapFn" : "readShareFn");
+  if (pathname === "/api/share/shortlist" || pathname === "/api/share/comment") return writeFeedback(request, env, ctx, dependencies, pathname);
+  return read(request, env, ctx, dependencies, pathname === "/api/share/map" ? "readMapFn" : pathname === "/api/share/feedback" ? "readFeedbackFn" : "readShareFn");
 }
 
 /** Injectable seams keep this browser gate independent from Worker, DB, and MCP wiring. */

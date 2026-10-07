@@ -40,11 +40,10 @@ is:
     gate baseline. Their branch is merged here and the latch sits on top of it.
     ops/completion-evidence-gate-selftest.py owns the detailed cases; this file
     asserts only that the duplicate is gone end to end.
-  · NOISE IS COUNTED AS REOPENS, not as findings. The four gates that remain
-    demoted still make their findings and still write audit rows. A0c explicitly
-    re-promotes context-handoff as the fourth admitted reopener, at a measured
-    lifecycle threshold. What is being scored is what the session was CHARGED,
-    because that is what the rationing changed.
+  · NOISE IS COUNTED AS REOPENS, not as findings. Context guidance and the four
+    gates that remain demoted still make their findings and still write audit
+    rows. What is being scored is what the session was CHARGED, because that is
+    what the rationing changed.
 
     .venv/bin/python ops/stop-gate-rationing-replay-selftest.py
 """
@@ -155,11 +154,44 @@ def replay_catches(tmp):
               f"{verdict}: {text[:120]}")
 
     # 2. "executor-tier gate refused an Agent spawn with no model named".
-    verdict, text = fire("executor-tier-gate.py", {
-        "tool_name": "Agent", "session_id": "selftest",
-        "tool_input": {"description": "sweep the logs", "prompt": "count the DENY lines"}})
-    check("executor-tier still refuses an Agent spawn naming no model",
-          verdict == "DENY" and "model" in text.lower(), f"{verdict}: {text[:120]}")
+    # Since #1228 (ruling 5ec806a4) the catch is no longer "always deny": a
+    # no-model spawn is DENIED when Jev cannot pick a tier at or above the
+    # acting threshold, and ALLOWED WITH JEV'S TIER FILLED IN when it can. Either
+    # way the spawn never runs on an unnamed, inherited tier, which is what the
+    # 2026-08-23 catch was for. Jev is pinned through the gate's own
+    # CARR_EXECUTOR_TIER_JEV_STUB seam, so this asserts the same thing whether
+    # or not the live judge is reachable, and makes no network call.
+    spawn = {"description": "sweep the logs", "prompt": "count the DENY lines"}
+    gate = os.path.join(REPO, "hooks", "executor-tier-gate.py")
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("CARR_EXECUTOR_TIER_JEV_STUB", "CARR_HOOK_FIXTURE")}
+
+    def tier_gate(stub):
+        p = subprocess.run([PY, gate], capture_output=True, text=True, timeout=60,
+                           input=json.dumps({"tool_name": "Agent", "session_id": "selftest",
+                                             "tool_input": spawn}),
+                           env={**base, "CARR_EXECUTOR_TIER_JEV_STUB": stub})
+        try:
+            hso = json.loads(p.stdout.strip().splitlines()[-1]).get("hookSpecificOutput", {})
+        except (ValueError, IndexError):
+            hso = {}
+        return p.returncode, hso
+
+    for stub, why in (("none", "Jev unavailable"),
+                      ("sonnet:0.30", "Jev below the acting threshold")):
+        rc, hso = tier_gate(stub)
+        check(f"executor-tier still refuses an Agent spawn naming no model ({why})",
+              rc == 0 and hso.get("permissionDecision") == "deny"
+              and "updatedInput" not in hso
+              and "model" in (hso.get("permissionDecisionReason") or "").lower(),
+              f"rc={rc} {json.dumps(hso)[:160]}")
+    rc, hso = tier_gate("haiku:0.90")
+    updated = hso.get("updatedInput") or {}
+    check("executor-tier names the tier itself when Jev is confident (allow, model filled in)",
+          rc == 0 and hso.get("permissionDecision") == "allow"
+          and updated.get("model") == "haiku"
+          and all(updated.get(k) == v for k, v in spawn.items()),
+          f"rc={rc} {json.dumps(hso)[:160]}")
 
     # 3a. conduct: "a shell command handed to Joe instead of run".
     verdict, _ = fire("conduct-stop-gate.py", {
@@ -297,7 +329,7 @@ def replay_noise(tmp):
 
 
 def replay_demotions(tmp):
-    print("\n  ── four gates announce; context-handoff deliberately reopens")
+    print("\n  ── context guidance and four demoted gates announce")
 
     # loose-work: this session edited a tracked file and left it.
     repo = os.path.join(tmp, "loose")
@@ -336,8 +368,8 @@ def replay_demotions(tmp):
                               "CARR_CONTEXT_STATE": os.path.join(tmp, "ctx-state.json"),
                               "CARR_CONTEXT_HOOK_EVENT": "Stop",
                               "CARR_CONTEXT_AUDIT": "off"})
-    check("context-handoff deliberately reopens at the hard line",
-          verdict == "REOPEN" and "CONTEXT_HANDOFF_REQUIRED" in text,
+    check("context-handoff announces at the hard line without blocking Stop",
+          verdict == "ANNOUNCE" and "context headroom notice" in text,
           f"{verdict}: {text[:160]}")
 
     # unread-artifact: a behavioural claim about a file only ever grepped.
@@ -360,12 +392,6 @@ def replay_demotions(tmp):
     check("map-architecture announces the missing verb call and does not reopen",
           verdict == "ANNOUNCE" and "map-architecture" in text, f"{verdict}: {text[:100]}")
 
-    # stale-claim needs a seeded git history; its own selftest owns that fixture
-    # and asserts the same register. Named here so a reader can see it was not
-    # forgotten — a silent omission is how a bounded check reads as a complete one.
-    notes.append("stale-claim's register is asserted in ops/stale-claim-gate-selftest.py "
-                 "('it announces without reopening the turn'); it needs a seeded commit "
-                 "history that belongs in that fixture, not this one")
 
 
 def replay_latch(tmp):
@@ -451,7 +477,7 @@ def main():
         return 1
     print(f"rationing replay ok ({passed} checks) — "
           "5 catches kept, 0 reopens charged for reporting prose, "
-          "1 admitted context reopen, 0 from four still-demoted gates, "
+          "0 context reopens, 0 from four still-demoted gates, "
           "no new blocker without a card")
     return 0
 

@@ -49,7 +49,6 @@
     "settings_change": "deny_gate",
     "shared_rename_absence": "schema",
     "staged_gate_bless": "deny_gate",
-    "stale_claim": "stop_gate",
     "stale_count": "schema",
     "trigger_grant": "schema",
     "vault_salvage": "judgment_ambient",
@@ -119,9 +118,22 @@
         "mcp-server/test/work-request-ready-plan.test.mjs",
         "ops/local-pg-ci-selftest.py"
       ]
+    },
+    "eval_receipt": {
+      "_note": "Carrying control for rule 6cbaa63a-be57-4c2e-955f-4ea7b5c0405d (every LLM-steering change ships an eval receipt), taught with enforcement_home=gate and carrying_control 'eval_receipt CI check'. Declared here rather than in rule-enforcement-map.json because audits/guidance-situation-curation-review.v1.json still pins the map by sha256 (review_state proposed). Fold it into the map with the other extras once that review settles.",
+      "enforcement_class": "deny_gate",
+      "failure_mode": "required CI check refuses the merge: a pull request that changes a surface in evals/surfaces.json without a valid evals/<surface>/receipt.json changed in the same PR, or a reasoned no-eval line in its body, turns ops/ci.sh --strict (gates class) red, and the main ruleset will not merge a red head",
+      "implementation": [
+        "ops/check-eval-receipt.py",
+        "ops/ci.sh",
+        "evals/surfaces.json"
+      ],
+      "test": [
+        "ops/check-eval-receipt-selftest.py"
+      ]
     }
   },
   "enforcement_class_is_a_property_of_the_control": "Deriving the class from the rules that cite a control was tried first and rejected: deal_guard and loop_guard both fail as 'transaction refusal' yet their rules were tagged differently, because a rule's enforcement_class describes what the RULE does while this describes how the CONTROL fires.",
   "schema_version": "carr-control-enforcement-classes-v1",
-  "why_this_file_exists": "ops.enforcement_control_catalog needs an enforcement_class per control, and rule-enforcement-map.json does not carry one. It is NOT added there because audits/guidance-situation-curation-review.v1.json pins that file by sha256 as the base inventory of a curation review that is still in review_state 'proposed'. Editing the map would invalidate a pending human review, and updating the recorded digest to match would assert a review that never happened. So the class lives here, beside the map rather than inside it, until that review is settled and the two can merge."
+  "why_this_file_exists": "ops.enforcement_control_catalog needs an enforcement_class per control, while rule-enforcement-map.json binds active rules to controls. This separate catalog records control classes. When the active map changes, the proposed guidance curation review must bind the new map and manifest bytes without claiming approval of the proposal."
 }

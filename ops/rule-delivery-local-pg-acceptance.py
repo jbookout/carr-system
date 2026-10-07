@@ -34,6 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
 PY = REPO / ".venv" / "bin" / "python"
 MIGRATION_0363 = REPO / "migrations" / "0363_rule_delivery_activation_digest_repin.sql"
+RETIREMENT_REPIN = REPO / "migrations" / "0837_repin_rule_delivery_activation_after_control_retirement.sql"
 PRIOR_ACTIVATION_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
 CURRENT_ACTIVATION_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
 # The chain has a fourth link as of 2026-09-01. Reinstating canonical_edit into
@@ -45,6 +46,22 @@ CURRENT_ACTIVATION_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f3
 # PRIOR (pre-0363) and CURRENT (post-0363) are deliberately untouched -- 0363
 # still produces CURRENT, and its assertions below must keep expecting it.
 POST_0471_ACTIVATION_DIGEST = "6d21c37d533a5d98debfe4991c902164cf3c1fee88e7f42a3112468268e3335c"
+# A FIFTH LINK as of 2026-09-03. Tagging rule 1fcaa63a (heavy-build-protocol)
+# into the reviewed map moved its digest again. 0471 is a sealed artifact inside
+# the 0454-0471 generation chain and cannot be rewritten to follow, so
+# migrations/0478 repins the eight targets forward -- the same shape 0363 -> 0471
+# already used. POST_0471 above is deliberately NOT bumped: it is the value 0471
+# actually writes, and this fixture reconstructs the real sequence rather than
+# jumping to the end state.
+POST_0478_ACTIVATION_DIGEST = "eebfa2d627dfbbc65ae06e623724487158b940c9376cd30dbb067aec2779e8bb"
+# A SIXTH LINK as of 2026-09-05. Activating the verb-creation and isolated-tree
+# rules moves the reviewed map digest without changing any of the eight pack
+# cutover targets. Migration 0483 carries that guarded forward repin.
+POST_0483_ACTIVATION_DIGEST = "784e05273341f5f7c16f96d1f0fb1516d8c605cb3287dec32aa37a1211dd0cb8"
+POST_0554_ACTIVATION_DIGEST = "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a"
+# EIGHTH LINK as of 2026-09-29. Rule ede4b241 (cloud model choice) entering the
+# reviewed map moved its digest; migration 0772 carries the guarded forward repin.
+POST_0772_ACTIVATION_DIGEST = "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
@@ -101,6 +118,8 @@ def main() -> int:
         print("rule-delivery-acceptance: CARR_LOCAL_PG_DSN required", file=sys.stderr)
         return 78
     data = json.loads(MAP.read_text())
+    _, overlay = load_validated()
+    current_map_digest = overlay["base_map_sha256"]
     layers = data["rule_load_layers"]
     scope_by_id = {rid: scope for scope, ids in data["active_rule_ids"].items() for rid in ids}
     # Scope is durable rule state, not reviewed-map configuration. Deliberately
@@ -112,6 +131,21 @@ def main() -> int:
     store_scope_by_id[synthetic_dell] = "dell"
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        # Observe the actual post-migration state before this acceptance mutates
+        # any fixture row. The full committed migration chain must reach the
+        # current reviewed overlay, not merely the last historical fixture.
+        cur.execute(
+            """select count(*),
+                      count(*) filter (where map_digest=%s),
+                      count(*) filter (where short_id=any(%s))
+                 from ops.rule_delivery_activation_target""",
+            (current_map_digest, sorted(EXPECTED_IDS)),
+        )
+        post_migrate = one(cur)
+        check("the real post-migrate state is the exact eight on the current map",
+              post_migrate == (len(EXPECTED_IDS), len(EXPECTED_IDS), len(EXPECTED_IDS)),
+              str(post_migrate))
+
         cur.execute("""do $$ begin
           if not exists(select 1 from pg_roles where rolname='carr_authority_joe') then
             create role carr_authority_joe login;
@@ -363,8 +397,92 @@ def main() -> int:
                 where map_digest=%s""",
             (POST_0471_ACTIVATION_DIGEST,),
         )
-        check("the post-0471 fixture is the exact eight on the current map",
+        check("the post-0471 fixture is the exact eight on the post-0471 map",
               one(cur)[0] == len(EXPECTED_IDS))
+
+        # FIFTH LINK: 0478's repin. The cutover below is handed the digest read
+        # from the live overlay, which is now the post-0478 value. Without this
+        # step the two disagree and the database refuses with "activation map
+        # digest preimage differs" -- which is how the gap was found the first
+        # time too, at the fourth link.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0478_ACTIVATION_DIGEST, POST_0471_ACTIVATION_DIGEST),
+        )
+        check("0478 repins exactly the eight post-0471 targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0478_ACTIVATION_DIGEST,),
+        )
+        check("the post-0478 fixture is the exact eight on the post-0478 map",
+              one(cur)[0] == len(EXPECTED_IDS))
+
+        # SIXTH LINK: 0483's repin after the two Layer 0 rule additions. The
+        # eight cutover contracts are unchanged; only their base-map identity
+        # moves forward.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0483_ACTIVATION_DIGEST, POST_0478_ACTIVATION_DIGEST),
+        )
+        check("0483 repins exactly the eight post-0478 targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0483_ACTIVATION_DIGEST,),
+        )
+        check("the post-0483 fixture is the exact eight on the current map",
+              one(cur)[0] == len(EXPECTED_IDS))
+        # SEVENTH LINK: 0554 binds the active 209-rule map after the reviewed
+        # inventory correction. Preserve the guarded 0483 preimage above.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0554_ACTIVATION_DIGEST, POST_0483_ACTIVATION_DIGEST),
+        )
+        check("0554 repins exactly the eight post-0483 targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0554_ACTIVATION_DIGEST,),
+        )
+        check("the post-0554 fixture is the exact eight on the reviewed map",
+              one(cur)[0] == len(EXPECTED_IDS))
+        # EIGHTH LINK: 0772 binds the 210-rule map after rule ede4b241 entered it.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0772_ACTIVATION_DIGEST, POST_0554_ACTIVATION_DIGEST),
+        )
+        check("0772 repins exactly the eight post-0554 targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0772_ACTIVATION_DIGEST,),
+        )
+        check("the post-0772 fixture is the exact eight on the reviewed map",
+              one(cur)[0] == len(EXPECTED_IDS))
+        # Replay the real retirement repin, including its guarded preimage.
+        # A hand-written fixture UPDATE would hide a missing/broken migration.
+        cur.execute(RETIREMENT_REPIN.read_text(encoding="utf-8"), prepare=False)
+        cur.execute(
+            """select count(*), count(*) filter (where map_digest=%s),
+                      array_agg(short_id order by short_id)
+                 from ops.rule_delivery_activation_target""",
+            (current_map_digest,),
+        )
+        check("retirement repins the exact targets to the current reviewed map",
+              one(cur) == (len(EXPECTED_IDS), len(EXPECTED_IDS), sorted(EXPECTED_IDS)))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
         cur.execute("select id from actor where slug='joe'")

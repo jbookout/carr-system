@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { TOOLS, ToolError, executeRegisteredTool } from "../src/tools.js";
 import { allowedIn, callTool } from "../src/mcp.js";
+import { mutationManifestIdentity } from "../src/mutation-registry.js";
 
 const JOE = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", human: true, via: "test" };
 const BOT = { ...JOE, human: false, slug: "codex" };
@@ -240,6 +242,75 @@ test("caller delivery labels are closed out and the registry snapshot uses the s
   await executeRegisteredTool(db, JOE, "propose-ready-plan", structuredClone(PROPOSE));
   const snapshot = db.calls.find(call => call.sql.includes("rule-delivery-source-snapshot"));
   assert.equal(snapshot.params[3], "carr-internal");
+});
+
+class DispositionFake {
+  constructor() { this.calls = []; this.toolCalls = new Map(); this.setterCalls = 0; }
+  async query(text, params = []) {
+    const sql = text.replace(/\s+/g, " ").trim(); this.calls.push({ sql, params });
+    if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response")) { const row = this.toolCalls.get(params[0]); return { rows: row ? [row] : [] }; }
+    if (sql.includes("from ops.work_request where") && sql.includes("for update")) return { rows: [{
+      id: "40000000-0000-0000-0000-000000000001", ref: "WR-000063", title: "Heavy sourced request", state: "triaged", version: 3,
+      capture_idempotency_key: "30000000-0000-0000-0000-000000000063", shape_disposition: "not_required", shape_fixed_surface_ref: "safe:fixed", shape_rationale: "Mistaken." }] };
+    if (sql.includes("set_sourced_work_request_shape_disposition")) { this.setterCalls += 1; return { rows: [{
+      id: "40000000-0000-0000-0000-000000000001", ref: "WR-000063", title: "Heavy sourced request", state: "triaged", version: 4,
+      shape_disposition: "required", shape_fixed_surface_ref: null, shape_rationale: params[4], shape_decided_by_actor_id: params[5], shape_decided_at: "2026-09-08T00:00:00Z", replayed: false }] }; }
+    if (sql.startsWith("insert into event")) return { rows: [] };
+    if (sql.startsWith("insert into tool_call")) { this.toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) }); return { rows: [] }; }
+    throw new Error(`unexpected query: ${sql}`);
+  }
+}
+
+test("a sourced correction replays within one registry identity and returns key_reuse after registry promotion", async () => {
+  const db = new DispositionFake();
+  const args = { idempotency_key: "60000000-0000-0000-0000-000000000068", work_request: "WR-000063", base_version: 3,
+    disposition: "required", rationale: "The request is intrinsically heavy and needs a Work Shape." };
+  const first = await executeRegisteredTool(db, JOE, "set-work-shape-disposition", structuredClone(args));
+  assert.equal(first.work_request.shape_disposition, "required");
+  assert.equal(first.work_request.version, 4);
+  assert.equal(db.setterCalls, 1);
+  assert.equal(db.calls.some(call => call.sql.includes("classify_sourced_work_request_build")), false, "a correction never consults the classifier");
+  const replay = await executeRegisteredTool(db, JOE, "set-work-shape-disposition", structuredClone(args));
+  assert.equal(replay.replayed, true);
+  assert.equal(db.setterCalls, 1, "an exact same-identity replay never reaches the setter again");
+  const changed = await refused(() => executeRegisteredTool(db, JOE, "set-work-shape-disposition", { ...args, rationale: "changed" }));
+  assert.equal(changed.error, "key_reuse");
+  // The envelope hash binds the SCAC registry identity. A stored row written
+  // under the predecessor registry therefore no longer matches: the same key
+  // legitimately returns key_reuse instead of replaying across identities.
+  const stored = db.toolCalls.get(args.idempotency_key);
+  const identity = mutationManifestIdentity();
+  assert.match(identity.registry_version, /^scac-mutation-registry\.v\d+$/);
+  const source = fs.readFileSync(new URL("../src/tools.js", import.meta.url), "utf8");
+  const envelope = source.slice(source.indexOf("async function withEnvelope"), source.indexOf("async function writeEvent"));
+  assert.match(envelope, /\.\.\.mutationManifestIdentity\(\),/);
+  db.toolCalls.set(args.idempotency_key, { ...stored, request_hash: `predecessor-registry:${stored.request_hash}` });
+  const promoted = await refused(() => executeRegisteredTool(db, JOE, "set-work-shape-disposition", structuredClone(args)));
+  assert.equal(promoted.error, "key_reuse");
+  assert.equal(db.setterCalls, 1, "a post-promotion key_reuse refusal makes no mutation");
+});
+
+test("migration 0492 rebases proposal, acceptance, and both 0333 outcome guards on the effective lineage without touching human authority", () => {
+  const sql = fs.readFileSync(new URL("../../migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql", import.meta.url), "utf8");
+  const between = (start, end) => sql.slice(sql.indexOf(start), sql.indexOf(end));
+  const propose = between("create or replace function ops.propose_sourced_work_request_plan(", "create or replace function ops.accept_sourced_work_request_plan(");
+  const accept = between("create or replace function ops.accept_sourced_work_request_plan(", "create or replace function ops.propose_sourced_work_request_outcome_feedback(");
+  const proposeOutcome = between("create or replace function ops.propose_sourced_work_request_outcome_feedback(", "create or replace function ops.accept_sourced_work_request_outcome_feedback(");
+  const acceptOutcome = between("create or replace function ops.accept_sourced_work_request_outcome_feedback(", "create or replace function ops.sourced_work_shape_revision_requires_effective_required()");
+  for (const [name, body] of [["propose", propose], ["accept", accept]]) {
+    assert.doesNotMatch(body, /from ops\.sourced_work_request_shape_disposition_receipt r/, `${name} must not trust the bare receipt table`);
+    assert.match(body, /ops\.effective_sourced_work_request_shape_disposition\(w\) e where e\.disposition='required'/, name);
+    assert.match(body, /ops\.effective_sourced_work_request_shape_disposition\(w\) e where e\.disposition='not_required'/, name);
+  }
+  assert.match(propose, /p_caps \? 'source_merge' and not coalesce\(ops\.source_merge_scope_valid\(p_caps->'source_merge'\),false\)/, "0470 source_merge caps survive");
+  assert.match(accept, /actor_slug := ops\.authority_actor_slug\(\);\n  select x\.\* into a from public\.actor x\n   where x\.slug = actor_slug and x\.active and x\.kind = 'human' for share;/, "0306 human authority check survives");
+  assert.match(accept, /applied_disposition := w\.shape_disposition/);
+  for (const [name, body] of [["propose-outcome", proposeOutcome], ["accept-outcome", acceptOutcome]]) {
+    assert.match(body, /sb\.fixed_surface_ref is not distinct from w\.shape_fixed_surface_ref\n              and exists \(select 1 from ops\.sourced_work_request_shape_disposition_lineage\(w\.id\) e/, name);
+    assert.match(body, /is not distinct from \(sb\.disposition,sb\.fixed_surface_ref,sb\.rationale,sb\.decided_by_actor_id,sb\.decided_at\)\)\)\) then/, name);
+  }
+  assert.match(acceptOutcome, /where x\.slug=actor_slug and x\.active and x\.kind='human' for share;/, "0333 human acceptance survives");
 });
 
 test("catalog failure rolls back its savepoint and leaves proposal audit writes committable", async () => {

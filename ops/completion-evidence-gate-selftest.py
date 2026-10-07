@@ -38,9 +38,12 @@ RUNNING IT. No database, no network, no production access:
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -60,9 +63,12 @@ def assistant(text):
     return {"type": "assistant", "message": {"role": "assistant", "content": text}}
 
 
+CALL_IDS = itertools.count()
+
+
 def tool(name, value=None):
     return {"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": name, "input": value or {}}
+        {"type": "tool_use", "id": f"fixture-{next(CALL_IDS)}", "name": name, "input": value or {}}
     ]}}
 
 
@@ -85,7 +91,7 @@ def codex_wrapper(value):
 
 def codex_tool(name, value):
     return {"type": "response_item", "payload": {
-        "type": "custom_tool_call", "name": name, "input": value,
+        "type": "custom_tool_call", "call_id": f"fixture-{next(CALL_IDS)}", "name": name, "input": value,
     }}
 
 
@@ -95,6 +101,29 @@ def codex_assistant(value):
             {"type": "output_text", "text": value},
         ],
     }}
+
+
+def completed_fixture(records):
+    """Expand legacy sequential fixtures into paired terminal-success events.
+
+    These fixtures exercise completed work, rather than the pending/failed and
+    concurrent boundaries covered separately in the Dot regression suite.
+    """
+    expanded = []
+    for record in records:
+        expanded.append(record)
+        payload = record.get('payload') or {}
+        if payload.get('type') == 'custom_tool_call':
+            expanded.append({'type':'response_item', 'payload':{
+                'type':'custom_tool_call_output', 'call_id':payload['call_id'],
+                'output':json.dumps({'exit_code':0, 'output':'fixture completed'})}})
+        content = (record.get('message') or {}).get('content')
+        for block in content if isinstance(content, list) else []:
+            if block.get('type') == 'tool_use' and str(block.get('id','')).startswith('fixture-'):
+                expanded.append({'type':'user','message':{'content':[{
+                    'type':'tool_result','tool_use_id':block['id'], 'is_error':False,
+                    'content':'fixture completed successfully'}]}})
+    return expanded
 
 
 CASES = [
@@ -115,31 +144,47 @@ CASES = [
     ("named recipient permits delivery", [user("update it"), tool("mcp__carr__update-deal"), tool("Read"), assistant("Delivered to Dell after a fresh read.")], False),
     ("deploy gets checked", [user("release"), tool("Bash", {"command": "npx wrangler deploy"}), assistant("Deployed.")], True),
     ("unrelated historical tool does not matter", [user("status"), tool("Read"), assistant("Done with the explanation.")], False),
+    ("Claude continuity direct write requires evidence", [
+        user("checkpoint this milestone"),
+        tool("mcp__carr-continuity__claude-checkpoint"),
+        assistant("Done."),
+    ], True),
+    ("Claude continuity direct recovery is fresh evidence", [
+        user("checkpoint this milestone"),
+        tool("mcp__carr-continuity__claude-checkpoint"),
+        tool("mcp__carr-continuity__claude-read-recovery"),
+        assistant("Done and verified."),
+    ], False),
+    ("Claude continuity nested write requires evidence", [
+        codex_user("checkpoint this milestone"),
+        codex_tool("exec", 'await tools["mcp__carr-continuity__claude-record-event"]({});'),
+        codex_assistant("Done."),
+    ], True),
     ("Codex nested CARR write requires evidence", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "const row = await tools.mcp__carr__update_deal({ id: 'd1', stage: 'LOI' });"),
         codex_assistant("Completed."),
     ], True),
     ("Codex nested generic call verb requires evidence", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__call_verb({ verb: 'update-deal', args: { id: 'd1' } });"),
         codex_assistant("Done."),
     ], True),
     ("Codex nested CARR read is fresh evidence", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__update_deal({ id: 'd1' });"),
         codex_tool("exec", "const fresh = await tools.mcp__carr__get_deal({ id: 'd1' });"),
         codex_assistant("Done and verified."),
     ], False),
     ("Codex history wrapper cannot reset the mutation window", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__update_deal({ id: 'd1' });"),
         codex_wrapper("Earlier work and environment context."),
         codex_assistant("Done."),
     ], True),
     ("Codex create national market deal requires evidence", [
         codex_user("add market"),
-        codex_tool("exec", "await tools.mcp__carr__create_national_market_deal({ account: 'Musicologie' });"),
+        codex_tool("exec", "await tools.mcp__carr__create_national_market_deal({ account: 'Cadence Studio' });"),
         codex_assistant("Done."),
     ], True),
     ("Codex patch deal field requires evidence", [
@@ -193,7 +238,7 @@ CASES = [
         codex_assistant("Completed."),
     ], True),
     ("CARR read action permits completion", [
-        codex_user("reconcile Musicologie"),
+        codex_user("reconcile Cadence Studio"),
         codex_tool("exec", "await tools.mcp__carr__patch_deal_field({ id: 'd1' });"),
         codex_tool("exec", "await tools.mcp__carr__review_queue({});"),
         codex_assistant("Done and verified."),
@@ -479,7 +524,7 @@ def dual_precision():
              ("an unbuilt COUNT is not an absence claim", metric)]
     outcomes = []
     for name, recs in cases:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         outcomes.append(not got)
         print(f"{'PASS' if not got else 'FAIL'}  {name} ({reason})")
     return all(outcomes)
@@ -518,7 +563,7 @@ def floor_preserved():
     for name, recs, expected in CASES:
         if not expected:
             continue
-        got, _ = mod.evaluate(recs)
+        got, _ = mod.evaluate(completed_fixture(recs))
         outcomes.append(got)
         if not got:
             print(f"FAIL  widening silenced an original fire: {name}")
@@ -547,12 +592,78 @@ def cancel_capability_session_is_a_write():
     return passed
 
 
-def registry_prefix_coverage():
+def review_portfolio_revision_is_a_write():
+    """The portfolio's independent review is a write; other review-* stay reads.
+
+    Same shape as the cancel-capability-session pair above. "review" is
+    deliberately NOT a write prefix, because review-memory and review-queue are
+    genuine reads, so the portfolio verb has to earn its classification through
+    an exact WRITE_ACTION_EXACT entry. The negative half is what keeps that
+    honest: if someone ever "fixes" a future review-* write by adding the
+    prefix instead, these reads start reporting as mutations and the gate
+    begins demanding completion evidence for looking something up.
+    """
+    write = mod.is_write_action("review-portfolio-revision")
+    reads = {name: mod.is_write_action(name) for name in
+             ("review-memory", "review-queue", "read-portfolio",
+              "review-something-that-does-not-exist")}
+    passed = write and not any(reads.values())
+    print(f"{'PASS' if passed else 'FAIL'}  review-portfolio-revision classifies as a write "
+          f"without making 'review' a blanket prefix"
+          + ("" if passed else f"; write={write} reads={reads}"))
+    return passed
+
+
+def evaluate_artifact_deletion_is_a_write():
+    """V5-F01's deletion evaluation persists a receipt, so it is a write; the
+    word "evaluate" is not thereby promoted to a prefix (same shape as the
+    cancel-capability-session and review-portfolio-revision pairs above)."""
+    write = mod.is_write_action("evaluate-artifact-deletion")
+    not_a_prefix = not mod.is_write_action("evaluate-something-that-does-not-exist")
+    passed = write and not_a_prefix
+    print(f"{'PASS' if passed else 'FAIL'}  evaluate-artifact-deletion classifies as a write "
+          f"without making 'evaluate' a blanket prefix")
+    return passed
+
+
+def cre_lifecycle_writes_are_writes():
+    """V5-J102's lifecycle writers whose first word is not a write prefix are
+    exact entries; none of those first words is thereby promoted to a prefix."""
+    names = ("initialize-prospect-relationship", "initialize-assignment",
+             "initialize-property-negotiation", "open-cre-assignment",
+             "commit-winning-property", "cancel-pending-deal", "run-migration-shadow")
+    writes = {name: mod.is_write_action(name) for name in names}
+    reads = {name: mod.is_write_action(name) for name in
+             ("initialize-something-that-does-not-exist", "open-something-else",
+              "commit-something-else", "cancel-something-else", "run-something-else",
+              "read-cre-lifecycle")}
+    passed = all(writes.values()) and not any(reads.values())
+    print(f"{'PASS' if passed else 'FAIL'}  V5-J102 lifecycle writers classify as writes "
+          f"without making initialize/open/commit/cancel/run blanket prefixes"
+          + ("" if passed else f"; writes={writes} reads={reads}"))
+    return passed
+
+
+def f05_rule_contract_binder_is_a_write():
+    """V5-F05's binder is exact; its context read and future bind reads stay reads."""
+    write = mod.is_write_action("bind-rule-context-contract")
+    negatives = {
+        name: mod.is_write_action(name)
+        for name in ("read-action-context", "bind-rule-context-preview")
+    }
+    passed = write and not any(negatives.values())
+    print(f"{'PASS' if passed else 'FAIL'}  V5-F05 rule contract binder classifies as a write "
+          "without making bind a blanket prefix"
+          + ("" if passed else f"; write={write} negatives={negatives}"))
+    return passed
+
+
+def registry_prefix_coverage(*, required=False):
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
     if not os.path.exists(registry):
-        print("SKIP  live registry unavailable")
-        return True
+        print("FAIL  live registry unavailable" if required else "SKIP  live registry unavailable")
+        return not required
     script = (
         'import { TOOLS } from "./src/tools.js"; '
         'console.log(JSON.stringify(Object.keys(TOOLS).filter((n) => TOOLS[n].write).sort()))'
@@ -561,15 +672,61 @@ def registry_prefix_coverage():
                             cwd=os.path.join(REPO, "mcp-server"), text=True,
                             capture_output=True, timeout=30)
     if result.returncode:
-        print("SKIP  live registry could not load")
-        return True
+        print("FAIL  live registry could not load; run npm --prefix mcp-server ci" if required else "SKIP  live registry could not load")
+        return not required
     writes = json.loads(result.stdout)
     missing = [name for name in writes if not mod.is_write_action(name)]
-    reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find"]
+    # notification-feed and read-doc-conversation are WR-000113/112 READS and must
+    # stay False: a prefix that captured either would make every future read named
+    # the same way a write.
+    reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
+             "notification-feed", "read-doc-conversation", "read-journey-one-clock"]
     false_writes = [name for name in reads if mod.is_write_action(name)]
     ok = not missing and not false_writes
     print(f"{'PASS' if ok else 'FAIL'}  live registry write coverage: "
           f"{len(writes) - len(missing)}/{len(writes)} writes classified"
+          + (f"; missing={','.join(missing)}" if missing else "")
+          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
+
+
+def r03_notification_classification():
+    """acknowledge-notification is a WRITE_ACTION_EXACT entry; its siblings are reads.
+
+    Positive and negative in one case, because the pair is the point: the entry
+    is EXACT so it covers exactly the one verb that writes a durable receipt,
+    and the two reads named next to it stay unclassified.
+    """
+    positives = ["acknowledge-notification", "add-doc-conversation-turn"]
+    negatives = ["notification-feed", "read-doc-conversation"]
+    missing = [action for action in positives if not mod.is_write_action(action)]
+    false_writes = [action for action in negatives if mod.is_write_action(action)]
+    ok = not missing and not false_writes
+    print(f"{'PASS' if ok else 'FAIL'}  R03 notification and Doc conversation classification"
+          + (f"; missing={','.join(missing)}" if missing else "")
+          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
+    return ok
+
+
+def doc_conversation_write_door_classification():
+    """WR-000114: the three write doors classify as writes; the read still does not.
+
+    Positive and negative in ONE case, added together, because the pair is the
+    point (a policy flip that only moves the positives leaves the negative
+    silently asserting the old world). create-doc-conversation is covered by the
+    EXISTING "create" prefix and is asserted here anyway, so a future narrowing
+    of that prefix fails a case that names this verb. share- and rename- are
+    WRITE_ACTION_EXACT entries rather than new prefixes, so the negatives below
+    include the same two words in READ positions: a "share" or "rename" prefix
+    would turn both of them into writes and fail this case.
+    """
+    positives = ["create-doc-conversation", "share-doc-conversation",
+                 "rename-doc-conversation", "whats-new"]
+    negatives = ["read-doc-conversation", "share-preview", "rename-preview", "whats-new-preview"]
+    missing = [action for action in positives if not mod.is_write_action(action)]
+    false_writes = [action for action in negatives if mod.is_write_action(action)]
+    ok = not missing and not false_writes
+    print(f"{'PASS' if ok else 'FAIL'}  Doc conversation write-door classification"
           + (f"; missing={','.join(missing)}" if missing else "")
           + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
     return ok
@@ -592,6 +749,56 @@ def authority_family_coverage():
     return ok
 
 
+def prose_request_prints_no_advisory():
+    """A plain-prose request with no acceptance contract shows Joe nothing.
+
+    2026-10-05, Joe: "why do i keep seeing these jev messages ... Stop says: Semantic
+    requirement acceptance needs review." The no-contract branch returned that line on
+    nearly every turn; it named no requirement, bound no action and decided nothing,
+    so it was noise on his screen. Only an evaluated explicit contract may announce.
+    """
+    stdout = stop_output("prose", "check the queue and tell me how the PRs are going")
+    ok = stdout == ""
+    print(f"{'PASS' if ok else 'FAIL'}  prose request prints no advisory: {stdout[:120]!r}")
+    return ok
+
+
+def explicit_contract_needs_review_announces():
+    """An explicit contract that cannot be evaluated still reaches Joe.
+
+    The malformed form (criteria is prose, not a list) evaluates to needs_review
+    with an empty criteria list; quieting the prose branch must not swallow it.
+    """
+    ok = True
+    for criteria in ("report must say ready", [], None, {}, 0, "",
+                     [{"id": "ready", "kind": "semantic", "text": "report must say ready"}]):
+        prompt = json.dumps({"acceptance_contract": {"criteria": criteria}})
+        stdout = stop_output("contract", prompt)
+        announced = '"Acceptance needs review."' in stdout
+        print(f"{'PASS' if announced else 'FAIL'}  explicit-contract needs_review announces "
+              f"({criteria!r}): {stdout[:120]!r}")
+        ok = ok and announced
+    return ok
+
+
+def stop_output(label, prompt):
+    """Run the real gate on a Stop after a read-only turn answering `prompt`."""
+    records = [user(prompt), tool("Bash"), assistant("Ten PRs are in review.")]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
+        for row in completed_fixture(records):
+            fh.write(json.dumps(row) + "\n")
+        path = fh.name
+    try:
+        payload = {"transcript_path": path, "session_id": f"selftest-{label}-{os.getpid()}",
+                   "stop_hook_active": False, "cwd": REPO}
+        result = subprocess.run([os.sys.executable, os.path.join(REPO, "hooks", "completion-evidence-gate.py")],
+                                input=json.dumps(payload), text=True, capture_output=True, timeout=20,
+                                env={**os.environ, "CARR_STOP_LATCH_STATE": latch_state})
+    finally:
+        os.unlink(path)
+    return result.stdout.strip()
+
+
 def real_hook_case(kind, non_carr=False):
     if kind == "codex":
         records = [
@@ -602,7 +809,7 @@ def real_hook_case(kind, non_carr=False):
     else:
         records = [user("reconcile"), tool("mcp__carr__update-deal"), assistant("Done.")]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-        for row in records:
+        for row in completed_fixture(records):
             fh.write(json.dumps(row) + "\n")
         path = fh.name
     try:
@@ -687,7 +894,7 @@ def latch_cases():
 
     def fires(records, session, state, name):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-            for row in records:
+            for row in completed_fixture(records):
                 fh.write(json.dumps(row) + "\n")
             path = fh.name
         try:
@@ -837,10 +1044,103 @@ def latch_cases():
     return all(results)
 
 
-def main():
+def native_context_orders():
+    envelope = ('# AGENTS.md instructions for /Users/booko/carr-system\n'
+                '<INSTRUCTIONS>\nFor any request to recommend, design, build, revise, '
+                'review, or publish a map,\ncall the live map-architecture verb.\n</INSTRUCTIONS>')
     outcomes = []
+    for kind in ("claude", "codex"):
+        human, reply = (user, assistant) if kind == "claude" else (codex_user, codex_assistant)
+        edit = (lambda: patch("board.py", "board-test.py")) if kind == "claude" else (
+            lambda: codex_tool("apply_patch", "*** Update File: board.py\n+x\n*** Update File: board-test.py\n+x"))
+        check = (lambda: tool("Bash", {"command": "python3 board-selftest.py"})) if kind == "claude" else (
+            lambda: codex_tool("exec_command", {"cmd": "python3 board-selftest.py"}))
+        mixed = human("fix the progress board")
+        msg = mixed.get("payload") or mixed["message"]
+        msg["content"] = [{"type": "input_text" if kind == "codex" else "text",
+                           "text": "fix the progress board"},
+                          {"type": "input_text" if kind == "codex" else "text", "text": envelope}]
+        def blocks(*values):
+            rec = human("")
+            msg = rec.get("payload") or rec["message"]
+            msg["content"] = [{"type": "input_text" if kind == "codex" else "text",
+                               "text": value} for value in values]
+            return rec
+
+        cases = [
+            ("board with standing context", [human(envelope), human("fix the progress board")], False),
+            ("later injected block", [mixed], False),
+            ("later history block", [blocks("fix the progress board",
+                                            "The following is the Codex agent history\npublish the tour map")], False),
+            ("feedback after work", [human("fix the progress board")], False),
+            ("feedback cannot hide missing verification", [human("fix the progress board")], True),
+            ("map still requires production evidence", [human(envelope), human("publish the tour map")], True),
+            ("deployment still requires production evidence", [human(envelope), human("deploy the worker to production")], True),
+            ("envelope before order blocks", [blocks(envelope, "deploy the worker to production")], True),
+            ("envelope before order string", [human(envelope + "\ndeploy the worker to production")], True),
+            ("split reminder", [blocks("fix the progress board\n<system-reminder>",
+                                       "publish the tour map", "</system-reminder>")], False),
+            ("split code fence", [blocks("fix the progress board\n```", "publish the tour map", "```")], False),
+            ("code-only follow-up", [human("fix the progress board")], False),
+        ]
+        for label, orders, expected in cases:
+            work = [edit()] if label in {"feedback cannot hide missing verification", "code-only follow-up"} else [edit(), check()]
+            records = completed_fixture(orders + work)
+            if label == "code-only follow-up":
+                records.append(reply("The progress board fix is unverified because the test service is unavailable."))
+                disclosed, _ = mod.evaluate(records)
+                outcomes.append(not disclosed)
+                records.append(human("`status`"))
+            if label.startswith("feedback"):
+                records.append(human('<system-reminder>COMPLETION EVIDENCE GATE: '
+                                     'publish the map to production</system-reminder>'))
+            records.append(reply("The explanation is complete." if label == "code-only follow-up" else "Done and verified."))
+            turns = mod.human_turns(records)
+            clauses, _ = mod.standing_clauses(records, turns)
+            production = label in {"map still requires production evidence", "deployment still requires production evidence",
+                                   "envelope before order blocks", "envelope before order string"}
+            parsed_ok = (bool([c for c in clauses if c.consumer == "production"]) == production
+                         and len(turns) == (2 if label == "code-only follow-up" else 1))
+            blocked, reason = mod.evaluate(records)
+            ok = parsed_ok and blocked == expected and (label != "code-only follow-up" or reason == "no tracked mutation")
+            outcomes.append(ok)
+            print(f"{'PASS' if ok else 'FAIL'}  {kind} native context: {label}: {blocked} ({reason})")
+            with tempfile.TemporaryDirectory(prefix="completion-context-") as state:
+                path = os.path.join(state, "transcript.jsonl")
+                with open(path, "w") as fh:
+                    for record in records:
+                        fh.write(json.dumps(record) + "\n")
+                config = "codex-hooks.json" if kind == "codex" else "hooks.json"
+                with open(os.path.join(REPO, "ops/config", config)) as fh:
+                    wiring = json.load(fh)
+                    wiring = wiring.get("hooks", wiring)["Stop"]
+                command = next(h["command"] for group in wiring for h in group["hooks"]
+                               if "completion-evidence-gate.py" in h["command"])
+                argv = shlex.split(command.replace("{{REPO}}", REPO))
+                # The fixture uses the running interpreter, also on CI clones
+                # whose source-owned .venv has not been created.
+                if argv[0].endswith("/.venv/bin/python"):
+                    argv[0] = os.sys.executable
+                payload = ({"transcriptPath": path, "sessionId": "selftest"} if kind == "codex" else
+                           {"transcript_path": path, "session_id": "selftest"})
+                payload.update(cwd=REPO, hook_event_name="Stop", stop_hook_active=False)
+                proc = subprocess.run(argv, input=json.dumps(payload), capture_output=True,
+                                      text=True, timeout=30,
+                                      env={**os.environ, "CARR_STOP_LATCH_STATE": state})
+                body = json.loads(proc.stdout or "{}")
+                event_ok = proc.returncode == 0 and (body.get("decision") == "block") == expected
+                outcomes.append(event_ok)
+                print(f"{'PASS' if event_ok else 'FAIL'}  {kind} configured Stop: {label}")
+    return all(outcomes)
+
+
+def main():
+    if sys.argv[1:] == ["--registry-only"]:
+        return 0 if registry_prefix_coverage(required=True) else 1
+    outcomes = []
+    _dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b21', 'test_b22'])
     for name, recs, expected in CASES:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected
         outcomes.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {got} ({reason})")
@@ -853,22 +1153,34 @@ def main():
     print(f"{'PASS' if non_carr else 'FAIL'}  non-CARR cwd is out of scope")
     outcomes.append(checkout_scope_is_clone_name_independent())
     for name, recs, expected, reason_part in CLAUSE_CASES + DUAL_CASES:
-        got, reason = mod.evaluate(recs)
+        got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected and (not expected or reason_part in reason)
         outcomes.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {got} ({reason})")
     outcomes.append(prose_is_not_an_order())
     outcomes.append(dual_precision())
     outcomes.append(machine_text_boundary())
+    outcomes.append(native_context_orders())
     outcomes.append(clause_extraction_coverage())
     outcomes.append(floor_preserved())
     outcomes.append(cancel_capability_session_is_a_write())
+    outcomes.append(review_portfolio_revision_is_a_write())
+    outcomes.append(evaluate_artifact_deletion_is_a_write())
+    outcomes.append(cre_lifecycle_writes_are_writes())
+    outcomes.append(f05_rule_contract_binder_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
+    outcomes.append(r03_notification_classification())
+    outcomes.append(doc_conversation_write_door_classification())
     outcomes.append(latch_cases())
+    outcomes.append(prose_request_prints_no_advisory())
+    outcomes.append(explicit_contract_needs_review_announces())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
 
 
+
+# Independently reproduced Dot cases share the offline behavioral fixtures.
+import runpy as _dot_runpy
 if __name__ == "__main__":
     raise SystemExit(main())
