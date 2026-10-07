@@ -14,14 +14,31 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class SuccessorCommands(unittest.TestCase):
     def test_generated_successor_rehome_uses_all_current_main_predecessor_inputs(self):
+        with tempfile.TemporaryDirectory(prefix='successor-rehome-source-') as directory:
+            source = Path(directory) / 'checkout'
+            subprocess.run(['git', 'clone', '--quiet', '--shared', str(ROOT), str(source)],
+                           env=self.env, check=True, capture_output=True)
+            for state in ('main', 'detached'):
+                with self.subTest(source_state=state):
+                    args = ['switch', '-C', 'main', 'HEAD'] if state == 'main' else ['switch', '--detach', 'HEAD']
+                    subprocess.run(['git', '-C', str(source), *args],
+                                   env=self.env, check=True, capture_output=True)
+                    self.assertEqual(subprocess.check_output(
+                        ['git', '-C', str(source), 'rev-parse', '--abbrev-ref', 'HEAD'],
+                        env=self.env, text=True).strip(), 'main' if state == 'main' else 'HEAD')
+                    self.repo = Path(directory) / state
+                    self.repo.mkdir()
+                    self._assert_generated_successor_rehome(source)
+
+    def _assert_generated_successor_rehome(self, source):
         from unittest.mock import patch
-        subprocess.run(['git', 'clone', '--quiet', '--shared', str(ROOT), str(self.repo / 'source')],
+        subprocess.run(['git', 'clone', '--quiet', '--shared', str(source), str(self.repo / 'source')],
                        env=self.env, check=True, capture_output=True)
         self.repo = self.repo / 'source'
         self.git('config', 'user.name', 'Fixture')
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('remote', 'set-url', 'origin', str(self.repo))
-        self.git('branch', 'main', 'HEAD')
+        self.git('switch', '-C', 'main', 'HEAD')
         self.git('switch', '-qc', 'feature')
         self.base = self.head()
         old = json.loads((self.repo / 'ops/config/scac-registry-chain.json').read_text())
