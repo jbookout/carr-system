@@ -580,7 +580,7 @@
           "deploy_mechanism": "ops/launchd/com.carr.gate-zero-canary.plist",
           "expected_cadence_seconds": 3600,
           "cadence_grace_seconds": 5400,
-          "notes": "NOT YET ACTIVATED, deliberately: the plist is held in DEFINITION_ONLY in ops/config-as-code.py, so installing it is Joe's own act and its presence in ~/Library/LaunchAgents is a drift finding until he takes it off that list. Until then this service has no runs and reads unknown — the honest answer for a job nobody has started, and the same posture carr-mcp already takes. CRITICALITY IS LOW because nothing depends on the canary's own work: it has none. What depends on it is one gate's ability to ask a question, and that gate reads a missing canary correctly today. Grace 5400s against a 3600s cadence covers the 30-minute run-spool flush (tools/ops-spool.py) exactly as notes-sweep's and run-spool-flush's graces do: a succeeded row queues locally and lands at the next flush, so the worst honest gap is one interval plus one flush."
+          "notes": "NOT YET ACTIVATED, deliberately: the plist is held in DEFINITION_ONLY in lib/launchd_hold.py, so installing it is Joe's own act and its presence in ~/Library/LaunchAgents is a drift finding until he takes it off that list. Until then this service has no runs and reads unknown — the honest answer for a job nobody has started, and the same posture carr-mcp already takes. CRITICALITY IS LOW because nothing depends on the canary's own work: it has none. What depends on it is one gate's ability to ask a question, and that gate reads a missing canary correctly today. Grace 5400s against a 3600s cadence covers the 30-minute run-spool flush (tools/ops-spool.py) exactly as notes-sweep's and run-spool-flush's graces do: a succeeded row queues locally and lands at the next flush, so the worst honest gap is one interval plus one flush."
         }
       ]
     },
@@ -1085,10 +1085,30 @@
           "notes": "Daily at 03:10 local, plus RunAtLoad. Per-machine by design (both the source transcripts and the destination archive are local to whichever Mac runs it), so it is neither PRIMARY_ONLY nor SECONDARY_ONLY in ops/config-as-code.py, and it depends on nothing in the record layer — no dependencies entry below."
         }
       ]
+    },
+    {
+      "key": "expert-reply-watch",
+      "name": "Expert reply watch",
+      "purpose": "Weekly read-only mining of tracked X accounts replies into queued log-capture records, with URL deduplication and a dated local run ledger.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "tools/expert_reply_watch.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.expert-reply-watch.plist",
+          "expected_cadence_seconds": 604800,
+          "cadence_grace_seconds": 86400,
+          "notes": "Monday 06:00 local. Primary only; Grok stdout proposals pass deterministic validation. CLI failure records one defect and exits nonzero. No X writes."
+        }
+      ]
     }
   ],
 
   "dependencies": [
+    { "service": "expert-reply-watch", "depends_on": "neon-record-layer" },
     { "service": "job-watchdog", "depends_on": "neon-record-layer" },
     { "service": "carr-mcp", "depends_on": "neon-record-layer" },
     { "service": "nightly-record-layer", "depends_on": "neon-record-layer" },

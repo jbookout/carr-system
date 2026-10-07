@@ -992,6 +992,22 @@ test("source-only migration diagnostics preserve the sealed runtime frontier", (
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
 });
 
+test("Worker upload retry evidence binds current script bytes without changing sealed authority", () => {
+  const fixture = JSON.parse(readRegistryArtifact(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const ingressKey = "external-admin:bin/deploy-worker.sh";
+  const sealed = frozenInventory(CURRENT_REGISTRY_VERSION).find(row => row.ingress_key === ingressKey);
+  const review = fixture.current_source_reviews[CURRENT_REGISTRY_VERSION];
+  const reviewed = review?.upsert.find(row => row.ingress_key === ingressKey) || sealed;
+  assert.ok(reviewed, "upload retry must have registered evidence at the current frontier");
+  const digest = sha256(readRegistryArtifact(new URL("../../bin/deploy-worker.sh", import.meta.url), "utf8"));
+  assert.equal(reviewed.schema_digest, digest);
+  assert.equal(reviewed.handler_digest, digest);
+  const authorityContract = row => Object.fromEntries(Object.entries(row)
+    .filter(([key]) => !["schema_digest", "handler_digest"].includes(key)));
+  assert.deepEqual(authorityContract(reviewed), authorityContract(sealed));
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, CURRENT_REGISTRY_VERSION), true);
   // The push toll calls the bare API; its default must follow the newest frontier.
@@ -1353,7 +1369,7 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   // DEFINITION-ONLY BY THIS PREDICATE and must not be pinned as if it were:
   // isDefinitionOnlyLaunchd asks whether the plist carries any trigger at all,
   // and the canary carries a real hourly StartInterval. What KEPT it uninstalled
-  // until 2026-09-12 was ops/config-as-code.py's DEFINITION_ONLY list, which is
+  // until 2026-09-12 was the DEFINITION_ONLY list now in lib/launchd_hold.py, which is
   // a different mechanism in a different file, so that is where this asserts it.
   for (const label of ["com.carr.canonical-fast-forward", "com.carr.canonical-dirty-watchdog",
     "com.carr.gate-zero-canary"]) {
@@ -1363,11 +1379,11 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
     assert.ok(Object.keys(row.trigger_contract || {}).length > 0 ||
       row.trigger_contract_digest, label);
   }
-  const configAsCode = readRegistryArtifact(
-    new URL("../../ops/config-as-code.py", import.meta.url), "utf8");
-  const definitionOnlyBlock = configAsCode.slice(
-    configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
-    configAsCode.indexOf("\n}\n", configAsCode.indexOf("DEFINITION_ONLY: dict[str, str] = {")));
+  const launchdHold = readRegistryArtifact(
+    new URL("../../lib/launchd_hold.py", import.meta.url), "utf8");
+  const definitionOnlyBlock = launchdHold.slice(
+    launchdHold.indexOf("DEFINITION_ONLY: dict[str, str] = {"),
+    launchdHold.indexOf("\n}\n", launchdHold.indexOf("DEFINITION_ONLY: dict[str, str] = {")));
   // THE CANARY'S SCHEDULE IS STARTED, so this clause is the mirror of what it
   // was until 2026-09-12: the plist must NOT be a key of DEFINITION_ONLY any
   // more. Joe's blanket approval (decision idempotency
