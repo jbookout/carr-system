@@ -47,18 +47,21 @@ TAIL_LIMIT = 200
 # limit (429, or GitHub's 403 "rate limit exceeded") and a request timeout.
 _CLIENT_ERROR = re.compile(r"\bHTTP 4\d\d\b")
 _RETRYABLE_CLIENT_ERROR = re.compile(r"\bHTTP (?:408|429)\b|rate limit", re.I)
-_LOGGED_OUT = re.compile(r"gh auth login")
+_AUTHENTICATION = re.compile(r"\bHTTP 401\b|gh auth login", re.I)
+_RATE_LIMIT = re.compile(r"\bHTTP 429\b|rate limit|abuse detection", re.I)
 
 
 class GitHubUnreadable(RuntimeError):
     """A GitHub read that could not be completed. `detail` is the redacted
     tail of gh's error; `transient` says whether the last failure might pass
-    on a later attempt."""
+    on a later attempt. `kind` classifies the full redacted diagnostic before
+    its tail is cut."""
 
     def __init__(self, message: str, *, detail: str = "", transient: bool = False,
-                 attempts: int = 1):
+                 attempts: int = 1, kind: str = "github_unreadable"):
         super().__init__(message)
         self.detail, self.transient, self.attempts = detail, transient, attempts
+        self.kind = kind
 
 
 def resolve_gh(env: Mapping[str, str] | None = None, *,
@@ -92,17 +95,22 @@ class GitHubReader:
             args += ["--method", "GET"]
             for key, value in fields.items():
                 args += ["-f", f"{key}={value}"]
-        data = self._parse(self.text(args), args)
+        text, attempts = self._read(args)
+        data = self._parse(text, args, attempts=attempts)
         if paginate:   # --slurp yields one list per page
             return [item for page in (data or []) for item in (page or [])]
         return data
 
     def json(self, args: list[str]) -> Any:
         """Any gh subcommand whose output is JSON (`pr list --json ...`), parsed."""
-        return self._parse(self.text(args), args)
+        text, attempts = self._read(args)
+        return self._parse(text, args, attempts=attempts)
 
     def text(self, args: list[str]) -> str:
         """Any gh subcommand's stdout, after retrying transient failures."""
+        return self._read(args)[0]
+
+    def _read(self, args: list[str]) -> tuple[str, int]:
         what = _what(args)
         delays = [] if self._outage else list(self.retry_delays)
         attempts = 0
@@ -114,38 +122,41 @@ class GitHubReader:
                     capture_output=True, text=True, timeout=self.timeout)
             except subprocess.TimeoutExpired:
                 failure = f"timed out after {self.timeout:g}s"
-                transient, detail = True, ""
+                transient, detail, kind = True, "", "github_unreadable"
             except OSError as exc:
                 raise GitHubUnreadable(f"gh {what} could not start: {type(exc).__name__}",
                                        attempts=attempts) from exc
             else:
                 if proc.returncode == 0:
                     self._outage = False
-                    return proc.stdout or ""
-                detail = self._tail(getattr(proc, "stderr", "") or "")
+                    return proc.stdout or "", attempts
+                diagnostic = self._redact(getattr(proc, "stderr", "") or "")
+                detail = diagnostic[-TAIL_LIMIT:]
                 failure = f"exited {proc.returncode}"
-                transient = _transient(detail)
+                transient = _transient(diagnostic)
+                kind = _failure_kind(diagnostic)
             if not transient or not delays:
                 self._outage = self._outage or (transient and attempts > 1)
                 plural = "s" if attempts > 1 else ""
                 raise GitHubUnreadable(
                     f"gh {what} {failure} after {attempts} attempt{plural}"
                     + (f": {detail}" if detail else ""),
-                    detail=detail, transient=transient, attempts=attempts)
+                    detail=detail, transient=transient, attempts=attempts, kind=kind)
             (self._sleep or time.sleep)(delays.pop(0))
 
-    def _tail(self, stderr: str) -> str:
+    def _redact(self, stderr: str) -> str:
         # Redact the whole stderr before keeping its tail, so a cut can never
         # leave half a token that the patterns no longer match.
         known = sensitive_env_values(self.env if self.env is not None else os.environ)
-        return " ".join(redact_text(stderr, known_secrets=known).split())[-TAIL_LIMIT:]
+        return " ".join(redact_text(stderr, known_secrets=known).split())
 
     @staticmethod
-    def _parse(text: str, args: list[str]) -> Any:
+    def _parse(text: str, args: list[str], *, attempts: int = 1) -> Any:
         try:
             return json.loads(text or "null")
         except ValueError as exc:
-            raise GitHubUnreadable(f"gh {_what(args)} returned output that is not JSON") from exc
+            raise GitHubUnreadable(f"gh {_what(args)} returned output that is not JSON",
+                                   attempts=attempts) from exc
 
 
 def _what(args: list[str]) -> str:
@@ -157,6 +168,12 @@ def _what(args: list[str]) -> str:
 
 
 def _transient(detail: str) -> bool:
-    if _LOGGED_OUT.search(detail):
+    if _AUTHENTICATION.search(detail):
         return False
     return not (_CLIENT_ERROR.search(detail) and not _RETRYABLE_CLIENT_ERROR.search(detail))
+
+
+def _failure_kind(detail: str) -> str:
+    if _AUTHENTICATION.search(detail):
+        return "authentication"
+    return "rate_limit" if _RATE_LIMIT.search(detail) else "github_unreadable"
