@@ -522,6 +522,14 @@ class Store:
     def record_durable(self, row: dict) -> None:
         recorded = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **row}
         self.record(recorded)
+        self.readback_durable(recorded)
+
+    def recover_durable(self, row: dict) -> None:
+        with self.records_path.open("rb") as fh:
+            os.fsync(fh.fileno())
+        self.readback_durable(row)
+
+    def readback_durable(self, recorded: dict) -> None:
         directory = os.open(self.root, os.O_RDONLY)
         try:
             os.fsync(directory)
@@ -1713,11 +1721,11 @@ class Pipeline:
         except StepFailed:
             return False
 
-    def last_released(self, state: dict, lane: str, lane_cfg: dict) -> str:
+    def last_released(self, state: dict, lane: str, lane_cfg: dict, live: dict | None = None) -> str:
         sha = (state.get(lane) or {}).get("last_released_sha")
         if sha:
             return sha
-        live = self.http(lane_cfg["live_release_url"])
+        live = live if live is not None else self.http(lane_cfg["live_release_url"])
         value = ((live.get("git_sha") or {}).get("value") if lane == "worker"
                  else live.get("source_commit"))
         if not isinstance(value, str) or not SHA_RE.fullmatch(value):
@@ -1867,6 +1875,76 @@ class Pipeline:
         self.store.save(state)
         return rejection
 
+    def release_proof_payload(self, row: dict) -> dict:
+        return {key: value for key, value in row.items()
+                if key not in {"ts", "status", "proof_digest", "slice_marker"}}
+
+    def finish_release_proof(self, proof: dict, state: dict, lane: str) -> None:
+        family = [row for row in self.store.records() if isinstance(row, dict)
+                  and row.get("status") in {"release_verified", "slice_marker_claimed", "shipped"}
+                  and (row.get("proof_digest") == proof["proof_digest"]
+                       or all(row.get(key) == proof[key] for key in ("lane", "sha", "run_id")))]
+        if any(row.get("proof_digest") != proof["proof_digest"]
+               or self.release_proof_payload(row) != self.release_proof_payload(proof) for row in family):
+            raise Blocked("journal_proof_mismatch", "a release journal phase changed its original proof binding")
+        shipped = next((row for row in reversed(family) if row["status"] == "shipped"), None)
+        if shipped:
+            self.store.recover_durable(shipped)
+        else:
+            result = {}
+            if lane == "worker" and proof.get("release_key"):
+                claim = next((row for row in family if row["status"] == "slice_marker_claimed"), None)
+                if claim:
+                    self.store.recover_durable(claim)
+                    result["slice_marker"] = {"started": None, "launch_outcome": "unknown",
+                                              "claim_run_id": proof["run_id"]}
+                else:
+                    self.store.record_durable({**proof, "status": "slice_marker_claimed"})
+                    result["slice_marker"] = self.mark_slices(proof["release_key"], proof["sha"])
+            self.store.record_durable({**proof, **result, "status": "shipped"})
+            shipped = next(row for row in reversed(self.store.records())
+                           if row.get("proof_digest") == proof["proof_digest"] and row.get("status") == "shipped")
+        lane_state = state.setdefault(lane, {})
+        lane_state.pop("rejection", None)
+        lane_state.update({"last_released_sha": proof["sha"], "failed_sha": None, "failed_step": None,
+                           "last_shipped_at": shipped["ts"], "last_shipped_proof": proof["proof_digest"]})
+        self.store.save(state)
+
+    def reconcile_release_proof(self, state: dict, lane: str, lane_cfg: dict, main: str) -> None:
+        checkpoint = state.get(lane, {}).get("last_released_sha")
+        candidates = [row for row in self.store.records() if isinstance(row, dict)
+                      and row.get("status") == "release_verified" and row.get("lane") == lane
+                      and row.get("sha") != checkpoint
+                      and (not checkpoint or row.get("from_sha") == checkpoint or row.get("sha") == main)]
+        if not candidates:
+            return
+        proof = candidates[-1]
+        payload = self.release_proof_payload(proof)
+        if (not SHA_RE.fullmatch(str(proof.get("sha") or ""))
+                or not SHA_RE.fullmatch(str(proof.get("from_sha") or ""))
+                or not proof.get("run_id") or proof.get("proof_digest") != evidence_digest(payload)
+                or proof.get("release_endpoint") != lane_cfg["live_release_url"]
+                or (checkpoint and proof["from_sha"] != checkpoint)):
+            raise Blocked("journal_proof_invalid", "pending release proof does not match its original source and lane binding")
+        live = self.http(lane_cfg["live_release_url"])
+        if lane == "worker":
+            matches = ((live.get("git_sha") or {}).get("value") == proof["sha"]
+                       and UUID_RE.fullmatch(str(proof.get("provider_version_id") or "")) is not None
+                       and (live.get("worker_version") or {}).get("id") == proof["provider_version_id"])
+        else:
+            identity = proof.get("live_identity") or {}
+            matches = (UUID_RE.fullmatch(str(identity.get("provider_version_id") or "")) is not None
+                       and all(live.get(key) == value for key, value in identity.items())
+                       and identity.get("source_commit") == proof["sha"]
+                       and identity.get("environment") == "production")
+        if not matches:
+            raise Blocked("journal_identity_mismatch", "served identity differs from the original pending release proof")
+        repo_dir = lane_repo_dir(self.cfg, lane, self.repo)
+        self.git("merge-base", "--is-ancestor", proof["sha"], main, cwd=repo_dir)
+        self.store.recover_durable(proof)
+        self.finish_release_proof(proof, state, lane)
+        self.out(f"release-pipeline[{lane}]: reconciled durable release {proof['sha'][:12]}")
+
     def run_lane(self, lane: str) -> int:
         self.observations.clear()
         self.dependency_evidence.clear()
@@ -1893,11 +1971,25 @@ class Pipeline:
             sha = remote[0]
             self.git("fetch", "--quiet", "origin", sha, cwd=repo_dir)
             self.observed_main = sha
-            base = self.last_released(state, lane, lane_cfg)
+            if sha != lane_state.get("last_released_sha"):
+                self.controller_current(state)
+                if not self.dry_run:
+                    self.reconcile_release_proof(state, lane, lane_cfg, sha)
+                    lane_state = state.setdefault(lane, {})
+            live = None if sha == lane_state.get("last_released_sha") else self.http(lane_cfg["live_release_url"])
+            base = self.last_released(state, lane, lane_cfg, live)
+            if (not self.dry_run and not lane_state.get("last_released_sha")
+                    and lane_state.get("failed_sha") == base):
+                raise Blocked("bootstrap_unreceipted", "failed release source identity has no durable shipped checkpoint")
             if sha == base:
+                if not lane_state.get("last_released_sha") and not self.dry_run:
+                    raise Blocked("bootstrap_unreceipted", "live source identity has no durable shipped checkpoint")
                 self.out(f"release-pipeline[{lane}]: main {sha[:12]} is already released")
                 return 0
-            self.controller_current(state)
+            if not self.dry_run and live is not None:
+                live_sha = (live.get("git_sha") or {}).get("value") if lane == "worker" else live.get("source_commit")
+                if live_sha == sha:
+                    raise Blocked("live_target_unreceipted", "target already serves without a reconciled durable release proof")
             if not self.dry_run and self.rejection_waits(lane_state, lane, base, sha):
                 return 0
             if not self.dry_run:
@@ -1928,11 +2020,17 @@ class Pipeline:
                              f"{failed[:12]} ({lane_state.get('failed_step')}); waiting for a green "
                              "fix-forward")
                     return 0
+            if not self.dry_run and live is not None:
+                live_sha = (live.get("git_sha") or {}).get("value") if lane == "worker" else live.get("source_commit")
+                if live_sha == sha:
+                    raise Blocked("live_target_unreceipted", "selected release target already serves without a reconciled durable release proof")
             changed = self.changed_paths(base, sha, cwd=repo_dir)
             needed, hits = classify(changed, lane_cfg)
             self.out(f"release-pipeline[{lane}]: batch {base[:12]}..{sha[:12]}: "
                      f"{len(changed)} path(s), {len(hits)} release path(s)")
             if not needed:
+                if not self.dry_run and not lane_state.get("last_released_sha"):
+                    raise Blocked("bootstrap_unreceipted", "source-only advancement has no durable prior release checkpoint")
                 self.out(f"release-pipeline[{lane}]: doc/test-only batch; nothing to release")
                 if not self.dry_run:
                     lane_state["last_released_sha"] = sha
@@ -1948,15 +2046,10 @@ class Pipeline:
                 self.out(f"release-pipeline[{lane}]: dry run complete; nothing executed")
                 return 0
             proof = {"lane": lane, "sha": sha, "from_sha": base, "run_id": self.run_id,
-                     "paths": hits[:50], **result}
+                     "release_endpoint": lane_cfg["live_release_url"], "paths": hits[:50], **result}
+            proof["proof_digest"] = evidence_digest(proof)
             self.store.record_durable({**proof, "status": "release_verified"})
-            if lane == "worker" and result.get("release_key"):
-                result["slice_marker"] = self.mark_slices(result["release_key"], sha)
-            self.store.record_durable({**proof, **result, "status": "shipped"})
-            lane_state.pop("rejection", None)
-            lane_state.update({"last_released_sha": sha, "failed_sha": None, "failed_step": None,
-                               "last_shipped_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")})
-            self.store.save(state)
+            self.finish_release_proof(proof, state, lane)
             self.out(f"release-pipeline[{lane}]: SHIPPED {sha[:12]}")
             return 0
         except Blocked as b:
@@ -2440,14 +2533,14 @@ class Pipeline:
                     self.sleep(5)
         return False, last, error, log
 
-    def verify_app_live(self, lane_cfg: dict, sha: str, *, attempts: int = 12) -> None:
+    def verify_app_live(self, lane_cfg: dict, sha: str, *, attempts: int = 12) -> dict:
         """Read the configured public endpoint until it serves the promoted SHA."""
         matched, last, error, log = self.await_live(
             lane_cfg, "app-verify-live",
             lambda live: live.get("source_commit") == sha and live.get("environment") == "production",
             attempts=attempts)
         if matched:
-            return
+            return {key: last.get(key) for key in ("source_commit", "environment", "provider_version_id")}
         read_error = f" last_read_error={error}" if error else ""
         raise StepFailed("app-verify-live", 1, str(log),
                          f"/app-release did not serve {sha} after {attempts} reads; "
@@ -2488,17 +2581,18 @@ class Pipeline:
             smoke_baseline = self.smoke_run("app", sha, "baseline", app_dir=wt)
         self.step("app-release", ["node", "scripts/release-production.mjs"], wt, timeout=900,
                   env=self.deploy_env())
+        live_identity = None
         if self.dry_run:
             self.out(f"  [dry-run] GET {lane_cfg['live_release_url']} and require source_commit == {sha}")
         else:
-            self.verify_app_live(lane_cfg, sha)
+            live_identity = self.verify_app_live(lane_cfg, sha)
         post_release = self.post_release_proof(
             "app", sha, smoke_baseline, app_dir=wt,
             rollback=lambda: self.rollback_app(lane_cfg, wt, prior_app)) if smoke_on else None
         if not self.dry_run:
             self.remove_worktrees()
         head = rev.get("head") or {}
-        return {"run_dir": str(self.run_dir), "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
+        return {"run_dir": str(self.run_dir), "live_identity": live_identity, "prs": rev["prs"], "pre_pipeline_prs": rev["pre_pipeline_prs"],
                 "reviews": rev.get("reviews", []), "fix_forwards": rev.get("fix_forwards", []),
                 "review_rule": head.get("rule"),
                 "reviewed_sha": head.get("reviewed_sha"), "pr_head_sha": head.get("head_sha"),
