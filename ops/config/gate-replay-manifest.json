@@ -347,6 +347,35 @@
         }
       ]
     },
+    "github-burst-guard.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash",
+            "scenarios"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUse only RECORDS: when a GitHub-touching command's output carries a rate-limit answer it writes the time to out/github-burst-guard-state.json and exits 0. It never denies and prints nothing; the cooldown it starts is refused on PreToolUse, covered by a scenario here and end to end by ops/github-burst-guard-selftest.py."
+        },
+        {
+          "event": "PostToolUseFailure",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUseFailure only RECORDS a rate-limit answer from a failed GitHub-touching command, the same as PostToolUse. It never denies and prints nothing; ops/github-burst-guard-selftest.py covers the failure-event path."
+        }
+      ]
+    },
     "drift-assertion-gate.py": {
       "role": "gate",
       "wirings": [
@@ -481,6 +510,19 @@
             "advisories",
             "scenarios"
           ]
+        }
+      ]
+    },
+    "job-watchdog-digest.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "UserPromptSubmit",
+          "matcher": "",
+          "fixtures": [
+            "prompts"
+          ],
+          "allow_only": "Read-only orchestrator context reporter: returns 0 and emits additionalContext from the finding ledger; never blocks, scans, dispatches or mutates findings."
         }
       ]
     },
@@ -657,7 +699,7 @@
       "wirings": [
         {
           "event": "PreToolUse",
-          "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
+          "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
           "fixtures": [
             "bash",
             "edits",
@@ -792,19 +834,6 @@
         }
       ]
     },
-    "stale-claim-gate.py": {
-      "role": "gate",
-      "wirings": [
-        {
-          "event": "Stop",
-          "matcher": "",
-          "fixtures": [
-            "advisories",
-            "scenarios"
-          ]
-        }
-      ]
-    },
     "stop_latch.py": {
       "role": "helper"
     },
@@ -881,9 +910,12 @@
     }
   },
   "lib_helpers": [
+    "lib/acceptance_checks.py",
+    "lib/credential_file.py",
+    "lib/jev_required_actions.py",
     "lib/claude_continuity_config.py",
     "lib/claude_rule_delivery_dedupe.py",
-    "lib/jev_required_actions.py",
+    "lib/job_watchdog.py",
     "lib/loadpy.py",
     "lib/local_principal.py",
     "lib/machine_prerequisites.py",

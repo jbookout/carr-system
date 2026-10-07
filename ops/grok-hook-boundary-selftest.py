@@ -26,14 +26,13 @@ def load(path):
 
 
 class GrokHookBoundaryTests(unittest.TestCase):
-    def test_context_wrapper_reaches_protected_probe_without_process_readback(self):
+    def test_context_wrapper_delegates_to_protected_probe(self):
         meter = load(ROOT / 'hooks/hook-meter-run.py')
         from hooks import grok_invocation as boundary
-        probe = boundary.bounded_grok_read_only
         with mock.patch.dict(os.environ, {}, clear=True), \
-                mock.patch.object(boundary, 'bounded_grok_read_only', wraps=probe) as called, \
+                mock.patch.object(boundary, 'grok_session', return_value=False) as called, \
                 mock.patch.object(boundary.subprocess, 'run') as ps:
-            self.assertFalse(meter.bounded_grok_read_only())
+            self.assertFalse(meter.grok_session())
             called.assert_called_once()
             ps.assert_not_called()
 
@@ -46,12 +45,47 @@ class GrokHookBoundaryTests(unittest.TestCase):
                       'python unrelated-session.py',
                       'grok --sandbox workspace --print task'):
             with self.subTest(owner=owner), mock.patch.dict(os.environ, {'CARR_GROK_RUN_READ_ONLY': '1'}), \
+                    mock.patch.object(boundary, '_process_image', side_effect=['/bin/sh', owner.split()[0]]), \
                     mock.patch.object(boundary.subprocess, 'run', side_effect=[
                         subprocess.CompletedProcess([], 0, '123 /bin/sh -c hook', ''),
                         subprocess.CompletedProcess([], 0, '124 ' + owner, ''),
                         subprocess.CompletedProcess([], 0, '1 ' + prefix, '')]) as ps:
                 self.assertFalse(boundary.bounded_grok_read_only())
                 self.assertEqual(ps.call_count, 2)
+
+    def test_any_grok_session_owns_context_hooks(self):
+        from hooks import grok_invocation as boundary
+        for owner in ('grok -p task -m grok-4.7 --reasoning-effort high --sandbox workspace --cwd /tmp',
+                      'grok --sandbox workspace --print task',
+                      '/opt/homebrew/bin/grok -p task'):
+            with self.subTest(owner=owner), mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(boundary, '_process_image', side_effect=['/bin/sh', owner.split()[0]]), \
+                    mock.patch.object(boundary.subprocess, 'run', side_effect=[
+                        subprocess.CompletedProcess([], 0, '123 /bin/sh -c hook', ''),
+                        subprocess.CompletedProcess([], 0, '124 ' + owner, '')]):
+                self.assertTrue(boundary.grok_session())
+
+    def test_other_agent_between_hook_and_grok_keeps_gates(self):
+        from hooks import grok_invocation as boundary
+        for owner in ('claude --permission-mode acceptEdits task',
+                      'codex exec --sandbox workspace-write task',
+                      'node /opt/bin/claude -p task', 'python unrelated.py'):
+            with self.subTest(owner=owner), mock.patch.object(boundary, '_process_image', side_effect=['/bin/sh', owner.split()[0]]), \
+                    mock.patch.object(boundary.subprocess, 'run', side_effect=[
+                    subprocess.CompletedProcess([], 0, '123 /bin/sh -c hook', ''),
+                    subprocess.CompletedProcess([], 0, '124 ' + owner, ''),
+                    subprocess.CompletedProcess([], 0, '1 grok -p outer', '')]):
+                self.assertFalse(boundary.grok_session())
+        with mock.patch.object(boundary.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ps', 0.75)):
+            self.assertFalse(boundary.grok_session())
+
+    def test_meter_skips_context_hooks_only_for_grok_sessions(self):
+        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        self.assertIn('rule-boot-gate.py', meter.GROK_CONTEXT_HOOKS)
+        self.assertNotIn('guard-unattended.py', meter.GROK_CONTEXT_HOOKS)
+        with mock.patch.object(meter, 'grok_session', return_value=True), \
+                mock.patch.object(sys, 'argv', ['hook-meter-run.py', str(ROOT / 'hooks/rule-boot-gate.py')]):
+            self.assertEqual(meter.main(), 0)
 
     def test_total_probe_deadline_reserves_time_for_gate(self):
         from hooks import grok_invocation as boundary
@@ -61,6 +95,7 @@ class GrokHookBoundaryTests(unittest.TestCase):
             return subprocess.CompletedProcess([], 0, '123 /bin/sh -c hook', '')
         with mock.patch.dict(os.environ, {'CARR_GROK_RUN_READ_ONLY': '1'}), \
                 mock.patch.object(time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(boundary, '_process_image', return_value='/bin/sh'), \
                 mock.patch.object(boundary.subprocess, 'run', side_effect=delayed) as ps:
             self.assertFalse(boundary.bounded_grok_read_only())
             self.assertLessEqual(ps.call_count, 2)
@@ -162,19 +197,49 @@ int main(int argc, char **argv) {
             probe = scratch / 'probe.py'
             probe.write_text('import sys\nsys.path.insert(0, ' + repr(str(ROOT)) +
                              ')\nfrom hooks.grok_invocation import bounded_grok_read_only\n'
-                             'print(bounded_grok_read_only())\n')
+                             'from hooks.grok_invocation import grok_session\n'
+                             'print(bounded_grok_read_only(), grok_session())\n')
             env = dict(os.environ, CARR_GROK_RUN_READ_ONLY='1',
                        BOUNDARY_PYTHON=sys.executable, BOUNDARY_PROBE=str(probe))
             prefix = [str(binary), '--model', 'grok-4.7', '--reasoning-effort',
                       'high', '--max-turns', '60', '--always-approve', '--sandbox']
-            for sandbox, expected in (('read-only', 'True'), ('workspace', 'False')):
+            for sandbox, expected in (('read-only', 'True True'), ('workspace', 'False True')):
                 result = subprocess.run(prefix + [sandbox, '--output-format',
                     'streaming-json', '--print', 'long prompt ' * 300], env=env,
                     capture_output=True, text=True, check=True, timeout=10)
                 self.assertEqual(result.stdout.strip(), expected)
             result = subprocess.run([str(binary)], env=env, capture_output=True,
                                     text=True, check=True, timeout=10)
-            self.assertEqual(result.stdout.strip(), 'False')
+            self.assertEqual(result.stdout.strip(), 'False True')
+            ordinary = scratch / 'ordinary-parent'
+            shutil.copy(binary, ordinary)
+            for name in ('ordinary-parent', 'grok', 'grok-1.0.46', 'sh'):
+                with self.subTest(forged_argv0=name):
+                    result = subprocess.run([name] + prefix[1:] + ['read-only',
+                        '--output-format', 'streaming-json', '--print', 'retrieval'],
+                        executable=str(ordinary), env=env, capture_output=True,
+                        text=True, check=True, timeout=10)
+                    self.assertEqual(result.stdout.strip(), 'False False')
+            meter_probe = scratch / 'meter-probe.py'
+            meter_probe.write_text('import importlib.util, sys\n'
+                'spec = importlib.util.spec_from_file_location("meter", ' +
+                repr(str(ROOT / 'hooks/hook-meter-run.py')) + ')\n'
+                'meter = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(meter)\n'
+                'sys.argv = ["meter", ' + repr(str(ROOT / 'hooks/rule-boot-gate.py')) +
+                ']\nsys.exit(meter.main())\n')
+            unmarked = {key: value for key, value in env.items()
+                        if key != 'CARR_GROK_RUN_READ_ONLY'}
+            for executable, name, exempt in ((binary, str(binary), True),
+                    (ordinary, 'grok', False), (ordinary, 'grok-1.0.46', False)):
+                result = subprocess.run([name], executable=str(executable),
+                    env={**unmarked, 'BOUNDARY_PROBE': str(meter_probe)},
+                    input='invalid payload', capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if exempt:
+                    self.assertEqual(result.stdout, '')
+                else:
+                    self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']
+                                     ['permissionDecision'], 'deny')
             for owner in ('claude', 'codex'):
                 nested = scratch / owner
                 shutil.copy(binary, nested)
@@ -182,7 +247,7 @@ int main(int argc, char **argv) {
                     'streaming-json', '--print', 'retrieval'],
                     env={**env, 'BOUNDARY_OWNER': str(nested)},
                     capture_output=True, text=True, check=True, timeout=10)
-                self.assertEqual(result.stdout.strip(), 'False', owner)
+                self.assertEqual(result.stdout.strip(), 'False False', owner)
 
     def test_marker_requires_exact_read_only_print_ancestor(self):
         from hooks import grok_invocation as boundary
@@ -196,6 +261,7 @@ int main(int argc, char **argv) {
         for command, expected in cases:
             with self.subTest(command=command), mock.patch.dict(
                     os.environ, {'CARR_GROK_RUN_READ_ONLY': '1'}), \
+                    mock.patch.object(boundary, '_process_image', side_effect=['/bin/sh', command.split()[0]]), \
                     mock.patch.object(boundary.subprocess, 'run', side_effect=[
                         subprocess.CompletedProcess([], 0, '123 /bin/sh -c hook', ''),
                         subprocess.CompletedProcess([], 0, '1 ' + command, '')]):
@@ -226,7 +292,7 @@ int main(int argc, char **argv) {
                        'rule-pack-drift-gate.py', 'chat-lint-carryover.py'):
             with self.subTest(target=target), mock.patch.object(sys, 'argv',
                     ['meter', str(ROOT / 'hooks' / target)]), \
-                    mock.patch.object(meter, 'bounded_grok_read_only', return_value=True, create=True), \
+                    mock.patch.object(meter, 'grok_session', return_value=True), \
                     mock.patch.object(sys, 'stdin', io.StringIO('invalid payload')), \
                     mock.patch('builtins.open', side_effect=AssertionError('context hook ran')):
                 self.assertEqual(meter.main(), 0)
@@ -243,13 +309,32 @@ int main(int argc, char **argv) {
                 self.assertEqual(module.main(), 0)
                 effect.assert_not_called()
 
+    def test_retained_guard_test_is_independent_of_launching_agent(self):
+        with mock.patch('hooks.grok_invocation.grok_session', return_value=True):
+            self.test_effect_guard_runs_and_context_hooks_run_without_exemption()
+
+    def test_meter_has_no_unused_read_only_adapter(self):
+        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        self.assertFalse(hasattr(meter, 'bounded_grok_read_only'))
+
+    def test_both_policies_use_the_same_owner_readback(self):
+        from hooks import grok_invocation as boundary
+        command = 'grok --model grok-4.7 --reasoning-effort high --max-turns 60 --always-approve --sandbox read-only --output-format streaming-json --print retrieval'
+        with mock.patch.dict(os.environ, {'CARR_GROK_RUN_READ_ONLY': '1'}), \
+                mock.patch.object(boundary, '_grok_owner_command', return_value=command) as owner, \
+                mock.patch.object(boundary.subprocess, 'run', side_effect=AssertionError('duplicate readback')):
+            self.assertTrue(boundary.grok_session())
+            self.assertTrue(boundary.bounded_grok_read_only())
+            self.assertEqual(owner.call_count, 2)
+
     def test_effect_guard_runs_and_context_hooks_run_without_exemption(self):
         meter = load(ROOT / 'hooks/hook-meter-run.py')
         for target, bounded in (('guard-unattended.py', True),
+                                ('guard-unattended.py', False),
                                 ('rule-boot-gate.py', False)):
             with self.subTest(target=target), mock.patch.object(sys, 'argv',
                     ['meter', str(ROOT / 'hooks' / target)]), \
-                    mock.patch.object(meter, 'bounded_grok_read_only', return_value=bounded), \
+                    mock.patch.object(meter, 'grok_session', return_value=bounded), \
                     mock.patch.object(sys, 'stdin', io.StringIO('{}')), \
                     mock.patch('builtins.open', mock.mock_open(read_data=b'raise SystemExit(2)')):
                 self.assertEqual(meter.main(), 2)
