@@ -19,6 +19,8 @@ permissions:
   actions: read
 jobs:
   evidence:
+    # Evidence is an optimization; unavailable evidence requires full classes.
+    continue-on-error: true
     name: Resolve exact-tree PR evidence
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -39,7 +41,7 @@ jobs:
           overwrite: true
   classes:
     needs: evidence
-    if: ${{ needs.evidence.outputs.reused != 'true' }}
+    if: ${{ always() && (needs.evidence.result != 'success' || needs.evidence.outputs.reused != 'true') }}
     name: ops/ci.sh --strict --only ${{ matrix.classes }}
     runs-on: ubuntu-latest
     strategy:
@@ -188,7 +190,7 @@ jobs:
           REUSED: ${{ needs.evidence.outputs.reused }}
           CLASSES: ${{ needs.classes.result }}
         run: |
-          if [ "$EVIDENCE" = success ] && { [ "$CLASSES" = success ] || { [ "$REUSED" = true ] && [ "$CLASSES" = skipped ]; }; }; then
+          if [ "$CLASSES" = success ] || { [ "$EVIDENCE" = success ] && [ "$REUSED" = true ] && [ "$CLASSES" = skipped ]; }; then
             echo "main-canary-green: identical-tree PR evidence or all classes passed"
           else
             echo "MAIN IS RED: evidence=$EVIDENCE classes=$CLASSES reused=$REUSED" | tee -a "$GITHUB_STEP_SUMMARY"

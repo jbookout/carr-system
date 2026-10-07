@@ -423,7 +423,7 @@ def settings_matches_repo():
 # tuples is installed, and only until it has been seen installed once on this
 # machine (a stamp under out/): after that, a missing tuple is tampering and
 # fails like any other.
-PENDING_INSTALL_GATES = ("rule-boot-gate.py",)
+PENDING_INSTALL_GATES = ("rule-boot-gate.py", "github-burst-guard.py")
 PENDING_INSTALL_STAMP_DIR = os.path.join(REPO, "out", "gate-install-seen")
 
 
