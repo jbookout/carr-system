@@ -176,9 +176,29 @@ def main():
             denied = invoke("rule-boot-gate.py", base, state)["hookSpecificOutput"]
             assert denied["permissionDecision"] == "deny"
             assert "continue" not in denied
+            # The source hook contract requires the same native call identity
+            # on Pre/Post; an ID-less recovery fetch must never establish recall.
+            missing = dict(base, tool_name="mcp__carr__standing_context",
+                           tool_input={"detail": "boot", "page": 1})
+            recovery = invoke("rule-boot-gate.py", missing, state)["hookSpecificOutput"]
+            assert recovery.get("permissionDecision") != "deny"
+            assert "stable tool_use_id" in recovery["additionalContext"]
+            missing_post = dict(missing, hook_event_name="PostToolUse",
+                                tool_response={"rule_boot": {
+                                    "schema": boot.BOOT_SCHEMA, "digest": arm["digest"],
+                                    "page": 1, "pages_total": 2,
+                                    "total_chars": 12, "text": "page 1"}})
+            current_arm = boot.read_arm(session)
+            marker_dir = boot._fetch_dir(session, None, current_arm)
+            markers_before = boot._markers(marker_dir)
+            invoke("rule-boot-gate.py", missing_post, state)
+            assert boot.read_arm(session) == current_arm
+            assert boot._markers(marker_dir) == markers_before
+            assert invoke("rule-boot-gate.py", base, state)["hookSpecificOutput"]["permissionDecision"] == "deny"
             for page in (1, 2):
                 command = f"./run.sh call standing-context '{{\"detail\":\"boot\",\"page\":{page}}}'"
-                fetch = dict(base, tool_name="Bash", tool_input={"command": command})
+                fetch = dict(base, tool_name="Bash", tool_input={"command": command},
+                             tool_use_id=f"codex-native-fetch-{page}")
                 assert invoke("rule-boot-gate.py", fetch, state) == {}
                 response = {"rule_boot": {"schema": boot.BOOT_SCHEMA, "digest": arm["digest"],
                                           "page": page, "pages_total": 2, "total_chars": 12, "text": f"page {page}"}}
