@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -290,6 +291,23 @@ class UptimeHealthTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_unprovisioned_monitor_warns_without_blocking_release(self):
+        # Joe 2026-10-06: an unprovisioned monitor must not block releases. Unreachable is WARN;
+        # a reachable monitor reporting production failures stays hard (test above).
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "findings.json"
+            result = subprocess.run([
+                sys.executable, str(root / "tools/health-check.py"), "--section", "uptime",
+                "--findings-json", str(output),
+            ], env={**os.environ, "CARR_UPTIME_STATUS_URL": "http://127.0.0.1:9/healthz",
+                    "CARR_UPTIME_RESPONSE_STATE": str(Path(tmp) / "response.json")},
+                capture_output=True, text=True, timeout=30)
+            findings = json.loads(output.read_text())["findings"]
+            self.assertEqual([f["key"] for f in findings], ["production_uptime"], result.stdout)
+            self.assertFalse(findings[0]["hard_error"])
+            self.assertIn("monitor unreachable", findings[0]["detail"])
 
     def test_output_has_bound_response_for_down_wrong_shape_slow_and_recovered(self):
         good = {
