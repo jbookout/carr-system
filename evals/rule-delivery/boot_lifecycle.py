@@ -76,7 +76,8 @@ def lifecycle(tree, pages, source, state, stub, session):
         hook("PostToolUse", "mcp__carr__standing_context", args, {"ok": True, "rule_boot": page})
         received[page["page"]] = page
         if page["page"] < len(pages):
-            incomplete_held &= hook("PreToolUse", *actions[1]).get("permissionDecision") == "deny"
+            incomplete_held &= all(hook("PreToolUse", tool, args).get("permissionDecision") == "deny"
+                                   for tool, args in actions)
     allowed_after = all(hook("PreToolUse", tool, args).get("permissionDecision") != "deny"
                         for tool, args in actions)
     delivered = boot_delivery(received)

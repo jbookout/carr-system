@@ -76,7 +76,7 @@
   "model": "deterministic-no-model",
   "schema": "rule-boot-lifecycle-measurement/v1",
   "source_sha256": {
-    "evals/rule-delivery/boot_lifecycle.py": "ccef3aa2980fd4dcd507245fd4c39b10b276e249f426537a47067d4556de35a7",
+    "evals/rule-delivery/boot_lifecycle.py": "ed7f5c80a521a8d8f3171d7776dd3cfe017c3fae3f028e55dbd9446f0a30db5f",
     "hooks/rule-boot-gate.py": "a2cbda4604f7429e3278fae4badce0d33b5e57faa6ae5740ae8247d9f47a5643",
     "lib/rule_boot_gate.py": "85a0bcb14fd9f5a24f4b1d89744b77a7bac5a05aefda11a603e3dbc0ca253113",
     "mcp-server/src/rule-boot-classes.js": "f0f5c87724933392bfe4c3637a3cb80549535b7b1c08720c20ca7676b019c823",
