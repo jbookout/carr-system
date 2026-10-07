@@ -74,7 +74,128 @@ def commands(doc):
             for group in groups for hook in group.get("hooks", []) if isinstance(hook, dict)]
 
 
+def permission_review_regressions():
+    """Every review fixture checks semantic preservation and repeat-run repair."""
+    import tomllib
+    default, body = mod.codex_permissions_source()
+    expected = tomllib.loads(default + "\n" + body)
+    fixtures = {
+        "1-marker-in-string": default + "\nnotes = '''\n" + mod.CODEX_PERMISSIONS_BEGIN
+            + '\nexample="keep"\n' + mod.CODEX_PERMISSIONS_END
+            + "\n'''\n[permissions.carr_unattended]\nextends=\":workspace\"\n",
+        "2-header-in-string": "notes = '''\n[example]\nx=1\n'''\nmodel=\"fixture\"\n"
+            + '[permissions.carr_unattended]\nextends=":workspace"\n',
+        "2-indented-header": '  [permissions.carr_unattended]\nextends=":workspace"\n',
+        "2-quoted-default": '\'default_permissions\' = \'old\'\nmodel="keep"\n',
+        "3-nested-array": default + '\n[permissions.carr_unattended]\nvalues=[\n'
+            + '["a", "b"],\n["c"], # continuation\n]\n[other]\nvalue=42\n',
+        "4-inline-profile": default + '\n[permissions]\n'
+            + 'carr_unattended={extends=":read-only",network={enabled=false}}\n'
+            + 'custom={description="keep"}\n[other]\nvalue=42\n',
+        "4-root-inline": default + '\npermissions={carr_unattended={extends=":workspace"},'
+            + 'custom={description="keep"}}\n[other]\nvalue=42\n',
+        "4-dotted-profile": default + '\n[permissions]\ncarr_unattended.extends=":workspace"\n'
+            + 'custom.description="keep"\n[other]\nvalue=42\n',
+        "4-root-dotted": default + '\npermissions.carr_unattended.extends=":workspace"\n'
+            + 'permissions.custom.description="keep"\n[other]\nvalue=42\n',
+    }
+    # These valid documents must never be accepted from marker text alone.
+    examples = default + "\nnotes = '''\n" + mod.CODEX_PERMISSIONS_BEGIN + "\n" + body + mod.CODEX_PERMISSIONS_END + "\n'''\n"
+    assert mod.canonical_codex_permissions(examples) is None
+    missing_default = mod.CODEX_PERMISSIONS_BEGIN + "\n" + body + mod.CODEX_PERMISSIONS_END + "\n"
+    assert mod.canonical_codex_permissions(missing_default) is None
+    fixtures['1-marker-with-user-data'] = (default + "\n" + mod.CODEX_PERMISSIONS_BEGIN
+        + '\nnotes="keep" # user comment\n' + mod.CODEX_PERMISSIONS_END
+        + '\n[permissions.carr_unattended]\nextends=":workspace"\n[other]\nvalue=42\n')
+    fixtures['3-user-nested-array'] = (default + '\n[permissions.carr_unattended]\nextends=":workspace"\n'
+        + '[permissions.custom]\nvalues=[\n["a", "b"],\n["c"],\n] # keep array\n'
+        + "notes=\"\"\"\n[not.a.header]\n\"\"\"\n[other]\nvalue=42\n")
+    failures = []
+    for name, raw in fixtures.items():
+        try:
+            before = tomllib.loads(raw)
+            result = mod.install_codex_permissions(raw, default, body)
+            after = tomllib.loads(result)
+            assert after['default_permissions'] == expected['default_permissions']
+            for profile, value in expected['permissions'].items():
+                assert after['permissions'][profile] == value
+            def unrelated(doc):
+                doc.pop('default_permissions', None)
+                permissions = doc.get('permissions', {})
+                for profile in expected['permissions']:
+                    permissions.pop(profile, None)
+                if not permissions:
+                    doc.pop('permissions', None)
+                return doc
+            assert unrelated(before) == unrelated(after), 'unrelated values changed'
+            assert mod.install_codex_permissions(result, default, body) == result, 'not idempotent'
+            assert mod.canonical_codex_permissions(result) == mod.portable(default + "\n\n" + body)
+            print(f"PASS permission review {name}")
+        except Exception as exc:
+            failures.append(name)
+            print(f"FAIL permission review {name}: {type(exc).__name__}: {exc}")
+    assert not failures, f"permission review regressions: {failures}"
+
+
 def main():
+    permission_review_regressions()
+    import tomllib
+    default, body = mod.codex_permissions_source()
+    # Codex may rewrite TOML syntax and discard comments without changing the
+    # installed permissions. Read the same reserved paths the installer owns.
+    import tomlkit
+    expected_permissions = mod.portable(default + "\n\n" + body)
+    markerless = mod.concrete(default + "\n\n" + body)
+    assert mod.canonical_codex_permissions(markerless) == expected_permissions
+    values = tomllib.loads(markerless)
+    rewritten = tomlkit.dumps({
+        'notes': mod.CODEX_PERMISSIONS_BEGIN + '\nexample only',
+        'default_permissions': values['default_permissions'],
+        'permissions': {
+            'custom': {'description': 'keep me'},
+            **{name: dict(reversed(list(profile.items())))
+               for name, profile in reversed(list(values['permissions'].items()))},
+        },
+    })
+    assert mod.canonical_codex_permissions(rewritten) == expected_permissions
+    quoted = markerless.replace('[permissions.carr_unattended]',
+                                "[ 'permissions' . 'carr_unattended' ]")
+    assert mod.canonical_codex_permissions(quoted) == expected_permissions
+    values['permissions']['carr_unattended']['network']['enabled'] = False
+    drifted = mod.canonical_codex_permissions(tomlkit.dumps(values))
+    assert isinstance(drifted, str) and drifted != expected_permissions
+    assert tomllib.loads(drifted)['permissions']['carr_unattended']['network']['enabled'] is False
+    values['default_permissions'] = 'carr_drive_readonly'
+    assert tomllib.loads(mod.canonical_codex_permissions(tomlkit.dumps(values)))[
+        'default_permissions'] == 'carr_drive_readonly'
+    del values['permissions']['carr_drive_readonly']
+    assert mod.canonical_codex_permissions(tomlkit.dumps(values)) is None
+    print('PASS semantic permission reads survive comment/syntax rewrites and detect drift')
+    raw = ('model = "fixture"\n' + default + '\n'
+           '[permissions.carr_unattended]\nextends = ":read-only"\n'
+           '[permissions.carr_unattended.network]\nenabled = false\n'
+           '[permissions.custom]\ndescription = "keep me"\n'
+           '[permissions.carr_drive_readonly]\nextends = ":workspace"\n'
+           '[permissions.carr_drive_readonly.filesystem]\n"." = "write"\n'
+           '[other]\nvalue = 42\n')
+    planned = mod.install_codex_permissions(raw, default, body)
+    parsed = tomllib.loads(planned)
+    assert parsed['permissions']['custom']['description'] == 'keep me'
+    assert parsed['other']['value'] == 42
+    assert parsed['model'] == 'fixture'
+    assert parsed['permissions']['carr_unattended']['network']['enabled'] is True
+    assert mod.install_codex_permissions(planned, default, body) == planned
+    quoted = raw.replace('[permissions.carr_unattended]', '[ "permissions" . "carr_unattended" ]')
+    assert tomllib.loads(mod.install_codex_permissions(quoted, default, body))['other']['value'] == 42
+    # Recover a config already damaged by an older nightly append.
+    duplicated = raw + "\n" + mod.CODEX_PERMISSIONS_BEGIN + "\n" + body + mod.CODEX_PERMISSIONS_END + "\n"
+    repaired = mod.install_codex_permissions(duplicated, default, body)
+    tomllib.loads(repaired)
+    assert mod.install_codex_permissions(repaired, default, body) == repaired
+    multiline = 'notes = \'\'\'\n[permissions.carr_unattended]\nexample = "keep"\n\'\'\'\n' + raw
+    fixed = mod.install_codex_permissions(multiline, default, body)
+    assert tomllib.loads(fixed)['notes'] == tomllib.loads(multiline)['notes']
+    print('markerless permissions reconciled; valid TOML; repeat unchanged')
     merged = mod.merge_codex_carr_hooks(LIVE, DESIRED)
     names = commands(merged)
     again = mod.merge_codex_carr_hooks(merged, DESIRED)
@@ -340,9 +461,9 @@ def main():
         # The definition-only mechanism is pinned with a SYNTHETIC entry since
         # the 2026-08-26 cutover released the real tick plist from the hold
         # (decision f4af0c87); tick_released below pins that release itself.
-        tick_released = "com.carr.control-plane-tick.plist" not in mod.DEFINITION_ONLY
-        original_definition_only = dict(mod.DEFINITION_ONLY)
-        mod.DEFINITION_ONLY["com.carr.synthetic-definition-only.plist"] = (
+        tick_released = "com.carr.control-plane-tick.plist" not in mod.launchd_hold.DEFINITION_ONLY
+        original_definition_only = dict(mod.launchd_hold.DEFINITION_ONLY)
+        mod.launchd_hold.DEFINITION_ONLY["com.carr.synthetic-definition-only.plist"] = (
             "synthetic hold for the selftest"
         )
         definition_only_plist = {
@@ -365,6 +486,12 @@ def main():
         load_attempts = []
 
         def fail_launchctl(args, *call_args, **call_kwargs):
+            if args[0] == "launchctl" and "synthetic-definition-only" in args[-1]:
+                if args[1] == "print":
+                    return SimpleNamespace(returncode=113, stderr='Could not find service "com.carr.synthetic-definition-only"', stdout="")
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            if args[:2] == ["launchctl", "print-disabled"]:
+                return SimpleNamespace(returncode=0, stderr="", stdout='"com.carr.synthetic-definition-only" => disabled')
             if args[:2] == ["launchctl", "unload"]:
                 return SimpleNamespace(returncode=0, stderr="", stdout="")
             if args[:2] == ["launchctl", "load"]:
@@ -406,8 +533,8 @@ def main():
                     ["launchctl", "bootout", f"gui/{os.getuid()}/{_label}"],
                     capture_output=True, text=True, check=False)
         mod.IS_PRIMARY = original_primary
-        mod.DEFINITION_ONLY.clear()
-        mod.DEFINITION_ONLY.update(original_definition_only)
+        mod.launchd_hold.DEFINITION_ONLY.clear()
+        mod.launchd_hold.DEFINITION_ONLY.update(original_definition_only)
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
         definition_only_absent = not (
             Path(mod.LAUNCHD_SRC) / "com.carr.synthetic-definition-only.plist"
@@ -501,7 +628,7 @@ def main():
         # repo produces byte-identical output, so an equality-based comparison
         # would have called it clean.
         janitor_plist = "com.carr.repo-hygiene-janitor.plist"
-        janitor_held = janitor_plist in mod.DEFINITION_ONLY
+        janitor_held = janitor_plist in mod.launchd_hold.DEFINITION_ONLY
         janitor_repo_body = (
             Path(REPO) / "ops" / "launchd" / janitor_plist
         ).read_text(encoding="utf-8")
@@ -591,7 +718,7 @@ def main():
         # HOME that is deleted moments later, and the question here is what the
         # reconciler INTENDS, which the dry run answers in full.
         canary_plist = "com.carr.gate-zero-canary.plist"
-        canary_released = canary_plist not in mod.DEFINITION_ONLY
+        canary_released = canary_plist not in mod.launchd_hold.DEFINITION_ONLY
         (launchd / canary_plist).write_text(
             (Path(REPO) / "ops" / "launchd" / canary_plist).read_text(encoding="utf-8"),
             encoding="utf-8")
@@ -889,7 +1016,7 @@ def main():
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
         ("definition-only hold skips a held plist without installing it",
          definition_only_absent
-         and "SKIP  com.carr.synthetic-definition-only.plist (definition only:" in launchd_out.getvalue()),
+         and "DEFINITION ONLY com.carr.synthetic-definition-only:" in launchd_out.getvalue()),
         ("control-plane tick released from definition-only hold (cutover 2026-08-26)",
          tick_released),
         ("the Gate Zero scheduler canary is released from the definition-only "

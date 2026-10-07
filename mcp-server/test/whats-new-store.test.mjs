@@ -1,7 +1,9 @@
+import { restoreEventIdentity } from './helpers/snapshot-schema.mjs';
+import { acquirePostgresFixtureGroup, acquireDisposablePostgres } from './helpers/disposable-postgres.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, renameSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -24,14 +26,23 @@ const uuid = n => `aa000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 
 test('SQL catchup store binds identity, time, coverage and late commits', { skip: !bin && 'local PostgreSQL binaries unavailable' }, async () => {
   const migration = readFileSync(path.join(root, 'migrations/0765_doc_whats_new.sql'), 'utf8');
-  const dir = mkdtempSync('/tmp/doc-catchup-');
-  let running = false;
+  let postgresFixture, dir;
   const clients = [];
+  const releaseBudget = await acquirePostgresFixtureGroup();
   try {
-    execFileSync(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale'], { stdio: 'pipe' });
-    execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h ''`,'-w','start'], { stdio: 'pipe' });
-    running = true;
-    const connect = async () => { const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' }); await c.connect(); clients.push(c); return c; };
+    postgresFixture = await acquireDisposablePostgres({ prefix: 'doc-catchup-', pgCtl: path.join(bin, 'pg_ctl'), dataName: '.' });
+    dir = postgresFixture.root;
+    await postgresFixture.run(path.join(bin,'initdb'), ['-D',dir,'-U','fixture','--auth=trust','--no-locale']);
+    // Hosted Postgres uses UTC; the catchup date contract uses America/Chicago.
+    await postgresFixture.run(path.join(bin,'pg_ctl'), ['-D',dir,'-l',path.join(dir,'server.log'),'-o',`-k ${dir} -h '' -c timezone=UTC`,'-w','start']);
+    const connect = async () => {
+      const c = new pg.Client({ host: dir, user: 'fixture', database: 'postgres' });
+      await c.connect(); clients.push(c);
+      // CURRENT_DATE fixtures use the same business day as the feature, even
+      // when the PostgreSQL cluster and CI host default to UTC.
+      await c.query("set time zone 'America/Chicago'");
+      return c;
+    };
     const c = await connect();
     await c.query('create schema ops; create role carr_writer; create role carr_authority; create role carr_reader; grant usage on schema ops to carr_writer,carr_authority,carr_reader;');
     const schema = readFileSync(path.join(root,'db/schema.sql'),'utf8');
@@ -43,6 +54,7 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       assert.ok(table, name);
       await c.query(table);
     }
+    await restoreEventIdentity(c, schema);
     await c.query('alter table public.actor add primary key(id);');
     const actorFunction = schema.match(/CREATE FUNCTION ops.portfolio_writer_actor_id\(\)[\s\S]*?\n\$\$;/)?.[0];
     assert.ok(actorFunction);
@@ -140,13 +152,46 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
     await identity('joe');
     assert.equal((await section('doc_suggestions',await context())).state,'ready');
     await c.query('reset role');
-    await c.query("update next_action set created_at=now()-interval '3 days',updated_at=now()-interval '3 days' where id=$1",[uuid(10)]);
-    await c.query("update critical_date set created_at=now()-interval '3 days',updated_at=now()-interval '3 days',due_on=current_date+14 where id=$1",[uuid(11)]);
-    await c.query("update ops.doc_suggestion set suggested_at=now()-interval '3 days',disposition='snoozed',snoozed_material_version=material_version,snoozed_until=current_date where id=$1",[uuid(21)]);
-    await identity('joe');
-    // Time crossing a due threshold counts even without a new record write.
-    const todayContext = { ...await context(), since:new Date(Date.now()-86400000).toISOString(),previous_snapshot:null };
-    for (const name of ['next_actions','critical_dates','doc_suggestions']) assert.equal((await section(name,todayContext)).state,'ready',name);
+    // Chicago midnight is still the previous day in Los Angeles. Neither the
+    // database session's current_date nor the test runner's clock defines it.
+    const originalZone = (await c.query('show TimeZone')).rows[0].TimeZone;
+    try {
+      for (const [day, threshold, criticalDue] of [
+        ['2026-10-02','2026-10-02T05:00:00.000Z','2026-10-16'],
+        ['2026-03-08','2026-03-08T06:00:00.000Z','2026-03-22'],
+        ['2026-03-09','2026-03-09T05:00:00.000Z','2026-03-23'],
+        ['2026-11-01','2026-11-01T05:00:00.000Z','2026-11-15'],
+        ['2026-11-02','2026-11-02T06:00:00.000Z','2026-11-16'],
+      ]) {
+        await c.query('reset role');
+        const oldWrite = new Date(Date.parse(threshold)-3*86400000).toISOString();
+        // Insertion bypasses the update trigger that refreshes updated_at.
+        await c.query('delete from next_action where id=$1',[uuid(10)]);
+        await c.query("insert into next_action(id,subject_type,subject_id,owner_id,description,due_on,created_by,updated_by,created_at,updated_at) values($1,'deal',$2,$3,'Review synthetic terms',$4,$3,$3,$5,$5)",[uuid(10),uuid(5),uuid(1),day,oldWrite]);
+        await c.query("update critical_date set created_at=$2,updated_at=$2,due_on=$3 where id=$1",[uuid(11),oldWrite,criticalDue]);
+        await c.query("update ops.doc_suggestion set suggested_at=$2,disposition='snoozed',snoozed_material_version=material_version,snoozed_until=$3 where id=$1",[uuid(21),oldWrite,day]);
+        await identity('joe');
+        const thresholdContext = { since:new Date(Date.parse(threshold)-86400000).toISOString(),high_water:threshold,previous_snapshot:null };
+        for (const zone of ['UTC','America/Chicago','America/Los_Angeles']) {
+          await c.query("select set_config('TimeZone',$1,false)",[zone]);
+          for (const name of ['next_actions','critical_dates','doc_suggestions']) {
+            const before = await section(name,{ ...thresholdContext,high_water:new Date(Date.parse(threshold)-1).toISOString() });
+            assert.equal(before.state,'empty',`${name} before Chicago midnight (${zone}, ${day})`);
+            for (const high_water of [threshold,new Date(Date.parse(threshold)+13*3600000).toISOString()]) {
+              const crossed = await section(name,{ ...thresholdContext,high_water });
+              assert.equal(crossed.state,'ready',`${name} after Chicago midnight (${zone}, ${high_water})`);
+              assert.equal(crossed.items.length,1);
+              assert.equal(Date.parse(crossed.items[0].at),Date.parse(threshold));
+            }
+            assert.equal((await section(name,{ ...thresholdContext,since:threshold })).state,'empty',
+              `${name} threshold is not repeated (${zone}, ${day})`);
+          }
+        }
+      }
+    } finally {
+      await c.query("select set_config('TimeZone',$1,false)",[originalZone]);
+    }
+    assert.equal((await c.query('show TimeZone')).rows[0].TimeZone,originalZone);
     await identity('dell');
     assert.equal((await section('new_leads',await context())).state,'empty');
     await c.query('reset role');
@@ -215,9 +260,10 @@ test('SQL catchup store binds identity, time, coverage and late commits', { skip
       assert.equal((await section('critical_dates',await context())).state,'empty');
     }
   } finally {
-    for (const c of clients) await c.end();
-    if (running) execFileSync(path.join(bin,'pg_ctl'), ['-D',dir,'-m','fast','-w','stop'], { stdio:'pipe' });
-    mkdirSync('/tmp/_to_delete',{ recursive:true });
-    renameSync(dir,path.join('/tmp/_to_delete',path.basename(dir)));
+    try {
+      for (const c of clients) await c.end();
+    } finally {
+      try { await postgresFixture?.close(); } finally { await releaseBudget(); }
+    }
   }
 });

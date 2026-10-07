@@ -94,8 +94,8 @@
   },
   "assurance_slice": {
     "schema_version": "assurance-slice-contract.v1",
-    "contract_digest": "sha256:9415dfb23b105d22b0f98b85db65743c06aedda1e7ed92f87acaa6a3d3f7a5c3",
-    "ownership_contract_digest": "sha256:2a021089e328c3a8719356628e8b2ea48bae4d0628c88e2262ccc54c42c6fe7c",
+    "contract_digest": "sha256:09ae6ad05a0299a7e9b0e1e99d29dffc7a621dfaf01f7444cafe3407de9a8ee6",
+    "ownership_contract_digest": "sha256:d62e19a88832550c2788bae008518708e622b16c82d5160cba8d3d82431f0587",
     "work_request": {
       "id": "wr:assurance-kernel",
       "state_version": 3,
@@ -178,7 +178,7 @@
           },
           "dependency_lock": {
             "path": "requirements.lock",
-            "digest": "sha256:46d6d385844ef63a04b77274543bd71849a09c991328fc01603b781c53d20076"
+            "digest": "sha256:2fa3db5248872e7328099eb6f2b80585484f4d2e418440ac36de9031cf0f8ed8"
           }
         },
         "check_profile_ref": "check-profile:assurance-compiler-v1",

@@ -53,7 +53,7 @@ CATALOG: dict = {
             "enabled": True,
             "adapter": "hermes",
             "assignee": "default",
-            "effective_model": "Grok 4.6",
+            "effective_model": "Grok 4.7",
             "capabilities": ["read"],
         },
         "joe": {
@@ -824,7 +824,7 @@ class FlashReplyReachesTheRoomTests(unittest.TestCase):
                 )
         finally:
             flash_wire.run_turn = real_run_turn
-        self.assertEqual(calls, ["What is the answer?"])
+            self.assertEqual(calls, [desks.DESK_INSTRUCTION + "\n\nWhat is the answer?"])
         self.assertEqual(row["status"], "completed")
         self.assertEqual(row["result"], "42")
         self.assertEqual(row["kind"], "flash-local")

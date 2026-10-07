@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""hook-meter-run.py — runs a gate, times it, records what happened, decides nothing.
+"""hook-meter-run.py — dispatches hooks, times them, preserves gate verdicts.
+
+Bounded read-only Grok print children do not own a CARR session lifecycle.
+Only their named context/state hooks are suppressed; effect guards still run.
 
     /usr/bin/env python3 hooks/hook-meter-run.py hooks/guard-unattended.py [args...]
 
@@ -99,6 +102,24 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 
 MAX_FIELD = 300
 INVOCATION_REPO_ENV = "CARR_HOOK_INVOCATION_REPO"
+
+def grok_session():
+    # Joe 2026-10-06: no context gate blocks his own model subscriptions. Any
+    # Grok session (read-only or writable) skips the context hooks below.
+    sys.path.insert(0, REPO)
+    try:
+        from hooks.grok_invocation import grok_session as probe
+    except ImportError:
+        return False
+    return probe()
+
+# Grok sessions have no CARR session lifecycle. Keep effect guards running;
+# suppress only context delivery/state hooks imported through Claude settings.
+GROK_CONTEXT_HOOKS = frozenset({
+    "gate-integrity.py", "rule-boot-gate.py", "context-handoff-gate.py",
+    "session-presence-hook.py", "rule-pack-preuse-reselection.py",
+    "rule-pack-drift-gate.py", "chat-lint-carryover.py",
+})
 
 
 class Tee(io.TextIOBase):
@@ -485,6 +506,10 @@ def main():
     target = argv[0]
     if not os.path.isabs(target):
         target = os.path.join(REPO, target)
+    if (os.path.dirname(os.path.abspath(target)) == os.path.join(REPO, "hooks")
+            and os.path.basename(target) in GROK_CONTEXT_HOOKS
+            and grok_session()):
+        return 0
 
     # ── setup. The two steps that would change a verdict if they failed —
     #    handing the gate its stdin, and passing its output through — use io
@@ -498,6 +523,10 @@ def main():
         # Never inherit an earlier wrapper's routing hint.  Only this payload's
         # existing top-level cwd may nominate an invocation checkout.
         os.environ.pop(INVOCATION_REPO_ENV, None)
+        # Jev calls the gate makes for itself go straight to the vendor; only
+        # the build advisory takes the server path (ops/typesafe_client.py
+        # IN_HOOK_ENV), so no hook spends its time budget on a receipt.
+        os.environ["CARR_JEV_IN_HOOK"] = "1"
         invocation_cwd = _top_level_cwd(raw)
         if invocation_cwd and os.path.isdir(invocation_cwd):
             os.environ[INVOCATION_REPO_ENV] = os.path.abspath(invocation_cwd)

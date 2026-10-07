@@ -91,12 +91,25 @@ import copy
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HEALTH_CHECK_PATH = Path(__file__).resolve().parent / "health-check.py"
 SOURCE = HEALTH_CHECK_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE, filename=str(HEALTH_CHECK_PATH))
+sys.path.insert(0, str(HEALTH_CHECK_PATH.parent.parent / "lib"))
+
+
+def setUpModule():
+    from unittest.mock import patch
+    global scheduled_machine
+    scheduled_machine = patch("scheduled_jobs.check", return_value=[])
+    scheduled_machine.start()
+
+
+def tearDownModule():
+    scheduled_machine.stop()
 
 # The two names a finding-recording call inside tools/health-check.py may
 # appear under: the low-level `_canonical_finding` itself (still called
@@ -120,7 +133,7 @@ STRUCTURAL_KEYS = {
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
 }
-ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity"}
+ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity", "scheduled_jobs_evidence_unavailable"}
 
 
 def _find_function(name: str) -> ast.FunctionDef:
@@ -568,6 +581,220 @@ class RedHelper(unittest.TestCase):
         self.assertEqual(self.ns["_FINDINGS"][0]["count"], 2)
 
 
+class PaidCapCanonicalHealthTests(unittest.TestCase):
+    """Execute the shipped health function and CLI with only external readers stubbed."""
+
+    def namespace(self):
+        import os, re, sys, time, subprocess
+        from unittest.mock import Mock
+        ns = _load_finding_and_red_functions()
+        mod = ast.Module(body=[_find_function("_canonical_health"),
+                               _find_function("_jev_paid_cap_row")], type_ignores=[])
+        ns.update(os=os, re=re, sys=sys, time=time, REPO_ROOT=str(HEALTH_CHECK_PATH.parent.parent),
+                  _uptime=Mock(row=Mock(return_value=("OK production uptime fixture", False))),
+                  CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
+                  _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
+                  _system_cost_row=lambda: ({"state": "ready", "alerts": []}, "OK fixture costs"),
+                  _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
+                  _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
+                  _grok_session_row=lambda: ("OK fixture Grok session", 0),
+                  flashlib=Mock(health_row=Mock(return_value="OK Flash stopped")),
+                  subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
+        exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
+        return ns
+
+    def grok_reader_failure(self, mode):
+        """Exercise the shipped reader with failed import or actual lock storage."""
+        import builtins, importlib.util, sys
+        from functools import partial
+        from unittest.mock import patch
+        if mode == "import":
+            original = builtins.__import__
+            def unavailable(name, *args, **kwargs):
+                if name == "grok_session":
+                    raise ImportError("fixture Grok reader unavailable")
+                return original(name, *args, **kwargs)
+            return patch.object(builtins, "__import__", unavailable)
+        spec = importlib.util.spec_from_file_location(
+            "grok_session", HEALTH_CHECK_PATH.parent.parent / "ops" / "grok_session.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        parent = Path(self.enterContext(tempfile.TemporaryDirectory())) / "not-a-directory"
+        parent.write_text("fixture blocked storage")
+        module.health_row = partial(module.health_row, state_path=parent / "state.json",
+                                    observe=lambda: {"status": "OK", "detail": "healthy fixture"})
+        return patch.dict(sys.modules, grok_session=module)
+
+    def test_grok_reader_errors_preserve_canonical_findings_and_remaining_checks(self):
+        import contextlib, io
+        for section in ("credentials", "all"):
+            for mode, error in (("import", "ImportError"), ("lock", "FileExistsError")):
+                with self.subTest(section=section, mode=mode):
+                    ns = self.all_namespace() if section == "all" else self.namespace()
+                    ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+                    exec(compile(ast.Module(body=[_find_function("_grok_session_row")],
+                                            type_ignores=[]), str(HEALTH_CHECK_PATH), "exec"), ns)
+                    with self.grok_reader_failure(mode), contextlib.redirect_stdout(io.StringIO()) as out:
+                        self.assertEqual(ns["_canonical_health"](), 1)
+                    self.assertEqual(out.getvalue().count("HEALTH_COMPLETE"), 1)
+                    self.assertIn("UNAVAILABLE Grok session", out.getvalue())
+                    self.assertIn(error, out.getvalue())
+                    self.assertIn("OK spend", out.getvalue())
+                    self.assertIn("credential health", out.getvalue())
+                    [finding] = ns["_FINDINGS"]
+                    self.assertEqual(finding["key"], "grok_session")
+                    self.assertTrue(finding["hard_error"])
+                    self.assertIn(error, finding["detail"])
+
+    def test_grok_narrow_cli_errors_emit_findings_and_completion(self):
+        import contextlib, io, runpy, sys
+        from unittest.mock import patch
+        for mode, error in (("import", "ImportError"), ("lock", "FileExistsError")):
+            with self.subTest(mode=mode):
+                findings = Path(self.enterContext(tempfile.TemporaryDirectory())) / "findings.json"
+                with self.grok_reader_failure(mode), \
+                        patch.object(sys, "argv", [str(HEALTH_CHECK_PATH), "--section", "grok-session",
+                                                   "--findings-json", str(findings)]), \
+                        contextlib.redirect_stdout(io.StringIO()) as out:
+                    with self.assertRaises(SystemExit) as exited:
+                        runpy.run_path(str(HEALTH_CHECK_PATH), run_name="__main__")
+                self.assertEqual(exited.exception.code, 1)
+                self.assertIn("UNAVAILABLE Grok session", out.getvalue())
+                self.assertIn(error, out.getvalue())
+                self.assertEqual(out.getvalue().count("Projection freshness/tamper checks are recovery evidence; use --recovery --reason <why>."), 1)
+                [finding] = json.loads(findings.read_text())["findings"]
+                self.assertEqual(finding["key"], "grok_session")
+                self.assertTrue(finding["hard_error"])
+                self.assertIn(error, finding["detail"])
+
+    def test_a_site_over_its_jev_budget_fails_health(self):
+        import io, contextlib
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: ("WARN jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+                                             " · over budget: jev_handoff=81/80")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertEqual([f["key"] for f in ns["_FINDINGS"]], ["jev_site_budget"])
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        ns["_jev_site_spend_row"] = lambda: "OK jev spend by site — 2026-10-04 · 40/3000 paid attempts"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 0)
+
+    def test_grok_failure_remains_a_finding_with_healthy_paid_cap(self):
+        ns = self.namespace()
+        ns["_grok_session_row"] = lambda: ("FAIL fixture Grok session", 1)
+        ns["_jev_paid_cap_row"] = lambda: "OK jev paid cap"
+        self.assertEqual(ns["_canonical_health"](), 1)
+        self.assertEqual([row["key"] for row in ns["_FINDINGS"]], ["grok_session"])
+
+    def all_namespace(self):
+        from unittest.mock import Mock
+        ns = self.namespace()
+        snap = {"exports": {}, "jobs": [], "job_definitions": [], "controls": {}}
+        ns.update(CANONICAL_SECTION="all", _canonical_snapshot=lambda: snap,
+                  _seat_health_rows=lambda: ["PASS seat fixture"],
+                  _branch_janitor_row=lambda: ("OK branch janitor fixture", False),
+                  _canonical_now=lambda snap: datetime.now(timezone.utc),
+                  _canonical_contradiction_alarm=lambda: 0,
+                  _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
+                  _tailscale_row=lambda: ("OK fixture node", False),
+                  _health_sub=Mock(classify_loose_status=Mock(return_value={
+                      "actionable_tracked": [], "actionable_untracked": [],
+                      "expected_patched_submodules": [], "managed_artifacts": []}),
+                      loose_work_requires_attention=Mock(return_value=False)),
+                  _jev_outage=Mock(evaluate=Mock(return_value={"status": "ok", "pending": False}),
+                                   reconcile=Mock(return_value="none")))
+        for name in ("_headless_rows", "_live_jobs", "_missing_due_executions", "_stuck_live_jobs",
+                     "_legacy_scheduled_definitions", "_calendar_prebrief_standing", "_calendar_prebrief_unknowns"):
+            ns[name] = lambda *args: []
+        return ns
+
+    def test_all_health_sections_report_cap_failure_with_other_checks_clean(self):
+        import io, contextlib
+        for line in ("OK jev paid cap", "HIT jev paid cap", "UNKNOWN jev paid cap"):
+            with self.subTest(line=line):
+                ns = self.all_namespace()
+                ns["_jev_paid_cap_row"] = lambda: line
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    self.assertEqual(ns["_canonical_health"](), int(not line.startswith("OK")))
+                self.assertIn("HEALTH_COMPLETE", out.getvalue())
+                self.assertEqual([row["key"] for row in ns["_FINDINGS"]],
+                                 [] if line.startswith("OK") else ["jev_paid_cap"])
+
+    def test_canonical_health_records_cap_failures_and_finishes(self):
+        import io, contextlib
+        for line in ("HIT jev paid cap — 10/10", "UNKNOWN jev paid cap — broken"):
+            with self.subTest(line=line):
+                ns = self.namespace()
+                ns["_jev_paid_cap_row"] = lambda: line
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(ns["_canonical_health"](), 1)
+                self.assertIn("HEALTH_COMPLETE", out.getvalue())
+                [finding] = ns["_FINDINGS"]
+                self.assertEqual(finding["key"], "jev_paid_cap")
+                self.assertEqual(finding["hard_error"], line.startswith("UNKNOWN"))
+
+    def test_failed_alerts_are_canonical_findings_even_below_cap(self):
+        import io, contextlib
+        ns = self.namespace()
+        ns["_jev_paid_cap_row"] = lambda: "WARN jev paid cap — alarms pending=0 failed=1 delivered=0"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ns["_canonical_health"](), 1)
+        [finding] = ns["_FINDINGS"]
+        self.assertEqual((finding["key"], finding["subject"], finding["count"]),
+                         ("jev_spend_alert", "failed", 1))
+
+    def test_loader_errors_are_contained_in_canonical_health_and_cli(self):
+        self.assert_loader_failure_findings({"jev_cap_client", "jev_site_client"})
+
+    def test_healthy_site_loader_is_exercised_when_cap_loader_fails(self):
+        self.assert_loader_failure_findings({"jev_cap_client"})
+
+    def assert_loader_failure_findings(self, failing_loaders):
+        import io, contextlib, importlib.util, runpy, sys
+        from unittest.mock import Mock, patch
+        original = importlib.util.spec_from_file_location
+        def fail_cap_loader(name, *args, **kwargs):
+            if name in failing_loaders:
+                raise ImportError("fixture missing client configuration")
+            spec = original(name, *args, **kwargs)
+            if name == "jev_site_client":
+                # This CLI section also reads site budgets. Keep that independent
+                # observation healthy instead of consulting the machine's cap log.
+                spec.loader = Mock(exec_module=lambda client: setattr(
+                    client, "spend_by_site_health",
+                    lambda: "OK jev spend by site — fixture"))
+            return spec
+        with patch.object(importlib.util, "spec_from_file_location", fail_cap_loader):
+            ns = self.namespace()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ns["_canonical_health"](), 1)
+            self.assertIn("HEALTH_COMPLETE", out.getvalue())
+            self.assertTrue(ns["_FINDINGS"][0]["hard_error"])
+            findings = Path(self.enterContext(tempfile.TemporaryDirectory())) / "findings.json"
+            with patch.object(sys, "argv", [str(HEALTH_CHECK_PATH), "--section", "jev-cap", "--findings-json", str(findings)]), \
+                    contextlib.redirect_stdout(io.StringIO()) as narrow:
+                with self.assertRaises(SystemExit) as exited:
+                    runpy.run_path(str(HEALTH_CHECK_PATH), run_name="__main__")
+            self.assertEqual(exited.exception.code, 1)
+            self.assertIn("UNKNOWN jev paid cap", narrow.getvalue())
+            self.assertIn("ImportError", narrow.getvalue())
+            rows = json.loads(findings.read_text())["findings"]
+            expected = {"jev_paid_cap"}
+            if "jev_site_client" in failing_loaders:
+                expected.add("jev_site_budget")
+            else:
+                self.assertIn("OK jev spend by site — fixture", narrow.getvalue())
+            self.assertEqual({row["key"] for row in rows}, expected)
+            self.assertTrue(all(row["hard_error"] for row in rows))
+            [finding] = [row for row in rows if row["key"] == "jev_paid_cap"]
+            self.assertEqual(finding["key"], "jev_paid_cap")
+            self.assertTrue(finding["hard_error"])
+
+
 class RcAssignedOnlyViaRed(unittest.TestCase):
     """Round 9 of an independent review of PR #1237 converts this from a
     DENYLIST to an ALLOWLIST. Round 8 only forbade a bare literal `rc = 1`
@@ -787,6 +1014,22 @@ class RcAssignedOnlyViaRed(unittest.TestCase):
         overlap = business_keys & hard_error_keys
         self.assertEqual(overlap, set(),
                          f"business-count key(s) wrongly marked hard_error=True: {overlap}")
+
+
+class ProvisioningPendingIsNamedAndTemporary(unittest.TestCase):
+    """production_uptime left ALWAYS_HARD_ERROR_KEYS on 2026-10-06: its "monitor unreachable"
+    state is WARN while carr-uptime is unprovisioned (Joe: unprovisioned monitors must not block
+    releases). This pins the exemption to exactly the named keys, so widening it fails here.
+    When PROVISIONING_PENDING loses production_uptime, put it back in ALWAYS_HARD_ERROR_KEYS."""
+
+    def test_pending_set_is_exactly_the_two_named_monitors(self):
+        source = (ROOT / "tools/health-check.py").read_text() if "ROOT" in globals() else \
+            Path(__file__).resolve().parents[1].joinpath("tools/health-check.py").read_text()
+        tree = ast.parse(source)
+        pending = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(getattr(t, "id", None) == "PROVISIONING_PENDING" for t in node.targets))
+        keys = {k.value for k in pending.value.keys}
+        self.assertEqual(keys, {"production_uptime", "system_costs"})
 
 
 class CanonicalHealthReturnsAreAllowlisted(unittest.TestCase):

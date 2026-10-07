@@ -1,16 +1,16 @@
 {
  "counts": {
-  "jev_compiled_triggers": 118,
+  "jev_compiled_triggers": 119,
   "pack_fallback_triggers": 7,
-  "seeded_detector_rule_ids": 50,
-  "seeded_detector_triggers": 14,
+  "seeded_detector_rule_ids": 51,
+  "seeded_detector_triggers": 15,
   "structural_extra_triggers": 2,
-  "triggers": 147
+  "triggers": 149
  },
  "generated_from": {
-  "jev_triggers_sha256": "fe5a1593d9c602327ecd986158c5f77c31d704f8695f0952e81d15552a20ca9d",
-  "map_sha256": "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a",
-  "triage_sha256": "2b2a18859cc64dc2da00d7eece2768667ac92859e5d5af0bb54e30b527670876"
+  "jev_triggers_sha256": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
+  "map_sha256": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
+  "triage_sha256": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c"
  },
  "generated_note": "Compiled by ops/rule-jit-compile.py from ops/config/rule-triage.v1.json's per-rule `detector` fields and ops/config/rule-enforcement-map.json's rule_packs/rule_load_layers. Never hand-edit this file \u2014 run the compiler again after changing either input, and `--check` verifies the two never drift apart.",
  "max_rules_per_trigger": 5,
@@ -880,12 +880,12 @@
    "packs": [
     "client-deal"
    ],
-   "pattern": "\\bconsultative\\s+aggressive\\-sales\\b|\\beducational\\s+consultative\\b|\\baggressive\\-sales\\s+assume\\b|\\bexperts\\s+unfamiliar\\b|\\bhealthcare\\s+experts\\b|\\bassume\\s+they've\\b|\\bunfamiliar\\s+cre\\b|\\bcarr\\b",
+   "pattern": "\\bconsultative\\s+aggressive\\-sales\\b|\\beducational\\s+consultative\\b|\\baggressive\\-sales\\s+assume\\b|\\bexperts\\s+unfamiliar\\b|\\bhealthcare\\s+experts\\b|\\bassume\\s+they've\\b|\\bunfamiliar\\s+cre\\b",
    "rule_ids": [
     "51d9f05f"
    ],
    "source": "jev_compiled",
-   "trigger_id": "636def7a507f"
+   "trigger_id": "63ee8ca94182"
   },
   {
    "kind": "prompt_regex",
@@ -919,12 +919,12 @@
    "packs": [
     "delegation-council"
    ],
-   "pattern": "\\bcopilot\\s+microsoft\\-native\\b|\\bclaude\\s+everything\\b|\\bmicrosoft\\-native\\b|\\bcalendar\\s+teams\\b|\\bsummaries\\b|\\bcopilot\\b|\\boutlook\\b|\\bclaude\\b|\\btriage\\b|\\bteams\\b",
+   "pattern": "\\bcopilot\\s+microsoft\\-native\\b|\\bclaude\\s+everything\\b|\\bmicrosoft\\-native\\b|\\bcalendar\\s+teams\\b|\\bsummaries\\b|\\bcopilot\\b|\\boutlook\\b|\\btriage\\b|\\bteams\\b",
    "rule_ids": [
     "8aefcdce"
    ],
    "source": "jev_compiled",
-   "trigger_id": "fc87b7218ff1"
+   "trigger_id": "5be7ffcb60d7"
   },
   {
    "kind": "prompt_regex",
@@ -1281,6 +1281,19 @@
   },
   {
    "kind": "prompt_regex",
+   "negative_pattern": "\\bstaffing\\s+model\\b",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "\\bmodel\\s+choice\\b|\\bwork's\\s+shape\\b|\\bcloud\\s+model\\b|\\bcloud\\s+pick\\b|\\bpick\\s+model\\b|\\bbatches\\b",
+   "rule_ids": [
+    "ede4b241"
+   ],
+   "source": "jev_compiled",
+   "trigger_id": "7f7cac8d1070"
+  },
+  {
+   "kind": "prompt_regex",
    "negative_pattern": "\\bjob\\s+description\\b|\\bfeeds\\s+link\\b",
    "packs": [
     "source-study"
@@ -1516,12 +1529,12 @@
    "packs": [
     "surface-doctrine"
    ],
-   "pattern": "\\brestyles\\s+reviews\\b|\\bbuilds\\s+restyles\\b|\\bcommand\\s+center\\b|\\bmoment\\s+builds\\b|\\bsurface\\s+board\\b|\\bcarr\\s+surface\\b|\\bcontrol\\s+room\\b|\\broom\\s+command\\b|\\bboard\\s+deal\\b|\\bdeal\\s+board\\b|\\blead\\s+board\\b|\\bcinematic\\b|\\bdashboard\\b|\\bdeal\\s+room\\b|\\bartifact\\b|\\bregister\\b|\\brestyles\\b|\\bcontrol\\b|\\breviews\\b|\\bboard\\b|\\bcarr\\b",
+   "pattern": "\\brestyles\\s+reviews\\b|\\bbuilds\\s+restyles\\b|\\bcommand\\s+center\\b|\\bmoment\\s+builds\\b|\\bsurface\\s+board\\b|\\bcarr\\s+surface\\b|\\bcontrol\\s+room\\b|\\broom\\s+command\\b|\\bboard\\s+deal\\b|\\bdeal\\s+board\\b|\\blead\\s+board\\b|\\bcinematic\\b|\\bdashboard\\b|\\bdeal\\s+room\\b|\\bartifact\\b|\\bregister\\b|\\brestyles\\b|\\bcontrol\\b|\\breviews\\b|\\bboard\\b",
    "rule_ids": [
     "67580c28"
    ],
    "source": "jev_compiled",
-   "trigger_id": "b18e185d62e3"
+   "trigger_id": "e5720a97c320"
   },
   {
    "kind": "prompt_regex",
@@ -1735,6 +1748,18 @@
    ],
    "source": "structural_extra",
    "trigger_id": "edbc364a81f9"
+  },
+  {
+   "kind": "verb",
+   "packs": [
+    "delegation-council"
+   ],
+   "pattern": "^(?:Agent|mcp__[\\w-]*[Rr]emote__create[_-](?:session|trigger))$",
+   "rule_ids": [
+    "ede4b241"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "c373f0cf37e7"
   },
   {
    "kind": "verb",

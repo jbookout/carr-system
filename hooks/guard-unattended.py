@@ -115,6 +115,8 @@ KNOWN_HOSTS = (
     # verifying a staging deploy toward the production URL instead. That is the
     # confusion the incident was made of, which is why it is listed here.
     "carr-mcp-staging.joe-bookout-carr-us.workers.dev",
+    # Staging app Worker, CARR-owned, no client data.
+    "doctorcre-app-staging.joe-bookout-carr-us.workers.dev",
     # nodejs.org: the official Node.js download host, and node is INFRASTRUCTURE
     # for this repo rather than a research read — mcp-server/local-verb.mjs is the
     # only route from a terminal or an unattended job to the record verbs, and
@@ -135,6 +137,10 @@ KNOWN_HOSTS = (
     # and the signed-out progress-board check read this exact host.
     "api.practicecre.com", "api.doctorcre.com", "app.doctorcre.com",
     "api.anthropic.com", "console.neon.tech",
+    # OpenRouter (Joe 2026-10-06): his own pay-per-token model router, used as a
+    # Claude Code ANTHROPIC_BASE_URL so builders can run GLM or DeepSeek models
+    # inside this harness, with these hooks still on, when subscriptions run dry.
+    "openrouter.ai",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
     # Dot relay uses the Slack Web API; its user token stays in ~/.hermes/.env.

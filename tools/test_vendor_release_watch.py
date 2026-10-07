@@ -1,6 +1,7 @@
 import copy
 import contextlib
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -58,6 +59,9 @@ def document_server(*, body=b'x' * 20, drip=0, header_delay=0, redirects=0):
 
 class VendorWatchTests(unittest.TestCase):
     def setUp(self):
+        publication = patch.dict(os.environ, {"PROGRESS_BOARD_LOCAL_ONLY": "1"})
+        publication.start()
+        self.addCleanup(publication.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -120,7 +124,9 @@ class VendorWatchTests(unittest.TestCase):
         self.assertEqual(len(board['tasks']), 1)
         card = next(iter(board['tasks'].values()))
         self.assertEqual(card['status'], 'done')
-        self.assertEqual(card['health'], 'healthy')
+        self.assertNotEqual(card.get('health'), 'blocked')
+        self.assertNotIn('blocked_reason', card)
+        self.assertNotIn('next_action', card)
         self.assertNotIn('restore', card['note'].lower())
         self.assertIn('recovered', card['note'].lower())
 
@@ -147,7 +153,7 @@ class VendorWatchTests(unittest.TestCase):
                     loops[loop_id] = {'loop_id': loop_id, 'version': 1, 'status': 'open'}
                 return json.dumps({'ok': True, 'loop_id': creates[key]})
             if verb == 'read-loop':
-                return json.dumps(loops[payload['loop_id']])
+                return json.dumps({'loop': loops[payload['loop_id']], 'amended': False, 'amendments': []})
             if verb == 'close-loop':
                 closes.append(payload)
                 loop = loops[payload['loop_id']]
@@ -165,6 +171,15 @@ class VendorWatchTests(unittest.TestCase):
             self.error = False
             w.reconcile(self.root, self.config, self.check(4600), w.Effects(self.root, self.config), 4600)
             self.assertEqual(loops['loop-1']['status'], 'done')
+            board = json.loads((self.root / 'out/boards/carr-v5.json').read_text())
+            card = next(iter(board['tasks'].values()))
+            self.assertEqual(card['status'], 'done')
+            self.assertNotEqual(card.get('health'), 'blocked')
+            self.assertNotIn('blocked_reason', card)
+            self.assertNotIn('next_action', card)
+            rows = w.read_latest(self.root / self.config['paths']['findings'])
+            self.assertIsNotNone(rows[found[0]['key']]['cleared_at'])
+            self.assertTrue(rows[found[0]['key']]['recovery_reported'])
             self.assertEqual(closes[0]['resolution'], 'done')
             self.assertIn('recovered', closes[0]['outcome'].lower())
             self.error = True
@@ -191,6 +206,20 @@ class VendorWatchTests(unittest.TestCase):
         rows = w.read_latest(self.root / self.config['paths']['findings'])
         self.assertIsNotNone(rows[found[0]['key']]['cleared_at'])
 
+    def test_recovery_refuses_missing_or_invalid_nested_loop(self):
+        record = {'loop_id': 'source-error-loop', 'version': 4, 'status': 'open'}
+        invalid = [None, [], {}, {**record, 'loop_id': 'other-loop'},
+                   {**record, 'version': True}, {**record, 'version': 0},
+                   {**record, 'status': 'unknown'}]
+        for loop in invalid:
+            # Outer record-like fields must never substitute for the nested record.
+            response = {**record, 'loop': loop, 'amended': False, 'amendments': []}
+            with self.subTest(loop=loop), patch.object(w.Effects, '_record', side_effect=[response, {'ok': True}]) as read, patch.object(w, 'board_task') as board:
+                with self.assertRaisesRegex(RuntimeError, 'recovery read'):
+                    w.Effects(self.root, self.config).resolve({'loop_id': record['loop_id'], 'url': INDEX, 'subject': 'source-error'})
+                read.assert_called_once_with('read-loop', {'loop_id': record['loop_id']})
+                board.assert_not_called()
+
     def test_pre_fix_cleared_ledger_reconciles_stale_board(self):
         self.error = True
         found = self.check(1000)
@@ -211,8 +240,9 @@ class VendorWatchTests(unittest.TestCase):
             if verb == 'add-loop':
                 return json.dumps({'ok': True, 'loop_id': 'source-error-loop'})
             if verb == 'read-loop':
-                return json.dumps({'loop_id': 'source-error-loop', 'version': 4,
-                                   'status': 'done' if closed else 'open'})
+                return json.dumps({'loop': {'loop_id': 'source-error-loop', 'version': 4,
+                                            'status': 'done' if closed else 'open'},
+                                   'amended': False, 'amendments': []})
             if verb == 'close-loop':
                 if refuse[0]:
                     return json.dumps({'ok': False, 'error': 'temporary refusal'})
@@ -254,7 +284,8 @@ class VendorWatchTests(unittest.TestCase):
                     raise RuntimeError('response lost after filing')
                 return json.dumps({'ok': True, 'loop_id': creates[key]})
             if verb == 'read-loop':
-                return json.dumps({'loop_id': payload['loop_id'], 'version': 1, 'status': 'open'})
+                return json.dumps({'loop': {'loop_id': payload['loop_id'], 'version': 1, 'status': 'open'},
+                                   'amended': False, 'amendments': []})
             if verb == 'close-loop':
                 return json.dumps({'ok': True})
             raise AssertionError(verb)
@@ -299,7 +330,8 @@ class VendorWatchTests(unittest.TestCase):
 
     def test_vendor_only_cli_fetch_failure_has_no_agent_actions(self):
         self.error = True
-        with patch.object(w, 'collect', side_effect=AssertionError('vendor-only must not collect PRs')), patch.object(w, 'fetch_document', self.fetch), patch.object(w.Effects, 'act', side_effect=AssertionError('no model actions')):
+        # This clock loses precision when rendered to the ledger's ISO timestamp.
+        with patch.object(w, 'collect', side_effect=AssertionError('vendor-only must not collect PRs')), patch.object(w, 'fetch_document', self.fetch), patch.object(w.Effects, 'act', side_effect=AssertionError('no model actions')), patch.object(w.time, 'time', return_value=1790736000.1234562):
             self.assertEqual(w.scan(self.root, self.config, vendor_only=True), 1)
         rows = w.read_latest(self.root / self.config['paths']['findings'])
         self.assertEqual([f['kind'] for f in rows.values()], ['vendor_release_fetch_error'])
@@ -307,7 +339,8 @@ class VendorWatchTests(unittest.TestCase):
                  {'key': 'unrelated', 'kind': 'job_dead', 'reported': True, 'reason': 'unrelated job', 'next_action': 'inspect'})
         self.error = False
         with patch.object(w, 'fetch_document', self.fetch), patch.object(w, 'time') as clock:
-            clock.time.return_value = w.epoch(rows[next(iter(rows))]['first_seen']) + 3600
+            state = w.read_latest(self.root / self.config['paths']['vendor_release_ledger'])
+            clock.time.return_value = state['openai-decisions']['checked_at'] + 3600
             self.assertEqual(w.scan(self.root, self.config, vendor_only=True), 0)
         rows = w.read_latest(self.root / self.config['paths']['findings'])
         error = next(f for f in rows.values() if f['kind'] == 'vendor_release_fetch_error')

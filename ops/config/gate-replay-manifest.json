@@ -347,6 +347,35 @@
         }
       ]
     },
+    "github-burst-guard.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash",
+            "scenarios"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUse only RECORDS: when a GitHub-touching command's output carries a rate-limit answer it writes the time to out/github-burst-guard-state.json and exits 0. It never denies and prints nothing; the cooldown it starts is refused on PreToolUse, covered by a scenario here and end to end by ops/github-burst-guard-selftest.py."
+        },
+        {
+          "event": "PostToolUseFailure",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUseFailure only RECORDS a rate-limit answer from a failed GitHub-touching command, the same as PostToolUse. It never denies and prints nothing; ops/github-burst-guard-selftest.py covers the failure-event path."
+        }
+      ]
+    },
     "drift-assertion-gate.py": {
       "role": "gate",
       "wirings": [
@@ -457,6 +486,9 @@
     "hook_meter.py": {
       "role": "helper"
     },
+    "grok_invocation.py": {
+      "role": "helper"
+    },
     "jev-supervisor.py": {
       "role": "gate",
       "wirings": [
@@ -469,8 +501,7 @@
             "reads",
             "tool_calls",
             "scenarios"
-          ],
-          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
+          ]
         },
         {
           "event": "Stop",
@@ -478,8 +509,7 @@
           "fixtures": [
             "advisories",
             "scenarios"
-          ],
-          "allow_only": "Every non-allow output is gated behind CARR_JEV_SUPERVISOR=advise; no production wiring sets it, so MODE is always shadow for Claude Code sessions. Forcing advise here would assert behaviour production does not have."
+          ]
         }
       ]
     },
@@ -669,7 +699,7 @@
       "wirings": [
         {
           "event": "PreToolUse",
-          "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
+          "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*",
           "fixtures": [
             "bash",
             "edits",
@@ -804,19 +834,6 @@
         }
       ]
     },
-    "stale-claim-gate.py": {
-      "role": "gate",
-      "wirings": [
-        {
-          "event": "Stop",
-          "matcher": "",
-          "fixtures": [
-            "advisories",
-            "scenarios"
-          ]
-        }
-      ]
-    },
     "stop_latch.py": {
       "role": "helper"
     },
@@ -893,9 +910,11 @@
     }
   },
   "lib_helpers": [
+    "lib/acceptance_checks.py",
+    "lib/credential_file.py",
+    "lib/jev_required_actions.py",
     "lib/claude_continuity_config.py",
     "lib/claude_rule_delivery_dedupe.py",
-    "lib/jev_required_actions.py",
     "lib/job_watchdog.py",
     "lib/loadpy.py",
     "lib/local_principal.py",
