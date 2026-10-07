@@ -4,10 +4,21 @@
 
 Joe asked for 100% recall on relevant rules; Jev chose this design (p=1.00).
 Every session and every subagent must fetch every page of the gated rule boot
-(standing-context `detail: "boot"`: the full text of the always-on rules plus
-a one-line index of every active rule, served live from the store) before any
-other tool call. hooks/gate-integrity.py arms the gate at SessionStart
-(startup, resume, clear, compact) and tells the model which calls to make.
+(standing-context `detail: "boot"`: the full text of the always-on rules, class
+A, plus a one-line index of every other active rule, served live from the
+store) before any other tool call. hooks/gate-integrity.py arms the gate at
+SessionStart (startup, resume, clear, compact) and tells the model which calls
+to make.
+
+THE SLIM BOOT (2026-10-07, Joe: "There is zero chance that loading 14 pages of
+rules after every compaction and every session start is good design"). B and C
+rules reach a context just in time through the PreToolUse route hook, so the
+boot carries only class A and unclassified rules in full and the gate requires
+only the pages the server reports. A compaction re-arms that set and a context
+re-reads it: a compaction summary is a lossy paraphrase the gate cannot read,
+so a receipt in it would prove an earlier read, not rules held now. A page
+confirmed for the current digest stays counted in its context. A filtered
+fetch counts when the call succeeded and what it printed carries the digest.
 
 Registered on PreToolUse with matcher ".*" so it sees every tool, which is why
 it is deliberately tiny: no network, no model, one small state read. Also

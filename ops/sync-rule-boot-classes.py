@@ -3,8 +3,8 @@
 from ops/config/rule-classes.v1.json, and guard the rule boot budget.
 
 WHY A GENERATED MODULE. standing-context's `detail: "boot"` mode (the gated
-rule boot, see mcp-server/src/rule-boot.js) renders an index of every active
-rule plus the full text of the always-on set. The class, the <=20-word
+rule boot, see mcp-server/src/rule-boot.js) renders the full text of the
+always-on set plus an index line for every other active rule. The class, the <=20-word
 summary and the "when it applies" line for each rule are committed data in
 ops/config/rule-classes.v1.json; rule STATEMENTS never enter class metadata and
 are read from the store at request time. Validation reads the existing committed
@@ -16,6 +16,11 @@ module, the same pattern as ops/sync-core-rule-ids.py.
 THIS SCRIPT IS THE ONLY WAY THE MODULE IS MEANT TO BE PRODUCED, and --check is
 the same code path, so the write and the parity check cannot drift apart
 (rule a8c55a47).
+
+ONLY CLASS A IS ALWAYS ON (Joe, 2026-10-06). The module's `on` flag is the
+class file's `always_on`, and validation refuses `always_on` on any class but
+a: b and c rules reach a context just in time through the PreToolUse route
+hook, d rules are held by gates, e rules are stale. Each stays one index line.
 
 THE BUDGET GUARD. The boot text is delivered to every session and every
 subagent before its first ordinary tool call, so its size is paid on every
@@ -148,6 +153,9 @@ def validate(doc, statements=None):
             problems.append(f"{rid}: always_on must be a boolean")
         if row.get("class") == "a" and not row.get("always_on"):
             problems.append(f"{rid}: class a is always on by definition")
+        if row.get("class") != "a" and row.get("always_on"):
+            problems.append(f"{rid}: only class a is always on; class {row.get('class')} is delivered at its "
+                            "action or topic (b, c), by its gate (d), or not at all (e)")
         if not isinstance(row.get("chars"), int) or row["chars"] <= 0:
             problems.append(f"{rid}: chars must be a positive integer")
         if "statement" in row or "human_quote" in row:
@@ -172,7 +180,8 @@ def render(doc):
     entries = []
     for rid in sorted(rules):
         row = rules[rid]
-        value = {"cls": row["class"], "on": True, "summary": row["summary"], "when": row["when"]}
+        value = {"cls": row["class"], "on": bool(row["always_on"]),
+                 "summary": row["summary"], "when": row["when"]}
         if row.get("personal_to"):
             value["personal_to"] = row["personal_to"]
         entries.append(f"  {json.dumps(rid)}: Object.freeze({json.dumps(value, ensure_ascii=False, sort_keys=True)}),")
@@ -210,10 +219,12 @@ def estimate(doc, sponsor=None):
         owner = row.get("personal_to")
         if owner and owner != sponsor:
             continue
-        total += len(f"{rid} | {row['class'].upper()} | {row['summary']} | {row['when']}\n")
-        header = f"### {rid}{' (personal)' if owner else ''}\n"
-        total += len(header) + row["chars"] + 2
-        big.append((row["chars"], rid))
+        if row["always_on"]:
+            header = f"### {rid}{' (personal)' if owner else ''}\n"
+            total += len(header) + row["chars"] + 2
+            big.append((row["chars"], rid))
+        else:
+            total += len(f"{rid} | {row['class'].upper()} | {row['summary']} | {row['when']}\n")
     big.sort(reverse=True)
     per_token = float(doc.get("chars_per_token", 3.6))
     return total, total / per_token, big

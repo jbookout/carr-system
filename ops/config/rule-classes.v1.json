@@ -1,6 +1,6 @@
 {
- "_note": "Committed classification for the gated rule boot (standing-context detail=boot, mcp-server/src/rule-boot.js). Holds ids, class, a <=20-word trigger summary and a length per rule; NEVER a rule statement. Statements are read live from the store when a context fetches its boot. `chars` is the statement length at classification, read only by the CI budget guard, which has no store to call. Class a includes standing person, team and business facts independent of task, including factual premises in mixed rules. ops/sync-rule-boot-classes.py validates supported fact shapes against the existing rule-selection corpus; unrecognized shapes require full-statement review. always_on = class a, plus rules whose only enforcement is a Stop gate (chat_lint, conduct_stop, completion_evidence: the gate fires after the reply is written), plus class-b rules with a conversational moment that Jev confirmed against the rule text. sponsors lists every partner whose scope the budget check measures.",
- "budget_tokens": 80000,
+ "_note": "Committed classification for the gated rule boot (standing-context detail=boot, mcp-server/src/rule-boot.js). Holds ids, class, a <=20-word trigger summary and a length per rule; NEVER a rule statement. Statements are read live from the store when a context fetches its boot. `chars` is the statement length at classification, read only by the CI budget guard, which has no store to call. Class a includes standing person, team and business facts independent of task, including factual premises in mixed rules. ops/sync-rule-boot-classes.py validates supported fact shapes against the existing rule-selection corpus; unrecognized shapes require full-statement review. always_on = class a, and only class a (Joe, 2026-10-06: full text of every rule at every boot and compaction is not good design). Class b and c rules reach a context just in time through the PreToolUse route hook (rule-route-trigger-delivery/v1), class d rules are held by their gates (Stop gates re-open the turn naming the rule), class e rules are stale; all of them stay one line in the boot index, and standing-context rule_ids returns any rule's full text. sponsors lists every partner whose scope the budget check measures.",
+ "budget_tokens": 32000,
  "chars_per_token": 3.6,
  "sponsors": ["dell", "joe"],
  "class_legend": {
@@ -179,8 +179,7 @@
    "when": "unexpected friction"
   },
   "1d50a3bb": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:conduct_stop",
+   "always_on": false,
    "chars": 1393,
    "class": "d",
    "moment": "conduct_stop gate",
@@ -188,8 +187,7 @@
    "when": "conduct_stop gate"
   },
   "1f3a7372": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1516,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -231,8 +229,7 @@
    "when": "new builds, predictions or confident direction"
   },
   "2271e684": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 159,
    "class": "d",
    "moment": "completion_evidence gate, terminal technical claim",
@@ -348,9 +345,10 @@
    "when": "before a change reaches main"
   },
   "30a189fb": {
-   "always_on": false,
+   "always_on": true,
+   "always_on_reason": "class-a; its only delivery route is the boot (no just-in-time trigger can see a non-CARR task)",
    "chars": 138,
-   "class": "c",
+   "class": "a",
    "moment": "non-CARR task detected",
    "personal_to": "joe",
    "summary": "When a task isn't CARR-related, stop and ask if it belongs in Life AI instead",
@@ -384,8 +382,7 @@
    "when": "candidate duplicate classification"
   },
   "38b15dc6": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 1648,
    "class": "d",
    "moment": "chat_lint gate",
@@ -393,8 +390,7 @@
    "when": "chat_lint gate"
   },
   "3a9dbafd": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:conduct_stop",
+   "always_on": false,
    "chars": 2598,
    "class": "d",
    "moment": "conduct_stop (conduct-stop-gate.py Stop)",
@@ -452,8 +448,7 @@
    "when": "working with LOI template terms"
   },
   "43e2ef76": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1272,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -536,8 +531,7 @@
    "when": "update-document-status verb (outbound_format split)"
   },
   "4e104d4c": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2282,
    "class": "d",
    "moment": "completion_evidence gate, new-verb deployment claim",
@@ -641,8 +635,7 @@
    "when": "correcting one of Joe's mislabeled statements"
   },
   "590b11e1": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1385,
    "class": "d",
    "moment": "completion_evidence gate, metric completion claim",
@@ -659,8 +652,7 @@
    "when": "a tool error blames a subsystem"
   },
   "5be2f462": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 2532,
    "class": "d",
    "moment": "chat_lint gate",
@@ -771,8 +763,7 @@
    "when": "building or evaluating Dr. CRE (Doc) features"
   },
   "6a4e6283": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 262,
    "class": "d",
    "moment": "completion_evidence gate (shipping claim)",
@@ -821,8 +812,7 @@
    "when": "lead board presentation"
   },
   "73381d78": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1503,
    "class": "d",
    "moment": "completion_evidence stop_gate - config-file change completion",
@@ -846,8 +836,7 @@
    "when": "projecting a long-running job's completion time"
   },
   "767f9b41": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 156,
    "class": "d",
    "moment": "completion_evidence gate, confirmation response",
@@ -889,8 +878,7 @@
    "when": "convening a red team/review panel"
   },
   "847f9995": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2730,
    "class": "d",
    "moment": "completion_evidence stop_gate - unattended-path credential verification",
@@ -922,8 +910,7 @@
    "when": "choosing Copilot vs Claude for a task"
   },
   "8c1e6057": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 197,
    "class": "d",
    "moment": "chat_lint stop_gate - asking a partner to open/edit/review a file",
@@ -1001,8 +988,7 @@
    "when": "any turn asserting a date or time"
   },
   "97326357": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 371,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -1093,8 +1079,7 @@
    "when": "proposing a restructuring"
   },
   "a6e6ab4e": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1111,
    "class": "d",
    "moment": "completion_evidence stop_gate - changed-system completion",
@@ -1127,8 +1112,7 @@
    "always_on_reason": "class-a; standing-fact:partner_persona"
   },
   "a9ecd5b4": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2381,
    "class": "d",
    "moment": "completion_evidence stop_gate - check-result reporting",
@@ -1279,8 +1263,7 @@
    "when": "handing up or acting on a subagent finding"
   },
   "c315befa": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 522,
    "class": "d",
    "moment": "chat_lint gate",
@@ -1418,8 +1401,7 @@
    "when": "deal_guard schema (deal value write)"
   },
   "d7f74c93": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 1930,
    "class": "d",
    "moment": "chat_lint gate",
@@ -1456,8 +1438,7 @@
    "when": "before reporting work as blocked or parked"
   },
   "dcf98880": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 106,
    "class": "d",
    "moment": "completion_evidence gate (human verification instruction)",
@@ -1491,8 +1472,7 @@
    "when": "answering an opinion request from Joe"
   },
   "e313a3ca": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:conduct_stop",
+   "always_on": false,
    "chars": 2295,
    "class": "d",
    "moment": "conduct_stop gate (before command handoff)",
@@ -1517,8 +1497,7 @@
    "when": "building any gate, hook, linter, or CI validator"
   },
   "e8868cbe": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2852,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -1526,8 +1505,7 @@
    "when": "shipping, parking work on Joe, or weekend-spanning runs"
   },
   "eaa31ac5": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2177,
    "class": "d",
    "moment": "completion_evidence gate (delivery claim)",
@@ -1568,8 +1546,7 @@
    "when": "after a non-trivial build works, before shipping"
   },
   "f04a05aa": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 446,
    "class": "d",
    "moment": "completion_evidence gate (autonomous-run completion)",
@@ -1595,8 +1572,7 @@
    "always_on_reason": "class-a; standing-fact:organization_service_model"
   },
   "f47a8fe9": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2045,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -1638,8 +1614,7 @@
    "when": "client_asset_packet render (search-packet)"
   },
   "fa217e48": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 193,
    "class": "d",
    "moment": "completion_evidence gate (completion/file claims)",
