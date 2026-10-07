@@ -1,5 +1,7 @@
 -- Dot database design review: forward-only integrity and concurrency repairs.
 -- New writes refuse invalid parents; existing invalid allocations refuse validation.
+-- rollback: forward-only — preserve recorded decisions and completed jobs; restore future behavior with a successor migration rather than undoing accepted state.
+-- lock-review: commission_allocation constraints and the activity index scan without rewriting business rows. Production row counts are not assumed; the migrator bounds lock acquisition at 5s and each statement at 5min, with rollback on timeout. The timeline index is exercised on 1,000,000 synthetic activity rows.
 
 CREATE OR REPLACE FUNCTION ops.decide_doc_suggestion(p_id uuid, p_base integer, p_choice text, p_until date, p_work_ref text, p_key uuid)
  RETURNS jsonb
