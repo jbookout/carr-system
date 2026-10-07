@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Optional gh wrapper for existing scripts; installing it is a separate action.
+"""Shared gh wrapper; the watchdog calls it directly from tracked source.
 
 GET pagination uses one budgeted CLI request per page. Other gh subcommands
 may make several hidden requests; invocation counts are a lower bound. Provider
-holds still apply. This wrapper neither installs itself nor changes credentials.
+holds still apply. Installing it on legacy PATHs is a separate action; the
+wrapper neither installs itself nor changes credentials.
 """
 import json
 import os
@@ -24,7 +25,7 @@ def main(argv=None):
         real = next((p for p in candidates if p and Path(p).resolve() != Path(__file__).resolve() and os.access(p, os.X_OK)), None)
     if not real:
         print("GitHub CLI unavailable", file=sys.stderr)
-        return 1
+        return 127
     reader = GitHubReader(gh=real, retry_delays=())
     try:
         if args and args[0] == "api" and "--paginate" in args:

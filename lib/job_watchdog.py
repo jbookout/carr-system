@@ -9,6 +9,7 @@ import math
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -31,7 +32,7 @@ EVIDENCE = {
 }
 # An unreadable evidence source cannot prove the findings it feeds have cleared.
 EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment", "rate_limited"})
-RATE_LIMIT = re.compile(r"API rate limit|secondary rate limit", re.I)
+RATE_LIMIT = re.compile(r"API rate limit|secondary rate limit|CARR_GITHUB_LOCAL_HOLD:|rate limited after|HTTP 429", re.I)
 RELEASE_LANE = re.compile(r"^release-pipeline\[([^\]]+)\]: (.*)$")
 # Lines that end a lane's tick (ops/release-pipeline.py run_lane). Anything else the
 # lane prints, such as a failed loop filing after BLOCKED, never replaces its outcome.
@@ -291,13 +292,18 @@ def tail(path, limit):
 
 
 def command(argv, config, cwd=None):
+    if argv[0] == "gh" and not shutil.which("gh"):
+        raise MissingTool("gh")
+    invocation = [sys.executable, str(SOURCE / "ops/github-gh.py"), *argv[1:]] if argv[0] == "gh" else argv
     try:
-        result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+        result = subprocess.run(invocation, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
                                 text=True, timeout=config["thresholds"]["command_timeout_seconds"])
     except FileNotFoundError as exc:
         if cwd is not None and not Path(cwd).is_dir():
             raise
         raise MissingTool(argv[0]) from exc
+    if result.returncode == 127 and argv[0] == "gh":
+        raise MissingTool("gh")
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exit {result.returncode}: {result.stderr.strip()} {result.stdout.strip()}")
     return result.stdout
@@ -603,6 +609,9 @@ def read_pr_cache(path):
 
 
 def rate_limit_reason(config, original):
+    detail = str(original)
+    if "CARR_GITHUB_LOCAL_HOLD:" in detail or re.search(r"rate limited after [0-9]+ attempt", detail):
+        return detail
     try:
         resources = json.loads(command(["gh", "api", "rate_limit"], config))["resources"]
         if not isinstance(resources, dict):

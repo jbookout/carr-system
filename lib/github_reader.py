@@ -178,9 +178,10 @@ class GitHubReader:
                 except ValueError as exc:
                     raise GitHubUnreadable(str(exc), kind="invalid_response", attempts=attempts) from None
                 diagnostic = self._redact(getattr(proc, "stderr", "") or "")
+                retry_at = None
                 if self.budget:
                     try:
-                        self.budget.observe(resource, headers, diagnostic, observed_at)
+                        retry_at = self.budget.observe(resource, headers, diagnostic, observed_at)
                     except (RuntimeError, ValueError, OverflowError):
                         raise GitHubUnreadable("GitHub budget response invalid; reads stopped", kind="budget_unreadable", attempts=attempts) from None
                 if proc.returncode == 0:
@@ -192,8 +193,9 @@ class GitHubReader:
                 transient = _transient(diagnostic)
                 kind = _failure_kind(diagnostic)
             if kind == "rate_limit":
+                deadline = f"; retry at {retry_at:.3f}" if retry_at is not None else ""
                 raise GitHubUnreadable(
-                    f"gh {what} rate limited after {attempts} attempt; {detail}",
+                    f"gh {what} rate limited after {attempts} attempt{deadline}; {detail}",
                     detail=detail, transient=True, attempts=attempts, kind=kind)
             if not transient or not delays:
                 self._outage = self._outage or (transient and attempts > 1)
