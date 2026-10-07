@@ -1,0 +1,9 @@
+{
+  "schema": "rule-boot-held-gate-probe/v1",
+  "held_pr": 1636,
+  "held_head": "bdb2ffe7a37d484a249ea030e22b2942487e201f",
+  "probe": "Startup, two served pages, Bash fetch piped through jq -r .rule_boot.digest, then ordinary Read PreToolUse.",
+  "held_head_verdict": "allow",
+  "successor_verdict": "deny",
+  "configuration_activated": false
+}

@@ -77,6 +77,20 @@ test("boot retains action rules until a replacement is proven, including newly t
   assert.ok(part1.includes(`END-${actionId}`), "an action route is not proof of delivery");
 });
 
+test("an index classification cannot defer unproven B, C, D or E delivery", () => {
+  const rows = ["b", "c", "d", "e"].map((cls, i) => row(`ffff000${i + 2}`, `Binding ${cls} text before action.`));
+  const classes = Object.fromEntries(rows.map((r, i) => [r.id.slice(0, 8), {
+    cls: ["b", "c", "d", "e"][i], on: false, summary: "a summary", when: "a condition",
+  }]));
+  const rendered = renderRuleBoot(rows, "joe", classes);
+  assert.equal(rendered.counts.always_on, rows.length);
+  for (const r of rows) {
+    assert.ok(rendered.text.split("## PART 2")[0].includes(r.statement));
+    assert.match(rendered.text, new RegExp(`^${r.id.slice(0, 8)} \\| [BCDE] \\| full text in Part 1$`, "m"));
+  }
+  assert.ok(!rendered.text.includes("a summary"), "an index pointer does not repeat a summary of retained text");
+});
+
 test("standing team ownership reaches Joe, Dell and unsponsored boots without task keywords", async () => {
   // The committed selection corpus preserves the live binding statement. Class
   // metadata remains separate, so a summary cannot silently replace this fact.

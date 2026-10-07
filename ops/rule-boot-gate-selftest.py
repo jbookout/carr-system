@@ -711,6 +711,22 @@ def case_piped_formatter(c):
                              agent="py-root", cwd="/tmp")), "python after cd to the repo root is fine"
 
 
+def case_digest_only_never_delivers_text(c):
+    c.stub_sized("ab", 2)
+    for source in ("startup", "compact"):
+        c.arm(source)
+        assert denied(c.call(*READ)), f"{source}: prior-context pages do not unlock tools"
+        for page in (1, 2):
+            command = f"{abs_cmd(page)} | jq -r '.rule_boot.digest'"
+            pre, post = c.fetch_cmd(command, page, stdout=lambda body: json.loads(body)["rule_boot"]["digest"])
+            assert not denied(pre), "recovery fetch remains available"
+            assert post and "does not count as read" in post["additionalContext"]
+        assert denied(c.call(*READ)), f"{source}: digest-only output cannot authorize a tool"
+        for page in (1, 2):
+            c.fetch(page)
+        assert c.call(*READ) is None, f"{source}: retained complete text authorizes the tool"
+
+
 def case_parallel_batch(c):
     """Seven page fetches sent at once, as a model batches them: every PreToolUse
     runs before any tool, then every PostToolUse, each set concurrently."""
@@ -865,7 +881,7 @@ CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage
          case_outage_keeps_effects_held, case_fetch_never_denied, case_deny_before_allow_after,
          case_digest_change_rearms, case_rearm_on_compact, case_subagent_path,
          case_answer_parsing,
-         case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
+         case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_digest_only_never_delivers_text, case_parallel_batch,
          case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
          case_confirm_needs_the_real_page,
          case_same_checkout_worktree]

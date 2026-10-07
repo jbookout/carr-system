@@ -54,7 +54,7 @@ CLASSES = {"a", "b", "c", "d", "e"}
 MAX_SUMMARY_WORDS = 20
 # Must match mcp-server/src/rule-boot.js's layout: one always-on entry is
 # "### <id>[ (personal)]\n<statement>\n\n", one index line is
-# "<id> | <CLASS> | <summary> | <when>\n". PREAMBLE_CHARS is a fixed allowance
+# "<id> | <CLASS> | full text in Part 1\n". PREAMBLE_CHARS is a fixed allowance
 # for the headers and instructions the renderer prints once.
 PREAMBLE_CHARS = 2400
 
@@ -210,7 +210,7 @@ def estimate(doc, sponsor=None):
         owner = row.get("personal_to")
         if owner and owner != sponsor:
             continue
-        total += len(f"{rid} | {row['class'].upper()} | {row['summary']} | {row['when']}\n")
+        total += len(f"{rid} | {row['class'].upper()} | full text in Part 1\n")
         header = f"### {rid}{' (personal)' if owner else ''}\n"
         total += len(header) + row["chars"] + 2
         big.append((row["chars"], rid))

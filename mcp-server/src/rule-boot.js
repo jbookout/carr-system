@@ -30,10 +30,6 @@ import {
 export const RULE_BOOT_SCHEMA = "carr-rule-boot/v1";
 export const RULE_BOOT_PAGE_CHARS = 20000;
 
-const UNCLASSIFIED_SUMMARY =
-  "(unclassified since the last classification; its full text is in the always-on section)";
-const UNCLASSIFIED_WHEN = "until classified: treat it as always relevant";
-
 // One view of the corpus for ONE sponsor. The SQL that feeds this already
 // scopes personal rules to the authenticated sponsor; the two checks below are
 // the belt to that brace, so a mis-scoped row can never render.
@@ -55,17 +51,17 @@ function scopedRules(rows, sponsor, classes) {
 // digest is taken by the caller (async Web Crypto).
 export function renderRuleBoot(rows, sponsor, classes = RULE_BOOT_CLASSES) {
   const rules = scopedRules(rows, sponsor, classes);
-  const alwaysOn = rules.filter(r => !r.cls || r.cls.on);
+  const alwaysOn = rules;
   const unclassified = rules.filter(r => !r.cls).map(r => r.id);
   const out = [];
   out.push("# CARR RULE BOOT — read every page before acting");
   out.push("");
   out.push(`Served live from the CARR doctrine store (the only source of truth) for ${sponsor ? `sponsor ${sponsor}` : "an unsponsored runtime (shared rules only)"}.`);
   out.push("Part 1 is the FULL TEXT of retained rules. Each binds at its stated moment, not on every turn.");
-  out.push("Part 2 is a one-line INDEX of every active rule: `id | class | summary | when it applies`.");
+  out.push("Part 2 indexes every active rule by id and class. Its binding text and condition are in Part 1.");
   out.push("Classes: A always-on (full text in Part 1); B binds at an action point; C binds when a topic is present;");
   out.push("D already enforced by a gate; E stale or duplicate; U unclassified (full text in Part 1).");
-  out.push("If a rule's full text is missing from Part 1, fetch its binding text:");
+  out.push("Every active rule is retained until delivery before its binding action is proven. Fetch a rule again with:");
   out.push("standing-context with rule_ids:[\"<id>\"]. Never quote an index summary as the rule itself.");
   out.push(`Classification: ${RULE_BOOT_CLASSES_DIGEST}.`);
   out.push("");
@@ -80,9 +76,7 @@ export function renderRuleBoot(rows, sponsor, classes = RULE_BOOT_CLASSES) {
   out.push("");
   for (const r of rules) {
     const cls = r.cls ? r.cls.cls.toUpperCase() : "U";
-    const summary = r.cls ? r.cls.summary : UNCLASSIFIED_SUMMARY;
-    const when = r.cls ? r.cls.when : UNCLASSIFIED_WHEN;
-    out.push(`${r.id} | ${cls} | ${summary} | ${when}`);
+    out.push(`${r.id} | ${cls} | full text in Part 1`);
   }
   out.push("");
   out.push("## END OF RULE BOOT");
