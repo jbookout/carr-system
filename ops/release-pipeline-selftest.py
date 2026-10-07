@@ -3726,7 +3726,9 @@ class ControllerFreshness(Base):
         super().setUp()
         self.fx.commit({"ops/release-pipeline.py": "v1\n"})
         live = {"sha": self.fx.base}
-        self.fx.pipeline(FakeRunner(live=live), live=live).tick(["worker"])
+        pipe = self.fx.pipeline(FakeRunner(live=live), live=live)
+        pipe.store.save({"worker": {"last_released_sha": self.fx.base}})
+        pipe.tick(["worker"])
 
 
     def test_smoke_helper_and_its_reader_are_bound_by_controller_freshness(self):
