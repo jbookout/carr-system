@@ -47,6 +47,8 @@ are explicit failures, never evidence that rules were read. Fetches, rule-read
 verbs and ToolSearch remain allowed for recovery. The diagnostic marker count
 is capped; enforcement is not. Tool-less delegates need a fetch-capable route.
 """
+import ast
+import builtins
 import errno
 import json
 import os
@@ -90,18 +92,25 @@ TOOLLESS_AGENT_TYPES = frozenset({"statusline-setup"})
 # <run.sh> is any path (absolute, ~/, or relative to the cwd or the cd target)
 # that resolves to this checkout's run.sh or a git worktree of the same repo.
 # The only redirects are 2>&1, 2>/dev/null and </dev/null. Each <filter> only
-# reshapes what the fetch printed and cannot run, write or invent anything:
-#     jq [display options] [path filter]   paths only: .a.b, .[], .[0], |, ",", keys, length, type
-#     python3|python -c '<code>'           one literal JSON pretty-printer, whose
-#                                          parse/serialize path preserves every field
+# computes over what the fetch printed and cannot run, write or read anything else:
+#     jq [display options] [filter]        any filter except the ones that read the
+#                                          environment, other files or modules
+#     python3|python -c '<code>'           code whose syntax tree is limited to pure
+#                                          computation over stdin and print (_py_pure)
 #     python3|python -m json.tool [opts]   (both Python forms only from a checkout root:
 #                                          Python imports from its working directory)
 #     head|tail [-n N | -N | -c N]         cat
 # Anything else — `;`, `||`, `&`, a second `&&`, `$`, backticks, a file
 # argument, a write, an unknown program — is not a fetch and is held as usual.
 # A relative cd is refused because PostToolUse may see the post-cd cwd.
-# Because no filter can invent or rewrite output, a page read through a pipe is confirmed
-# the same way as a direct one: by the answer's own digest, page and text.
+# WHAT A PIPED PAGE PROVES. A
+# filter may keep the whole JSON, and then the page is confirmed like a direct
+# read (digest, page, text and length). Or it may keep less: the page then
+# counts when the call SUCCEEDED and what it printed carries the armed boot's
+# digest. Joe's ruling: a context that fetched the page and kept the digest
+# has done the read; demanding the whole JSON made sessions fetch every page
+# twice. The cost, accepted on purpose: a filtered page has no length evidence,
+# and a filter that keeps the digest and drops the text still counts.
 # KNOWN RESIDUALS (Jev, 2026-09-27, kind rule-boot-gate-fetch-recognition-
 # loopholes; top gap edited_worktree_run_sh 0.95), kept on purpose: the gate
 # trusts the run.sh it recognises, and a session can edit a worktree's run.sh
@@ -114,16 +123,34 @@ _REDIRECT = re.compile(r"(?:2>&1|2>\s*/dev/null|<\s*/dev/null)(?=[\s|]|$)")
 _JQ_OPTS = frozenset({"-r", "-c", "-S", "-M", "-C", "-j", "-a", "--raw-output", "--compact-output",
                       "--sort-keys", "--tab", "--monochrome-output", "--color-output",
                       "--ascii-output", "--join-output"})
-_JQ_PATH_TOKEN = re.compile(
-    r'\s+|\|\s*|,|\.\[\]|\.\["[A-Za-z0-9_]+"\]|\.[A-Za-z_][A-Za-z0-9_]*|\.|\[\d{1,4}\]|\[\]'
-    r'|(?:keys|length|type)(?![A-Za-z0-9_])')
+# jq has no way to run a program or write a file. What it CAN do beyond reshaping
+# stdin is read the environment, other files and modules; those builtins are refused.
+_JQ_REFUSED = re.compile(
+    r"\$(?:ENV|__)|\b(?:env|input|inputs|input_filename|input_line_number|import|include|"
+    r"modulemeta|get_search_list|get_prog_origin|get_jq_origin|debug|stderr|halt_error)\b")
 _HEAD_TAIL_ARGS = re.compile(r"(?:-n ?\+?\d{1,7}|-c ?\+?\d{1,9}|-\d{1,7}|-n\+?\d{1,7}|-c\+?\d{1,9})?")
 _JSON_TOOL_ARGS = re.compile(r"(?:\s*(?:--indent \d{1,2}|--sort-keys|--compact|--no-ensure-ascii|--tab))*")
-# An AST node whitelist cannot prove dataflow: even read/print-only code can
-# replace a byte by splitting stdin reads and printing a constant in between.
-# This exact script reads the complete JSON once and serializes that object
-# without assignment to its fields. Other -c programs are not trusted fetches.
-_PY_JSON_PRETTY = "import json,sys; print(json.dumps(json.load(sys.stdin), indent=2))"
+# A python3 -c filter is admitted when its syntax tree can only compute over
+# stdin and print (_py_pure). It is not trusted to preserve the page: what it
+# printed is judged by the digest it carries (see WHAT A PIPED PAGE PROVES).
+_PY_IMPORTS = frozenset({"json", "sys"})
+_PY_BUILTINS = frozenset({"print", "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple",
+                          "sorted", "range", "enumerate", "zip", "min", "max", "sum", "any", "all",
+                          "repr", "reversed", "abs", "round", "isinstance", "True", "False", "None"})
+_PY_MODULE_ATTRS = {("json",): {"load", "loads", "dumps"}, ("sys",): {"stdin", "stdout"},
+                    ("sys", "stdin"): {"read", "readline", "readlines"}, ("sys", "stdout"): {"write"}}
+_PY_METHODS = frozenset({"get", "keys", "values", "items", "split", "rsplit", "strip", "lstrip", "rstrip",
+                         "join", "replace", "splitlines", "startswith", "endswith", "lower", "upper",
+                         "count", "find", "index", "partition", "rpartition"})
+
+_PY_NODES = (ast.Module, ast.Expr, ast.Assign, ast.AugAssign, ast.For, ast.If, ast.IfExp, ast.Compare,
+             ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Call, ast.Name, ast.Load, ast.Store, ast.Constant,
+             ast.Attribute, ast.Subscript, ast.Slice, ast.Tuple, ast.List, ast.Dict, ast.Set, ast.ListComp,
+             ast.DictComp, ast.SetComp, ast.GeneratorExp, ast.comprehension, ast.keyword, ast.JoinedStr,
+             ast.FormattedValue, ast.Import, ast.alias, ast.Pass, ast.Break, ast.Continue,
+             ast.operator, ast.boolop, ast.cmpop, ast.unaryop)
+# Every other builtin name (open, exec, eval, getattr, __import__, ...) is refused.
+_PY_UNSAFE_BUILTINS = frozenset(dir(builtins)) - _PY_BUILTINS
 # Only the Worker's own closed-vocabulary refusal of `detail` means "not
 # deployed yet"; any other error is an outage.
 _BOOT_UNSUPPORTED = re.compile(
@@ -345,7 +372,8 @@ def _expand(word, quoted, base):
 
 
 def _jq_ok(args):
-    """jq with display options and at most one path-only filter, no files."""
+    """jq with display options and at most one filter, no files, and none of
+    the builtins that read the environment, other files or modules."""
     flt, i = None, 0
     while i < len(args):
         a = args[i]
@@ -359,13 +387,66 @@ def _jq_ok(args):
             return False
     if flt is None:
         return True
-    pos = 0
-    while pos < len(flt):
-        m = _JQ_PATH_TOKEN.match(flt, pos)
-        if not m or m.end() == pos:
+    return bool(flt.strip()) and not _JQ_REFUSED.search(flt)
+
+
+def _py_pure(code):
+    """True when `code` can only compute over stdin and print: imports of json
+    and sys only, a fixed set of builtins, json.load/loads/dumps, sys.stdin
+    reads and sys.stdout.write, string and mapping methods, no underscore
+    names, no definitions. Every object it can reach is data, a pure function
+    or stdin/stdout, so no keyword argument can open, run or write anything.
+    Anything it cannot parse is refused."""
+    try:
+        tree = ast.parse(code, mode="exec")
+    except (SyntaxError, ValueError):
+        return False
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    for node in ast.walk(tree):
+        if not isinstance(node, _PY_NODES):
             return False
-        pos = m.end()
-    return bool(flt.strip())
+        if isinstance(node, ast.Import):
+            if any(a.name not in _PY_IMPORTS or (a.asname and a.asname != a.name) for a in node.names):
+                return False
+        elif isinstance(node, ast.keyword):
+            if node.arg is None:
+                return False  # **mapping: keyword names this check cannot see
+        elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("_") or not _py_attr_ok(node):
+                return False
+        elif isinstance(node, ast.Name):
+            if node.id.startswith("_"):
+                return False
+            if node.id in _PY_IMPORTS:
+                # json and sys only as the base of an admitted attribute chain.
+                if isinstance(node.ctx, ast.Store) or not isinstance(parents.get(node), ast.Attribute):
+                    return False
+            elif node.id in _PY_UNSAFE_BUILTINS:
+                return False
+        elif isinstance(node, ast.Constant) and isinstance(node.value, bytes):
+            return False
+    return True
+
+
+def _py_chain(node):
+    """("sys", "stdin") for sys.stdin, None when the base is not a bare name."""
+    names = []
+    while isinstance(node, ast.Attribute):
+        names.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    return tuple([node.id] + names[::-1])
+
+
+def _py_attr_ok(node):
+    chain = _py_chain(node)
+    if chain and chain[0] in _PY_IMPORTS:
+        return node.attr in _PY_MODULE_ATTRS.get(chain[:-1], ())
+    return node.attr in _PY_METHODS
 
 
 def _harmless_filter(stage):
@@ -376,7 +457,7 @@ def _harmless_filter(stage):
         return _jq_ok(args)
     if prog in ("python3", "python"):
         if len(args) == 2 and args[0] == "-c":
-            return args[1] == _PY_JSON_PRETTY
+            return _py_pure(args[1])
         return args[:2] == ["-m", "json.tool"] and bool(_JSON_TOOL_ARGS.fullmatch(" ".join(args[2:])))
     if prog in ("head", "tail"):
         return bool(_HEAD_TAIL_ARGS.fullmatch(" ".join(args)))
@@ -493,8 +574,9 @@ def fetch_instructions(pages, digest=None, pages_total=None):
         "Until then only these calls, other standing-context calls, the read-only rule verbs "
         "(applicable-rules, resolve-doctrine-rules, read-doctrine, search-doctrine, doctrine-index, "
         "doctrine-sections) and ToolSearch will run. A leading `cd <absolute repo path> &&` and a pipe "
-        "into a formatter (jq, python3 -c from the repo root, head) keep it a fetch if the whole JSON "
-        "prints; anything run after the fetch (&&, ;, ||, &) does not. "
+        "into a filter (jq, python3 -c from the repo root, head) keep it a fetch; a filtered page counts "
+        "when what it prints keeps .rule_boot.digest (or the whole JSON). Anything run after the fetch "
+        "(&&, ;, ||, &) is not a fetch. "
         "Ordinary tools stay held until the complete boot is verified; recovery rule reads remain available.")
 
 
@@ -698,8 +780,8 @@ def verdict(payload, now=None):
             if age > PENDING_GRACE_S:
                 return _hold(folder, len(confirmed), UNAVAILABLE_NOTICE + "\nNo confirmed answer; retry the missing pages.")
     unreadable = [p for p in missing if f"u{p}" in names]
-    lead = (f"Page(s) {', '.join(map(str, unreadable))} came back without the whole page (a pipe or "
-            "formatter kept only part of it), so they do not count as read.\n") if unreadable else ""
+    lead = (f"Page(s) {', '.join(map(str, unreadable))} came back without the whole page or the boot's "
+            "digest (a filter kept neither), so they do not count as read.\n") if unreadable else ""
     source = str(arm.get("source") or "")
     if not agent_id and not confirmed and source in ("compact", "resume", "clear"):
         # The main context's pages are keyed by the arm's epoch, so reads made
@@ -774,24 +856,59 @@ def _short_text(folder, arm):
     want = int(arm.get("total_chars") or 0)
     if want < 1:
         return True
-    got = 0
+    got, by_digest = 0, False
     for p in range(1, int(arm.get("pages_total") or 0) + 1):
         try:
             with open(os.path.join(folder, f"c{p}"), encoding="utf-8") as fh:
                 raw = fh.read(32).strip()
         except OSError:
             return True
+        if raw == DIGEST_ONLY:
+            by_digest = True
+            continue
         if not raw.isdigit():
             return True
         got += int(raw)
-    return got != want
+    # A page confirmed through a filter by its digest carries no length; the
+    # length test then cannot apply (WHAT A PIPED PAGE PROVES).
+    return False if by_digest else got != want
 
 
 INCONCLUSIVE_NOTICE = (
-    "RULE BOOT: page {page}'s answer did not carry that whole page (its rule_boot JSON with the "
-    "digest, page {page} and the page text), so it does not count as read. A pipe or formatter "
-    "that keeps only part of the output, or cuts it, does this. Fetch page {page} again without "
-    "the pipe, or with one that prints the whole JSON.")
+    "RULE BOOT: page {page}'s answer carried neither the whole page nor the boot's digest, so it "
+    "does not count as read. Fetch page {page} again without the pipe, or with a filter that keeps "
+    ".rule_boot.digest in what it prints (for example jq -r '.rule_boot | .digest, .text').")
+
+# The c<N> marker of a page confirmed by its digest through a filter: no length.
+DIGEST_ONLY = "digest"
+
+
+def _clear_stale(folder, page):
+    """A confirmed page clears the outage, not-deployed and unreadable markers."""
+    for stale in ("failed", "unsupported", f"u{page}"):
+        try:
+            os.unlink(os.path.join(folder, stale))
+        except OSError:
+            pass
+
+
+def _printed(response):
+    """Everything a Bash call printed, as one string."""
+    texts = []
+    _strings(response, texts)
+    return "\n".join(texts)
+
+
+def _carries_digest(response, digest):
+    """True when the printed output names `digest` whole: "sha256:<hex>", or
+    the bare hex when it is long enough to be unambiguous."""
+    digest = str(digest or "")
+    if not digest.startswith("sha256:") or len(digest) < 15:
+        return False
+    hexpart = digest[7:]
+    printed = _printed(response)
+    pattern = re.escape(hexpart) if len(hexpart) >= 32 else re.escape(digest)
+    return re.search(r"(?<![0-9a-f])" + pattern + r"(?![0-9a-f])", printed) is not None
 
 
 def observe(payload):
@@ -800,10 +917,10 @@ def observe(payload):
 
     A page is confirmed only by an answer that is that page (_is_page), and
     its text length is recorded so completion can be checked against the
-    boot's total_chars. When the fetch's output went through a filter, only a
-    confirmed page counts: anything else is INCONCLUSIVE (the filter, not the
-    store, may be what failed), which neither confirms a page nor unlocks
-    the context as an outage."""
+    boot's total_chars. A successful filtered fetch can also be confirmed by
+    the armed digest in its output, without length evidence. Other filtered
+    answers are INCONCLUSIVE because the filter may be what failed; they
+    neither confirm a page nor unlock the context as an outage."""
     session_id = payload.get("session_id") or payload.get("sessionId")
     agent_id = payload.get("agent_id") or payload.get("agentId")
     kind, page, direct = _classify(payload.get("tool_name") or payload.get("toolName") or "",
@@ -822,6 +939,17 @@ def observe(payload):
     if not direct and answer != "boot":
         answer = "inconclusive"
     arm = read_arm(session_id)
+    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse"
+    # Only a FILTERED fetch can be confirmed by its digest alone: an unfiltered
+    # answer printed everything, so a wrong page or a missing text is just that.
+    if (not direct and answer == "inconclusive" and succeeded and arm and arm.get("status") == "armed"
+            and _carries_digest(response, arm.get("digest"))):
+        # Filtered, succeeded, and printed the armed digest: the page is read.
+        folder = _fetch_dir(session_id, agent_id, arm)
+        _touch(folder, f"p{page}")
+        _put(folder, f"c{page}", DIGEST_ONLY)
+        _clear_stale(folder, page)
+        return None
     if answer in ("boot", "out_of_range"):
         total = int((boot or {}).get("pages_total") or 0)
         digest = str((boot or {}).get("digest") or "")
@@ -830,7 +958,10 @@ def observe(payload):
                                       or int(arm.get("pages_total") or 0) != total):
             arm = {**(arm or {}), "schema": SCHEMA, "status": "armed", "digest": digest,
                    "pages_total": total, "rearmed_by": "fetch", "armed_at": int(time.time())}
-            arm.setdefault("epoch", secrets.token_hex(6))
+            # No arm yet (SessionStart did not arm, or parallel fetches each see
+            # none): derive the epoch from the digest, so racing writes agree and
+            # no fetch's confirmed pages are stranded under a losing epoch.
+            arm.setdefault("epoch", "fetch-" + safe_key(digest.replace("sha256:", ""), "none")[:12])
             arm.pop("reason", None)
             arm.pop("total_chars", None)
             if int((boot or {}).get("total_chars") or 0) >= 1:
@@ -865,11 +996,7 @@ def observe(payload):
                                  f"boot:{session_id}:{agent_id or 'main'}:{_stand_in(arm)}", ids)
             except (OSError, ValueError):
                 pass
-        for stale in ("failed", "unsupported", f"u{page}"):
-            try:
-                os.unlink(os.path.join(folder, stale))
-            except OSError:
-                pass
+        _clear_stale(folder, page)
         return None
     folder = _fetch_dir(session_id, agent_id, _stand_in(arm))
     if answer == "inconclusive":

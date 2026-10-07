@@ -680,25 +680,27 @@ def case_piped_formatter(c):
                f"{abs_cmd(1)} | python3 -c 'import os; os.system(\"id\")'",
                f"{abs_cmd(1)} | python3 -c 'print(open(\"/etc/hosts\").read())'",
                f"{abs_cmd(1)} | python3 -c '__import__(\"os\")'",
-               f"{abs_cmd(1)} | python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"rule_boot\"][\"page\"]=2; print(json.dumps(d))'",
-               f"{abs_cmd(1)} | python3 -c 'print(\"{{\\\"rule_boot\\\": 1}}\")'",
                f"{abs_cmd(1)} | python3 /tmp/evil.py",
-               # Rewriting the text while keeping the JSON (review of #1343, nit 2).
-               f"{abs_cmd(1)} | python3 -c 'import sys; print(\"maybe\".join(sys.stdin.read().split(\"NEVER\")))'",
-               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read().lower())'",
-               # A character loop can rewrite text without a string method and keep
-               # the boot page's JSON, digest, and length intact.
-               f"{abs_cmd(1)} | python3 -c 'import sys\nfor ch in sys.stdin.read(): print(\"X\" if ch == \"N\" else ch, end=\"\")'",
-               # Even straight-line reads can replace one byte while preserving
-               # the boot page's length and claimed digest.
-               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read(169), end=\"\"); sys.stdin.read(1); print(\"X\", end=\"\"); print(sys.stdin.read(), end=\"\")'",
-               f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'",
+               f"{abs_cmd(1)} | jq env",
                f"{abs_cmd(1)} | jq -n '\"x\"'", f"{abs_cmd(1)} | jq . /etc/hosts",
                f"{abs_cmd(1)} | head -n 5 /etc/hosts", f"{abs_cmd(1)} | cat /etc/hosts",
                f"{abs_cmd(1)} | jq . $(id)", f"{abs_cmd(1)} | jq `id`",
                f"{RUN_SH} call standing-context \"$(id)\""]
     for i, cmd in enumerate(refused):
         assert denied(c.call("Bash", {"command": cmd}, agent=f"pipe-{i}")), f"not a harmless pipe: {cmd}"
+    # Filters that only compute over what the fetch printed are fetches:
+    # they cannot run, write or read anything else. Whether the page
+    # then counts is decided by the digest in what they printed, not by trusting
+    # the filter to have kept every byte.
+    pure = [f"{abs_cmd(1)} | python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"rule_boot\"][\"page\"]=2; print(json.dumps(d))'",
+            f"{abs_cmd(1)} | python3 -c 'print(\"{{\\\"rule_boot\\\": 1}}\")'",
+            f"{abs_cmd(1)} | python3 -c 'import sys; print(\"maybe\".join(sys.stdin.read().split(\"NEVER\")))'",
+            f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read().lower())'",
+            f"{abs_cmd(1)} | python3 -c 'import sys\nfor ch in sys.stdin.read(): print(\"X\" if ch == \"N\" else ch, end=\"\")'",
+            f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read(169), end=\"\"); sys.stdin.read(1); print(\"X\", end=\"\"); print(sys.stdin.read(), end=\"\")'",
+            f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'"]
+    for i, cmd in enumerate(pure):
+        assert not denied(c.call("Bash", {"command": cmd}, agent=f"pure-{i}")), f"a pure filter is a fetch: {cmd}"
     # A Python filter imports json from its working directory, so it runs only
     # from a checkout root of this repo (review of #1343, nit 1).
     for i, (cmd, cwd) in enumerate([(f"{abs_cmd(1)} | {PY_FORMAT}", "/tmp"),
@@ -857,6 +859,139 @@ def case_same_checkout_worktree(c):
     assert json.loads(out.stdout or "null") == ["fetch", "fetch", "fetch", "other", "other"], out.stdout + out.stderr
 
 
+# The gate follows the server's page count independently of renderer policy.
+
+def case_gate_requires_only_the_served_pages(c):
+    """The gate asks for exactly the pages the armed boot has, no more."""
+    c.stub_sized("a", pages=4)
+    text = c.arm()
+    assert "4 page(s)" in text and "(1, 2, 3, 4)" in text, text
+    r = c.call(*READ)
+    assert denied(r) and "(1, 2, 3, 4)" in r["permissionDecisionReason"], r
+    for p in (1, 2, 3, 4):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None, "four of four pages read: allowed"
+    _, post = c.fetch_cmd(abs_cmd(5), 5, answer="boom", boot=None)
+    assert c.call(*READ) is None, "a page beyond the boot is never demanded"
+
+
+def case_confirmed_page_stays_counted(c):
+    """A page confirmed for the current digest stays counted in that
+    context; no later answer for it, and no detour through another digest,
+    turns it back into a missing page."""
+    c.stub_sized("a", pages=3)
+    c.arm()
+    for p in (1, 2, 3):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None
+    # A re-read of page 2 that keeps only part of the answer, then one that fails.
+    c.fetch_cmd(f"{abs_cmd(2)} | jq -c .rule_boot.page", 2, stdout=lambda b: "2")
+    assert c.call(*READ) is None, "an inconclusive re-read never un-counts a confirmed page"
+    c.fetch_cmd(abs_cmd(2), 2, answer="could not reach the deployed Worker: fetch failed")
+    assert c.call(*READ) is None, "a failed re-read never un-counts a confirmed page"
+    # Another door serves another digest for one page (e.g. a different sponsor
+    # scope); the context must read that digest, and pages of the first digest
+    # count again as soon as the arm returns to it.
+    c.fetch_cmd(abs_cmd(1), 1, boot=c.boot(1, digest="b"))
+    assert denied(c.call(*READ)), "a different digest must be read in full"
+    c.fetch_cmd(abs_cmd(1), 1)
+    assert c.call(*READ) is None, "back on digest a: its three confirmed pages still count"
+
+
+def case_parallel_first_fetch_without_arm(c):
+    """With no SessionStart arm, parallel fetches each create the arm.
+    Their epochs must agree, or the later write strands the earlier pages."""
+    c.stub_sized("a", pages=3)
+    arm_path = os.path.join(c.state, SESSION, "arm.json")
+    for p in (1, 2, 3):
+        if os.path.exists(arm_path):
+            os.unlink(arm_path)  # each PostToolUse saw no arm, as in a parallel batch
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None, "three pages confirmed by three racing arm writes: allowed"
+
+
+def case_compact_rearms_the_served_set(c):
+    """A compaction re-arms the served pages and nothing
+    else, and nothing short of reading them stands in: not a digest-only
+    call, not an unpaged standing-context, not a summary's memory."""
+    c.stub_sized("a", pages=4)
+    c.arm()
+    for p in (1, 2, 3, 4):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None
+    text = c.arm("compact")
+    assert "4 page(s)" in text, text
+    r = c.call(*READ)
+    assert denied(r) and "compact" in r["permissionDecisionReason"], r
+    assert "(1, 2, 3, 4)" in r["permissionDecisionReason"], r
+    c.call("mcp__carr__standing-context", {})
+    c.call("mcp__carr__standing-context", {"rule_ids": ["015183f5"]})
+    assert denied(c.call(*READ)), "a digest-confirm or gist call does not stand in for the pages"
+    for p in (1, 2, 3, 4):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None, "the served set re-read after compaction: allowed"
+
+
+def case_filtered_fetch_counts_with_digest(c):
+    """A fetch piped through jq or python3 -c counts when the call
+    succeeded and its printed output carries the boot's digest."""
+    c.stub_sized("a", pages=4)
+    c.arm()
+    dig = c.boot(1)["digest"]
+    forms = [
+        (f"{abs_cmd(1)} | jq -r '.rule_boot | .digest, .text'",
+         lambda b: dig + "\n" + json.loads(b)["rule_boot"]["text"]),
+        (f"{abs_cmd(2)} | jq -c '{{d: .rule_boot.digest, t: .rule_boot.text}}'",
+         lambda b: json.dumps(dict(d=dig, t=json.loads(b)["rule_boot"]["text"]))),
+        (f"{abs_cmd(3)} | python3 -c \"import json,sys; b=json.load(sys.stdin)['rule_boot']; print(b['digest']); print(b['text'])\"",
+         lambda b: dig + "\n" + json.loads(b)["rule_boot"]["text"] + "\n"),
+        (f"{abs_cmd(4)} | jq -r .rule_boot.digest", lambda b: dig + "\n"),
+    ]
+    for p, (cmd, out) in enumerate(forms, start=1):
+        pre, post = c.fetch_cmd(cmd, p, stdout=out)
+        assert not denied(pre), f"a jq or python3 -c filter keeps it a fetch: {cmd}: {pre}"
+        assert not notice(post), f"digest printed: counted silently: {cmd}: {post}"
+    assert c.call(*READ) is None, "four filtered pages, each carrying the digest: allowed"
+    # Without the digest, or with another digest, the page does not count.
+    c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c2.stub_sized("a", pages=1)
+    c2.arm()
+    for cmd, out in ((f"{abs_cmd(1)} | jq -c '{{p: .rule_boot.page, t: .rule_boot.text}}'",
+                      lambda b: json.dumps(dict(p=1, t=json.loads(b)["rule_boot"]["text"]))),
+                     (f"{abs_cmd(1)} | jq -c '{{rule_boot: {{digest: \"sha256:x\"}}}}'",
+                      lambda b: '{"rule_boot": {"digest": "sha256:x"}}'),
+                     (f"{abs_cmd(1)} | jq -r .rule_boot.digest",
+                      lambda b: "sha256:" + "b" * 8 + "\n")):
+        pre, post = c2.fetch_cmd(cmd, 1, stdout=out)
+        assert not denied(pre), f"still a fetch: {cmd}"
+        assert "digest" in notice(post), f"not counted, and the notice names the digest: {post}"
+        assert denied(c2.call(*READ)), f"not counted: {cmd}"
+    # A filtered call that failed is not a read, whatever it printed.
+    c2.fetch_cmd(f"{abs_cmd(1)} | jq -r .rule_boot.digest", 1, answer="Exit code 1\n" + dig)
+    assert denied(c2.call(*READ)), "a failed call never counts"
+    # The digest check needs an armed digest to compare against.
+    c3 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c3.stub_sized("a", pages=1)
+    c3.fetch_cmd(f"{abs_cmd(1)} | jq -r .rule_boot.digest", 1, stdout=lambda b: dig + "\n")
+    assert denied(c3.call(*READ)), "with nothing armed, a printed digest proves nothing"
+    # Filters still may not run, write or read anything else.
+    refused = [f"{abs_cmd(1)} | python3 -c 'import os; os.system(\"id\")'",
+               f"{abs_cmd(1)} | python3 -c 'print(open(\"/etc/hosts\").read())'",
+               f"{abs_cmd(1)} | python3 -c '__import__(\"os\").system(\"id\")'",
+               f"{abs_cmd(1)} | python3 -c 'import json,sys; json.__builtins__'",
+               f"{abs_cmd(1)} | python3 -c 'import subprocess'",
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.modules)'",
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(1, file=sys.stderr)'",
+               f"{abs_cmd(1)} | python3 -c 'exec(\"1\")'",
+               f"{abs_cmd(1)} | python3 -c 'import json; json.dump(1, open(\"x\", \"w\"))'",
+               f"{abs_cmd(1)} | python3 -c '\"{{0.__class__}}\".format(1)'",
+               f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '$ENV'", f"{abs_cmd(1)} | jq -n 1",
+               f"{abs_cmd(1)} | jq 'input_filename'", f"{abs_cmd(1)} | jq -f /tmp/x.jq",
+               f"{abs_cmd(1)} | jq --rawfile x /etc/hosts .", f"{abs_cmd(1)} | jq 'import \"x\" as x; .'"]
+    for i, cmd in enumerate(refused):
+        assert denied(c.call("Bash", {"command": cmd}, agent=f"filter-{i}")), f"not a harmless filter: {cmd}"
+
+
 CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
@@ -868,7 +1003,10 @@ CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage
          case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
          case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
          case_confirm_needs_the_real_page,
-         case_same_checkout_worktree]
+         case_same_checkout_worktree,
+         case_gate_requires_only_the_served_pages, case_confirmed_page_stays_counted,
+         case_parallel_first_fetch_without_arm, case_compact_rearms_the_served_set,
+         case_filtered_fetch_counts_with_digest]
 
 
 def run_all(tree):
@@ -950,7 +1088,7 @@ MUTANTS = {
     "out-of-range-read-as-outage": [('        if _OUT_OF_RANGE in text:', '        if False:')],
     "failed-sticky": [('        if not _short_text(folder, arm):\n            return "allow", None',
                        '        if not _short_text(folder, arm) and "failed" not in names:\n            return "allow", None'),
-                      ('        for stale in ("failed", "unsupported", f"u{page}"):', '        for stale in ():')],
+                      ('    for stale in ("failed", "unsupported", f"u{page}"):', '    for stale in ():')],
     "escape-after-outage": [('\n        return _hold(folder, len(confirmed), UNAVAILABLE_NOTICE',
                              '\n        return "allow", UNAVAILABLE_NOTICE #')],
     "not-deployed-read-as-unreachable": [('    if str(reason or "").startswith("not_deployed"):',
@@ -966,8 +1104,21 @@ MUTANTS = {
                                       '    if False:')],
     "no-length-check": [('    if want < 1:\n        return True', '    if True:\n        return False')],
     "any-filter-harmless": [('def _harmless_filter(stage):\n', 'def _harmless_filter(stage):\n    return True\n')],
-    "any-python-code": [('            return args[1] == _PY_JSON_PRETTY', '            return True')],
-    "any-jq-filter": [('    if flt is None:\n        return True\n    pos = 0', '    if True:\n        return True\n    pos = 0')],
+    "any-python-code": [('            return _py_pure(args[1])', '            return True')],
+    "any-jq-filter": [('    return bool(flt.strip()) and not _JQ_REFUSED.search(flt)', '    return True')],
+    # Digest-confirmed filtered pages and agreeing epochs.
+    "digest-not-checked": [('            and _carries_digest(response, arm.get("digest"))):', '            ):')],
+    "digest-confirms-direct-answers": [('    if (not direct and answer == "inconclusive" and succeeded',
+                                        '    if (answer == "inconclusive" and succeeded')],
+    "digest-confirms-failed-calls": [('    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse"',
+                                      '    succeeded = True')],
+    "racing-epochs": [('            arm.setdefault("epoch", "fetch-" + safe_key(digest.replace("sha256:", ""), "none")[:12])',
+                       '            arm.setdefault("epoch", secrets.token_hex(6))')],
+    "python-unsafe-builtins": [('            elif node.id in _PY_UNSAFE_BUILTINS:\n                return False',
+                                '            elif False:\n                return False')],
+    "python-any-attribute": [('            if node.attr.startswith("_") or not _py_attr_ok(node):',
+                              '            if False:')],
+
     "lookalike-worktree": [('    if os.path.realpath(os.path.join(gitdir, back)) != os.path.realpath(dotgit):\n        return None',
                             '    if False:\n        return None')],
     "worktree-refuses-main-checkout": [('        return bool(mine) and _git_common_dir(os.path.dirname(real)) == mine',
