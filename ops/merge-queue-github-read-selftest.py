@@ -59,7 +59,7 @@ class Contract(unittest.TestCase):
 
     def assert_read_only(self, gh):
         for argv, kwargs in gh.calls:
-            self.assertEqual(argv, ["gh", "api", "repos/synthetic/fixture/pulls/7"])
+            self.assertEqual(argv, ["gh", "api", "repos/synthetic/fixture/pulls/7", "--include"])
             self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
             self.assertEqual(kwargs["timeout"], 30)
 
@@ -147,7 +147,7 @@ class Contract(unittest.TestCase):
         self.assertEqual(sleeps, [5])
         self.assert_read_only(gh)
 
-    def test_rate_limits_keep_reader_retry_policy(self):
+    def test_rate_limits_do_not_retry_before_provider_reset(self):
         for error in ["HTTP 403: API rate limit exceeded\n", "HTTP 429: rate limit exceeded\n"]:
             with self.subTest(error=error):
                 reader, gh, sleeps = fixture(*[(1, "", error)] * 3)
@@ -155,7 +155,7 @@ class Contract(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["blocker"]["kind"], "rate_limit")
                 self.assertTrue(result["blocker"]["retryable"])
-                self.assertEqual(sleeps, [5, 15])
+                self.assertEqual(sleeps, [])
                 self.assert_read_only(gh)
 
     def test_permanent_read_failure_is_never_closed_or_empty_success(self):

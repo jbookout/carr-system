@@ -8,12 +8,12 @@ reader and the Jev value report kept failing on the first blip.
 
 GitHubReader owns how a read is done; callers keep their domain queries.
 
-  retry      a failed read is retried after 5s and then 15s, unless gh's
-             error is one a retry cannot fix (a 4xx other than a rate limit,
-             gh logged out, gh missing). Once a read has exhausted its retries
-             on a transient failure, the same reader's next reads try once
-             until one succeeds: an outage costs one retry cycle per run, not
-             one per read.
+  retry      network failures retry after 5s and 15s. Provider rate limits
+             stop immediately and retain their reset/Retry-After deadline in
+             shared state. A local hold returns without a request or renewal.
+  paging     GET pagination makes one budgeted request per page and refuses
+             incomplete results after twenty pages. Other CLI subcommands can
+             make hidden requests; pacing counts invocations, not those calls.
   redaction  gh's stderr is redacted in full before its tail is kept, so a
              cut can never leave half a token the patterns no longer match.
   one error  every unreadable read raises GitHubUnreadable, a RuntimeError
@@ -38,6 +38,8 @@ from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from lib.secret_redaction import redact_text, sensitive_env_values
+from lib.github_rate_limit import GitHubReadBudget, GitHubReadPaused, split_response
+from urllib.parse import urlencode, urlsplit, parse_qsl
 
 GH_FALLBACKS = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
 RETRY_DELAYS = (5, 15)
@@ -79,27 +81,49 @@ class GitHubReader:
     def __init__(self, *, env: Mapping[str, str] | None = None, cwd: str | None = None,
                  timeout: float = 30, retry_delays: Iterable[float] = RETRY_DELAYS,
                  gh: str | None = None, runner: Callable[..., Any] | None = None,
-                 sleep: Callable[[float], Any] | None = None):
+                 sleep: Callable[[float], Any] | None = None,
+                 budget: GitHubReadBudget | None = None):
         self.env = dict(env) if env is not None else None
         self.cwd, self.timeout = cwd, timeout
         self.retry_delays = tuple(retry_delays)
         self.gh = gh or resolve_gh(self.env)
         self._runner, self._sleep = runner, sleep
         self._outage = False
+        self.budget = budget or (GitHubReadBudget(self.env) if runner is None else None)
+        self._next_page: bool | None = None
 
     def api(self, path: str, *, paginate: bool = False,
-            fields: Mapping[str, object] | None = None) -> Any:
-        """`gh api <path>` parsed. paginate=True reads every page and flattens them."""
-        args = ["api", *(["--paginate", "--slurp"] if paginate else []), path]
-        if fields:
-            args += ["--method", "GET"]
-            for key, value in fields.items():
-                args += ["-f", f"{key}={value}"]
-        text, attempts = self._read(args)
-        data = self._parse(text, args, attempts=attempts)
-        if paginate:   # --slurp yields one list per page
-            return [item for page in (data or []) for item in (page or [])]
-        return data
+            fields: Mapping[str, object] | None = None, max_pages: int = 20,
+            slurp: bool = False) -> Any:
+        """Read GET pages individually; never return a truncated list as complete."""
+        if type(max_pages) is not int or not 1 <= max_pages <= 160:
+            raise ValueError("max_pages must be between 1 and 160")
+        rows, pages = [], []
+        for page in range(1, max_pages + 1):
+            endpoint = path
+            if paginate:
+                parts = urlsplit(path)
+                query = dict(parse_qsl(parts.query))
+                query.update({"per_page": "100", "page": str(page)})
+                endpoint = parts.path + "?" + urlencode(query)
+            args = ["api", endpoint]
+            if fields:
+                args += ["--method", "GET"]
+                for key, value in fields.items():
+                    if paginate and key in ("per_page", "page"):
+                        continue
+                    args += ["-f", f"{key}={value}"]
+            text, attempts = self._read(args)
+            data = self._parse(text, args, attempts=attempts)
+            if not paginate:
+                return data
+            if not isinstance(data, list):
+                raise GitHubUnreadable(f"gh api {path.split('?')[0]} returned no page list", kind="invalid_response")
+            rows.extend(data)
+            pages.append(data)
+            if self._next_page is False or (self._next_page is None and len(data) < 100):
+                return pages if slurp else rows
+        raise GitHubUnreadable(f"gh api {path.split('?')[0]} exceeded {max_pages} pages; no partial result returned", kind="pagination_limit")
 
     def json(self, args: list[str]) -> Any:
         """Any gh subcommand whose output is JSON (`pr list --json ...`), parsed."""
@@ -111,14 +135,33 @@ class GitHubReader:
         return self._read(args)[0]
 
     def _read(self, args: list[str]) -> tuple[str, int]:
+        if args and args[0] == "api" and "--paginate" in args:
+            raise GitHubUnreadable("Native pagination bypasses page budgets; use api(paginate=True)",
+                                   kind="invalid_response", attempts=0)
         what = _what(args)
         delays = [] if self._outage else list(self.retry_delays)
         attempts = 0
         while True:
             attempts += 1
+            endpoint = args[1].lstrip("/") if len(args) > 1 and args[0] == "api" else ""
+            resource = ("graphql" if endpoint == "graphql" else "code_search" if endpoint.startswith("search/code")
+                        else "search" if endpoint.startswith("search/") else "core" if endpoint and not endpoint.startswith("-") else "unknown")
+            try:
+                if self.budget:
+                    delay = self.budget.reserve(resource)
+                    if delay:
+                        (self._sleep or time.sleep)(delay)
+                    self.budget.check(resource)
+            except GitHubReadPaused as exc:
+                raise GitHubUnreadable(str(exc), kind="rate_limit", transient=True, attempts=attempts - 1) from None
+            except (RuntimeError, OSError) as exc:
+                raise GitHubUnreadable(str(exc), kind="budget_unreadable", attempts=attempts - 1) from None
+            observed_at = self.budget.clock() if self.budget else time.time()
+            include = bool(args and args[0] == "api" and "--include" not in args and "-i" not in args)
+            invocation = [*args, "--include"] if include else args
             try:
                 proc = (self._runner or subprocess.run)(
-                    [self.gh, *args], env=self.env, cwd=self.cwd, stdin=subprocess.DEVNULL,
+                    [self.gh, *invocation], env=self.env, cwd=self.cwd, stdin=subprocess.DEVNULL,
                     capture_output=True, text=True, timeout=self.timeout)
             except subprocess.TimeoutExpired:
                 failure = f"timed out after {self.timeout:g}s"
@@ -127,14 +170,28 @@ class GitHubReader:
                 raise GitHubUnreadable(f"gh {what} could not start: {type(exc).__name__}",
                                        attempts=attempts) from exc
             else:
-                if proc.returncode == 0:
-                    self._outage = False
-                    return proc.stdout or "", attempts
+                try:
+                    headers, body = split_response(proc.stdout or "")
+                except ValueError as exc:
+                    raise GitHubUnreadable(str(exc), kind="invalid_response", attempts=attempts) from None
                 diagnostic = self._redact(getattr(proc, "stderr", "") or "")
+                if self.budget:
+                    try:
+                        self.budget.observe(resource, headers, diagnostic, observed_at)
+                    except (RuntimeError, ValueError, OverflowError):
+                        raise GitHubUnreadable("GitHub budget response invalid; reads stopped", kind="budget_unreadable", attempts=attempts) from None
+                if proc.returncode == 0:
+                    self._next_page = bool(re.search(r';\s*rel="next"', headers.get("link", ""))) if headers else None
+                    self._outage = False
+                    return (body if include else proc.stdout or ""), attempts
                 detail = diagnostic[-TAIL_LIMIT:]
                 failure = f"exited {proc.returncode}"
                 transient = _transient(diagnostic)
                 kind = _failure_kind(diagnostic)
+            if kind == "rate_limit":
+                raise GitHubUnreadable(
+                    f"gh {what} rate limited after {attempts} attempt; {detail}",
+                    detail=detail, transient=True, attempts=attempts, kind=kind)
             if not transient or not delays:
                 self._outage = self._outage or (transient and attempts > 1)
                 plural = "s" if attempts > 1 else ""

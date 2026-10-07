@@ -2077,23 +2077,21 @@ class ReviewGate(Base):
 
     def test_verdict_comments_are_read_across_pages(self):
         gh = rp.GitHub("o/r", {})
-        real = rp.subprocess.run
-
-        class Done:
-            returncode = 0
-            stdout = json.dumps([[{"id": 1}], [{"id": 2}, {"id": 3}]])
-
         seen = []
-
+        replies = [
+            'HTTP/2.0 200\nLink: <https://api.github.com/x?page=2>; rel="next"\n\n[{"id":1}]',
+            'HTTP/2.0 200\nX-RateLimit-Remaining: 10\n\n[{"id":2},{"id":3}]',
+        ]
         def fake(argv, **kw):
             seen.append(argv)
-            return Done()
-        rp.subprocess.run = fake
-        try:
-            self.assertEqual([c["id"] for c in gh.comments(5)], [1, 2, 3])
-        finally:
-            rp.subprocess.run = real
-        self.assertIn("--paginate", seen[0])
+            return subprocess.CompletedProcess(argv, 0, replies.pop(0), "")
+        gh.reader = rp.GitHubReader(env={}, runner=fake)
+        self.assertEqual([c["id"] for c in gh.comments(5)], [1, 2, 3])
+        self.assertEqual([a[2] for a in seen], [
+            "repos/o/r/issues/5/comments?per_page=100&page=1",
+            "repos/o/r/issues/5/comments?per_page=100&page=2",
+        ])
+        self.assertTrue(all("--paginate" not in a for a in seen))
 
 
 

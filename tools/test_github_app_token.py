@@ -82,6 +82,7 @@ class GitHubAppTokenTests(unittest.TestCase):
     def test_mints_verified_rs256_and_reuses_private_cache(self):
         env = app.gh_env()
         self.assertTrue(env["GH_TOKEN"] == "synthetic-app")
+        self.assertTrue(env["CARR_GITHUB_BUDGET_PRINCIPAL"].startswith("app:"))
         self.assertNotIn("GITHUB_TOKEN", env)
         self.assertEqual(env["GH_HOST"], "github.com")
         self.assertTrue(os.environ["GH_TOKEN"] == "synthetic-user")
