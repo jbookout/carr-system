@@ -164,6 +164,36 @@ gh = Gh((0, "<html>", ""))
 exc = raised(lambda: reader(gh).api("x"))
 check("a reply that is not JSON is unreadable", exc is not None and "not JSON" in str(exc), exc)
 
+for method in ("api", "json"):
+    sleeps = []
+    gh = Gh(CONNECT, (0, "<html>", ""))
+    r = reader(gh, sleeps, env={})
+    exc = raised(lambda: r.api("x") if method == "api" else r.json(["pr", "list"]))
+    check(f"{method} non-JSON reports the actual recovered read attempts",
+          exc is not None and exc.attempts == 2 and not exc.transient
+          and len(gh.calls) == 2 and sleeps == [5], (exc, len(gh.calls), sleeps))
+
+for marker, expected_kind, transient in (
+        ("HTTP 401: Bad credentials", "authentication", False),
+        ("Please run gh auth login", "authentication", False),
+        ("HTTP 404: Not Found", "github_unreadable", False),
+        ("HTTP 403: API rate limit exceeded", "rate_limit", True),
+        ("HTTP 429: Too Many Requests", "rate_limit", True)):
+    sleeps = []
+    synthetic_secret = "synthetic-secret-canary-123456789"
+    error = marker + "\nAuthorization: token " + synthetic_secret + "\n" + "wrapper diagnostic " * 30
+    gh = Gh(*[(1, "", error)] * 3)
+    exc = raised(lambda: reader(gh, sleeps, env={"GH_TOKEN": synthetic_secret}).api("x"))
+    check(f"{marker} is classified before the diagnostic tail is cut",
+          exc is not None and exc.kind == expected_kind and exc.transient == transient
+          and exc.attempts == (3 if transient else 1)
+          and len(gh.calls) == (3 if transient else 1)
+          and sleeps == ([5, 15] if transient else []),
+          (exc, len(gh.calls), sleeps))
+    check(f"{marker} retains only a bounded redacted diagnostic",
+          exc is not None and len(exc.detail) <= 200 and len(str(exc)) < 400
+          and "\n" not in str(exc) and synthetic_secret not in str(exc), str(exc))
+
 # ── redaction ─────────────────────────────────────────────────────────────
 
 token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"

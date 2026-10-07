@@ -100,6 +100,33 @@ class Contract(unittest.TestCase):
                 self.assertEqual(sleeps, [])
                 self.assert_read_only(gh)
 
+    def test_authentication_before_long_wrapper_tail_stops_and_redacts(self):
+        canary = "synthetic-secret-canary-123456789"
+        error = f"HTTP 401: Bad credentials\nAuthorization: token {canary}\n" + "wrapper diagnostic " * 30
+        reader, gh, sleeps = fixture(*[(1, "", error)] * 3, env={"GH_TOKEN": canary})
+        result = self.read(reader)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["pull_request"])
+        self.assertEqual(result["blocker"]["kind"], "authentication")
+        self.assertFalse(result["blocker"]["retryable"])
+        self.assertEqual(result["blocker"]["attempts"], 1)
+        self.assertEqual(len(gh.calls), 1)
+        self.assertEqual(sleeps, [])
+        self.assertNotIn(canary, json.dumps(result))
+        self.assertLess(len(result["blocker"]["detail"]), 400)
+        self.assert_read_only(gh)
+
+    def test_non_json_after_retry_reports_actual_attempts(self):
+        reader, gh, sleeps = fixture((1, "", "HTTP 502: Bad Gateway\n"), (0, "not-json", ""))
+        result = self.read(reader)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["pull_request"])
+        self.assertFalse(result["blocker"]["retryable"])
+        self.assertEqual(result["blocker"]["attempts"], 2)
+        self.assertEqual(len(gh.calls), 2)
+        self.assertEqual(sleeps, [5])
+        self.assert_read_only(gh)
+
     def test_502_and_timeout_keep_existing_bounded_retry(self):
         for error in [(1, "", "HTTP 502: Bad Gateway\n"), subprocess.TimeoutExpired("gh", 30)]:
             with self.subTest(error=type(error).__name__):
