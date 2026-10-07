@@ -149,6 +149,7 @@ def gh_env() -> dict[str, str]:
     env.pop("GH_TOKEN", None)
     env.pop("GITHUB_TOKEN", None)
     env["GH_HOST"] = "github.com"
+    env["CARR_GITHUB_BUDGET_PRINCIPAL"] = "stored-login"
     config = _config()
     key_path = Path.home() / ".config/carr" / config["key_file"]
     try:
@@ -163,6 +164,7 @@ def gh_env() -> dict[str, str]:
         raise GitHubAppError("GitHub App private key unavailable; GitHub calls stopped") from None
     try:
         env["GH_TOKEN"] = _token(config, key)
+        env["CARR_GITHUB_BUDGET_PRINCIPAL"] = f"app:{config['app_id']}:{config['repository']}"
     except _MissingInstallation:
         LOG.warning("GitHub App installation missing or suspended; falling back to user login")
     except GitHubAppError:
