@@ -1,0 +1,50 @@
+{
+  "activation_hold": true,
+  "baseline_ref": "b14473e5e84d92c7c415599c57883308dfef24fc",
+  "candidate_suite": {
+    "cases": 35,
+    "mutants_killed": 25,
+    "mutants_total": 25,
+    "result": "passed"
+  },
+  "claims": "Offline native-hook correlation and concurrency controls only. No deployed adapter, no-tool message, model obedience, or billed-cost claim.",
+  "controls": {
+    "case_arming_fetch_overlap": {
+      "baseline": "failed_expected",
+      "error_type": "AssertionError",
+      "reason": "old completed pages survived while new arming fetch waited"
+    },
+    "case_concurrent_compact": {
+      "baseline": "failed_expected",
+      "error_type": "AssertionError",
+      "reason": "confirmation escaped generation lock"
+    },
+    "case_concurrent_digest": {
+      "baseline": "failed_expected",
+      "error_type": "AssertionError",
+      "reason": "confirmation escaped generation lock"
+    },
+    "case_correlation_failures": {
+      "baseline": "failed_expected",
+      "error_type": "AssertionError",
+      "reason": "Read"
+    },
+    "case_delayed_old_epoch": {
+      "baseline": "failed_expected",
+      "error_type": "AssertionError",
+      "reason": "old answers changed page markers"
+    },
+    "case_delayed_subagent": {
+      "baseline": "failed_expected",
+      "error_type": "AssertionError",
+      "reason": ""
+    }
+  },
+  "schema": "rule-boot-epoch-control-measurement/v1",
+  "source_sha256": {
+    "evals/rule-delivery/boot_epoch_probe.py": "68b96daa14de62374723d87637f261fb0540a83d1e08a5de21e7adbeb8584760",
+    "hooks/rule-boot-gate.py": "a2cbda4604f7429e3278fae4badce0d33b5e57faa6ae5740ae8247d9f47a5643",
+    "lib/rule_boot_gate.py": "0d1def5f4356fb92eae65977c25518c895280b145cbb827368fe873b3841cbb0",
+    "ops/rule-boot-gate-selftest.py": "1dc82259bae3423e72620f1d4a85ca4faa022122f6a4c6048295b9814820f049"
+  }
+}

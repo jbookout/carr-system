@@ -29,6 +29,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import threading
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SESSION = "sess-selftest"
@@ -120,7 +122,22 @@ class Case:
         return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source],
                               capture_output=True, text=True, env=self.env, timeout=30).stdout
 
+    def native_payload(self, payload):
+        """Existing scenarios use the stable ID supplied by native fetch hooks."""
+        payload = dict(payload)
+        if "tool_use_id" not in payload and "toolUseId" not in payload:
+            key = json.dumps([payload.get("agent_id"), payload.get("tool_name"),
+                              payload.get("tool_input")], sort_keys=True)
+            calls = getattr(self, "native_calls", {})
+            if payload.get("hook_event_name") == "PreToolUse":
+                self.native_counter = getattr(self, "native_counter", 0) + 1
+                calls[key] = f"fixture-{self.native_counter}"
+                self.native_calls = calls
+            payload["tool_use_id"] = calls.get(key)
+        return payload
+
     def hook(self, payload):
+        payload = self.native_payload(payload)
         if self.subprocess_only():
             out = subprocess.run([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
                                  input=json.dumps(payload), capture_output=True, text=True,
@@ -139,6 +156,7 @@ class Case:
 
     def hooks_parallel(self, payloads):
         """Run the hook for every payload at once (a model's parallel batch)."""
+        payloads = [self.native_payload(payload) for payload in payloads]
         procs = [subprocess.Popen([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   text=True, env=self.env) for _ in payloads]
@@ -857,7 +875,199 @@ def case_same_checkout_worktree(c):
     assert json.loads(out.stdout or "null") == ["fetch", "fetch", "fetch", "other", "other"], out.stdout + out.stderr
 
 
-CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
+def correlated(page, call, agent=None):
+    tool, args = mcp_fetch(page)
+    payload = {"session_id": SESSION, "cwd": REPO, "tool_name": tool,
+               "tool_input": args, "tool_use_id": call}
+    if agent:
+        payload["agent_id"] = agent
+    return payload
+
+
+def initiate(c, page, call, agent=None):
+    payload = correlated(page, call, agent)
+    assert not denied(c.hook(dict(payload, hook_event_name="PreToolUse")))
+    return payload
+
+
+def answer(c, payload, boot):
+    return c.hook(dict(payload, hook_event_name="PostToolUse",
+                       tool_response={"ok": True, "rule_boot": boot}))
+
+
+def current_arm(c):
+    with open(os.path.join(c.state, SESSION, "arm.json")) as handle:
+        return json.load(handle)
+
+
+def generation_markers(c):
+    root = os.path.join(c.state, SESSION, "fetched")
+    return sorted((os.path.relpath(os.path.join(folder, name), root),
+                   open(os.path.join(folder, name)).read())
+                  for folder, _dirs, files in os.walk(root) for name in files
+                  if not name.startswith("d"))
+
+
+def protected_held(c, agent=None):
+    for tool, args in (READ, ("Bash", {"command": "git push origin HEAD"}),
+                       ("Agent", {"prompt": "Inspect diagnosis"})):
+        assert denied(c.call(tool, args, agent=agent)), tool
+
+
+def case_delayed_old_epoch(c):
+    for new_digest in ("a", "b"):
+        c.stub_sized("a", 3); c.arm()
+        old = [(initiate(c, p, f"old-{new_digest}-{p}"), c.boot(p)) for p in (1, 2, 3)]
+        c.stub_sized(new_digest, 3); c.arm("compact")
+        before = current_arm(c); markers = generation_markers(c)
+        for payload, boot in old:
+            answer(c, payload, boot)
+        assert current_arm(c) == before, "old answers changed compact arm"
+        assert generation_markers(c) == markers, "old answers changed page markers"
+        protected_held(c)
+        c.fetch(1)
+        for payload, boot in old:
+            answer(c, payload, boot)
+        protected_held(c)
+        c.fetch(2); c.fetch(3)
+        assert c.call(*READ) is None, "fresh complete delivery must recover"
+
+
+def case_correlation_failures(c):
+    c.stub_sized("a", 2); c.arm()
+    # Missing and conflicting aliases, unmatched result, page/input/context mismatch.
+    missing = correlated(1, None)
+    c.hook(dict(missing, hook_event_name="PreToolUse")); answer(c, missing, c.boot(1))
+    conflict = correlated(1, "id-one"); conflict["toolUseId"] = "id-two"
+    c.hook(dict(conflict, hook_event_name="PreToolUse")); answer(c, conflict, c.boot(1))
+    answer(c, correlated(1, "not-initiated"), c.boot(1))
+    payload = initiate(c, 1, "wrong-context")
+    answer(c, dict(payload, agent_id="other"), c.boot(1))
+    payload = initiate(c, 1, "wrong-page")
+    answer(c, dict(payload, tool_input={"detail": "boot", "page": 2}), c.boot(2))
+    duplicate = initiate(c, 1, "duplicate-start")
+    c.hook(dict(duplicate, hook_event_name="PreToolUse"))
+    answer(c, duplicate, c.boot(1)); protected_held(c)
+    # Different calls of the same page do not satisfy another page.
+    c.fetch(1); c.fetch(1); protected_held(c)
+    # Replay after an epoch change cannot reuse a consumed identity.
+    good = initiate(c, 2, "consumed"); answer(c, good, c.boot(2))
+    assert c.call(*READ) is None
+    c.arm("compact"); answer(c, good, c.boot(2)); protected_held(c)
+    for p in (1, 2): c.fetch(p)
+    assert c.call(*READ) is None
+
+
+def wait_file(path):
+    deadline = time.monotonic() + 10
+    while not os.path.exists(path):
+        assert time.monotonic() < deadline, f"barrier not reached: {path}"
+        time.sleep(.01)
+
+
+def race_barrier(c, mode):
+    c.stub_sized("a", 2); c.arm()
+    late = initiate(c, 2, "late-" + mode)
+    old_boot = c.boot(2)
+    first = initiate(c, 1, "first-" + mode)
+    first_payload = dict(first, tool_response={"ok": True, "rule_boot": c.boot(1, "b", 2)})
+    late_payload = dict(late, tool_response={"ok": True, "rule_boot": old_boot})
+    c.stub_sized("b", 2)
+    ready, release, attempted = [os.path.join(c.work, mode + "-" + n) for n in ("ready", "release", "attempted")]
+    first_path = os.path.join(c.work, mode + "-first.json")
+    late_path = os.path.join(c.work, mode + "-late.json")
+    for path, body in ((first_path, first_payload), (late_path, late_payload)):
+        with open(path, "w") as handle: json.dump(body, handle)
+    code = """import json,os,sys,time
+sys.path.insert(0,sys.argv[1]);from lib import rule_boot_gate as g
+mode,path,ready,release=sys.argv[2:6]
+original=g.write_arm
+def barrier(session,arm):
+ if arm.get('status')=='armed':
+  open(ready,'w').close()
+  deadline=time.monotonic()+10
+  while not os.path.exists(release):
+   if time.monotonic()>deadline: raise RuntimeError('release barrier timed out')
+   time.sleep(.01)
+ return original(session,arm)
+g.write_arm=barrier
+if mode=='compact':g.arm_session('sess-selftest','compact')
+else:g.observe(json.load(open(path)))
+"""
+    first_proc = subprocess.Popen([sys.executable, "-c", code, c.tree, mode, first_path, ready, release], env=c.env)
+    second_proc = None
+    try:
+        wait_file(ready)
+        second_code = "import sys,json;sys.path.insert(0,sys.argv[1]);from lib import rule_boot_gate as g;open(sys.argv[3],'w').close();g.observe(json.load(open(sys.argv[2])))"
+        second_proc = subprocess.Popen([sys.executable, "-c", second_code, c.tree, late_path, attempted], env=c.env)
+        wait_file(attempted)
+        time.sleep(.1)
+        assert second_proc.poll() is None, "confirmation escaped generation lock"
+        open(release, "w").close()
+        assert first_proc.wait(timeout=10) == 0
+        assert second_proc.wait(timeout=10) == 0
+    finally:
+        open(release, "a").close()
+        for proc in (first_proc, second_proc):
+            if proc and proc.poll() is None:
+                proc.kill(); proc.wait()
+    assert current_arm(c)["digest"] == "sha256:" + "b" * 8, "late result rolled back newer arm"
+    protected_held(c)
+    c.fetch(1); c.fetch(2)
+    assert c.call(*READ) is None
+
+
+def case_concurrent_compact(c):
+    race_barrier(c, "compact")
+
+
+def case_concurrent_digest(c):
+    race_barrier(c, "digest")
+
+
+def case_delayed_subagent(c):
+    c.stub_sized("a", 2); c.arm()
+    old = [(initiate(c, p, "agent-old-" + str(p), "sub"), c.boot(p)) for p in (1, 2)]
+    c.arm("compact"); before = current_arm(c); markers = generation_markers(c)
+    for payload, boot in old: answer(c, payload, boot)
+    assert current_arm(c) == before and generation_markers(c) == markers
+    protected_held(c, agent="sub"); protected_held(c)
+    for p in (1, 2): c.fetch(p, agent="sub")
+    assert c.call(*READ, agent="sub") is None
+    protected_held(c)
+
+
+def case_arming_fetch_overlap(c):
+    c.stub_sized("a", 2); c.arm()
+    for p in (1, 2): c.fetch(p)
+    assert c.call(*READ) is None
+    started, release = threading.Event(), threading.Event()
+    with InProcess(c) as (_hook, lib):
+        original = lib._live_page_one
+        def delayed_fetch():
+            if threading.current_thread().name == "old-arm":
+                started.set()
+                assert release.wait(10)
+                return {"rule_boot": c.boot(1, "b", 2)}, None
+            return {"rule_boot": c.boot(1, "c", 2)}, None
+        lib._live_page_one = delayed_fetch
+        thread = threading.Thread(target=lambda: lib.arm_session(SESSION, "compact"), name="old-arm")
+        try:
+            thread.start(); assert started.wait(10)
+            decision, _ = lib.verdict({"session_id": SESSION, "tool_name": READ[0], "tool_input": READ[1]})
+            assert decision == "deny", "old completed pages survived while new arming fetch waited"
+            lib.arm_session(SESSION, "compact"); before = current_arm(c)
+            release.set(); thread.join(10); assert not thread.is_alive()
+            assert current_arm(c) == before and before["digest"] == "sha256:" + "c" * 8
+        finally:
+            release.set(); thread.join(10); lib._live_page_one = original
+    protected_held(c)
+    c.stub_sized("c", 2)
+    for p in (1, 2): c.fetch(p)
+    assert c.call(*READ) is None
+
+
+CASES = [case_delayed_subagent, case_arming_fetch_overlap, case_delayed_old_epoch, case_correlation_failures, case_concurrent_compact, case_concurrent_digest, case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
          case_failure_not_sticky, case_state_unwritable_never_armed, case_disk_full_never_armed,
@@ -937,6 +1147,7 @@ def check_pending_install():
 # ------------------------------------------------------------------ mutants
 
 MUTANTS = {
+    "generation-validation-removed": [('and request.get("arm") == _arm_binding(arm)', 'and True')],
     # First round (the coordinator's three, plus two).
     "never-denies": [('\n    return "deny", reason\n', '\n    return "allow", reason\n')],
     "denies-the-fetch-itself": [('    if kind == "fetch":\n        if page is not None:',
