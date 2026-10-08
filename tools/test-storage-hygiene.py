@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "storage_hygiene", ROOT / "tools" / "storage_hygiene.py")
+assert SPEC is not None and SPEC.loader is not None
 storage_hygiene = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = storage_hygiene
 SPEC.loader.exec_module(storage_hygiene)

@@ -305,12 +305,16 @@ def apply_plan(plan: CleanupPlan, *, dry_run: bool, ledger_path: Path,
                 + int(disk_used is not None and disk_used > disk_threshold))
     previous = _previous_run(ledger_path)
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    episode_key = None
+    episode_key: str | None = None
     if findings:
-        episode_key = (previous.get("finding_episode")
-                       if previous.get("finding_count", 0) else at)
+        previous_episode = previous.get("finding_episode")
+        episode_key = (previous_episode
+                       if (previous.get("finding_count", 0)
+                           and isinstance(previous_episode, str))
+                       else at)
     status = "skipped-dry-run" if dry_run else "not-needed"
     if findings and not dry_run:
+        assert episode_key is not None
         try:
             answer = record_finding(_finding_payload(
                 plan, episode_key=episode_key, disk_used=disk_used))
