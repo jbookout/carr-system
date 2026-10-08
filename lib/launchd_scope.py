@@ -71,6 +71,7 @@ PRIMARY_ONLY = {
     # keymap, local servers, spool flush, fleet sync) stay on every machine.
     "com.carr.room-bridge.plist",
     "com.carr.release-pipeline.plist",
+    "com.carr.merge-queue.plist",
     "com.carr.control-plane-tick.plist",
     "com.carr.delivery-cadence-a05-sweep.plist",
     "com.carr.nightly-exports-daytime-retry.plist",
