@@ -349,6 +349,54 @@ for _cmd in ("curl -o new-research-download.html https://research.example.org/x"
 case("python network client to an arbitrary host stays blocked",
      bash("python3 -c \"import requests; requests.get('https://evil.example.com/')\""), DENY)
 
+# ── 7b. A SEND behind a command prefix is still a send (2026-10-08) ──────────
+# Reviewer finding on PR 1646: the sender test only recognised a sender at the
+# very start of a command or right after a bare wrapper word, so a leading
+# assignment (`X=1 curl ...`) or a wrapper with its own options or assignments
+# (`env -i curl ...`, `env X=1 curl ...`, `timeout 5 curl ...`) hid the sender,
+# and a data-sending curl to an unlisted host was ALLOWED. Every prefix below
+# must leave the send blocked, in every command position.
+_SENDS = {"curl": "curl -d @x.txt https://research.example.org/",
+          "wget": "wget --post-file=x.txt https://research.example.org/"}
+_PREFIXES = ("", "X=1 ", "X=1 Y='a b' ", "env ", "env X=1 ", "env -i ", "env -u HOME X=1 ",
+             "/usr/bin/env X=1 ", "X=1 env Y=2 ", "command ", "exec ", "nice ", "nice -n 10 ",
+             "nohup ", "timeout 5 ", "timeout -s KILL 5 ", "time ", "time -p ", "/usr/bin/time -p ",
+             "sudo ", "sudo -E ", "sudo -u root ", "stdbuf -oL ", "stdbuf -o L ", "xargs ",
+             "xargs -n1 ", "X=1 nice -n 5 timeout 5 ", "/opt/homebrew/bin/timeout 5 ")
+for _tool, _send in _SENDS.items():
+    for _prefix in _PREFIXES:
+        case(f"prefixed {_tool} send: {_prefix!r}", bash(_prefix + _send), DENY)
+_POSITIONS = (("after ;", "true; {}"), ("after &&", "true && {}"), ("after ||", "false || {}"),
+              ("after |", "true | {}"), ("in a subshell", "({})"),
+              ("in a command substitution", "echo $({})"), ("in backticks", "echo `{}`"),
+              ("on a new line", "true\n{}"), ("in bash -c", "bash -c '{}'"),
+              ("in sh -c", 'sh -c "{}"'), ("in eval", "eval '{}'"),
+              ("in sudo sh -c", "sudo sh -c '{}'"), ("in su -c", "su root -c '{}'"),
+              ("after if/then", "if true; then {}; fi"), ("in a loop body", "while true; do {}; done"))
+for _tool, _send in _SENDS.items():
+    for _prefix in ("", "X=1 ", "env X=1 ", "env -i ", "timeout 5 ", "sudo -E "):
+        for _where, _shape in _POSITIONS:
+            case(f"prefixed {_tool} send {_where}: {_prefix!r}",
+                 bash(_shape.format(_prefix + _send)), DENY)
+# Quoting that hides the boundary or the executable's spelling from a raw scan.
+for _cmd in ('X="a;b" curl -d @x.txt https://research.example.org/',
+             "X='a b' env -i curl -d @x.txt https://research.example.org/",
+             '\\curl -d @x.txt https://research.example.org/',
+             'c""url -d @x.txt https://research.example.org/',
+             "'curl' -d @x.txt https://research.example.org/"):
+    case(f"quoted spelling of a send: {_cmd!r}", bash(_cmd), DENY)
+# The fix must not turn a prefix into a reason to refuse legitimate work.
+for _cmd in ("X=1 curl https://research.example.org/page",
+             "X=1 Y='a b' curl -s https://research.example.org/page | head -5",
+             "true && X=1 curl -s https://research.example.org/page",
+             "X=1 wget -q -O new-research-download.html https://research.example.org/page",
+             "env FOO=1 python3 ops/something.py",
+             "env FOO=1 python3 ops/something.py --source https://research.example.org/page",
+             "X=1 echo 'see https://research.example.org/page'",
+             "timeout 5 git status --short",
+             "nice -n 10 python3 ops/something.py https://research.example.org/page"):
+    case(f"prefixed non-send stays allowed: {_cmd!r}", bash(_cmd, cwd=REPO), ALLOW)
+
 # ── 8. Regression: the other guard classes still bite ─────────────────────────
 case("destructive rm", bash("rm -rf /Users/booko/carr-system/lib"), DENY)
 case("git force push", bash("git push --force origin main"), DENY)

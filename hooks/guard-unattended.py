@@ -664,19 +664,48 @@ RULES = [
 # still broken. The loop names the right fix and this is it: decide from the
 # command's EXECUTABLE first, and only then look at hostnames.
 #
-# THE SENDER TEST. A sender name counts only in COMMAND POSITION — at the start of
-# the command, or after a pipe, semicolon, `&&`, `||`, a subshell opener, or one
-# of the usual prefix words (sudo/env/xargs/time/nohup) — optionally with a
-# leading path. That is what keeps `https` in `"see https://example.com"` from
-# matching while `curl`, `/usr/bin/curl` and `... | xargs curl` all still do.
-# `http`/`https` REMAIN senders in command position, because httpie's client is
-# literally named `http` and dropping it would open a real hole.
+# THE SENDER TEST. A sender name counts only as the EXECUTABLE a simple command
+# runs, optionally with a leading path. That is what keeps `https` in
+# `"see https://example.com"` from matching while `curl`, `/usr/bin/curl` and
+# `... | xargs curl` all still do. `http`/`https` REMAIN senders, because
+# httpie's client is literally named `http` and dropping it would open a real hole.
+#
+# WHAT "THE EXECUTABLE" MEANS is decided by normalising command position, not by
+# listing spellings (2026-10-08). The first version matched a sender only at the
+# start of a command or straight after a bare prefix word, so `X=1 curl -d ...`,
+# `env -i curl -d ...`, `env X=1 curl -d ...` and `timeout 5 curl -d ...` hid
+# the sender, and a data-sending curl to an unlisted host was ALLOWED; so were
+# the same sends inside `bash -c '...'`, `eval '...'` and after `then`/`do`.
+# Command position is now found the way the shell finds it (command_executables):
+#   - leading VAR=value assignments are skipped;
+#   - shell keywords that introduce a command (then, do, if, ! ...) are skipped;
+#   - a WRAPPER, a program that runs another command (env, sudo, timeout, nice,
+#     time, xargs ...), makes EVERY later word a candidate executable, because
+#     each wrapper takes its own options and option values and a parser that
+#     guessed them would be one unknown flag away from a hole; a later word
+#     holding spaces is a quoted command string and is read as a command;
+#   - the string a shell runs with -c, and the words eval runs, are commands too.
+# It reads the command twice: as properly quoted shell words, and as raw text
+# split at every boundary character, so a command substitution or backtick
+# inside a quoted string is still seen. Either reading finding a sender is
+# enough. Over-reading costs only the plain-fetch check below; under-reading
+# lets a send through.
 SENDER = (r"curl|wget|nc|ncat|netcat|telnet|ftp|sftp|scp|rsync|ssh|httpie|http|https"
           r"|links|lynx|w3m|aria2c|axel|fetch")
-SEND_CTX = re.compile(
-    r"(?:^|[|;&(){}`\n]|\$\(|&&|\|\||\bsudo\b|\bxargs\b|\benv\b|\btime\b|\bnohup\b|\bdoas\b)"
-    r"\s*(?:[\w./-]*/)?(?:" + SENDER + r")\b",
-    re.I)
+_SENDER_NAMES = frozenset(SENDER.lower().split("|"))
+# Programs whose job is to run another command given as their arguments.
+COMMAND_WRAPPERS = frozenset({
+    "xargs", "sudo", "doas", "env", "time", "nohup", "command", "exec", "builtin",
+    "watch", "timeout", "gtimeout", "parallel", "nice", "renice", "ionice", "stdbuf",
+    "setsid", "caffeinate", "unbuffer", "flock", "chronic", "chroot", "taskset", "chrt",
+    "script", "nsenter", "unshare", "firejail", "proxychains", "proxychains4", "torsocks",
+    "sandbox-exec", "arch", "su", "runuser", "pkexec", "coproc"})
+# Shell reserved words after which the next word is in command position.
+_COMMAND_KEYWORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until",
+                               "!", "{"})
+_SHELLS = re.compile(r"^(?:ba|z|da|k|c|tc|fi|mk)?sh$")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\+?=")
+_RAW_BOUNDARY = re.compile(r"[|;&(){}`\n]")
 
 # AN INTERPRETER THAT IMPORTS A NETWORK CLIENT IS ALSO A SENDER, and this half is
 # what keeps the narrower executable test from becoming a hole: `python3 -c "import
@@ -786,6 +815,78 @@ def hosts_in(cmd):
     return [url_host(url) for url in urls_in(cmd)] + REMOTE_TARGET_RE.findall(cmd)
 
 
+def _exe_name(word):
+    """A word read as an executable name: path and stray quoting removed, lowercased."""
+    return os.path.basename(word.strip("'\"\\")).lower()
+
+
+def _shell_c_script(words):
+    """The script a shell runs with -c (`bash -c`, `sh -ec`), or None."""
+    for k, w in enumerate(words[:-1]):
+        if w.startswith("-") and not w.startswith("--") and "c" in w:
+            return words[k + 1]
+    return None
+
+
+def command_executables(words, depth=0):
+    """Every executable one simple command could run, after normalising command
+    position (see THE SENDER TEST). `words` are its shell words."""
+    i = 0
+    while i < len(words) and (_ASSIGNMENT.match(words[i]) or words[i] in _COMMAND_KEYWORDS):
+        i += 1
+    if i >= len(words):
+        return []
+    exe, rest = _exe_name(words[i]), words[i + 1:]
+    if exe in COMMAND_WRAPPERS:
+        # A word with spaces is a quoted command string (`su -c '...'`,
+        # `sudo sh -c '...'`, `watch '...'`), so it is read as a command.
+        found = [exe]
+        for w in rest:
+            if any(c.isspace() for c in w):
+                found += executables_in(w, depth + 1) if depth < 4 else []
+            elif "://" not in w:
+                found.append(_exe_name(w))
+        return found
+    script = " ".join(rest) if exe == "eval" else (
+        _shell_c_script(rest) if _SHELLS.match(exe) else None)
+    if script and depth < 4:
+        return [exe] + executables_in(script, depth + 1)
+    return [exe]
+
+
+def _command_words(segment):
+    """Shell words of one raw segment; unbalanced quoting falls back to splitting."""
+    try:
+        return shlex.split(segment, posix=True)
+    except ValueError:
+        return [w.strip("'\"") for w in segment.split()]
+
+
+def executables_in(cmd, depth=0):
+    """Every executable `cmd` could run, from both the quoted-word reading and
+    the raw boundary-split reading (see THE SENDER TEST)."""
+    found = []
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        tokens = []
+    segment = []
+    for token in tokens + [";"]:
+        if token in SHELL_BOUNDARIES:
+            words = [w for w in segment if w not in ("(", ")", "{", "}")]
+            try:
+                words = shell_operands(words)[0]
+            except ValueError:
+                pass
+            found += command_executables(words, depth)
+            segment = []
+        else:
+            segment.append(token)
+    for raw in _RAW_BOUNDARY.split(cmd):
+        found += command_executables(_command_words(raw), depth)
+    return found
+
+
 def is_send_context(cmd):
     """True when the command can actually put bytes on the network.
 
@@ -793,7 +894,7 @@ def is_send_context(cmd):
     position, or an interpreter that references a network client library. A
     command that merely quotes a URL matches neither.
     """
-    return bool(SEND_CTX.search(cmd) or NET_CLIENT.search(cmd))
+    return bool(NET_CLIENT.search(cmd) or _SENDER_NAMES.intersection(executables_in(cmd)))
 
 # ── THE PLAIN READ-ONLY FETCH (Joe, 2026-10-07) ──────────────────────────────
 #
@@ -827,9 +928,6 @@ def is_send_context(cmd):
 # loopback address; that GET still carries only the URL out, and its response
 # comes back to this session, not to the host — the same accepted residual.
 READ_ONLY_FETCHERS = frozenset({"curl", "wget"})
-_SENDER_NAMES = frozenset(SENDER.lower().split("|"))
-_SENDER_WRAPPERS = frozenset({"xargs", "sudo", "doas", "env", "time", "nohup", "command",
-                              "exec", "watch", "timeout", "parallel"})
 _UNREADABLE = re.compile(r"[`]|\$[({A-Za-z_0-9@*#?$!-]|<\(|>\(")
 _CURL_SEND_LONG = frozenset({
     "data", "data-ascii", "data-binary", "data-raw", "data-urlencode", "json",
@@ -966,7 +1064,7 @@ def read_only_fetch_refusal(cmd, cwd=None):
     fetches = 0
     for seg in segments:
         words = [w for w in seg if w not in ("(", ")", "{", "}")]
-        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+        while words and (_ASSIGNMENT.match(words[0]) or words[0] in _COMMAND_KEYWORDS):
             words = words[1:]
         try:
             words, redirects = shell_operands(words)
@@ -987,8 +1085,7 @@ def read_only_fetch_refusal(cmd, cwd=None):
             return f"{exe} in a fetch command could run what the fetch returns"
         if exe == "tee" and not all(_safe_fetch_output(a, cwd) for a in words[1:] if not a.startswith("-")):
             return "tee would write fetched bytes over a file or outside the working directory"
-        if exe in _SENDER_WRAPPERS and any(
-                os.path.basename(w).lower() in _SENDER_NAMES for w in words[1:]):
+        if exe in COMMAND_WRAPPERS and _SENDER_NAMES.intersection(command_executables(words)):
             return f"a network client run through {exe} is not a plain fetch"
         if exe not in _SENDER_NAMES:
             continue
