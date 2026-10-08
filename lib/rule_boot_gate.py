@@ -14,6 +14,8 @@ DATABASE AND CODE ONLY. The state here holds the digest, the page count and
 which pages a context has fetched. It never holds rule text.
 
 STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
+    <session>/requests/<context-call-hash>.json  initiating arm and native tool identity
+    <session>/.generation.lock             serializes arm/confirmation/decision
     <session>/arm.json                    status (armed | unavailable |
                                           not_deployed), digest, pages_total,
                                           epoch
@@ -28,9 +30,13 @@ STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
         d<H>-<rnd>  one deny, made when H pages were confirmed
 Marker files, not a read-modify-write JSON, because a model often fetches the
 pages in parallel and parallel hooks would otherwise lose each other's pages.
-<key> is the digest for a subagent and digest+epoch for the main context, so
-a SessionStart re-arm (startup, resume, clear, compact, fork) makes the main
-context fetch again, and a digest change re-gates every context.
+<key> is digest+epoch for every context, so a SessionStart re-arm (startup,
+resume, clear, compact, fork) forces main and same-ID subagent contexts to
+fetch again, and a digest change re-gates every context.
+
+Each answer must match its native PreToolUse identity and captured generation.
+Stale/ambiguous answers change no current arm or page markers. Digest changes
+start a new generation; hash ordering and arrival ordering convey no recency.
 
 WHEN THE DIGEST MOVES MID-SESSION. Every boot page carries the corpus digest
 and page count. When a fetch in any context returns a digest or page count
@@ -46,8 +52,30 @@ confirmed. Outages, repeated attempts, missing adapters and unwritable state
 are explicit failures, never evidence that rules were read. Fetches, rule-read
 verbs and ToolSearch remain allowed for recovery. The diagnostic marker count
 is capped; enforcement is not. Tool-less delegates need a fetch-capable route.
+
+THE HOST TRANSCRIPT MUST AGREE (transcript_freshness). Complete markers are
+necessary, never sufficient: revoking them after compaction is a write, and a
+write can fail (ENOSPC, EROFS) and then leave old markers standing once
+storage recovers. So an ordinary tool is also held until this context's own
+host transcript proves the pages are in its live context, with no write
+needed:
+  · the hook's tool_use_id is found once in the transcript (bounded wait,
+    TRANSCRIPT_WAIT_S; the host writes it asynchronously);
+  · walking parentUuid back from that entry, before any compact_boundary or
+    microcompact_boundary, every page 1..N of the armed digest appears as a
+    boot fetch whose single, linked, non-error result is that page, and the
+    page lengths add up to total_chars;
+  · a subagent is judged on <session>/subagents/**/agent-<id>.jsonl alone.
+Anything unknown holds: no transcript path, a missing or duplicate entry, a
+torn last line, an ambiguous chain, a stale digest, or a Codex payload
+(Codex 0.159.0's PreToolUse path never calls flush_rollout and the recorder
+source was not available, so ordering is unprovable and Codex ordinary tools
+stay held).
 """
 import errno
+import fcntl
+import hashlib
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -159,6 +187,98 @@ def _session_dir(session_id):
     return os.path.join(state_root(), safe_key(session_id, "no-session"))
 
 
+@contextmanager
+def session_lock(session_id):
+    """Serialize generation changes, request binding and page confirmation."""
+    folder = _session_dir(session_id)
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, ".generation.lock"), "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _alias(payload, names, optional=False):
+    values = [payload[n] for n in names if n in payload and payload[n] is not None]
+    if not values:
+        return "" if optional else None
+    if any(not isinstance(v, str) or not v.strip() or len(v) > 512 for v in values):
+        return None
+    return values[0] if all(v == values[0] for v in values) else None
+
+
+def _request_identity(payload):
+    session = _alias(payload, ("session_id", "sessionId"))
+    agent = _alias(payload, ("agent_id", "agentId"), optional=True)
+    call = _alias(payload, ("tool_use_id", "toolUseId"))
+    if session is None or agent is None or call is None:
+        return None
+    return session, agent, call
+
+
+def _arm_binding(arm):
+    return {k: (arm or {}).get(k) for k in ("epoch", "status", "digest", "pages_total", "total_chars")}
+
+
+def _request_location(identity):
+    session, agent, call = identity
+    key = hashlib.sha256(json.dumps([agent, call]).encode()).hexdigest()
+    return os.path.join(_session_dir(session), "requests"), key + ".json"
+
+
+def _save_request(folder, name, record):
+    os.makedirs(folder, exist_ok=True)
+    temporary = os.path.join(folder, "." + name + "." + secrets.token_hex(6))
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True)
+        os.replace(temporary, os.path.join(folder, name))
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _request_shape(payload, page):
+    return {"tool": payload.get("tool_name") or payload.get("toolName"), "page": page,
+            "input_sha256": hashlib.sha256(json.dumps(
+                payload.get("tool_input") or payload.get("toolInput") or {}, sort_keys=True).encode()).hexdigest()}
+
+
+def _begin_fetch(payload, arm, page):
+    identity = _request_identity(payload)
+    if identity is None:
+        return "RULE BOOT UNVERIFIED: the adapter must supply one stable tool_use_id on both fetch hooks. Rule fetches remain available."
+    folder, name = _request_location(identity)
+    if os.path.exists(os.path.join(folder, name)):
+        _save_request(folder, name, {"phase": "ambiguous"})
+        return "RULE BOOT UNVERIFIED: duplicate fetch identity; retry with a fresh native tool call."
+    _save_request(folder, name, {"phase": "pending", "identity": list(identity),
+                               "arm": _arm_binding(arm), "shape": _request_shape(payload, page)})
+    return None
+
+
+def _consume_fetch(payload, arm, page):
+    identity = _request_identity(payload)
+    if identity is None:
+        return False
+    folder, name = _request_location(identity)
+    try:
+        with open(os.path.join(folder, name), encoding="utf-8") as handle:
+            request = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    valid = (request.get("phase") == "pending" and request.get("identity") == list(identity)
+             and request.get("arm") == _arm_binding(arm)
+             and request.get("shape") == _request_shape(payload, page))
+    if request.get("phase") == "pending":
+        _save_request(folder, name, {**request, "phase": "observed"})
+    return valid
+
+
 def read_arm(session_id):
     try:
         with open(os.path.join(_session_dir(session_id), "arm.json"), encoding="utf-8") as fh:
@@ -168,13 +288,42 @@ def read_arm(session_id):
         return None
 
 
+def _invalidate_arm(session_id):
+    """Revoke the old permit without allocating a new file (including ENOSPC)."""
+    try:
+        os.unlink(os.path.join(_session_dir(session_id), "arm.json"))
+    except FileNotFoundError:
+        pass
+
+
+def _state_fault(session_id, exc):
+    # A failed lock/write must not leave a completed old generation usable
+    # when storage recovers. Unlink also covers faults before lock acquisition;
+    # revoking a concurrently newer arm is conservative, never a grant.
+    why = type(exc).__name__
+    try:
+        _invalidate_arm(session_id)
+    except OSError as revoke:
+        why += "; generation revocation failed: " + type(revoke).__name__
+    return STATE_UNWRITABLE_NOTICE.format(why=why)
+
+
 def write_arm(session_id, arm):
     folder = _session_dir(session_id)
+    # Successful publication is atomic under the session lock. Revoke first:
+    # an allocation/write/replace failure cannot preserve old page permits.
+    _invalidate_arm(session_id)
     os.makedirs(folder, exist_ok=True)
     tmp = os.path.join(folder, f".arm.{os.getpid()}.{secrets.token_hex(3)}.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(arm, fh, sort_keys=True)
-    os.replace(tmp, os.path.join(folder, "arm.json"))
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(arm, fh, sort_keys=True)
+        os.replace(tmp, os.path.join(folder, "arm.json"))
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def _stand_in(arm):
@@ -187,7 +336,7 @@ def _stand_in(arm):
 def _fetch_dir(session_id, agent_id, arm):
     agent = safe_key(agent_id, "main")
     digest = safe_key(str(arm.get("digest") or "").replace("sha256:", ""), "none")[:24]
-    key = digest if agent_id else f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
+    key = f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
     return os.path.join(_session_dir(session_id), "fetched", agent, key)
 
 
@@ -599,26 +748,40 @@ def _live_page_one(timeout=10):
     return None, f"unreachable (exit {proc.returncode})"
 
 
-def arm_session(session_id, source, now=None):
+def _arm_session(session_id, source, now=None):
     """Arm the gate for a session at SessionStart and return the context text
     (always under 10k characters: SessionStart context is capped there)."""
-    response, reason = _live_page_one()
-    boot = response.get("rule_boot") if isinstance(response, dict) else None
     arm = {"schema": SCHEMA, "source": str(source or ""), "armed_at": int(now or time.time()),
            "epoch": secrets.token_hex(6)}
-    if isinstance(boot, dict) and boot.get("digest") and int(boot.get("pages_total") or 0) >= 1:
-        arm.update(status="armed", digest=boot["digest"], pages_total=int(boot["pages_total"]))
-        if int(boot.get("total_chars") or 0) >= 1:
-            arm["total_chars"] = int(boot["total_chars"])
+    with session_lock(session_id):
+        write_arm(session_id, {**arm, "status": "unavailable", "reason": "arming"})
+    response, reason = _live_page_one()
+    boot = response.get("rule_boot") if isinstance(response, dict) else None
+    with session_lock(session_id):
+        current = read_arm(session_id)
+        if not current or current.get("epoch") != arm["epoch"]:
+            return UNAVAILABLE_NOTICE + " A newer generation superseded this arming fetch; read the current boot."
+        if isinstance(boot, dict) and boot.get("digest") and int(boot.get("pages_total") or 0) >= 1:
+            arm.update(status="armed", digest=boot["digest"], pages_total=int(boot["pages_total"]))
+            if int(boot.get("total_chars") or 0) >= 1:
+                arm["total_chars"] = int(boot["total_chars"])
+            write_arm(session_id, arm)
+            return fetch_instructions(list(range(1, arm["pages_total"] + 1)), arm["digest"], arm["pages_total"])
+        if str(reason or "").startswith("not_deployed"):
+            arm.update(status="not_deployed", reason=reason)
+            write_arm(session_id, arm)
+            return NOT_DEPLOYED_NOTICE
+        arm.update(status="unavailable", reason=reason or "unreachable")
         write_arm(session_id, arm)
-        return fetch_instructions(list(range(1, arm["pages_total"] + 1)), arm["digest"], arm["pages_total"])
-    if str(reason or "").startswith("not_deployed"):
-        arm.update(status="not_deployed", reason=reason)
-        write_arm(session_id, arm)
-        return NOT_DEPLOYED_NOTICE
-    arm.update(status="unavailable", reason=reason or "unreachable")
-    write_arm(session_id, arm)
-    return f"{UNAVAILABLE_NOTICE} ({arm['reason']})"
+        return f"{UNAVAILABLE_NOTICE} ({arm['reason']})"
+
+
+def arm_session(session_id, source, now=None):
+    """Re-arm or revoke the prior generation, retaining the recovery read door."""
+    try:
+        return _arm_session(session_id, source, now)
+    except OSError as exc:
+        return _state_fault(session_id, exc)
 
 
 # ---------------------------------------------------------------- verdicts
@@ -639,7 +802,7 @@ def _hold(folder, confirmed, reason):
     return "deny", reason
 
 
-def verdict(payload, now=None):
+def _verdict(payload, now=None):
     """The PreToolUse decision for one tool call: ("allow"|"deny", context_or_reason)."""
     session_id = payload.get("session_id") or payload.get("sessionId")
     agent_id = payload.get("agent_id") or payload.get("agentId")
@@ -651,6 +814,9 @@ def verdict(payload, now=None):
     kind, page = classify(tool, tool_input, payload.get("cwd"))
     if kind == "fetch":
         if page is not None:
+            notice = _begin_fetch(payload, arm, page)
+            if notice:
+                return "allow", notice
             why = record_page(session_id, agent_id, key, page)
             if why:
                 return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)
@@ -678,7 +844,7 @@ def verdict(payload, now=None):
     missing = [p for p in range(1, total + 1) if p not in confirmed]
     if not missing:
         if not _short_text(folder, arm):
-            return "allow", None
+            return "complete", arm
         return _hold(folder, len(confirmed), (
             "RULE BOOT: every page came back, but their text does not add up to the boot's length "
             f"({arm.get('total_chars')} characters), so part of it was cut on the way to you. "
@@ -794,7 +960,7 @@ INCONCLUSIVE_NOTICE = (
     "the pipe, or with one that prints the whole JSON.")
 
 
-def observe(payload):
+def _observe(payload):
     """PostToolUse on a boot fetch: record what came back, re-arm the session
     on a new digest or page count. Returns a notice for the context, or None.
 
@@ -822,6 +988,8 @@ def observe(payload):
     if not direct and answer != "boot":
         answer = "inconclusive"
     arm = read_arm(session_id)
+    if not _consume_fetch(payload, arm, page):
+        return "RULE BOOT UNVERIFIED: stale, missing or mismatched fetch identity; read the current boot with fresh tool calls."
     if answer in ("boot", "out_of_range"):
         total = int((boot or {}).get("pages_total") or 0)
         digest = str((boot or {}).get("digest") or "")
@@ -830,21 +998,15 @@ def observe(payload):
                                       or int(arm.get("pages_total") or 0) != total):
             arm = {**(arm or {}), "schema": SCHEMA, "status": "armed", "digest": digest,
                    "pages_total": total, "rearmed_by": "fetch", "armed_at": int(time.time())}
-            arm.setdefault("epoch", secrets.token_hex(6))
+            arm["epoch"] = secrets.token_hex(6)
             arm.pop("reason", None)
             arm.pop("total_chars", None)
             if int((boot or {}).get("total_chars") or 0) >= 1:
                 arm["total_chars"] = int(boot["total_chars"])
-            try:
-                write_arm(session_id, arm)
-            except OSError:
-                return None
+            write_arm(session_id, arm)
         if answer == "boot" and not arm.get("total_chars"):
             arm["total_chars"] = int(boot["total_chars"])
-            try:
-                write_arm(session_id, arm)
-            except OSError:
-                return None
+            write_arm(session_id, arm)
         folder = _fetch_dir(session_id, agent_id, _stand_in(arm))
         if answer == "out_of_range":
             return (f"RULE BOOT: page {page} does not exist; this boot has {total or 'fewer'} "
@@ -880,3 +1042,230 @@ def observe(payload):
         return NOT_DEPLOYED_NOTICE
     _touch(folder, "failed")
     return UNAVAILABLE_NOTICE
+
+
+def verdict(payload, now=None):
+    """A protected decision sees one atomic generation and confirmation state.
+
+    Complete markers are necessary, never sufficient: the host transcript must
+    also show the boot on this context's current chain (outside the lock,
+    because it may wait for the host's write to land)."""
+    session = payload.get("session_id") or payload.get("sessionId")
+    try:
+        with session_lock(session):
+            decision, detail = _verdict(payload, now)
+        if decision != "complete":
+            return decision, detail
+        why = transcript_freshness(payload, detail)
+        if why is None:
+            return "allow", None
+        total = int(detail.get("pages_total") or 0)
+        with session_lock(session):
+            folder = _fetch_dir(session, payload.get("agent_id") or payload.get("agentId"), detail)
+            return _hold(folder, total, TRANSCRIPT_STALE_NOTICE.format(why=why) + (
+                "" if why.startswith(CODEX_UNPROVEN) else
+                "\n" + fetch_instructions(list(range(1, total + 1)), detail.get("digest"), total)))
+    except OSError as exc:
+        kind, _page = classify(payload.get("tool_name") or payload.get("toolName") or "",
+                               payload.get("tool_input") or payload.get("toolInput") or {}, payload.get("cwd"))
+        text = _state_fault(session, exc)
+        return ("allow" if kind in ("fetch", "readonly") else "deny"), text
+
+
+# ---------------------------------------------------------------- host transcript freshness
+#
+# WHY. Revocation by marker needs a write to succeed: on 2026-10-08 a
+# compaction that could not unlink arm.json (ENOSPC/EROFS) left main and child
+# contexts allowed once storage recovered. This proof needs no write. The host
+# writes its own transcript, and compaction itself moves the boundary.
+#
+# WHAT IS READ (Claude Code 2.1.288 transcript, shapes read 2026-10-08):
+#   * transcript_path is the SESSION file; a subagent's own file is
+#     <session file without .jsonl>/subagents/[<subdir>/]agent-<agent_id>.jsonl
+#   * one JSON line per content block; parentUuid links each entry to the one
+#     before it; a tool_result entry's parentUuid and sourceToolAssistantUUID
+#     name its tool_use entry, so a parallel batch's sibling results sit off
+#     the parentUuid chain and are joined by that link
+#   * compaction writes a system compact_boundary whose parentUuid is null
+#     (logicalParentUuid, never followed here, names the pre-compaction tail)
+#
+# THE PROOF. This call's tool_use entry must be in this context's file (it may
+# land after PreToolUse fires: the host queues writes, so the gate waits
+# briefly and then holds). From it, walk parentUuid back, stopping at a
+# compaction boundary, a missing or ambiguous parent, or a cycle. Every page
+# 1..pages_total of the ARMED digest must come back as a full page in the one
+# result linked to a fetch call on that chain, and the page lengths must add
+# up to total_chars. Anything unknown (no transcript, a torn line, a second
+# result for one call, a Codex host) proves nothing and holds.
+
+TRANSCRIPT_WAIT_S = 1.0
+TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
+_DISCONTINUITIES = frozenset({"compact_boundary", "microcompact_boundary"})
+_BOUNDARY_MARKS = (b'"subtype":"compact_boundary"', b'"subtype":"microcompact_boundary"')
+_AGENT_KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
+CODEX_UNPROVEN = "Codex hooks carry no proof"
+TRANSCRIPT_STALE_NOTICE = (
+    "RULE BOOT NOT FRESH: {why} Ordinary tools stay held until this context's own host transcript "
+    "shows every page of the current boot after its last compaction; rule reads and ToolSearch remain available.")
+
+
+def _transcript_wait():
+    # Test override only, like CARR_RULE_BOOT_STATE_DIR; bounded under the hook timeout.
+    try:
+        return max(0.0, min(3.0, float(os.environ.get("CARR_RULE_BOOT_TRANSCRIPT_WAIT_S", TRANSCRIPT_WAIT_S))))
+    except ValueError:
+        return TRANSCRIPT_WAIT_S
+
+
+def _context_transcript(payload):
+    """(path, None) for this context's own transcript file, or (None, why)."""
+    if "turn_id" in payload or "turnId" in payload:
+        return None, (CODEX_UNPROVEN + " that the current call or a compaction reached the rollout "
+                      "before PreToolUse (0.159.0 flushes only before SessionEnd and Interrupt hooks).")
+    main = payload.get("transcript_path") or payload.get("transcriptPath")
+    if not isinstance(main, str) or not os.path.isabs(main) or not main.endswith(".jsonl"):
+        return None, "the hook input names no host transcript."
+    agent = payload.get("agent_id") or payload.get("agentId")
+    if not agent:
+        return main, None
+    if not isinstance(agent, str) or not _AGENT_KEY.fullmatch(agent):
+        return None, "the subagent id is not a transcript key."
+    root, name = os.path.join(main[:-len(".jsonl")], "subagents"), f"agent-{agent}.jsonl"
+    found = []
+    for folder, dirs, files in os.walk(root):
+        if os.path.relpath(folder, root).count(os.sep) >= 3:
+            dirs[:] = []
+        if name in files:
+            found.append(os.path.join(folder, name))
+    if len(found) != 1:
+        return None, "this subagent's own transcript was not found exactly once."
+    return found[0], None
+
+
+def _transcript_records(path):
+    """Every complete JSON-object line from the last compaction boundary on.
+    An unterminated last line is still being written and is not read."""
+    with open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        start = max(0, handle.tell() - TRANSCRIPT_MAX_BYTES)
+        handle.seek(start)
+        raw = handle.read()
+    if start:
+        raw = raw[raw.find(b"\n") + 1:] if b"\n" in raw else b""
+    raw = raw[:raw.rfind(b"\n") + 1]
+    cut = max(raw.rfind(mark) for mark in _BOUNDARY_MARKS)
+    if cut >= 0:
+        raw = raw[raw.rfind(b"\n", 0, cut) + 1:]
+    records = []
+    for line in raw.split(b"\n"):
+        try:
+            record = json.loads(line) if line.strip() else None
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _content_blocks(record, kind):
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict) and b.get("type") == kind]
+
+
+def _chain_results(records, call, session, agent):
+    """[(tool_name, tool_input, cwd, result_content)] for every earlier call on
+    this call's chain since its last boundary with exactly one linked, non-error
+    result; None when this call's own entry is not there exactly once."""
+    by_uuid, ambiguous, current = {}, set(), []
+    for record in records:
+        uid = record.get("uuid")
+        if isinstance(uid, str):
+            if uid in by_uuid and by_uuid[uid] != record:
+                ambiguous.add(uid)
+            by_uuid[uid] = record
+        if record.get("type") == "assistant" and any(
+                b.get("id") == call for b in _content_blocks(record, "tool_use")):
+            current.append(record)
+    if len({r.get("uuid") for r in current}) != 1:
+        return None
+    head = current[0]
+    if head.get("sessionId") != session or (head.get("agentId") or None) != (agent or None) \
+            or bool(head.get("isSidechain")) != bool(agent):
+        return None
+    uses, seen, record = {}, set(), head
+    while isinstance(record, dict) and record.get("uuid") not in seen:
+        seen.add(record.get("uuid"))
+        if record.get("type") == "system" and record.get("subtype") in _DISCONTINUITIES:
+            break
+        for block in _content_blocks(record, "tool_use") if record.get("type") == "assistant" else []:
+            if block.get("id") != call and isinstance(block.get("id"), str):
+                uses[block["id"]] = (record.get("uuid"), block.get("name"), block.get("input"), record.get("cwd"))
+        parent = record.get("parentUuid")
+        record = by_uuid.get(parent) if isinstance(parent, str) and parent not in ambiguous else None
+    results = {}
+    for record in records:
+        for block in _content_blocks(record, "tool_result") if record.get("type") == "user" else []:
+            use = uses.get(block.get("tool_use_id"))
+            if use is None:
+                continue
+            linked = use[0] in (record.get("sourceToolAssistantUUID"), record.get("parentUuid"))
+            results.setdefault(block["tool_use_id"], []).append(
+                (linked and block.get("is_error") is not True, block.get("content")))
+    return [(name, tool_input, cwd, found[0][1])
+            for use_id, (_uid, name, tool_input, cwd) in uses.items()
+            for found in [results.get(use_id, [])] if len(found) == 1 and found[0][0]]
+
+
+def transcript_freshness(payload, arm, now=time.monotonic):
+    """None when this context's host transcript proves the armed boot is in
+    its current context; otherwise why not, in words for the hold."""
+    path, why = _context_transcript(payload)
+    if why:
+        return why
+    call = _alias(payload, ("tool_use_id", "toolUseId"))
+    session = _alias(payload, ("session_id", "sessionId"))
+    agent = _alias(payload, ("agent_id", "agentId"), optional=True)
+    if not call or not session or agent is None:
+        return "the hook input carries no stable call identity."
+    deadline = now() + _transcript_wait()
+    while True:
+        try:
+            pairs = _chain_results(_transcript_records(path), call, session, agent)
+        except OSError:
+            pairs = None
+        if pairs is not None:
+            break
+        if now() >= deadline:
+            return ("this tool call is not in the host transcript (the host could not write it, "
+                    "wrote only part of it, or wrote it somewhere this gate cannot prove).")
+        time.sleep(0.025)
+    want = (arm.get("digest"), int(arm.get("pages_total") or 0), int(arm.get("total_chars") or 0))
+    pages = {}
+    for name, tool_input, cwd, content in pairs:
+        kind, page, _direct = _classify(name, tool_input, cwd if isinstance(cwd, str) else payload.get("cwd"))
+        if kind != "fetch" or page is None or page in pages:
+            continue
+        answer, boot = read_answer(content)
+        if answer == "boot" and _is_page(boot, page) and (
+                boot.get("digest"), int(boot.get("pages_total") or 0), int(boot.get("total_chars") or 0)) == want:
+            pages[page] = boot
+    have = sorted(p for p in pages if 1 <= p <= want[1])
+    if len(have) != want[1] or want[1] < 1:
+        return (f"since its last compaction this context's transcript shows {len(have)} of {want[1]} "
+                "page(s) of the current boot.")
+    if sum(_utf16_len(pages[p]["text"]) for p in have) != want[2]:
+        return "the pages in this context's transcript do not add up to the boot's length."
+    return None
+
+
+def observe(payload):
+    """Never let a stale request race a new arm or change current markers."""
+    session = payload.get("session_id") or payload.get("sessionId")
+    try:
+        with session_lock(session):
+            return _observe(payload)
+    except OSError as exc:
+        return _state_fault(session, exc)

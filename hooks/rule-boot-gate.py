@@ -26,7 +26,9 @@ the recovery paths that remain available while effects are held.
     (matching page, digest and text) in the result, and the page lengths add
     up to the boot's total_chars
   · other standing-context calls, the read-only rule verbs, ToolSearch -> allow
-  · every page of the armed digest confirmed in this context          -> allow
+  · every page of the armed digest confirmed in this context, AND this
+    context's own host transcript shows every page after its last
+    compaction (transcript_freshness; Codex cannot prove it) -> allow
   · incomplete boot, outage, absent deployment, unwritable state or repeated
     holds                                     -> DENY with the recovery calls
   · otherwise                                   -> DENY, naming the exact calls
