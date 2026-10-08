@@ -72,7 +72,7 @@ DEFAULT_RESULTS = Path(
     )
 )
 
-CODEX_TIMEOUT_S = float(os.environ.get("CARR_HERMES_CODEX_TIMEOUT", "900"))
+CODEX_TIMEOUT_S = float(os.environ.get("CARR_HERMES_CODEX_TIMEOUT", "5400"))
 
 # Codex prints this on STDOUT and still exits 0, so the exit code lies.
 QUOTA_HINT = re.compile(r"hit your usage limit", re.I)
@@ -165,6 +165,7 @@ def _to_codex(
     config_overrides: tuple[str, ...] = (),
     live_desktop: bool = False,
     stream_output: bool = False,
+    timeout_s: float | None = None,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -172,7 +173,11 @@ def _to_codex(
     keeps its own context, so a desk that started a new thread every task
     would throw away everything it had been told. `codex exec resume <id>`
     carries it, and --json reports the thread id in its first event.
+
+    timeout_s lets a caller with its own authority window (the Engineering
+    controller's 930 s lease) pin a shorter limit than the router default.
     """
+    limit_s = CODEX_TIMEOUT_S if timeout_s is None else float(timeout_s)
     task = desks.desk_prompt(task)
     thread = None if fresh else entry.get("thread_id")
     # A THREAD CODEX DESKTOP HOLDS OPEN CANNOT BE RESUMED FROM HERE. Found live
@@ -256,16 +261,16 @@ def _to_codex(
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
             if stream_output:
-                proc = _run_codex_streamed(argv, env or os.environ.copy(), CODEX_TIMEOUT_S)
+                proc = _run_codex_streamed(argv, env or os.environ.copy(), limit_s)
             else:
                 proc = subprocess.run(
                     argv, env=env or os.environ.copy(), capture_output=True,
-                    text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
+                    text=True, timeout=limit_s, stdin=subprocess.DEVNULL,
                 )
         except FileNotFoundError:
             return {"status": "failed", "detail": "codex is not on PATH"}
         except subprocess.TimeoutExpired:
-            return {"status": "timed_out", "detail": f"no answer in {CODEX_TIMEOUT_S:.0f}s"}
+            return {"status": "timed_out", "detail": f"no answer in {limit_s:.0f}s"}
 
         events = _codex_events(proc.stdout or "")
         started = next((e for e in events if e.get("type") == "thread.started"), None)
@@ -290,9 +295,16 @@ def _to_codex(
 
         # Belt for the same signal arriving as prose. Codex prints the limit
         # BOTH as a --json event and as a plain line, and the plain line is
-        # what a future version might keep if the event shape changes.
-        blob = f"{proc.stderr or ''}\n{proc.stdout or ''}"
-        if QUOTA_HINT.search(blob):
+        # what a future version might keep if the event shape changes. Only
+        # Codex's own plain lines count: a JSON event carries command output,
+        # so a job that read a file holding this phrase (dispatch.py does) is
+        # not out of credit, and a turn that finished with an answer never is.
+        plain = [line for line in (proc.stdout or "").splitlines()
+                 if not line.lstrip().startswith("{")]
+        blob = "\n".join([proc.stderr or "", *plain])
+        finished = proc.returncode == 0 and bool(result) and any(
+            e.get("type") == "turn.completed" for e in events)
+        if not finished and QUOTA_HINT.search(blob):
             at = RETRY_AT.search(blob)
             return {**base, "status": "quota_exhausted",
                     "detail": (QUOTA_HINT.search(blob) and
@@ -318,6 +330,7 @@ def dispatch(
     live_desktop: bool = False,
     stream_output: bool = False,
     retrieval: bool = False,
+    codex_timeout_s: float | None = None,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
 
@@ -382,18 +395,19 @@ def dispatch(
             entry["socket"], task,
             thread_id=None if fresh else entry.get("thread_id"),
             cwd=entry.get("cwd"), model=entry.get("model"),
+            deadline_s=codex_timeout_s,
         )
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])
     elif cwd:
         outcome = _to_codex(
             {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
-            **stream_options,
+            timeout_s=codex_timeout_s, **stream_options,
         )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
-            live_desktop=live_desktop,
+            live_desktop=live_desktop, timeout_s=codex_timeout_s,
             **stream_options,
         )
         # pin the desk to its thread so the next task lands in the same one

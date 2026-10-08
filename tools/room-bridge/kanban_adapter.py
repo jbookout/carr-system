@@ -33,6 +33,12 @@ ORIGIN_VALUE = re.compile(r"[a-z][a-z-]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 RECONCILIATION_DIAGNOSTIC_LIMIT = 25
 
 
+
+# A queue claim lasts CLAIM_TTL_S. A Codex job started under that claim must
+# end inside it, or stale-claim recovery can hand the same task out twice.
+CLAIM_TTL_S = 900
+QUEUE_CODEX_TIMEOUT_S = CLAIM_TTL_S - 30
+
 class QueueError(RuntimeError):
     def __init__(self, code: str, reason: str):
         super().__init__(reason)
@@ -288,7 +294,7 @@ class KanbanAdapter:
 
     def claim(self, task_id: str) -> None:
         self.command_runner([
-            "hermes", "kanban", "--board", BOARD, "claim", task_id, "--ttl", "900",
+            "hermes", "kanban", "--board", BOARD, "claim", task_id, "--ttl", str(CLAIM_TTL_S),
         ])
 
     def reclaim(self, task_id: str, reason: str) -> None:
