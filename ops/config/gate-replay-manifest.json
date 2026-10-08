@@ -347,6 +347,35 @@
         }
       ]
     },
+    "github-burst-guard.py": {
+      "role": "gate",
+      "wirings": [
+        {
+          "event": "PreToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash",
+            "scenarios"
+          ]
+        },
+        {
+          "event": "PostToolUse",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUse only RECORDS: when a GitHub-touching command's output carries a rate-limit answer it writes the time to out/github-burst-guard-state.json and exits 0. It never denies and prints nothing; the cooldown it starts is refused on PreToolUse, covered by a scenario here and end to end by ops/github-burst-guard-selftest.py."
+        },
+        {
+          "event": "PostToolUseFailure",
+          "matcher": "Bash",
+          "fixtures": [
+            "bash"
+          ],
+          "allow_only": "PostToolUseFailure only RECORDS a rate-limit answer from a failed GitHub-touching command, the same as PostToolUse. It never denies and prints nothing; ops/github-burst-guard-selftest.py covers the failure-event path."
+        }
+      ]
+    },
     "drift-assertion-gate.py": {
       "role": "gate",
       "wirings": [

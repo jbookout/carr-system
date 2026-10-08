@@ -7,10 +7,15 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE / "lib"))
+from launchd_hold import read_holds
 import job_watchdog as watchdog  # noqa: E402
 
 
 def main():
+    hold = read_holds().get("com.carr.job-watchdog")
+    if hold:
+        print(hold.describe())
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=os.environ.get("CARR_WATCHDOG_CONFIG", str(SOURCE / "ops/config/job-watchdog.json")))
     parser.add_argument("--root", default=os.environ.get("CARR_JOB_ROOT"))

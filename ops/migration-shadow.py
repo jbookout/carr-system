@@ -178,7 +178,12 @@ def find_pg18(explicit: str | None) -> pathlib.Path | None:
 def default_base() -> str:
     ref = (os.environ.get("GITHUB_BASE_REF") or "").strip()
     target = f"origin/{ref}" if ref else "origin/main"
-    return subprocess.run(["git", "merge-base", "HEAD", target], cwd=REPO, capture_output=True,
+    parents = ["HEAD"]
+    pending = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                             cwd=REPO, capture_output=True, text=True)
+    if pending.returncode == 0:
+        parents.append(pending.stdout.strip())
+    return subprocess.run(["git", "merge-base", target, *parents], cwd=REPO, capture_output=True,
                           text=True, check=True).stdout.strip()
 
 

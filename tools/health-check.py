@@ -24,6 +24,7 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
 import jev_outage_health as _jev_outage
+import uptime_health as _uptime
 import flashlib
 from lib.credential_file import read_env_file
 
@@ -108,8 +109,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "costs"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|costs")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "costs", "uptime"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|costs|uptime")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -1262,6 +1263,17 @@ def _calendar_prebrief_unknowns(now, path=CALENDAR_PREBRIEF_LAST_RUN):
              f"on its {when.date()} run · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
 
 
+# MONITORS NOT YET PROVISIONED (Joe 2026-10-06: "don't just leave them in place and let them
+# block things"). Both checks landed with today's batch before their backing services existed,
+# so their "cannot read" state failed every release's health baseline. Until provisioning lands,
+# that state prints as WARN and never as hard_error. A real failure the monitor DOES report
+# (production down, a cost spike) stays hard. Delete an entry the day its service is live.
+PROVISIONING_PENDING = {
+    "production_uptime": "carr-uptime monitor unreachable (Worker/secrets not provisioned)",
+    "system_costs": "billing readers unavailable (cost collector not provisioned)",
+}
+
+
 def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
     print(f"  CANONICAL_FINDING {key} — {detail}")
     for row in _FINDINGS:
@@ -1366,7 +1378,8 @@ def _canonical_health():
         _cost_snapshot, _cost_line = _system_cost_row()
         print("  " + _cost_line)
         if _cost_snapshot['state'] != 'ready' or _cost_snapshot['alerts']:
-            rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable')
+            rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable'
+                      and 'system_costs' not in PROVISIONING_PENDING)
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)
@@ -1380,7 +1393,7 @@ def _canonical_health():
         if " over budget: " in _site_line or _site_line.startswith("UNKNOWN"):
             rc = _red("jev_site_budget", _site_line, hard_error=_site_line.startswith("UNKNOWN"))
     try:
-        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session") else _canonical_snapshot()
+        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session", "uptime") else _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
         _red("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
@@ -1956,6 +1969,14 @@ def _canonical_health():
                     "· restore lib/branch_retirement.py · verify health · auto-clear after successful readback")
             print("  WARN " + line)
             rc = _red("branch_janitor", line, subject="three-repo-retirement")
+
+    if CANONICAL_SECTION in ("all", "uptime") and not CANONICAL_FIXTURE:
+        line, failed = _uptime.row()
+        print("  " + line)
+        if failed:
+            _unprovisioned = ("production_uptime" in PROVISIONING_PENDING
+                              and "monitor unreachable" in line)
+            rc = _red("production_uptime", line, subject="carr-uptime", hard_error=not _unprovisioned)
 
     if CANONICAL_SECTION in ("all", "tailscale"):
         try:
@@ -3075,6 +3096,20 @@ try:
             rc = 1
 except Exception as e:
     print(f"  ⚠︎ {'machine config':<18} check failed ({type(e).__name__}: {e})")
+    rc = 1
+
+try:
+    sys.path.insert(0, REPO_ROOT)
+    from lib import launchd_hold_health as _launchd_hold_health
+    _hold_line, _hold_rc = _launchd_hold_health.check(
+        os.path.expanduser("~"),
+        lambda name, payload: _jev_outage.call_verb(name, payload, repo=REPO_ROOT))
+    print(f"  {_hold_line}")
+    rc = max(rc, _hold_rc)
+except Exception as e:
+    print(f"  WARN launchd holds response failed ({type(e).__name__}) · "
+          "on breach: owner claude (Platform Engineer) repairs the hold health reader; "
+          "verify rerun health; auto-clear on a successful read")
     rc = 1
 
 # ── the egress guard: is its LOGIC right, and is its DATA fresh (2026-08-09) ──

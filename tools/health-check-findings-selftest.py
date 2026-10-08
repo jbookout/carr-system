@@ -591,6 +591,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         mod = ast.Module(body=[_find_function("_canonical_health"),
                                _find_function("_jev_paid_cap_row")], type_ignores=[])
         ns.update(os=os, re=re, sys=sys, time=time, REPO_ROOT=str(HEALTH_CHECK_PATH.parent.parent),
+                  _uptime=Mock(row=Mock(return_value=("OK production uptime fixture", False))),
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
                   _system_cost_row=lambda: ({"state": "ready", "alerts": []}, "OK fixture costs"),
@@ -1051,6 +1052,22 @@ class FeatureSwitchFindings(unittest.TestCase):
                     self.assertEqual(findings[0]['hard_error'], hard_error)
                 if hard_error:
                     self.assertIn('UNKNOWN feature switches:', output.getvalue())
+
+
+class ProvisioningPendingIsNamedAndTemporary(unittest.TestCase):
+    """production_uptime left ALWAYS_HARD_ERROR_KEYS on 2026-10-06: its "monitor unreachable"
+    state is WARN while carr-uptime is unprovisioned (Joe: unprovisioned monitors must not block
+    releases). This pins the exemption to exactly the named keys, so widening it fails here.
+    When PROVISIONING_PENDING loses production_uptime, put it back in ALWAYS_HARD_ERROR_KEYS."""
+
+    def test_pending_set_is_exactly_the_two_named_monitors(self):
+        source = (ROOT / "tools/health-check.py").read_text() if "ROOT" in globals() else \
+            Path(__file__).resolve().parents[1].joinpath("tools/health-check.py").read_text()
+        tree = ast.parse(source)
+        pending = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(getattr(t, "id", None) == "PROVISIONING_PENDING" for t in node.targets))
+        keys = {k.value for k in pending.value.keys}
+        self.assertEqual(keys, {"production_uptime", "system_costs"})
 
 
 class CanonicalHealthReturnsAreAllowlisted(unittest.TestCase):
