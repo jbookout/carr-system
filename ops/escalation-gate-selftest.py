@@ -42,6 +42,24 @@ APPROVAL_CASES = [
      "Restore the source-study rule?", ["Approve", "Don't approve"], False),
     ("approval-labelled-build", "work the queue",
      "Build all 16 retro fixes?", ["Approve", "Do not approve"], False),
+    # "rule: <what it says>" — the form a session uses for a rule that has no
+    # short name yet. The first one was refused live on 2026-10-08.
+    ("approve-described-rule", "approve the rule and fix the gate",
+     "Approve the new rule: research uses the whole internet, and the "
+     "research-site index is a memory, not a fence (check it first, also "
+     "search the open web, add useful new sites yourself, never involve you)?",
+     ["Approve", "Don't approve"], False),
+    ("labelled-described-rule", "work the queue",
+     "The proposed rule — sessions add useful research sites to the index themselves?",
+     ["Approve", "Do not approve"], False),
+    ("described-rule-hides-choice", "work the queue",
+     "Approve the new rule: use nullable columns or a sentinel date?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-hides-which", "work the queue",
+     "Approve the rule: which folder structure should exports use?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-unlabelled", "work the queue",
+     "The new rule: research uses the whole internet?", ["Yes", "No"], True),
     ("internal-approach", "work the queue",
      "Which approach should I take for the exporter refactor?", ["Rewrite", "Patch"], True),
     ("approve-internal-approach", "work the queue",

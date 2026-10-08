@@ -175,6 +175,11 @@ APPROVAL_ARTIFACT = re.compile(
     r"|(?:the\s+)?" + ARTIFACT_NAME + r"\s+(?:build|plan))"
     r"(?:\s+for\s+(?:the\s+)?" + ARTIFACT_NAME + r")?"
     r"(?:\s+as written)?", re.I)
+# A rule with no short name yet is named by what it says: "the new rule: X".
+# Its text may contain when/how/should, so only option-picking words refuse it.
+DESCRIBED_RULE = re.compile(
+    r"(?:the\s+)?(?:new\s+|proposed\s+)?rule\s*(?::|—|–|\s-)\s*\S.*", re.I | re.S)
+DESCRIBED_CHOICE = re.compile(r"\b(which|whether|or|instead|versus)\b", re.I)
 
 
 def direct_approval(question):
@@ -189,6 +194,8 @@ def direct_approval(question):
                   for o in (question.get("options") or []) if isinstance(o, dict)}
         if "approve" not in labels or not labels.intersection({"don't approve", "do not approve"}):
             return False
+    if DESCRIBED_RULE.fullmatch(stem):
+        return not DESCRIBED_CHOICE.search(stem)
     return (not APPROVAL_CHOICE.search(stem)
             and APPROVAL_ARTIFACT.fullmatch(stem) is not None)
 
