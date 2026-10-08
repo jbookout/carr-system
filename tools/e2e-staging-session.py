@@ -46,7 +46,8 @@ def validate_config(source: str) -> dict:
 
 def checked_run(args, *, run=subprocess.run, **kwargs):
     try:
-        result = run(list(map(str, args)), capture_output=True, text=True, timeout=120, **kwargs)
+        result = run([sys.executable, str(REPO / "bin/with-timeout.py"), "120", *map(str, args)],
+                     capture_output=True, text=True, **kwargs)
     except (OSError, subprocess.TimeoutExpired):
         raise StagingRefusal("command unavailable or timed out; output suppressed") from None
     if result.returncode:

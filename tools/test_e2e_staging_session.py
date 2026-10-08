@@ -3,6 +3,9 @@ import contextlib
 import io
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -18,6 +21,51 @@ SECRET = "synthetic-e2e-session-secret-for-tests-only"
 
 
 class StagingSessionTests(unittest.TestCase):
+    def test_timeout_stops_children_before_refusal_and_suppresses_output(self):
+        for detached in (False, True):
+            with self.subTest(detached=detached), tempfile.TemporaryDirectory() as directory:
+                marker = Path(directory) / "late-effect"
+                ready = Path(directory) / "ready"
+                child = (
+                    "import pathlib, signal, time; "
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                    f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+                    "time.sleep(0.8); "
+                    f"pathlib.Path({str(marker)!r}).write_text('synthetic')"
+                )
+                launcher = (
+                    "import subprocess, sys, time; "
+                    f"p = subprocess.Popen([sys.executable, '-c', {child!r}], "
+                    f"start_new_session={detached!r}); "
+                    f"print({SECRET!r}, flush=True); "
+                    f"print({TOKEN!r}, file=sys.stderr, flush=True); "
+                    "p.wait()"
+                )
+
+                def short_run(args, **kwargs):
+                    if str(REPO / "bin/with-timeout.py") in args:
+                        args = [*args[:2], "0.2", *args[3:]]
+                        kwargs["timeout"] = 3
+                    else:
+                        kwargs["timeout"] = 0.2
+                    return subprocess.run(args, **kwargs)
+
+                output, errors = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    with self.assertRaises(MODULE.StagingRefusal) as caught:
+                        MODULE.checked_run([sys.executable, "-c", launcher], run=short_run)
+                self.assertEqual(ready.read_text(), "ready")
+                self.assertNotIn(SECRET, str(caught.exception) + output.getvalue() + errors.getvalue())
+                self.assertNotIn(TOKEN, str(caught.exception) + output.getvalue() + errors.getvalue())
+                time.sleep(1)
+                self.assertFalse(marker.exists(), "child performed an effect after timeout refusal")
+
+    def test_checked_run_preserves_output_input_and_exit_failure(self):
+        command = [sys.executable, "-c", "import sys; print(sys.stdin.read().upper(), end='')"]
+        self.assertEqual(MODULE.checked_run(command, input="synthetic\n"), "SYNTHETIC\n")
+        with self.assertRaisesRegex(MODULE.StagingRefusal, "command failed; output suppressed"):
+            MODULE.checked_run([sys.executable, "-c", "raise SystemExit(7)"])
+
     def test_apply_requires_the_exact_carr_source_before_loading_credentials(self):
         with patch.object(MODULE, "source_identity", return_value=SHA):
             for arguments in [["--apply"], ["--apply", "--source-sha", "b" * 40]]:
@@ -40,7 +88,7 @@ class StagingSessionTests(unittest.TestCase):
     def test_provider_operations_are_fixed_staging_and_do_not_print_secrets(self):
         calls = []
         def run(args, **kwargs):
-            calls.append((list(map(str, args)), kwargs))
+            calls.append((list(map(str, args[3:])), kwargs))
             return subprocess.CompletedProcess(args, 0, "provider output containing a secret", "")
         child_env = MODULE.provider_environment({"PATH": "/bin", "DATABASE_URL_WRITER": "forbidden", "CLOUDFLARE_API_TOKEN": "wrong"}, TOKEN)
         self.assertEqual(child_env["CLOUDFLARE_API_TOKEN"], TOKEN)
