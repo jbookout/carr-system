@@ -420,12 +420,39 @@ class ReplayTests(unittest.TestCase):
             board = root / "out/boards" / (c["board"] + ".json")
             board.parent.mkdir(parents=True)
             board.write_text(json.dumps({"tasks": {}}))
-            completed = subprocess.CompletedProcess([], 0, "", "")
+            completed = subprocess.CompletedProcess([], 0, json.dumps({"applied": True, "before": None, "after": {}}), "")
             with patch.dict(os.environ, {"PROGRESS_BOARD_LOCAL_ONLY": ""}), \
                  patch.object(w.subprocess, "run", return_value=completed) as run:
                 w.board_task(root, c, "synthetic", "orchestrator", "blocked", "failure",
                              reason="failure", next_action="retry")
             self.assertEqual(run.call_args.kwargs["env"]["PROGRESS_BOARD_LOCAL_ONLY"], "1")
+            self.assertIn("--receipt", run.call_args.args[0])
+
+    def test_clear_without_recovery_retires_only_exact_generated_watchdog_card(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["file_defects"] = False
+        c["actions"]["job_hang"] = "report"
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                effects = w.Effects(root, c)
+                fields = {"card": "shared-card"} if explicit else {}
+                found = w.finding("job_hang", "synthetic-job", "worker stopped producing output", c, **fields)
+                card = effects.card(found)
+                effects.show_finding(found)
+                path = root / c["paths"]["findings"]
+                w.append(path, {**found, "reported": False, "cleared_at": None})
+                rows_before = [json.loads(line) for line in path.read_text().splitlines()]
+
+                w.reconcile(root, c, [], effects, 200)
+
+                task = json.loads((root / "out/boards" / (c["board"] + ".json")).read_text())["tasks"][card]
+                self.assertEqual(task["status"], "blocked" if explicit else "done")
+                self.assertEqual(w.read_latest(path)[found["key"]]["cleared_at"], w.stamp(200))
+                rows_after = [json.loads(line) for line in path.read_text().splitlines()]
+                for row in rows_before:
+                    self.assertIn(row, rows_after)
 
     def test_current_head_latest_review_and_active_fixer(self):
         import job_watchdog as w
