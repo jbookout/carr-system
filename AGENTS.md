@@ -274,13 +274,14 @@ Several sessions run against this one checkout at the same time.
 
 ## Rule lifecycle evidence
 
-All five steps are required; none needs SQL. 1. `teach` (rule is `proposed`).
-2. `./.venv/bin/python ops/rule-admission-audit.py --preflight` (reads as
-`DATABASE_URL_READER`) prints the `projection.delivery` keys the installed
-[writer](migrations/0482_rule_delivery_binding_writer.sql) needs. 3. `admit-rule`
-with those keys. 4. Step 2 plus `--rule-id <full-UUID>` must print `ready`;
-any other status is a failed readback. 5. Joe's `approve-rule` activates
-(`activate-rule` is retired).
+Before teaching, admitting, approving, amending or retiring a rule, run
+`./.venv/bin/python ops/rule-admission-audit.py --preflight` with the existing
+read credential; add `--rule-id <full-rule-UUID>` for its prepared admission.
+It derives the `projection.delivery` keys from the installed writer
+([migration 0482](migrations/0482_rule_delivery_binding_writer.sql)) and reports
+`ready` only when the prepared admission carries every one. Any other status,
+or no connection, is a failed readback, never permission to infer readiness.
+Approval still goes through the record verbs.
 
 ## Writing
 

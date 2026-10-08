@@ -39,8 +39,11 @@ class DevTools {
       this.socket.addEventListener("open", resolve, { once: true });
       this.socket.addEventListener("error", reject, { once: true });
     });
+    this.listeners = new Map();
     this.socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data));
+      // Unsolicited protocol events carry a method and no id.
+      if (message.method) for (const listener of this.listeners.get(message.method) || []) listener(message.params);
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -55,6 +58,10 @@ class DevTools {
     const result = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, method }));
     this.socket.send(JSON.stringify({ id, method, params }));
     return result;
+  }
+
+  on(method, listener) {
+    this.listeners.set(method, [...(this.listeners.get(method) || []), listener]);
   }
 
   async evaluate(expression) {
@@ -182,7 +189,18 @@ async function launchBrowser(t) {
   t.diagnostic(`[chrome-startup] ${JSON.stringify({ startupMs: browser.startupMs, attempts: browser.attempts })}`);
   await cdp.call("Page.enable");
   await cdp.call("Runtime.enable");
-  return { cdp };
+  // These layout and interaction journeys must not depend on live font CDNs:
+  // a stalled Google Fonts request in a fresh profile delays page load past
+  // the polling budget. Network.setBlockedURLs (`urls` is the deprecated but
+  // widely supported form) fails those requests immediately.
+  await cdp.call("Network.enable");
+  await cdp.call("Network.setBlockedURLs", { urls: ["*://fonts.googleapis.com/*", "*://fonts.gstatic.com/*"] });
+  // Record request URLs and failures so a test can prove what was blocked.
+  const requestUrls = new Map();
+  const failures = [];
+  cdp.on("Network.requestWillBeSent", ({ requestId, request }) => requestUrls.set(requestId, request.url));
+  cdp.on("Network.loadingFailed", ({ requestId, blockedReason }) => failures.push({ url: requestUrls.get(requestId), blockedReason }));
+  return { cdp, failures };
 }
 
 async function configureViewport(cdp, width, { touch = false } = {}) {
@@ -385,6 +403,24 @@ test("V5-J101 real Chrome desktop/touch journeys preserve modality, focus, reflo
   await key(cdp, "Escape");
   await waitFor(cdp, "document.querySelector('#docPanel').hidden", "Escape did not close an unpinned Doc");
   assert.equal(await cdp.evaluate("document.activeElement?.id"), "docPanelToggle", "closing Doc must restore focus to its opener");
+});
+
+test("V5-J101 live Google Fonts requests are blocked so page load never waits on a font CDN", { timeout: BROWSER_TEST_TIMEOUT_MS }, async (t) => {
+  const origin = await pagesServer(t);
+  const browser = await launchBrowser(t);
+  if (!browser.cdp) {
+    if (process.env.CI) assert.fail(browser.unavailableReason);
+    t.skip(browser.unavailableReason);
+    return;
+  }
+  const { cdp, failures } = browser;
+  await configureViewport(cdp, 1280);
+  // business.html links fonts.googleapis.com; a blocked request surfaces as
+  // Network.loadingFailed with blockedReason "inspector".
+  await navigate(cdp, `${origin}/clients`, "#docPanelToggle");
+  await waitFor(cdp, "document.readyState === 'complete'", "page did not finish loading");
+  const blocked = failures.filter((item) => item.blockedReason === "inspector").map((item) => new URL(item.url).hostname);
+  assert.ok(blocked.includes("fonts.googleapis.com"), `fonts.googleapis.com must be blocked by the inspector; saw ${JSON.stringify(failures)}`);
 });
 
 test("V5-J101 the overflow/panel-fit guard catches live layout mutants a scrollWidth-only check would have missed", { timeout: BROWSER_TEST_TIMEOUT_MS }, async (t) => {

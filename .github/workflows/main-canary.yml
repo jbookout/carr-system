@@ -100,10 +100,13 @@ jobs:
         timeout-minutes: 3
         run: |
           set -euo pipefail
+          if zsh --version >/dev/null 2>&1; then
+            exit 0
+          fi
           apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
-          if ! sudo apt-get "${apt_options[@]}" install -y -qq zsh; then
-            sudo apt-get "${apt_options[@]}" update -qq
-            sudo apt-get "${apt_options[@]}" install -y -qq zsh
+          if ! timeout --kill-after=5s 45s sudo apt-get "${apt_options[@]}" install -y -qq zsh; then
+            timeout --kill-after=5s 60s sudo apt-get "${apt_options[@]}" update -qq
+            timeout --kill-after=5s 45s sudo apt-get "${apt_options[@]}" install -y -qq zsh
           fi
 
       - name: Install PostgreSQL 17
