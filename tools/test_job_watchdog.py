@@ -356,6 +356,111 @@ class ReplayTests(unittest.TestCase):
             self.assertEqual(state[pipeline["key"]]["cleared_at"], w.stamp(200))
             self.assertIsNone(state[red["key"]]["cleared_at"])
 
+    def test_successful_report_retry_clears_record_error_during_incomplete_scan(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["job_hang"] = "report"
+        class Effects:
+            failing = True
+            def report(self, finding):
+                if self.failing:
+                    raise RuntimeError("progress board timed out")
+                return {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            effects = Effects()
+            found = w.finding("job_hang", "synthetic-job", "worker stopped producing output", c)
+            w.reconcile(root, c, [found], effects, 100, complete=False)
+            path = root / c["paths"]["findings"]
+            error_key = "record_error:" + found["key"]
+            self.assertIsNone(w.read_latest(path)[error_key]["cleared_at"])
+            rows_before = [json.loads(line) for line in path.read_text().splitlines()]
+
+            effects.failing = False
+            w.reconcile(root, c, [found], effects, 200, complete=False)
+
+            latest = w.read_latest(path)
+            self.assertTrue(latest[found["key"]]["reported"])
+            self.assertEqual(latest[error_key]["cleared_at"], w.stamp(200))
+            rows_after = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertGreater(len(rows_after), len(rows_before))
+            self.assertTrue(any(row["key"] == error_key and row.get("cleared_at") is None for row in rows_after))
+
+    def test_disappeared_finding_and_record_error_clear_without_deleting_history(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["job_hang"] = "report"
+        class Effects:
+            def report(self, finding):
+                raise RuntimeError("progress board timed out")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            found = w.finding("job_hang", "synthetic-job", "worker stopped producing output", c)
+            w.reconcile(root, c, [found], Effects(), 100)
+            path = root / c["paths"]["findings"]
+            rows_before = [json.loads(line) for line in path.read_text().splitlines()]
+
+            w.reconcile(root, c, [], Effects(), 200)
+
+            error_key = "record_error:" + found["key"]
+            latest = w.read_latest(path)
+            self.assertEqual(latest[found["key"]]["cleared_at"], w.stamp(200))
+            self.assertEqual(latest[error_key]["cleared_at"], w.stamp(200))
+            rows_after = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertGreater(len(rows_after), len(rows_before))
+            for row in rows_before:
+                self.assertIn(row, rows_after)
+
+    def test_board_task_forces_deferred_local_progress_board_mutation(self):
+        from unittest.mock import patch
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            board = root / "out/boards" / (c["board"] + ".json")
+            board.parent.mkdir(parents=True)
+            board.write_text(json.dumps({"tasks": {}}))
+            completed = subprocess.CompletedProcess([], 0, json.dumps({"applied": True, "before": None, "after": {}}), "")
+            with patch.dict(os.environ, {"PROGRESS_BOARD_LOCAL_ONLY": ""}), \
+                 patch.object(w.subprocess, "run", return_value=completed) as run:
+                w.board_task(root, c, "synthetic", "orchestrator", "blocked", "failure",
+                             reason="failure", next_action="retry")
+            self.assertEqual(run.call_args.kwargs["env"]["PROGRESS_BOARD_LOCAL_ONLY"], "1")
+            self.assertIn("--receipt", run.call_args.args[0])
+            self.assertIn("--defer-refresh", run.call_args.args[0])
+
+    def test_clear_without_recovery_retires_only_exact_generated_watchdog_card(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["file_defects"] = False
+        c["actions"]["job_hang"] = "report"
+        for mode in ("generated", "reassigned", "explicit"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                effects = w.Effects(root, c)
+                fields = {"card": "shared-card"} if mode == "explicit" else {}
+                found = w.finding("job_hang", "synthetic-job", "worker stopped producing output", c, **fields)
+                card = effects.card(found)
+                effects.show_finding(found)
+                if mode == "reassigned":
+                    w.board_task(root, c, card, "new-executor", "blocked",
+                                 found["reason"] + "\nNext action: " + found["next_action"],
+                                 reason=found["reason"], next_action=found["next_action"])
+                path = root / c["paths"]["findings"]
+                w.append(path, {**found, "reported": False, "cleared_at": None})
+                rows_before = [json.loads(line) for line in path.read_text().splitlines()]
+
+                w.reconcile(root, c, [], effects, 200)
+
+                task = json.loads((root / "out/boards" / (c["board"] + ".json")).read_text())["tasks"][card]
+                self.assertEqual(task["status"], "done" if mode == "generated" else "blocked")
+                if mode == "reassigned":
+                    self.assertEqual(task["executor"], "new-executor")
+                self.assertEqual(w.read_latest(path)[found["key"]]["cleared_at"], w.stamp(200))
+                rows_after = [json.loads(line) for line in path.read_text().splitlines()]
+                for row in rows_before:
+                    self.assertIn(row, rows_after)
+
     def test_current_head_latest_review_and_active_fixer(self):
         import job_watchdog as w
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")

@@ -2049,6 +2049,38 @@ class ReviewRound1420(BoardCase):
         result = self.run_board("note", "demo", "--text", "x")
         self.assertIn("not published", result.stderr)
 
+    def test_11_b_deferred_mutation_does_not_refresh_or_publish(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        with self.in_process(PROGRESS_BOARD_LOCAL_ONLY="1"), \
+             patch.object(BOARD, "render", side_effect=AssertionError("local mutation refreshed the whole board")), \
+             patch.object(BOARD, "publish_board", side_effect=AssertionError("local mutation published")):
+            BOARD.main(["task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex",
+                        "--defer-refresh"])
+        self.assertEqual(self.read_state("demo")["tasks"]["a"]["status"], "running")
+
+    def test_11_c_task_receipt_captures_locked_before_state_and_cas_noop(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--note", "Original evidence")
+        before = self.read_state("demo")["tasks"]["a"]
+
+        applied = self.run_board("task", "demo", "a", "--status", "blocked", "--health", "blocked",
+                                 "--reason", "Synthetic failure", "--next-action", "Recover",
+                                 "--note", "Watchdog overlay", "--receipt")
+        receipt = json.loads(applied.stdout)
+        self.assertTrue(receipt["applied"])
+        self.assertEqual(receipt["before"], before)
+        self.assertEqual(receipt["after"], self.read_state("demo")["tasks"]["a"])
+
+        current = receipt["after"]
+        refused = self.run_board("task", "demo", "a", "--status", "done", "--note", "stale restore",
+                                 "--expected-task", json.dumps({"status": "running"}), "--receipt")
+        receipt = json.loads(refused.stdout)
+        self.assertFalse(receipt["applied"])
+        self.assertEqual(receipt["before"], current)
+        self.assertEqual(receipt["after"], current)
+        self.assertEqual(self.read_state("demo")["tasks"]["a"], current)
+
 
 def merged_view(oid):
     """A complete merged PR as gh reports it, merged at `oid`."""
