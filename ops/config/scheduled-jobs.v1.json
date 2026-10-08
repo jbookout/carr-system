@@ -12,6 +12,50 @@
   "captured_at": "2026-10-05T17:56:20Z",
   "jobs": [
     {
+      "label": "com.carr.build-duration-check",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "build-duration-check",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/build-duration-check.py",
+        "--record-loops"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 30
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 50
+          }
+        ],
+        "RunAtLoad": false
+      },
+      "expected_enabled": true,
+      "expected_installed": true,
+      "log_path": "~/carr-system/out/build-duration-check.log",
+      "log_max_age_seconds": 1800,
+      "owner": "orchestrator",
+      "done_signal": "out/build-duration-check.json receipt with scan cursor; deduplicated build-duration workflow loops; primary only",
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
+    },
+    {
       "label": "com.carr.calendar-eventkit",
       "scheduler": "launchd",
       "program_arguments": [
