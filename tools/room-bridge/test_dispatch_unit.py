@@ -365,6 +365,43 @@ def main() -> int:
     check("a seat out of credit reports quota_exhausted, not success",
           codex_out_of_credit_is_its_own_status)
 
+    def finished_job_that_quotes_the_limit_text_is_completed():
+        """2026-10-08: a PR 185 fix finished, pushed and answered, yet came back
+        quota_exhausted because Codex had read dispatch.py, whose source holds
+        the limit phrase, and that command output rode stdout as a JSON event."""
+        quoting = fake_bin / "codex-quoting"
+        quoting.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,sys\n"
+            "argv=sys.argv[1:]\n"
+            "tid = argv[-2] if 'resume' in argv[:2] else 'thread-first-0001'\n"
+            "print(json.dumps({'type':'thread.started','thread_id':tid}))\n"
+            "print(json.dumps({'type':'item.completed','item':{'type':'command_execution',"
+            "'aggregated_output':'QUOTA_HINT = re.compile(r\"hit your usage limit\", re.I)'}}))\n"
+            "out=None\n"
+            "for i,a in enumerate(argv):\n"
+            "    if a in ('-o','--output-last-message'): out=argv[i+1]\n"
+            "if out: open(out,'w').write('Fixed and pushed.')\n"
+            "print(json.dumps({'type':'turn.completed'}))\n"
+        )
+        shim = fake_bin / "codex"
+        saved = shim.read_text()
+        shim.write_text(quoting.read_text())
+        try:
+            env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+            out = dispatch.dispatch(
+                "codex-desk", "anything", registry=reg,
+                results_path=root / "quoting-results.ndjson", env=env,
+            )
+            assert out["status"] == "completed", out
+            assert out["result"] == "Fixed and pushed.", out
+        finally:
+            shim.write_text(saved)
+            shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+
+    check("a finished job whose output quotes the limit text is completed",
+          finished_job_that_quotes_the_limit_text_is_completed)
+
     def codex_keeps_its_own_context():
         """The second task must land in the SAME thread as the first.
 

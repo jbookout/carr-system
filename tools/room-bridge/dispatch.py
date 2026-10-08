@@ -295,9 +295,16 @@ def _to_codex(
 
         # Belt for the same signal arriving as prose. Codex prints the limit
         # BOTH as a --json event and as a plain line, and the plain line is
-        # what a future version might keep if the event shape changes.
-        blob = f"{proc.stderr or ''}\n{proc.stdout or ''}"
-        if QUOTA_HINT.search(blob):
+        # what a future version might keep if the event shape changes. Only
+        # Codex's own plain lines count: a JSON event carries command output,
+        # so a job that read a file holding this phrase (dispatch.py does) is
+        # not out of credit, and a turn that finished with an answer never is.
+        plain = [line for line in (proc.stdout or "").splitlines()
+                 if not line.lstrip().startswith("{")]
+        blob = "\n".join([proc.stderr or "", *plain])
+        finished = proc.returncode == 0 and bool(result) and any(
+            e.get("type") == "turn.completed" for e in events)
+        if not finished and QUOTA_HINT.search(blob):
             at = RETRY_AT.search(blob)
             return {**base, "status": "quota_exhausted",
                     "detail": (QUOTA_HINT.search(blob) and
