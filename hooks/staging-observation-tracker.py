@@ -392,11 +392,12 @@ def handle(payload, repo=REPO):
         return
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        sys.exit(0)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+@decision(failure="raise")
+def decide(payload):
     try:
         handle(payload)
     except Exception as exc:
@@ -404,5 +405,9 @@ def main():
     sys.exit(0)  # this tracker never blocks; it only ever observes
 
 
+def main():
+    sys.exit(run(decide))
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

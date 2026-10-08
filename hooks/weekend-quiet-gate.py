@@ -181,40 +181,46 @@ REASON = (
 )
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    dlog(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    dlog(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    if not SEND_TOOLS.match(tool or ""):
+        sys.exit(0)
+
+    clock = now()
+    if clock is None:
+        dlog("ALLOW(unreadable-clock)")
+        sys.exit(0)
+    if clock.weekday() < 5:                               # Mon-Fri
+        sys.exit(0)
+
+    if partner_is_here(payload.get("transcript_path")):
+        dlog(f"ALLOW(partner-present) {tool}")
+        sys.exit(0)
+
+    day = clock.strftime("%A")
+    dlog(f"DENY {tool} on {day}")
+    print(REASON.format(day=day), file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:                                  # noqa: BLE001
-        dlog(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
-
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        if not SEND_TOOLS.match(tool or ""):
-            sys.exit(0)
-
-        clock = now()
-        if clock is None:
-            dlog("ALLOW(unreadable-clock)")
-            sys.exit(0)
-        if clock.weekday() < 5:                               # Mon-Fri
-            sys.exit(0)
-
-        if partner_is_here(payload.get("transcript_path")):
-            dlog(f"ALLOW(partner-present) {tool}")
-            sys.exit(0)
-
-        day = clock.strftime("%A")
-        dlog(f"DENY {tool} on {day}")
-        print(REASON.format(day=day), file=sys.stderr)
-        sys.exit(2)
-
-    except SystemExit:
-        raise
-    except Exception as exc:                                  # noqa: BLE001
-        dlog(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

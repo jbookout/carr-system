@@ -805,12 +805,12 @@ def handle_stop(payload: dict) -> int:
     return 0
 
 
-def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
+
+@decision(failure="raise")
+def decide(payload):
     event = payload.get("hook_event_name") or payload.get("hookEventName")
     try:
         if event == "Stop":
@@ -818,6 +818,10 @@ def main() -> int:
         return handle_pretooluse(payload)
     except Exception:
         return 0  # conduct/cost gate fails open; it must never wedge the session
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":
