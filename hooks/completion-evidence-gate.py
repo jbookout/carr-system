@@ -168,6 +168,9 @@ WRITE_ACTION_EXACT = {
     "undo-lead-move",
     "advance-leads",  # evidence-driven stages and approval-only drafts
     "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
+    "remove-research-site",  # soft-removes a research-site index row (removed_at, who, why).
+                              # EXACT rather than a "remove" prefix: it is the only remove-
+                              # verb, and a prefix would capture any future read named so.
     "acknowledge-board-answer",  # durable Received receipt for a board answer
     "answer-board-question",      # human partner records a durable answer
     "ask-board-question",         # opens a named question on the board
