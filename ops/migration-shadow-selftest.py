@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+from git_env import fixture_env
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 TOOL = REPO / "ops" / "migration-shadow.py"
@@ -83,6 +84,39 @@ check("seed content remains bound", bool(shadow.differences(snapshot(seed, R1), 
 check("unadmitted timestamps remain bound", bool(shadow.differences(snapshot("select '2026-01-01';\n", R1), snapshot("select '2026-02-02';\n", R1))))
 
 from unittest.mock import patch
+with tempfile.TemporaryDirectory() as tmp:
+    work = pathlib.Path(tmp)
+    repo = work / 'repo'
+    repo.mkdir()
+    env = fixture_env()
+    env['GITHUB_BASE_REF'] = ''
+    message = work / 'commit-message'
+    message.write_text('Synthetic migration base fixture\n')
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=repo, env=env,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    def commit(path):
+        (repo / path).write_text(path)
+        git('add', path)
+        git('commit', '-q', '-F', str(message))
+    git('init', '-q', '-b', 'topic')
+    git('config', 'user.name', 'Fixture')
+    git('config', 'user.email', 'fixture@example.invalid')
+    git('config', 'core.hooksPath', '/dev/null')
+    commit('base.txt')
+    base = git('rev-parse', 'HEAD')
+    git('branch', 'main')
+    commit('topic.txt')
+    git('checkout', '-q', 'main')
+    commit('main.txt')
+    main = git('rev-parse', 'HEAD')
+    git('update-ref', 'refs/remotes/origin/main', main)
+    git('checkout', '-q', 'topic')
+    with patch.object(shadow, 'REPO', repo), patch.dict(shadow.os.environ, env, clear=True):
+        check('an unmerged branch shadows from its common base', shadow.default_base() == base)
+        git('merge', '--no-commit', 'main')
+        check('a pending main merge shadows from the main it incorporated', shadow.default_base() == main)
+
 with tempfile.TemporaryDirectory() as tmp:
     work = pathlib.Path(tmp)
     def fake_run(command, env, label, log):

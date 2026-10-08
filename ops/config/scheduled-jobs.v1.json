@@ -2414,6 +2414,34 @@
       "owner": "orchestrator",
       "done_signal": "Canonical out/boards/*.json and authenticated publish acknowledgement",
       "expectation_note": "Required board publisher named in gap #3. Cadence is the lib/launchd_calendar.py two-minute form; StartInterval does not fire on macOS 27."
+    },
+    {
+      "label": "com.carr.expert-reply-watch",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "expert-reply-watch",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/expert_reply_watch.py"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": {
+          "Weekday": 1,
+          "Hour": 6,
+          "Minute": 0
+        },
+        "RunAtLoad": false
+      },
+      "expected_enabled": true,
+      "expected_installed": true,
+      "log_path": "~/carr-system/out/expert-reply-watch.log",
+      "log_max_age_seconds": 691200,
+      "owner": "orchestrator",
+      "done_signal": "Dated out/expert-reply-watch/ledger.json run is ok; new replies have capture_id acknowledgements. CLI failure records one defect and exits nonzero.",
+      "expectation_note": "Monday 06:00 local on primary only; installed via config-as-code from canonical main."
     }
   ],
   "expectations_reviewed_at": "2026-10-05",

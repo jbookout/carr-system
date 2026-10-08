@@ -40,6 +40,7 @@
 # inherited from the nightly chain.
 PRIMARY_ONLY = {
     "com.carr.build-duration-check.plist",
+    "com.carr.expert-reply-watch.plist",
     "com.carr.job-watchdog.plist",
     "com.carr.videopipeline.plist",
     # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
