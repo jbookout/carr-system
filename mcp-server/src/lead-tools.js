@@ -46,7 +46,7 @@ export function leadTools() {
         // to go straight into the insert, so a plausible-but-wrong value — `lane:
         // "referral"`, which reads like an obvious lane and is not one — came back as
         // a bare "internal error" with nothing naming the field or the options.
-        // Measured live 2026-08-10 creating Dr. Harlan's lead: three attempts failed
+        // Measured live 2026-08-10 creating Dr. Example's lead: three attempts failed
         // opaquely and the bare call succeeded, which tells the caller nothing about
         // WHICH field was wrong. Same failure class as loop #261.
         for (const [field, table] of [["stage", "lead_stage"], ["lane", "lead_lane"]]) {

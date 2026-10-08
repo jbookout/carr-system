@@ -39,6 +39,7 @@
 # com.carr.fetch-allowlist.plist exists as its own job rather than being
 # inherited from the nightly chain.
 PRIMARY_ONLY = {
+    "com.carr.build-duration-check.plist",
     "com.carr.expert-reply-watch.plist",
     "com.carr.job-watchdog.plist",
     "com.carr.videopipeline.plist",

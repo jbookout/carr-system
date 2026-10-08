@@ -417,91 +417,99 @@ def read_turn(path, limit=400):
     return recs, 0, ""
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    dlog(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    dlog(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    is_ask = tool == "AskUserQuestion"
+    is_loop = tool.startswith("mcp__") and tool.endswith("__add-loop")
+    if not (is_ask or is_loop):
+        sys.exit(0)
+
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+
+    # The human's own last turn, for the "he asked" exemption. Best-effort:
+    # if the transcript is unreadable we simply lose one exemption and the
+    # other three still apply.
+    human_last, recs, start = "", [], 0
+    path = payload.get("transcript_path")
+    if path and os.path.exists(path):
+        try:
+            recs, start, human_last = read_turn(path)
+        except Exception:
+            pass
+
+    if is_ask:
+        blob = question_text(ti)
+        finding = hands_off_unattempted(
+            blob, human_last, denied_commands(recs, start))
+        if finding == "handoff_review":
+            audit({"ts": now(), "hook": "escalation-gate", "classes": ["handoff_review"],
+                   "patterns": ["needs_review"], "session": payload.get("session_id")})
+            print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE,
+                "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "additionalContext": HANDOFF_REVIEW_MESSAGE}}))
+        elif finding:
+            audit({
+                "ts": now(),
+                "hook": "escalation-gate",
+                "classes": ["command_handoff"],
+                "patterns": [f"attempt_first:{finding}"],
+                "session": payload.get("session_id"),
+                "excerpt": " ".join(blob.split())[:400],
+            })
+            dlog(f"DENY(attempt_first:{finding}) :: {' '.join(blob.split())[:200]}")
+            print(ATTEMPT_FIRST_REASON, file=sys.stderr)
+            sys.exit(2)
+
+    if is_ask:
+        # Per-item classification: one fact-capture question must not
+        # exempt an internal question riding in the same interview.
+        allow, why = classify_per_item(ti, human_last)
+        blob = question_text(ti)
+    else:
+        if not parks_a_decision(ti):
+            sys.exit(0)
+        blob = loop_text(ti)
+        allow, why = classify(blob, human_last)
+
+    if allow:
+        dlog(f"ALLOW({why}) :: {' '.join(blob.split())[:160]}")
+        sys.exit(0)
+
+    audit({
+        "ts": now(),
+        "hook": "escalation-gate",
+        "classes": ["internal_ask" if is_ask else "internal_loop_parked"],
+        "patterns": [f"escalation:{why}"],
+        "session": payload.get("session_id"),
+        "excerpt": " ".join(blob.split())[:400],
+    })
+    dlog(f"DENY({why}) :: {' '.join(blob.split())[:200]}")
+    # Exit 2, not JSON. Same reasoning as guard-unattended.py: on any build
+    # that does not parse the structured contract, exit 0 reads as ALLOW and
+    # the gate fails open silently. Exit 2 blocks everywhere and hands
+    # stderr back as the reason.
+    print(REASON if is_ask else LOOP_REASON, file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        dlog(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
-
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        is_ask = tool == "AskUserQuestion"
-        is_loop = tool.startswith("mcp__") and tool.endswith("__add-loop")
-        if not (is_ask or is_loop):
-            sys.exit(0)
-
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
-
-        # The human's own last turn, for the "he asked" exemption. Best-effort:
-        # if the transcript is unreadable we simply lose one exemption and the
-        # other three still apply.
-        human_last, recs, start = "", [], 0
-        path = payload.get("transcript_path")
-        if path and os.path.exists(path):
-            try:
-                recs, start, human_last = read_turn(path)
-            except Exception:
-                pass
-
-        if is_ask:
-            blob = question_text(ti)
-            finding = hands_off_unattempted(
-                blob, human_last, denied_commands(recs, start))
-            if finding == "handoff_review":
-                audit({"ts": now(), "hook": "escalation-gate", "classes": ["handoff_review"],
-                       "patterns": ["needs_review"], "session": payload.get("session_id")})
-                print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE,
-                    "hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                           "additionalContext": HANDOFF_REVIEW_MESSAGE}}))
-            elif finding:
-                audit({
-                    "ts": now(),
-                    "hook": "escalation-gate",
-                    "classes": ["command_handoff"],
-                    "patterns": [f"attempt_first:{finding}"],
-                    "session": payload.get("session_id"),
-                    "excerpt": " ".join(blob.split())[:400],
-                })
-                dlog(f"DENY(attempt_first:{finding}) :: {' '.join(blob.split())[:200]}")
-                print(ATTEMPT_FIRST_REASON, file=sys.stderr)
-                sys.exit(2)
-
-        if is_ask:
-            # Per-item classification: one fact-capture question must not
-            # exempt an internal question riding in the same interview.
-            allow, why = classify_per_item(ti, human_last)
-            blob = question_text(ti)
-        else:
-            if not parks_a_decision(ti):
-                sys.exit(0)
-            blob = loop_text(ti)
-            allow, why = classify(blob, human_last)
-
-        if allow:
-            dlog(f"ALLOW({why}) :: {' '.join(blob.split())[:160]}")
-            sys.exit(0)
-
-        audit({
-            "ts": now(),
-            "hook": "escalation-gate",
-            "classes": ["internal_ask" if is_ask else "internal_loop_parked"],
-            "patterns": [f"escalation:{why}"],
-            "session": payload.get("session_id"),
-            "excerpt": " ".join(blob.split())[:400],
-        })
-        dlog(f"DENY({why}) :: {' '.join(blob.split())[:200]}")
-        # Exit 2, not JSON. Same reasoning as guard-unattended.py: on any build
-        # that does not parse the structured contract, exit 0 reads as ALLOW and
-        # the gate fails open silently. Exit 2 blocks everywhere and hands
-        # stderr back as the reason.
-        print(REASON if is_ask else LOOP_REASON, file=sys.stderr)
-        sys.exit(2)
-
-    except Exception as exc:
-        dlog(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

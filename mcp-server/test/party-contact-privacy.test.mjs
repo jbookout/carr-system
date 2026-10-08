@@ -61,6 +61,13 @@ test('public duplicate-organization examples use synthetic business names', () =
   assert.equal(/\/\/ Synthetic [^\n]+ — 17 rows,/.test(support), true);
 });
 
+test('public lead source uses a synthetic person in its failure example', () => {
+  const source = readFileSync(new URL('../src/lead-tools.js', import.meta.url), 'utf8');
+  const examples = [...source.matchAll(/creating Dr\. ([^'\n]+)'s lead/g)].map(match => match[1]);
+  assert.equal(examples.length, 1, 'the lead failure example is covered');
+  assert.equal(examples.every(name => name === 'Example'), true, 'lead examples must be synthetic');
+});
+
 test('contact refusals read canonical private actor phones on PostgreSQL', () =>
   withPostgresFixture({ tables: ['actor', 'party', 'tool_call', 'system_config'].map(name => `public.${name}`) }, async ({ c, command }) => {
     const actor = { id: randomUUID(), slug: 'joe', human: true };
