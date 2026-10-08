@@ -99,7 +99,8 @@ class AdapterCase(unittest.TestCase):
                               check=False, env=self.env)
 
     def install_fake_record_call(self, response=None, outage=False, event_response=None,
-                                 recovery_tool_error=False, event_tool_error=False):
+                                 recovery_tool_error=False, event_tool_error=False,
+                                 binding_responses=None):
         fake = self.base / "fake-call.py"
         log = self.base / "calls.jsonl"
         if log.exists():
@@ -116,6 +117,16 @@ import json, os, pathlib, sys, time
 log = pathlib.Path(os.environ["FAKE_CALL_LOG"])
 with log.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps({"verb": sys.argv[1], "args": json.loads(sys.argv[2])}, separators=(",", ":")) + "\\n")
+bindings = json.loads(os.environ.get("FAKE_BINDING_RESPONSES", "{}"))
+bound = bindings.get(json.loads(sys.argv[2])["project_id"], {}).get(sys.argv[1])
+if bound is not None:
+    time.sleep(bound.get("delay", 0))
+    value = json.dumps(bound["response"])
+    if bound.get("tool_error"):
+        print("TOOL ERROR " + value, file=sys.stderr)
+        raise SystemExit(1)
+    print(value)
+    raise SystemExit(0)
 time.sleep(float(os.environ.get("FAKE_CALL_DELAY", "0")))
 if os.environ.get("FAKE_CALL_OUTAGE") == "1":
     print("simulated store outage", file=sys.stderr)
@@ -150,7 +161,21 @@ else:
             env["FAKE_EVENT_TOOL_ERROR"] = "1"
         if outage:
             env["FAKE_CALL_OUTAGE"] = "1"
+        if binding_responses is not None:
+            env["FAKE_BINDING_RESPONSES"] = json.dumps(binding_responses)
         return env, log
+
+    def desktop_assignment(self, roots=None):
+        project_id = "93df6a68-6a0c-4ed2-8021-1a2787acf6f7"
+        state = {
+            "thread-project-assignments": {self.session_id: {
+                "projectKind": "local", "projectId": project_id}},
+            "local-projects": {project_id: {
+                "id": project_id,
+                "rootPaths": [str(self.project)] if roots is None else roots}},
+        }
+        (self.codex_home / ".codex-global-state.json").write_text(json.dumps(state))
+        return project_id
 
     def run_hook(self, payload, env):
         return subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload),
@@ -1021,6 +1046,171 @@ class CodexHookTests(AdapterCase):
                 "hookSpecificOutput"]["additionalContext"]
         self.assertIn("was rejected by the record store (codex_event_key_conflict)", context)
         self.assertNotIn("receipt could not be stored because the record store is unavailable", context)
+
+    def test_legacy_desktop_roots_require_an_array_of_absolute_strings(self):
+        hook = load_hook_module()
+        meta = {"runtime": "codex", "native_task_id": self.session_id,
+                "project_id": "git:canonical", "cwd": str(self.project)}
+        for roots in ("/unrelated/project", {"/": True}, [],
+                      [str(self.base / "unrelated")], ["relative"],
+                      [str(self.project), 42], [str(self.project), ""]):
+            with self.subTest(roots=roots):
+                self.desktop_assignment(roots)
+                with mock.patch.dict(os.environ, self.env):
+                    self.assertIsNone(hook._legacy_desktop_project(meta))
+        for roots in ([str(self.project)], [str(self.base)],
+                      [str(self.base / "unrelated"), str(self.project)]):
+            with self.subTest(roots=roots):
+                project_id = self.desktop_assignment(roots)
+                with mock.patch.dict(os.environ, self.env):
+                    self.assertEqual(hook._legacy_desktop_project(meta), project_id)
+
+    def test_alternate_recovery_failures_survive_the_real_wrapper(self):
+        self.native_rollout({"type": "event_msg", "payload": {"message": "recover"}})
+        hook = load_hook_module()
+        project_id = self.desktop_assignment()
+        with mock.patch.dict(os.environ, self.env):
+            meta = hook.HISTORY.validate_native_rollout(self.hook_payload())
+        canonical = meta["project_id"]
+        conflict = {"error": "codex_recovery_binding_conflict"}
+        for alternate, status, error in (
+            ({"response": {"ok": True}, "delay": 1}, "unavailable", None),
+            ({"response": {"error": "codex_continuity_owner_required"},
+              "tool_error": True}, "rejected", "codex_continuity_owner_required"),
+        ):
+            with self.subTest(status=status):
+                env, log = self.install_fake_record_call(binding_responses={
+                    canonical: {"codex-read-recovery": {
+                        "response": conflict, "tool_error": True}},
+                    project_id: {"codex-read-recovery": alternate},
+                })
+                with mock.patch.dict(os.environ, env):
+                    result = hook.read_recovery(meta, deadline=time.monotonic() + 0.5)
+                self.assertEqual(result["status"], status)
+                self.assertEqual(result.get("error"), error)
+                self.assertEqual(result["binding_conflict"],
+                                 {"status": "rejected", "response": conflict,
+                                  "error": conflict["error"]})
+                self.assertEqual(meta["project_id"], canonical)
+                self.assertEqual([json.loads(line)["args"]["project_id"]
+                                  for line in log.read_text().splitlines()],
+                                 [canonical, project_id])
+                output = io.StringIO()
+                with mock.patch.dict(os.environ, env), \
+                     mock.patch.object(hook, "EVENT_DEADLINE_SECONDS", 0.5), \
+                     mock.patch.object(sys, "stdin", io.StringIO(json.dumps(
+                         self.hook_payload("UserPromptSubmit", turn_id="turn-alternate")))), \
+                     contextlib.redirect_stdout(output), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    hook.main()
+                context = json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("record store is unavailable" if status == "unavailable"
+                              else f"checkpoint recovery ({error})", context)
+                self.assertNotIn("checkpoint recovery (codex_recovery_binding_conflict)", context)
+
+    def test_postcompact_slow_store_keeps_the_canonical_receipt_budget(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        env, log = self.install_fake_record_call()
+        env["FAKE_CALL_DELAY"] = "5"
+        result = self.run_hook(self.hook_payload(
+            "PostCompact", turn_id="turn-slow-store", trigger="auto"), env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("TimeoutExpired", result.stderr)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([call["verb"] for call in calls], ["codex-record-event"])
+        self.assertEqual(calls[0]["args"]["cursor"]["source_window_number"], 1)
+
+    def test_postcompact_large_rollout_is_scanned_once_before_the_receipt(self):
+        self.native_rollout()
+        row = json.dumps({"type": "event_msg", "payload": {"message": "x" * 1000}}) + "\n"
+        with self.rollout.open("a") as handle:
+            for _ in range(45000):
+                handle.write(row)
+        self.append_rollout(compacted_row(1, "window-initial", "window-current"))
+        hook = load_hook_module()
+        self.assertLess(self.rollout.stat().st_size, hook.HISTORY.MAX_COMPACTION_SCAN_BYTES)
+        env, log = self.install_fake_record_call()
+        env["FAKE_CALL_DELAY"] = "1.5"
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(sys, "stdin", io.StringIO(json.dumps(self.hook_payload(
+                 "PostCompact", turn_id="turn-large-rollout", trigger="auto")))), \
+             mock.patch.object(hook.HISTORY, "compaction_occurrence",
+                               wraps=hook.HISTORY.compaction_occurrence) as scan, \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            hook.main()
+        self.assertEqual(output.getvalue(), "")
+        self.assertNotIn("TimeoutExpired", errors.getvalue())
+        self.assertEqual(scan.call_count, 1)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([call["verb"] for call in calls], ["codex-record-event"])
+        self.assertEqual(calls[0]["args"]["cursor"]["source_window_number"], 1)
+
+    def test_postcompact_retries_a_legacy_binding_only_with_checkpoint_proof(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        hook = load_hook_module()
+        project_id = self.desktop_assignment()
+        with mock.patch.dict(os.environ, self.env):
+            canonical = hook.HISTORY.validate_native_rollout(self.hook_payload())["project_id"]
+        for found in (True, False):
+            with self.subTest(found=found):
+                env, log = self.install_fake_record_call(binding_responses={
+                    canonical: {
+                        "codex-record-event": {"tool_error": True, "response": {
+                            "error": "codex_event_binding_conflict"}},
+                        "codex-read-recovery": {"tool_error": True, "response": {
+                            "error": "codex_recovery_binding_conflict"}},
+                    },
+                    project_id: {"codex-read-recovery": {
+                        "response": self.checkpoint() if found else {
+                            "ok": True, "found": False, "checkpoint": None}}},
+                })
+                result = self.run_hook(self.hook_payload(
+                    "PostCompact", turn_id="turn-legacy-post", trigger="auto"), env)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                expected = ["codex-record-event", "codex-read-recovery", "codex-read-recovery"]
+                self.assertEqual([call["verb"] for call in calls],
+                                 expected + (["codex-record-event"] if found else []))
+                if found:
+                    self.assertEqual(calls[-1]["args"]["project_id"], project_id)
+                    self.assertEqual(calls[0]["args"]["cursor"], calls[-1]["args"]["cursor"])
+                    self.assertNotEqual(calls[0]["args"]["idempotency_key"],
+                                        calls[-1]["args"]["idempotency_key"])
+
+    def test_legacy_desktop_project_recovers_only_verified_existing_checkpoint(self):
+        hook = load_hook_module()
+        project_id = self.desktop_assignment()
+        meta = {"runtime": "codex", "native_task_id": self.session_id,
+                "project_id": "git:canonical", "cwd": str(self.project)}
+        calls = []
+
+        def record_call(_verb, args, **_kwargs):
+            calls.append(args["project_id"])
+            if args["project_id"] == "git:canonical":
+                return {"status": "rejected", "error": "codex_recovery_binding_conflict"}
+            return {"status": "ok", "response": {"ok": True, "found": True,
+                                               "checkpoint": {"checkpoint_version": 2}}}
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}), \
+             mock.patch.object(hook, "call_verb", side_effect=record_call):
+            result = hook.read_recovery(meta)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(meta["project_id"], project_id)
+        self.assertEqual(calls, ["git:canonical", project_id])
+
+        meta["project_id"] = "git:canonical"
+        def missing_call(_verb, args, **_kwargs):
+            if args["project_id"] == "git:canonical":
+                return {"status": "rejected", "error": "codex_recovery_binding_conflict"}
+            return {"status": "ok", "response": {"ok": True, "found": False}}
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}), \
+             mock.patch.object(hook, "call_verb", side_effect=missing_call):
+            result = hook.read_recovery(meta)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(meta["project_id"], "git:canonical")
 
     def test_sanctioned_tool_error_rejection_is_not_reported_as_outage(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))

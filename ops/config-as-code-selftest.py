@@ -461,9 +461,9 @@ def main():
         # The definition-only mechanism is pinned with a SYNTHETIC entry since
         # the 2026-08-26 cutover released the real tick plist from the hold
         # (decision f4af0c87); tick_released below pins that release itself.
-        tick_released = "com.carr.control-plane-tick.plist" not in mod.DEFINITION_ONLY
-        original_definition_only = dict(mod.DEFINITION_ONLY)
-        mod.DEFINITION_ONLY["com.carr.synthetic-definition-only.plist"] = (
+        tick_released = "com.carr.control-plane-tick.plist" not in mod.launchd_hold.DEFINITION_ONLY
+        original_definition_only = dict(mod.launchd_hold.DEFINITION_ONLY)
+        mod.launchd_hold.DEFINITION_ONLY["com.carr.synthetic-definition-only.plist"] = (
             "synthetic hold for the selftest"
         )
         definition_only_plist = {
@@ -486,6 +486,12 @@ def main():
         load_attempts = []
 
         def fail_launchctl(args, *call_args, **call_kwargs):
+            if args[0] == "launchctl" and "synthetic-definition-only" in args[-1]:
+                if args[1] == "print":
+                    return SimpleNamespace(returncode=113, stderr='Could not find service "com.carr.synthetic-definition-only"', stdout="")
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            if args[:2] == ["launchctl", "print-disabled"]:
+                return SimpleNamespace(returncode=0, stderr="", stdout='"com.carr.synthetic-definition-only" => disabled')
             if args[:2] == ["launchctl", "unload"]:
                 return SimpleNamespace(returncode=0, stderr="", stdout="")
             if args[:2] == ["launchctl", "load"]:
@@ -527,8 +533,8 @@ def main():
                     ["launchctl", "bootout", f"gui/{os.getuid()}/{_label}"],
                     capture_output=True, text=True, check=False)
         mod.IS_PRIMARY = original_primary
-        mod.DEFINITION_ONLY.clear()
-        mod.DEFINITION_ONLY.update(original_definition_only)
+        mod.launchd_hold.DEFINITION_ONLY.clear()
+        mod.launchd_hold.DEFINITION_ONLY.update(original_definition_only)
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
         definition_only_absent = not (
             Path(mod.LAUNCHD_SRC) / "com.carr.synthetic-definition-only.plist"
@@ -622,7 +628,7 @@ def main():
         # repo produces byte-identical output, so an equality-based comparison
         # would have called it clean.
         janitor_plist = "com.carr.repo-hygiene-janitor.plist"
-        janitor_held = janitor_plist in mod.DEFINITION_ONLY
+        janitor_held = janitor_plist in mod.launchd_hold.DEFINITION_ONLY
         janitor_repo_body = (
             Path(REPO) / "ops" / "launchd" / janitor_plist
         ).read_text(encoding="utf-8")
@@ -712,7 +718,7 @@ def main():
         # HOME that is deleted moments later, and the question here is what the
         # reconciler INTENDS, which the dry run answers in full.
         canary_plist = "com.carr.gate-zero-canary.plist"
-        canary_released = canary_plist not in mod.DEFINITION_ONLY
+        canary_released = canary_plist not in mod.launchd_hold.DEFINITION_ONLY
         (launchd / canary_plist).write_text(
             (Path(REPO) / "ops" / "launchd" / canary_plist).read_text(encoding="utf-8"),
             encoding="utf-8")
@@ -1010,7 +1016,7 @@ def main():
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
         ("definition-only hold skips a held plist without installing it",
          definition_only_absent
-         and "SKIP  com.carr.synthetic-definition-only.plist (definition only:" in launchd_out.getvalue()),
+         and "DEFINITION ONLY com.carr.synthetic-definition-only:" in launchd_out.getvalue()),
         ("control-plane tick released from definition-only hold (cutover 2026-08-26)",
          tick_released),
         ("the Gate Zero scheduler canary is released from the definition-only "

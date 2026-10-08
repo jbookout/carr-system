@@ -101960,6 +101960,37 @@
       ],
       "expected_count": 1130,
       "expected_sha256": "cd2787524475e13050602e0453688165bb43f62aa99aff065eac61a415deff20"
+    },
+    "scac-mutation-registry.v113": {
+      "base_version": "v113",
+      "reason": "PR 1491 source-only review: bind the existing deploy-worker external-admin row after adding bounded retries for transient Worker version-upload failures. The script CLI, credential boundary, authority contract, and sealed runtime frontier remain unchanged.",
+      "upsert": [
+        {
+          "ingress_key": "external-admin:bin/deploy-worker.sh",
+          "ingress_kind": "external_admin",
+          "operation": "bin/deploy-worker.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/deploy-worker.sh",
+          "schema_digest": "e3d6150c8c03a673474f3805f19f9f66dd2762fee81f83d7ca516ee7af204ed5",
+          "handler_digest": "e3d6150c8c03a673474f3805f19f9f66dd2762fee81f83d7ca516ee7af204ed5",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ],
+      "expected_count": 1157,
+      "expected_sha256": "359f00adaeaecb9e38cd278919f61204a330a5f2069fa72dd821c74dfb79680b"
     }
   }
 }
