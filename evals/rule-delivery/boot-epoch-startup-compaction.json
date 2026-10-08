@@ -1,0 +1,136 @@
+{
+  "activation_hold": true,
+  "arms": {
+    "baseline": {
+      "approx_tokens": 76381,
+      "digest": "sha256:5b265e2c43983190c561fe0d6bd8a60a0acea610c4335c301b79965f0271aca3",
+      "discoverable_hits": 717,
+      "full_text_availability": 1.0,
+      "full_text_hits": 717,
+      "full_text_rules": 200,
+      "in_scope_rules": 200,
+      "lifecycles": [
+        {
+          "allowed_after": true,
+          "context": "main",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "startup"
+        },
+        {
+          "allowed_after": true,
+          "context": "same-child",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "startup"
+        },
+        {
+          "allowed_after": true,
+          "context": "main",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "compact"
+        },
+        {
+          "allowed_after": true,
+          "context": "same-child",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "compact"
+        }
+      ],
+      "max_json_page_chars": 20672,
+      "missing_ids": [],
+      "pages": 14,
+      "required_occurrences": 717,
+      "total_chars": 274972
+    },
+    "candidate": {
+      "approx_tokens": 76381,
+      "digest": "sha256:5b265e2c43983190c561fe0d6bd8a60a0acea610c4335c301b79965f0271aca3",
+      "discoverable_hits": 717,
+      "full_text_availability": 1.0,
+      "full_text_hits": 717,
+      "full_text_rules": 200,
+      "in_scope_rules": 200,
+      "lifecycles": [
+        {
+          "allowed_after": true,
+          "context": "main",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "startup"
+        },
+        {
+          "allowed_after": true,
+          "context": "same-child",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "startup"
+        },
+        {
+          "allowed_after": true,
+          "context": "main",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "compact"
+        },
+        {
+          "allowed_after": true,
+          "context": "same-child",
+          "delivered_ids_sha256": "2ae62482f961ebefe91e05a68643b9bea1cb4914a85508e56411e44cd33389ca",
+          "delivered_rules": 200,
+          "digest_only_held": true,
+          "held_before": true,
+          "incomplete_held": true,
+          "source": "compact"
+        }
+      ],
+      "max_json_page_chars": 20672,
+      "missing_ids": [],
+      "pages": 14,
+      "required_occurrences": 717,
+      "total_chars": 274972
+    }
+  },
+  "baseline_kind": "baseline renderer with candidate native gate",
+  "baseline_ref": "ec166e6c205c81bd8a02e304a87f749a2f0d53b2",
+  "claims": "Offline native-ID fixture; no deployed adapter, model obedience or billed savings claim",
+  "corpus_rules": 200,
+  "corpus_sha256": "c33af18bb924391a1b77cc4d80dfdc2466d3642b1f51ef7c00f4d80b17974d1a",
+  "frozen_cases_sha256": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
+  "lifecycle_probe_sha256": "3613a0779653a50de2e023955e90b47df432793abab57fa74cd882913077cb65",
+  "model": "deterministic-no-model",
+  "schema": "rule-boot-native-id-lifecycle-measurement/v1",
+  "source_sha256": {
+    "evals/rule-delivery/boot_epoch_probe.py": "68b96daa14de62374723d87637f261fb0540a83d1e08a5de21e7adbeb8584760",
+    "hooks/rule-boot-gate.py": "a2cbda4604f7429e3278fae4badce0d33b5e57faa6ae5740ae8247d9f47a5643",
+    "lib/rule_boot_gate.py": "2a5054484c1da88a2a599c099ad674b7a81704dc05e6415f6659f51342b159eb",
+    "mcp-server/src/rule-boot-classes.js": "f0f5c87724933392bfe4c3637a3cb80549535b7b1c08720c20ca7676b019c823",
+    "mcp-server/src/rule-boot.js": "effc00a4d1ed83c7473e6f71c129a59778e6c9d3827938ec52047555e03a1598"
+  },
+  "sponsor": "joe",
+  "test_cases": 72,
+  "token_measure": "rendered UTF-16 chars / 3.6; not deployed consumption"
+}

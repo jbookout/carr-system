@@ -1,0 +1,24 @@
+{
+  "control_passed": true,
+  "corpus_sha256": "c33af18bb924391a1b77cc4d80dfdc2466d3642b1f51ef7c00f4d80b17974d1a",
+  "delayed_corpus_digest": "sha256:5b265e2c43983190c561fe0d6bd8a60a0acea610c4335c301b79965f0271aca3",
+  "epoch_changed": true,
+  "expected": "After compact into a newer corpus, delayed answers initiated in the old arm must not roll the corpus back or authorize protected actions.",
+  "final_corpus_digest": "sha256:49a3772ab3d8b50774f4d9343c529e20c4006e64f107aeb70f1d42b9a74f278e",
+  "gate_source_sha256": "2a5054484c1da88a2a599c099ad674b7a81704dc05e6415f6659f51342b159eb",
+  "limitation": "Source-only native-hook probe. Barrier-driven process concurrency and fresh recovery are separately covered by the hook selftest. No deployed adapter or no-tool-turn proof; activation remains held.",
+  "new_corpus_digest": "sha256:49a3772ab3d8b50774f4d9343c529e20c4006e64f107aeb70f1d42b9a74f278e",
+  "probe_sha256": "68b96daa14de62374723d87637f261fb0540a83d1e08a5de21e7adbeb8584760",
+  "protected_action_decisions": {
+    "Agent": "deny",
+    "Bash": "deny",
+    "Read": "deny"
+  },
+  "schema": "offline-delayed-boot-answer-control/v1",
+  "sequence": [
+    "initiate all old-corpus page fetches in startup arm",
+    "arm compact with actual freshly rendered newer corpus",
+    "deliver delayed old page answers",
+    "query Read/Bash/Agent verdicts; never execute those actions"
+  ]
+}
