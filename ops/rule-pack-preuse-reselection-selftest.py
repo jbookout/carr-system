@@ -1311,19 +1311,88 @@ for routine_tool, routine_input in (
     check(f"{routine_tool} routine work does not deliver the sizing rule",
           "8400cd3d" not in hits, hits)
 
-for dispatch_name, dispatch_command in (
-        ("Codex Model Room brief",
-         'python3 tools/room-bridge/dispatch.py send codex-desk "fix the review"'),
-        ("Dot brief", "bin/dot-relay send-job /tmp/dot-brief.txt")):
+DISPATCH_COMMANDS = (
+    'python3 tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    'python3 ./tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    '/Users/booko/carr-system/tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    './dispatch.py send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --registry X send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --registry=X send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --results X send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --results=X --registry="desk registry.json" send codex-desk "fix the review"',
+    'python3 "tools/room-bridge/dispatch.py" --registry "desk registry.json" --results out.jsonl send codex-desk "fix the review"',
+    'bin/dot-relay send-job /tmp/dot-brief.txt',
+    './bin/dot-relay send-job /tmp/dot-brief.txt',
+    '/Users/booko/carr-system/bin/dot-relay send-job /tmp/dot-brief.txt',
+    'python3 bin/dot-relay send-job /tmp/dot-brief.txt',
+    'python3 "bin/dot-relay" --state-dir "job state" send-job /tmp/dot-brief.txt',
+    './dot-relay --credentials=x --state-dir=y send-job /tmp/dot-brief.txt',
+    'bin/dot-relay --state-dir x --credentials y send-job /tmp/dot-brief.txt',
+)
+NON_DISPATCH_COMMANDS = (
+    'python3 tools/room-bridge/dispatch.py desks',
+    'python3 tools/room-bridge/dispatch.py --registry X desks',
+    'python3 tools/room-bridge/dispatch.py --registry send desks',
+    'python3 tools/room-bridge/dispatch.py --results="send" desks',
+    'python3 tools/room-bridge/dispatch.py send-other codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py desks; echo send',
+    'bin/dot-relay watch 123.456',
+    '/Users/booko/carr-system/bin/dot-relay --state-dir x watch 123.456',
+    'bin/dot-relay --state-dir send-job watch 123.456',
+    'bin/dot-relay send-job-other /tmp/dot-brief.txt',
+    'bin/dot-relay watch 123.456; echo send-job',
+)
+for dispatch_command in DISPATCH_COMMANDS:
     hits = routed_for("Bash", {"command": dispatch_command})
-    check(f"{dispatch_name} delivers the new-work sizing rule",
+    check(f"dispatch spelling routes the sizing rule: {dispatch_command}",
           "8400cd3d" in hits, hits)
-for non_dispatch_name, non_dispatch_command in (
-        ("Model Room desk listing", "python3 tools/room-bridge/dispatch.py desks"),
-        ("Dot watch", "bin/dot-relay watch 123.456")):
+for non_dispatch_command in NON_DISPATCH_COMMANDS:
     hits = routed_for("Bash", {"command": non_dispatch_command})
-    check(f"{non_dispatch_name} does not deliver the sizing rule",
+    check(f"non-dispatch command excludes sizing: {non_dispatch_command}",
           "8400cd3d" not in hits, hits)
+
+with tempfile.TemporaryDirectory() as dispatch_tmp:
+    saved_env = dict(os.environ)
+    os.environ["CARR_RULE_ROUTE_DEDUPE_DIR"] = str(Path(dispatch_tmp) / "dedupe")
+    os.environ["CARR_RULES_ALWAYS_ON_FILE"] = str(Path(dispatch_tmp) / "always-on.md")
+    try:
+        for index, command in enumerate(DISPATCH_COMMANDS):
+            for client, tool in (("claude", "Bash"), ("codex", "functions.exec")):
+                for background in (False, True):
+                    call = gen_payload(tool=tool, client=client,
+                                       session=f"dispatch-{index}-{client}-{background}",
+                                       tool_input={"command": command,
+                                                   "run_in_background": background})
+                    calls = []
+
+                    def selector_runner(argv, **kwargs):
+                        args = json.loads(argv[-1])
+                        calls.append(args)
+                        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                            gen_selector_result(packs=args["packs"], ids=args["rule_ids"])))
+
+                    real_process, saved_stdin = rail.process, sys.stdin
+                    stdout = io.StringIO()
+                    sys.stdin = io.StringIO(json.dumps(call))
+                    rail.process = lambda p: real_process(p, runner=selector_runner)
+                    try:
+                        with contextlib.redirect_stdout(stdout):
+                            rc = rail.main()
+                    finally:
+                        rail.process, sys.stdin = real_process, saved_stdin
+                    output = json.loads(stdout.getvalue() or "{}")
+                    row = json.loads(context(output) or "{}")
+                    delivered = {r["id"]: r["statement"] for r in row.get("rules", [])}
+                    check(f"hook entry point delivers sizing: {index} {client} background={background}",
+                          rc == 0 and delivered.get("8400cd3d") == "binding jit rule 8400cd3d"
+                          and len(calls) == 1
+                          and routes_lib.validate_route_receipt(row, repo=REPO), row.get("rule_ids"))
+                    if background:
+                        check(f"background dispatch preserves scheduled rules: {index} {client}",
+                              set(EXPECTED_IDS) <= set(delivered), sorted(delivered))
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
 
 
 # The Bash route (production route rail) fires on every supported cloud launch
