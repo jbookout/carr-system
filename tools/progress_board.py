@@ -1850,10 +1850,10 @@ def local_only() -> bool:
 def refresh_and_publish(project: str) -> None:
     """Every mutation reaches the app board, the only board UI. A failed
     publication is loud: the local state is kept and the retry is named."""
+    render(project)
     if local_only():
         log(f"{project}: saved locally; not published to the app board (PROGRESS_BOARD_LOCAL_ONLY is set)")
         return
-    render(project)
     try:
         publish_board(project)
     except RuntimeError as exc:
@@ -1861,7 +1861,7 @@ def refresh_and_publish(project: str) -> None:
                          f"Retry: tools/progress_board.py render {project} --publish")
 
 
-def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> bool:
+def mutate(project: str, change: Callable[[dict[str, Any]], bool | None], *, refresh: bool = True) -> bool:
     """Read, change and write one board as a single locked transaction, then
     refresh and publish it."""
     with board_lock(project):
@@ -1870,7 +1870,8 @@ def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> boo
             return False
         state["updated_at"] = stamp()
         write_json(state)
-    refresh_and_publish(project)
+    if refresh:
+        refresh_and_publish(project)
     return True
 
 
@@ -2273,7 +2274,7 @@ def command_task(args: argparse.Namespace) -> None:
         update_task(state, args)
         receipt["applied"] = True
         receipt["after"] = copy.deepcopy(state["tasks"][args.task_id])
-    mutate(args.project, change)
+    mutate(args.project, change, refresh=not args.defer_refresh)
     if args.receipt:
         print(json.dumps(receipt, separators=(",", ":")))
 
@@ -2458,6 +2459,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--lane", choices=("status", "needs-joe"))
     task.add_argument("--expected-task", help="update only if these task fields still match this JSON object")
     task.add_argument("--receipt", action="store_true", help="print the locked before/after task mutation receipt")
+    task.add_argument("--defer-refresh", action="store_true", help="save the task without refreshing or publishing the board")
     task.add_argument("--note")
     task.add_argument("--evidence")
     task.add_argument("--delivery-target", choices=("worker", "app", "workstation", "database", "manual"),

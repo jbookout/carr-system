@@ -486,7 +486,7 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
         prior = json.loads(board.read_text()).get("tasks", {}).get(card)
         argv = [sys.executable, str(SOURCE / "tools/progress_board.py"), "task", project, card,
                 "--status", status, "--health", health or ("blocked" if status == "blocked" else "healthy"),
-                "--note", note, "--receipt"]
+                "--note", note, "--receipt", "--defer-refresh"]
         if prior is None:
             argv.extend(["--title", card, "--executor", executor])
         elif executor != "orchestrator":
@@ -674,12 +674,13 @@ def reconcile(root, config, found, effects, now, complete=True, *, clear_kinds=N
                         current[key] = {**row, "reason": "Vendor fetch recovered; recovery reporting failed: " + str(exc),
                                         "next_action": "Retry watchdog recovery reporting; inspect the board or record-layer error."}
                         continue  # Keep recovery pending until every visible effect succeeds.
-                if prior.get("board_recovery") or (not prior.get("card") and hasattr(effects, "clear_unrecovered")):
+                retire_generated = getattr(effects, "retire_generated_card_without_receipt", None)
+                if prior.get("board_recovery") or (not prior.get("card") and retire_generated is not None):
                     try:
                         if prior.get("board_recovery"):
                             effects.clear(prior, list(current.values()))
                         else:
-                            effects.clear_unrecovered(prior)
+                            retire_generated(prior)
                     except Exception as exc:
                         error = finding("board_error", key, str(exc), config)
                         current[error["key"]] = error
@@ -1107,13 +1108,12 @@ class Effects:
                    health=before.get("health", "healthy"), expected_task=owned,
                    reason=before.get("blocked_reason"), next_action=before.get("next_action"))
 
-    def clear_unrecovered(self, f):
-        """Retire a generated card left by a task subprocess that timed out
-        after its local write but before returning the recovery receipt."""
+    def retire_generated_card_without_receipt(self, f):
         card = self.card(f)
         note = f["reason"] + "\nNext action: " + f["next_action"]
-        owned = {"status": "blocked", "health": "blocked", "note": note,
-                 "lane": self.config["needs_joe_lane"] if f.get("needs_joe") else None}
+        owned = {"status": "blocked", "health": "blocked", "note": note, "executor": "orchestrator",
+                 "lane": self.config["needs_joe_lane"] if f.get("needs_joe") else None,
+                 "blocked_reason": f["reason"], "next_action": f["next_action"]}
         board_task(self.root, self.config, card, "orchestrator", "done",
                    "Watchdog finding recovered; evidence source is healthy.",
                    expected_task=owned)
