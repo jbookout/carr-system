@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { launchChrome } from "../../dealroom/test/chrome-launch.mjs";
+import { CHROME_STOP_TIMEOUT_MS, launchChrome, processTreeStopsWithin } from "../../dealroom/test/chrome-launch.mjs";
 
 const fixture = new URL("./fixtures/chrome-launch-fixture.mjs", import.meta.url);
 const nativeKill = process.kill.bind(process);
@@ -14,6 +14,13 @@ const realChrome = [
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ].filter(Boolean).find(existsSync);
+const realChromeSkipReason = process.platform !== "darwin"
+  ? "requires macOS"
+  : !realChrome
+    ? "Chrome is unavailable"
+    : process.env.CODEX_SANDBOX === "seatbelt"
+      ? "Codex seatbelt aborts Chrome before DevTools"
+      : false;
 const codeSignCloneDirectory = path.resolve(tmpdir(), "..", "X", "com.google.Chrome.code_sign_clone");
 function fakeChrome(t, scenarios, beforeSpawn = () => {}) {
   const calls = [];
@@ -22,16 +29,11 @@ function fakeChrome(t, scenarios, beforeSpawn = () => {}) {
       const target = process.platform === "win32" ? child.pid : -child.pid;
       try { nativeKill(target, "SIGKILL"); }
       catch (error) { if (error.code !== "ESRCH") throw error; }
-      const deadline = performance.now() + 1000;
-      for (;;) {
-        try { nativeKill(target, 0); }
-        catch (error) {
-          if (error.code === "ESRCH") break;
-          throw error;
-        }
-        assert.ok(performance.now() < deadline, `fake Chrome process tree ${child.pid} survived SIGKILL`);
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
+      assert.equal(
+        await processTreeStopsWithin(target, CHROME_STOP_TIMEOUT_MS, nativeKill),
+        true,
+        `fake Chrome process tree ${child.pid} survived SIGKILL`,
+      );
       await rm(profile, { recursive: true, force: true });
     }
   });
@@ -51,21 +53,40 @@ function processAlive(pid) {
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
+async function directoryEntryCount(directory) {
+  try { return (await readdir(directory)).length; }
+  catch (error) { if (error.code === "ENOENT") return 0; throw error; }
+}
+
+test("code-sign clone counting treats an absent directory as empty", async (t) => {
+  const parent = await mkdtemp(path.join(tmpdir(), "chrome-clone-count-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  assert.equal(await directoryEntryCount(path.join(parent, "not-created")), 0);
+});
+
+test("fake Chrome cleanup waits through transient EPERM", async () => {
+  let probes = 0;
+  const killProcess = () => {
+    probes += 1;
+    throw Object.assign(new Error("group exit in progress"), { code: probes < 3 ? "EPERM" : "ESRCH" });
+  };
+  assert.equal(await processTreeStopsWithin(-123, 100, killProcess), true);
+  assert.equal(probes, 3);
+});
+
 test("graceful Chrome shutdown does not grow the macOS code-sign clone directory", {
-  skip: process.platform !== "darwin" || !realChrome || !existsSync(codeSignCloneDirectory),
+  skip: realChromeSkipReason,
   timeout: 90_000,
 }, async (t) => {
-  const before = (await readdir(codeSignCloneDirectory)).length;
-  let browser;
-  try { browser = await launchChrome(realChrome); }
-  catch (error) { t.skip(`Chrome could not launch: ${error.message}`); return; }
+  const before = await directoryEntryCount(codeSignCloneDirectory);
+  const browser = await launchChrome(realChrome);
   t.after(() => browser.close());
   await browser.close();
-  const after = (await readdir(codeSignCloneDirectory)).length;
+  const after = await directoryEntryCount(codeSignCloneDirectory);
   assert.equal(after, before, `Chrome code-sign clones grew ${before} -> ${after}`);
 });
 
-test("Chrome requests a DevTools shutdown before sending process signals", async (t) => {
+test("Chrome requests a real CDP shutdown before sending process signals", async (t) => {
   const fake = fakeChrome(t, ["ready"]);
   const shutdown = [];
   const spawnChrome = (...args) => {
@@ -84,14 +105,10 @@ test("Chrome requests a DevTools shutdown before sending process signals", async
   const browser = await launchChrome("fake-chrome", {
     spawnChrome,
     timeoutMs: 1500,
-    closeBrowser: async () => {
-      shutdown.push("Browser.close");
-      nativeKill(fake.calls[0].child.pid, "SIGKILL");
-      return true;
-    },
   });
   await browser.close();
-  assert.deepEqual(shutdown, ["Browser.close"], "DevTools shutdown precedes and avoids process signals");
+  assert.deepEqual(shutdown, [], "the production CDP path avoids process signals");
+  assert.equal(processAlive(fake.calls[0].child.pid), false);
 });
 
 test("Chrome falls back to the browser PID when DevTools shutdown fails", async (t) => {
@@ -132,6 +149,25 @@ test("Chrome bounds a stalled DevTools shutdown before falling back to the brows
     "Browser.close",
     [fake.calls[0].child.pid, "SIGTERM"],
   ], "a stalled DevTools request times out before PID fallback");
+});
+
+test("startup timeout requests Browser.close after the browser endpoint is published", async (t) => {
+  const fake = fakeChrome(t, ["page-hang", "page-hang"]);
+  const signals = [];
+  const spawnChrome = (...args) => {
+    const child = fake.spawnChrome(...args);
+    const kill = child.kill.bind(child);
+    child.kill = (signal) => {
+      signals.push(signal);
+      return kill(signal);
+    };
+    return child;
+  };
+  await assert.rejects(
+    launchChrome("fake-chrome", { spawnChrome, timeoutMs: 500, pollIntervalMs: 10 }),
+    /fixture:Browser\.close/,
+  );
+  assert.deepEqual(signals, [], "browser-level shutdown exits without process signals");
 });
 
 test("Chrome waits through an exiting process group's transient EPERM probe", { skip: process.platform === "win32" }, async (t) => {
@@ -176,7 +212,7 @@ for (const scenario of ["ready-helper", "hang-helper"]) {
     await browser.close();
     assert.equal(processAlive(helperPid), false, "the owned helper must be gone when cleanup returns");
     assert.equal(existsSync(fake.calls[0].profile), false);
-    assert.equal(fake.calls[0].child.signalCode, "SIGTERM", "the leader exited without SIGKILL");
+    assert.notEqual(fake.calls[0].child.signalCode, "SIGKILL", "the leader exited without SIGKILL");
     assert.equal(fake.calls.length, scenario === "hang-helper" ? 2 : 1);
   });
 }

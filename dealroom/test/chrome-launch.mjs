@@ -35,10 +35,10 @@ function signalGroup(child, signal) {
   } catch (error) { if (error.code !== "ESRCH") throw error; }
 }
 
-async function groupStopsWithin(child, ms) {
+export async function processTreeStopsWithin(pid, ms, killProcess = process.kill.bind(process)) {
   const deadline = performance.now() + ms;
   for (;;) {
-    try { process.kill(-child.pid, 0); }
+    try { killProcess(pid, 0); }
     catch (error) {
       if (error.code === "ESRCH") return true;
       // macOS can report EPERM while an owned group is exiting. Keep waiting;
@@ -97,12 +97,19 @@ function browserControl(url, timeoutMs) {
   };
 }
 
-async function readyPage(profile, remainingMs) {
+async function devToolsEndpoint(profile) {
   const [portText, browserPath] = (await readFile(path.join(profile, "DevToolsActivePort"), "utf8")).split(/\r?\n/);
   const port = Number(portText);
   if (!/^\d+$/.test(portText) || port < 1 || port > 65535 || !/^\/devtools\/browser\/[^\s]+$/.test(browserPath ?? "")) {
     throw new Error("DevToolsActivePort is incomplete or invalid");
   }
+  return {
+    port,
+    browserWsUrl: `ws://127.0.0.1:${port}${browserPath}`,
+  };
+}
+
+async function readyPage(port, remainingMs) {
   // File publication can precede HTTP/page readiness; both share the deadline.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.min(500, remainingMs));
@@ -116,10 +123,7 @@ async function readyPage(profile, remainingMs) {
     if (url.protocol !== "ws:" || !["localhost", "127.0.0.1"].includes(url.hostname) || Number(url.port) !== port || !url.pathname.startsWith("/devtools/page/")) {
       throw new Error("Chrome did not expose a local page target");
     }
-    return {
-      pageWsUrl: url.href,
-      browserWsUrl: `ws://${url.hostname}:${port}${browserPath}`,
-    };
+    return url.href;
   } finally { clearTimeout(timer); }
 }
 
@@ -154,12 +158,12 @@ export async function launchChrome(chrome, {
           await settlesWithin(exitPromise, stopTimeoutMs);
         }
         const treeStopped = process.platform !== "win32" && child.pid
-          ? await groupStopsWithin(child, stopTimeoutMs)
+          ? await processTreeStopsWithin(-child.pid, stopTimeoutMs)
           : exited;
         if (!treeStopped) {
           signalGroup(child, "SIGKILL");
           const killed = process.platform !== "win32" && child.pid
-            ? await groupStopsWithin(child, stopTimeoutMs)
+            ? await processTreeStopsWithin(-child.pid, stopTimeoutMs)
             : await settlesWithin(exitPromise, stopTimeoutMs);
           if (!killed) throw new Error("Chrome process tree did not exit after SIGKILL");
         }
@@ -190,10 +194,11 @@ export async function launchChrome(chrome, {
         if (spawnError) throw spawnError;
         if (exited || child.exitCode !== null || child.signalCode !== null) throw new Error("Chrome exited before DevTools started");
         try {
-          const { pageWsUrl, browserWsUrl } = await readyPage(profile, Math.max(1, deadline - performance.now()));
-          control = closeBrowser
+          const { port, browserWsUrl } = await devToolsEndpoint(profile);
+          control ??= closeBrowser
             ? { close: () => closeBrowser(browserWsUrl), dispose() {} }
             : browserControl(browserWsUrl, stopTimeoutMs);
+          const pageWsUrl = await readyPage(port, Math.max(1, deadline - performance.now()));
           const elapsedMs = Math.round(performance.now() - started);
           attempts.push({ attempt, elapsedMs });
           return { pageWsUrl, startupMs: Math.round(performance.now() - totalStarted), attempts, close };
