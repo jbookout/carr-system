@@ -258,6 +258,48 @@ def main() -> int:
     check("a codex-live desk whose app-server is gone is refused",
           a_dead_app_server_is_refused)
 
+    def a_silent_seat_stops_at_the_callers_limit():
+        """PR 1660 re-review: a queued codex-live job ignored the claim-scoped
+        limit, and each read could wait the full per-read timeout. A seat that
+        accepts but never answers must stop at the caller's whole-call limit."""
+        import time as _time
+        quiet = str(root / "quiet.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(quiet)
+        server.listen(8)
+        held: list = []
+        stop = threading.Event()
+
+        def accept_and_hold():
+            server.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    conn, _ = server.accept()
+                    held.append(conn)
+                except OSError:
+                    continue
+
+        t = threading.Thread(target=accept_and_hold, daemon=True)
+        t.start()
+        try:
+            reg.register("cx-quiet", "codex-live", socket=quiet, cwd=str(root),
+                         model="gpt-5.1-codex-mini", effort="medium")
+            began = _time.monotonic()
+            row = dispatch.dispatch("cx-quiet", "do the thing", registry=reg,
+                                    results_path=results, codex_timeout_s=1)
+            took = _time.monotonic() - began
+            assert row["status"] == "timed_out", row
+            assert took < 10, took
+        finally:
+            stop.set()
+            t.join(timeout=2)
+            for conn in held:
+                conn.close()
+            server.close()
+
+    check("a silent live Codex seat stops at the caller's whole-call limit",
+          a_silent_seat_stops_at_the_callers_limit)
+
     tmp.cleanup()
     print()
     if FAILURES:

@@ -395,6 +395,7 @@ def dispatch(
             entry["socket"], task,
             thread_id=None if fresh else entry.get("thread_id"),
             cwd=entry.get("cwd"), model=entry.get("model"),
+            deadline_s=codex_timeout_s,
         )
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])

@@ -42,13 +42,25 @@ import uuid
 class Wire:
     def __init__(self, path: str, timeout: float = 180.0):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.timeout = timeout
+        # An optional whole-call deadline (time.monotonic()). Each read waits
+        # at most what is left of it, so many short reads cannot add up past it.
+        self.deadline: float | None = None
         self.sock.settimeout(timeout)
         self.sock.connect(path)
         self.buf = bytearray()
 
+    def _recv(self, size: int) -> bytes:
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("whole-call deadline passed")
+            self.sock.settimeout(min(self.timeout, remaining))
+        return self.sock.recv(size)
+
     def _read_exact(self, size: int) -> bytes:
         while len(self.buf) < size:
-            chunk = self.sock.recv(max(4096, size - len(self.buf)))
+            chunk = self._recv(max(4096, size - len(self.buf)))
             if not chunk:
                 raise EOFError(f"socket closed with {size - len(self.buf)} bytes outstanding")
             self.buf.extend(chunk)
@@ -70,7 +82,7 @@ class Wire:
         self.sock.sendall(request)
         marker = b"\r\n\r\n"
         while marker not in self.buf:
-            chunk = self.sock.recv(4096)
+            chunk = self._recv(4096)
             if not chunk:
                 raise EOFError("socket closed during WebSocket upgrade")
             self.buf.extend(chunk)
@@ -158,6 +170,7 @@ def run_turn(
     sandbox: str = "workspace-write",
     approval_policy: str = "never",
     timeout: float = 300.0,
+    deadline_s: float | None = None,
 ) -> dict:
     """Deliver one turn to a live Codex session and wait for its answer.
 
@@ -170,7 +183,21 @@ def run_turn(
         raise DeskError("unsafe_approval_policy",
                         "dispatched Codex desks require never; permission needs go to the orchestrator")
     task = desk_prompt(task)
+    started = time.monotonic()
     wire = Wire(sock_path, timeout=timeout)
+    if deadline_s is not None:
+        # The caller's limit covers setup and the turn together.
+        wire.deadline = started + deadline_s
+    try:
+        return _run_turn(wire, task, thread_id=thread_id, cwd=cwd, model=model,
+                         sandbox=sandbox, approval_policy=approval_policy, timeout=timeout)
+    except TimeoutError:
+        return {"status": "timed_out", "thread_id": thread_id,
+                "detail": f"no answer within {deadline_s if deadline_s is not None else timeout:.0f}s"}
+
+
+def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
+              approval_policy, timeout) -> dict:
     transcript: list[dict] = []
     wire.upgrade()
 
@@ -209,6 +236,8 @@ def run_turn(
     wait_response(wire, "turn-start", transcript)
 
     deadline = time.monotonic() + timeout
+    if getattr(wire, "deadline", None) is not None:
+        deadline = min(deadline, wire.deadline)
     answer = None
     while time.monotonic() < deadline:
         msg = wire.receive_json()
