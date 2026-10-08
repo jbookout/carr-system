@@ -947,6 +947,92 @@ def _shell_c_script(words):
     return None
 
 
+# Option grammar of the wrappers whose program position can be computed:
+# (short options taking a value, short flags, long options taking a value,
+#  long flags, operands before the program, pattern each operand must match).
+# A wrapper missing here, or any option missing from its entry, means the
+# program position is unknown, and the caller then reads every word as a
+# candidate. Under-modelling an option would hide the sender behind it, so an
+# unknown option fails closed rather than being guessed at.
+_DURATION = r"\d+(?:\.\d+)?[smhd]?"
+_WRAPPER_GRAMMAR = {
+    "timeout": ("sk", "v", {"--signal", "--kill-after"},
+                {"--preserve-status", "--foreground", "--verbose"}, 1, _DURATION),
+    "gtimeout": ("sk", "v", {"--signal", "--kill-after"},
+                 {"--preserve-status", "--foreground", "--verbose"}, 1, _DURATION),
+    "nohup": ("", "", set(), set(), 0, None),
+    "nice": ("n", "", {"--adjustment"}, set(), 0, None),
+    "env": ("uCSP", "i0v", {"--unset", "--chdir", "--split-string"},
+            {"--ignore-environment", "--null", "--debug"}, 0, None),
+    "sudo": ("ughprtUCDT", "AbBEeHiKklNnPSsVv",
+             {"--user", "--group", "--host", "--prompt", "--role", "--type",
+              "--other-user", "--close-from", "--chdir", "--command-timeout"},
+             {"--preserve-env", "--login", "--shell", "--non-interactive",
+              "--stdin", "--background", "--set-home", "--askpass", "--bell",
+              "--reset-timestamp", "--remove-timestamp"}, 0, None),
+    "flock": ("wEc", "sxnuoFh",
+              {"--timeout", "--wait", "--conflict-exit-code", "--command"},
+              {"--shared", "--exclusive", "--nonblock", "--nb", "--unlock",
+               "--close", "--no-fork", "--verbose"}, 1, None),
+    "chroot": ("", "", {"--userspec", "--groups"}, {"--skip-chdir"}, 1, None),
+    "xargs": ("aEIdLnPsJRS", "0oprtxie",
+              {"--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
+               "--max-args", "--max-procs", "--max-chars"},
+              {"--null", "--open-tty", "--interactive", "--no-run-if-empty",
+               "--verbose", "--exit", "--show-limits"}, 0, None),
+    "sandbox-exec": ("fnpD", "", set(), set(), 0, None),
+    "time": ("of", "pal", {"--output", "--format"},
+             {"--portability", "--append", "--verbose"}, 0, None),
+    "ionice": ("cnp", "t", {"--class", "--classdata", "--pid"},
+               {"--ignore"}, 0, None),
+}
+
+
+def _wrapped_program(exe, rest):
+    """Index in `rest` of the program wrapper `exe` runs, or None when the
+    position cannot be computed for certain (see _WRAPPER_GRAMMAR)."""
+    grammar = _WRAPPER_GRAMMAR.get(exe)
+    if grammar is None:
+        return None
+    short_value, short_flag, long_value, long_flag, operands, operand_re = grammar
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w == "--":
+            i += 1
+            break
+        if w.startswith("--"):
+            name = w.split("=", 1)[0]
+            if name not in long_value and name not in long_flag:
+                return None
+            i += 2 if (name in long_value and "=" not in w) else 1
+            continue
+        if w.startswith("-") and len(w) > 1:
+            if exe == "nice" and w[1:].isdigit():
+                i += 1
+                continue
+            takes_next = False
+            for j, c in enumerate(w[1:], 1):
+                if c in short_value:
+                    takes_next = j == len(w) - 1
+                    break
+                if c not in short_flag:
+                    return None
+            i += 2 if takes_next else 1
+            continue
+        if exe == "env" and _ASSIGNMENT.match(w):
+            i += 1
+            continue
+        break
+    for _ in range(operands):
+        if i >= len(rest) or (operand_re and not re.fullmatch(operand_re, rest[i])):
+            return None
+        i += 1
+    if i >= len(rest) or rest[i].startswith("-"):
+        return None
+    return i
+
+
 def command_invocations(words, depth=0):
     """Every (executable, its argument words) one simple command could run,
     after normalising command position (see THE SENDER TEST)."""
@@ -960,16 +1046,20 @@ def command_invocations(words, depth=0):
     if exe in COMMAND_WRAPPERS:
         # A word with spaces is a quoted command string (`su -c '...'`,
         # `sudo sh -c '...'`, `watch '...'`), so it is read as a command.
-        # Wrapper option grammars differ (`sudo -u joe`, `timeout 30`), so every
-        # bare word is a candidate program, until the first word given as a path
-        # (`./run.sh`, `/usr/bin/curl`): that IS the program, and the words after
-        # it are its arguments, even when one is spelled like a network client.
+        # Every other word is a candidate program, because a wrapper's option
+        # values and operands (`sudo -D /tmp`, `flock /tmp/lk`) can sit in front
+        # of the sender. The scan stops only where _wrapped_program places the
+        # program at a path or at another wrapper: the words after it are that
+        # program's arguments (`timeout 30 ./run.sh fetch <url>`).
+        p = _wrapped_program(exe, rest)
+        stop = p if p is not None and ("/" in rest[p] or
+                                       _exe_name(rest[p]) in COMMAND_WRAPPERS) else None
         for k, w in enumerate(rest):
             if any(c.isspace() for c in w):
                 found += invocations_in(w, depth + 1) if depth < 4 else []
             elif "://" in w:
                 continue
-            elif "/" in w:
+            elif k == stop:
                 found += command_invocations(rest[k:], depth + 1) if depth < 4 else []
                 break
             else:
