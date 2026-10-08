@@ -387,6 +387,15 @@ class CronStop(GuardCase):
         self.assertTrue(result['restored'])
         self.assertEqual(fake.schedules[STAGING[0]], prior)
 
+    def test_new_stop_after_restore_gets_a_new_propagation_window(self):
+        fake = FakeCloudflare([row(cost=0.01)])
+        self.run_guard(fake)
+        self.assertTrue(guard.restore(config(), http=fake, token='synthetic-token', now=NOW,
+                                      state_dir=self.state)['restored'])
+        self.run_guard(fake, now=NOW + timedelta(hours=1))
+        self.assertEqual(guard.read_receipt(self.state)['stop_propagation']['not_before'],
+                         '2026-10-08T13:15:00Z')
+
 
 class Thresholds(GuardCase):
     def test_under_threshold_is_ok_and_touches_no_worker(self):

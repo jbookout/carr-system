@@ -866,6 +866,7 @@ def restore(cfg: dict, *, http, token, now: datetime, state_dir=None, ack_quaran
         receipt['disabled_schedules'] = remaining_schedules
         remaining = remaining + remaining_schedules
         if not remaining:
+            receipt.pop('stop_propagation', None)
             receipt.update(hold=None, hold_since=None, state='CLEAR', restored_at=_iso(now), last_evaluation=None,
                            last_fast=None, quarantined_file=None)
         _saver(state, receipt, token)({'at': _iso(now), 'event': 'restore', 'state': receipt['state'],
