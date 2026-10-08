@@ -9,6 +9,7 @@ import math
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -21,6 +22,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 # Each evidence source and the finding kinds detect derives from it. detect refuses
 # a kind its source does not declare, and an unreadable source blinds exactly these.
 EVIDENCE = {
+    "scheduled_jobs": frozenset({"scheduled_job_drift"}),
     "jobs": frozenset({"job_failed", "job_dead", "job_hang", "job_silent", "job_over_limit"}),
     "prs": frozenset({"pr_blocked_review", "pr_ci_red", "pr_conflict", "pr_draft_idle", "pr_ready"}),
     "merge_queue": frozenset({"pr_ready"}),
@@ -30,7 +32,7 @@ EVIDENCE = {
 }
 # An unreadable evidence source cannot prove the findings it feeds have cleared.
 EVIDENCE_ERROR_KINDS = frozenset({"collection_error", "environment", "rate_limited"})
-RATE_LIMIT = re.compile(r"API rate limit|secondary rate limit", re.I)
+RATE_LIMIT = re.compile(r"API rate limit|secondary rate limit|CARR_GITHUB_LOCAL_HOLD:|rate limited after|HTTP 429", re.I)
 RELEASE_LANE = re.compile(r"^release-pipeline\[([^\]]+)\]: (.*)$")
 # Lines that end a lane's tick (ops/release-pipeline.py run_lane). Anything else the
 # lane prints, such as a failed loop filing after BLOCKED, never replaces its outcome.
@@ -153,6 +155,10 @@ def detect(facts, config, now):
             raise ValueError(f"{kind} is not declared as derived from {source} in EVIDENCE")
         found.append(finding(kind, subject, reason, config, **fields))
     t = config["thresholds"]
+    for row in facts.get("scheduled_jobs", []):
+        emit("scheduled_jobs", "scheduled_job_drift", row["label"], row["detail"],
+             key=row["key"], next_action=row["fix"] +
+             "; verify python3 ops/scheduled-jobs-check.py; auto-clear on next complete scan without this finding")
     jobs = facts.get("jobs", [])
     for job in jobs:
         subject = job["id"]
@@ -286,13 +292,18 @@ def tail(path, limit):
 
 
 def command(argv, config, cwd=None):
+    if argv[0] == "gh" and not shutil.which("gh"):
+        raise MissingTool("gh")
+    invocation = [sys.executable, str(SOURCE / "ops/github-gh.py"), *argv[1:]] if argv[0] == "gh" else argv
     try:
-        result = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+        result = subprocess.run(invocation, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
                                 text=True, timeout=config["thresholds"]["command_timeout_seconds"])
     except FileNotFoundError as exc:
         if cwd is not None and not Path(cwd).is_dir():
             raise
         raise MissingTool(argv[0]) from exc
+    if result.returncode == 127 and argv[0] == "gh":
+        raise MissingTool("gh")
     if result.returncode:
         raise RuntimeError(f"{argv[0]} exit {result.returncode}: {result.stderr.strip()} {result.stdout.strip()}")
     return result.stdout
@@ -419,7 +430,10 @@ def reconcile(root, config, found, effects, now, complete=True):
     extras = []
     for key, f in current.items():
         prior = previous.get(key, {})
-        row = {**f, "first_seen": prior.get("first_seen", stamp(now)), "cleared_at": None}
+        first_seen = prior.get("first_seen", stamp(now))
+        if f["kind"] == "scheduled_job_drift" and prior.get("cleared_at"):
+            first_seen = stamp(now)
+        row = {**f, "first_seen": first_seen, "cleared_at": None}
         if prior.get("cleared_at"):
             row["board_recovery"] = None
         if not prior or prior.get("cleared_at") or prior.get("reason") != f["reason"]:
@@ -595,6 +609,9 @@ def read_pr_cache(path):
 
 
 def rate_limit_reason(config, original):
+    detail = str(original)
+    if any(marker in detail for marker in ("CARR_GITHUB_LOCAL_HOLD:", "CARR_GITHUB_PROVIDER_HOLD:")) or re.search(r"rate limited after [0-9]+ attempt", detail):
+        return detail
     try:
         resources = json.loads(command(["gh", "api", "rate_limit"], config))["resources"]
         if not isinstance(resources, dict):
@@ -651,6 +668,14 @@ def collect(root, config, now=None):
             facts["jobs"].append(job)
     except Exception as exc:
         error("job registry", exc, "jobs")
+    if sys.platform == "darwin":
+        try:
+            import scheduled_jobs
+            facts["scheduled_jobs"] = scheduled_jobs.check(now=now)
+            if any(row["code"] == "evidence_unavailable" for row in facts["scheduled_jobs"]):
+                error("scheduled job evidence", RuntimeError("incomplete scheduled-job observation"), "scheduled_jobs")
+        except Exception as exc:
+            error("scheduled jobs", exc, "scheduled_jobs")
     queue = path_at(root, config["paths"]["merge_queue"])
     if queue.exists():
         try:
@@ -792,7 +817,8 @@ class Effects:
         append(path_at(self.root, c["paths"]["findings"]),
                {"key": f["key"], "board_recovery": recovery})
         if c["actions"]["file_defects"] and f["kind"] != "pr_ready":
-            digest_key = hashlib.sha256(f["key"].encode()).hexdigest()
+            episode_key = f["key"] + (":" + f["first_seen"] if f["kind"] == "scheduled_job_drift" else "")
+            digest_key = hashlib.sha256(episode_key.encode()).hexdigest()
             payload = {"idempotency_key": "job-watchdog:" + digest_key,
                        "kind": "open_loop", "owner": "orchestrator", "domain": "system",
                        "body": f["reason"] + "\nNext action: " + f["next_action"],
@@ -809,9 +835,27 @@ class Effects:
             response = json.loads(result[start:])
             if response.get("ok") is not True or not response.get("loop_id"):
                 raise RuntimeError("record layer refused watchdog defect: " + str(response))
+            if f["kind"] == "scheduled_job_drift":
+                return {"board_recovery": recovery, "loop_id": response["loop_id"]}
         return {"board_recovery": recovery}
 
     def clear(self, f, active):
+        if f["kind"] == "scheduled_job_drift" and f.get("loop_id"):
+            result = command([str(SOURCE / "run.sh"), "call", "read-loop",
+                              json.dumps({"loop_id": f["loop_id"]})], self.config)
+            current = json.loads(result[result.find("{"):])
+            if current.get("loop_id") != f["loop_id"] or not isinstance(current.get("version"), int):
+                raise RuntimeError("scheduled-job loop readback failed")
+            if current["status"] == "open":
+                payload = {"loop_id": f["loop_id"], "base_version": current["version"],
+                           "idempotency_key": "scheduled-jobs-clear:" + f["loop_id"],
+                           "resolution": "done", "outcome":
+                           "A complete scheduled-job scan no longer finds " + f["key"] +
+                           "; checked live machine evidence against ops/config/scheduled-jobs.v1.json."}
+                result = command([str(SOURCE / "run.sh"), "call", "close-loop", json.dumps(payload)], self.config)
+                closed = json.loads(result[result.find("{"):])
+                if closed.get("ok") is not True:
+                    raise RuntimeError("scheduled-job loop closure failed")
         recovery = f["board_recovery"]
         card = recovery["card"]
         owned = {"status": "blocked", "health": "blocked", "note": recovery["note"],

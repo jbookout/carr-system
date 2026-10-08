@@ -1,3 +1,4 @@
+import { readNeedsJoe } from "./needs-joe.js";
 import { ToolError } from "./tool-error.js";
 import { readRuleEnforcementCoverage } from "./lifecycle-assurance.v5.js";
 import { versionGuard, withEnvelope, writeEvent } from "./versioned-write.js";
@@ -703,9 +704,9 @@ export function ruleTools() {
     "governance-queue": {
       discoveryOrder: 60,
       write: false,
-      description: "Read every pending governance decision in one payload: rules admitted and awaiting approve-rule, guidance import batches staged and awaiting decide-guidance-import-batch, and retrieval proposals awaiting approve-retrieval-proposals — each with enough context to decide. Read-only; grants no authority and performs no decision itself.",
+      description: "Read every pending decision in one payload: rules admitted and awaiting approve-rule, guidance import batches staged and awaiting decide-guidance-import-batch, retrieval proposals awaiting approve-retrieval-proposals, and needs_joe — the ONE list of every open item waiting on Joe (action-required and Joe-owned loops, Work Requests in needs_joe, unanswered board questions, rule approvals, and the locally published PR and tabled items), each with a plain title, why only Joe can do it, the one action, link, age and what it blocks, ordered by what it blocks. Items the system can decide itself are excluded and counted by reason. Read-only; grants no authority and performs no decision itself.",
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
-      handler: async (c) => {
+      handler: async (c, actor, _args, { now } = {}) => {
         const row = (await c.query("select ops.read_governance_queue() as queue /* governance-queue */")).rows[0];
         const queue = row?.queue || {};
         const rules = queue.pending_rule_approvals || [];
@@ -722,10 +723,10 @@ export function ruleTools() {
             pending_retrieval_proposals: proposals.length,
             total: rules.length + batches.length + proposals.length,
           },
+          needs_joe: await readNeedsJoe(c, actor, queue, { now }),
         };
       },
     },
-
     "accept-workflow": {
       discoveryOrder: 61,
       write: true, authorityOnly: true,

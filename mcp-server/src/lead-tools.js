@@ -4,24 +4,49 @@ import { ToolError } from "./tool-error.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { lockLeadLifecycle, validateStageReview } from "./lead-workspace.js";
 
+const LEAD_OWNERS = ["joe", "dell"];
+const LEAD_SCORE_FIELDS = {
+  score: { type: ["integer", "null"], minimum: 0, maximum: 100 },
+  score_reason: { type: ["string", "null"] },
+  owner: { type: "string", enum: LEAD_OWNERS },
+};
+
+function validateLeadScoreFields(fields) {
+  if (Object.hasOwn(fields, "score") && fields.score !== null &&
+      (!Number.isInteger(fields.score) || fields.score < 0 || fields.score > 100))
+    throw new ToolError({ error: "invalid_score", hint: "score must be an integer from 0 to 100, or null" });
+  if (Object.hasOwn(fields, "score_reason") && fields.score_reason !== null && typeof fields.score_reason !== "string")
+    throw new ToolError({ error: "invalid_score_reason", hint: "score_reason must be a string, or null" });
+  if (Object.hasOwn(fields, "owner") && !LEAD_OWNERS.includes(fields.owner))
+    throw new ToolError({ error: "invalid_owner", valid: LEAD_OWNERS });
+}
+
+async function resolveLeadOwner(client, slug) {
+  const owner = (await client.query("select id,slug,display_name from actor where slug=$1 and active", [slug])).rows[0];
+  if (!owner) throw new ToolError({ error: "actor_not_provisioned", slug });
+  return { owner: owner.slug, owner_id: owner.id, owner_label: owner.display_name };
+}
+
 export function leadTools() {
   return {
     "new-lead": {
       discoveryOrder: 35,
       write: true,
-      description: "Create a lead over a new or existing party; mints the next L-ref atomically. Sets lead_stage and owner_id/owner_label. Stage must be an existing lead_stage slug (they were imported from the live registry).",
+      description: "Create a lead over a new or existing party; mints the next L-ref atomically. Accepts score (integer 0-100 or null), score_reason (string or null), and owner (joe|dell). Alabama parties default to Dell when owner is omitted; other parties default to the caller. Stage must be an existing lead_stage slug (they were imported from the live registry).",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" },
         party_id: { type: "string", description: "from add-party or find" },
         stage: { type: "string" }, lane: { type: "string" }, segment: { type: "string" },
+        ...LEAD_SCORE_FIELDS,
         source_type: { type: "string" }, source_detail: { type: "string" } },
         required: ["idempotency_key","party_id","stage"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "new-lead", args, async () => {
+        validateLeadScoreFields(args);
         // stage and lane are FOREIGN KEYS (lead_stage.slug, lead_lane.slug). They used
         // to go straight into the insert, so a plausible-but-wrong value — `lane:
         // "referral"`, which reads like an obvious lane and is not one — came back as
         // a bare "internal error" with nothing naming the field or the options.
-        // Measured live 2026-08-10 creating Dr. Example's lead: three attempts failed
+        // Measured live 2026-08-10 creating Dr. Harlan's lead: three attempts failed
         // opaquely and the bare call succeeded, which tells the caller nothing about
         // WHICH field was wrong. Same failure class as loop #261.
         for (const [field, table] of [["stage", "lead_stage"], ["lane", "lead_lane"]]) {
@@ -35,19 +60,24 @@ export function leadTools() {
               hint: `${field} is a foreign key into ${table}; pass one of the listed slugs. Inventing a plausible one fails at the database, not here.` });
           }
         }
+        const party = (await c.query("select state from party where id=$1", [args.party_id])).rows[0];
+        if (!party) throw new ToolError({ error: "party_not_found" });
+        const ownerSlug = args.owner ?? (party.state === "AL" ? "dell" : null);
+        const owner = ownerSlug ? await resolveLeadOwner(c, ownerSlug)
+          : { owner: actor.slug, owner_id: actor.id, owner_label: actor.display };
         const ref = (await c.query("select 'L-' || lpad(nextval('ref_lead_seq')::text, 3, '0') as r")).rows[0].r;
         const r = await c.query(
           `insert into lead (registry_ref, party_id, stage, lane, segment, source_type, source_detail,
-           owner_id, owner_label, created_by, updated_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$8,$8) returning id`,
+             owner_id, owner_label, created_by, updated_by, score, score_reason)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12) returning id`,
           [ref, args.party_id, args.stage, args.lane || null, args.segment || null,
-           args.source_type || null, args.source_detail || null, actor.id, actor.display]);
+           args.source_type || null, args.source_detail || null, owner.owner_id, owner.owner_label,
+           actor.id, args.score ?? null, args.score_reason ?? null]);
         await writeEvent(c, actor, "new-lead", "lead", r.rows[0].id,
-          { new: { ref }, idempotency_key: args.idempotency_key });
+          { new: { ref, score: args.score ?? null, score_reason: args.score_reason ?? null, ...owner }, idempotency_key: args.idempotency_key });
         return { ok: true, lead_id: r.rows[0].id, ref };
       }),
     },
-
     "promote-pool": {
       discoveryOrder: 36,
       write: true,
@@ -365,27 +395,28 @@ export function leadTools() {
     "update-lead": {
       discoveryOrder: 44, serialization: "idempotency-key",
       write: true,
-      description: "Field-level change to a lead (stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. do_not_contact is inseparable from suppressed=true, and only a human may clear an existing suppression instruction. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
+      description: "Field-level change to a lead (score, score_reason, owner, stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal). stage and lane are FOREIGN KEYS into lead_stage/lead_lane; a wrong slug comes back with the full valid list rather than a bare internal error. do_not_contact is inseparable from suppressed=true, and only a human may clear an existing suppression instruction. base_version required from a fresh read; a conflict means someone else wrote — surface it to the human, never auto-retry. party_id (identity) and client_id (the lead-to-client conversion pointer) are deliberately absent from fields: neither is a field edit through this verb, the same posture update-deal takes on client_id and update-party-contact takes on identity fields generally (rule 5d44d3f3) — a discrepancy there is a different kind of correction, not a value to overwrite in place.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, expected_actor: { type: "string", minLength: 1 }, lead: { type: "string" },
         base_version: { type: "integer" },
         stage_review: { type: "object", additionalProperties: false, properties: { reason: { type: "string", minLength: 1, maxLength: 1000 }, evidence_ids: { type: "array", items: { type: "string" }, maxItems: 20 }, undo_event_id: { type: "string" }, human_quote: { type: "string", maxLength: 1000 } }, required: ["reason", "evidence_ids"] },
-        fields: { type: "object", description: "subset of: stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
+        fields: { type: "object", properties: LEAD_SCORE_FIELDS, description: "subset of: score, score_reason, owner, stage, lane, segment, source_type, source_detail, suppressed, est_lease_event, next_action_date, notes_path, notes, event_source, event_confidence, report_back_due, drip_campaign, drip_added, sf_deal" } },
         required: ["idempotency_key","lead","base_version","fields"] },
-      handler: (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
+      handler: async (c, actor, args) => withEnvelope(c, actor, "update-lead", args, async () => {
+        validateLeadScoreFields(args.fields);
         const reviewed = Object.hasOwn(args, "stage_review") ? validateStageReview(args.stage_review, args.fields, ToolError) : null;
         if (reviewed?.undo_event_id) {
           if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_confirmation_required" });
           if (!reviewed.human_quote?.trim()) throw new ToolError({ error: "undo_human_quote_required" });
         }
         if (args.expected_actor && args.expected_actor !== actor.slug) throw new ToolError({ error: "account_changed" });
-        const subject = await resolveSubject(c, args.lead);
-        if (subject.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: subject });
+        const s = await resolveSubject(c, args.lead);
+        if (s.type !== "lead") throw new ToolError({ error: "not_a_lead", resolved: s });
+        await versionGuard(c, "lead", s.id, args.base_version);
         const allowed = ["stage","lane","segment","source_type","source_detail","suppressed",
                          "est_lease_event","next_action_date","notes_path","notes","event_source",
-                         "event_confidence","report_back_due","drip_campaign","drip_added","sf_deal"];
-        const keys = Object.keys(args.fields).filter(key => allowed.includes(key));
-        await versionGuard(c, "lead", subject.id, args.base_version);
+                         "event_confidence","report_back_due","drip_campaign","drip_added","sf_deal","score","score_reason","owner"];
+        const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
         if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
         // Pre-validate rather than letting the FK abort the transaction, same reason
         // new-lead checks stage/lane up front: once the violation fires the
@@ -401,7 +432,7 @@ export function leadTools() {
               hint: `${field} is a foreign key into ${table}; pass one of the listed slugs, never the label.` });
           }
         }
-        const current = (await c.query("select stage,suppressed from lead where id=$1", [subject.id])).rows[0];
+        const current = (await c.query("select stage,suppressed from lead where id=$1", [s.id])).rows[0];
         const nextStage = keys.includes("stage") ? args.fields.stage : current.stage;
         const nextSuppressed = keys.includes("suppressed") ? args.fields.suppressed : current.suppressed;
         if (keys.includes("stage") && (current.stage === "archived" || nextStage === "archived") && !canExercisePartnerAuthority(actor))
@@ -422,35 +453,33 @@ export function leadTools() {
         if (reviewed) {
           const ids = reviewed.evidence_ids;
           const evidence = ids.length ? (await c.query(
-            "select id,occurred_at,kind,connected from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [subject.id, ids])).rows : [];
+            "select id,occurred_at,kind,connected from activity where lead_id=$1 and id=any($2::uuid[]) and occurred_at<=now()", [s.id, ids])).rows : [];
           if (evidence.length !== ids.length) throw new ToolError({ error: "stage_evidence_mismatch" });
           if (args.fields.stage === "engaged" && evidence.some(row => ["call","text"].includes(row.kind) && row.connected !== true))
             throw new ToolError({ error: "stage_evidence_not_contact" });
           if (reviewed.undo_event_id) {
             const last = (await c.query(`select * from v_lead_stage_transition
-            where lead_id=$1 order by mutation_order desc limit 1`, [subject.id])).rows[0];
+              where lead_id=$1 order by mutation_order desc limit 1`, [s.id])).rows[0];
             if (!last || !last.automatic || last.event_id !== reviewed.undo_event_id.toLowerCase() || last.prior_stage !== args.fields.stage || last.stage !== current.stage)
               throw new ToolError({ error: "undo_changed" });
           }
           stageReview = { ...reviewed, evidence_ids: ids,
             evidence_date: evidence.map(row => new Date(row.occurred_at).toISOString()).sort().at(-1) || null };
         }
-        const old = (await c.query(`select ${keys.join(",")} from lead where id=$1`, [subject.id])).rows[0];
-        const sets = keys.map((key, i) => `${key}=$${i + 2}`).join(", ");
-        await c.query(`update lead set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
-          [actor.id, ...keys.map(key => args.fields[key]), subject.id]);
-        for (const field of keys) await writeEvent(c, actor, "update-lead", "lead", subject.id, {
-          field, old: { [field]: old[field] },
-          new: { [field]: args.fields[field], ...(field === "stage" && stageReview ? { stage_review: stageReview } : {}) },
-          idempotency_key: args.idempotency_key,
-          recorded_at_after_lock: field === "stage",
-          ...(field === "stage" && stageReview ? {
-            cause: stageReview.undo_event_id ? "human_correction" : undefined,
-            human_quote: stageReview.human_quote, agent_rationale: stageReview.reason,
-          } : {}),
-        });
+        const owner = keys.includes("owner") ? await resolveLeadOwner(c, args.fields.owner) : null;
+        const storage = Object.fromEntries(keys.filter(k => k !== "owner").map(k => [k, args.fields[k]]));
+        if (owner) Object.assign(storage, { owner_id: owner.owner_id, owner_label: owner.owner_label });
+        const columns = Object.keys(storage);
+        const old = (await c.query(`select ${columns.join(",")}${owner ? ",(select slug from actor where id=lead.owner_id) as owner" : ""} from lead where id=$1`, [s.id])).rows[0];
+        const sets = columns.map((k, i) => `${k}=$${i + 2}`).join(", ");
+        await c.query(`update lead set ${sets}, updated_by=$1 where id=$${columns.length + 2}`,
+          [actor.id, ...Object.values(storage), s.id]);
+        for (const k of keys)
+          await writeEvent(c, actor, "update-lead", "lead", s.id,
+            { recorded_at_after_lock: k === "stage", field: k, old: { [k]: old[k], ...(k === "owner" ? { owner_id: old.owner_id, owner_label: old.owner_label } : {}) }, new: { [k]: args.fields[k], ...(k === "owner" ? owner : {}), ...(k === "stage" && stageReview ? { stage_review: stageReview } : {}) },
+              ...(k === "stage" && stageReview ? { cause: stageReview.undo_event_id ? "human_correction" : undefined,
+                human_quote: stageReview.human_quote, agent_rationale: stageReview.reason } : {}), idempotency_key: args.idempotency_key });
         return { ok: true, updated: keys };
       }, { serialized: true }),
-    },
-  };
+    },  };
 }

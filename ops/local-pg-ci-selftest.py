@@ -177,6 +177,8 @@ check(
 )
 check("true pre-0450 fingerprint is captured", events[8][-1] == "--fingerprint-only")
 check("migration class runs through canonical CI", events[9][-2:] == ("--only", "migration"))
+check("migration gates discover the selected PostgreSQL binaries in the scrubbed child",
+      child_envs[9]["PATH"].split(os.pathsep)[0] == "/fake")
 check(
     "F03 PostgreSQL acceptance runs immediately after canonical CI",
     events[10][-1].endswith("tools/test-f03-production-migration.py"),

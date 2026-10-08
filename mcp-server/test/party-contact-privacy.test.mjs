@@ -84,7 +84,7 @@ test('private placeholder configuration is seeded from approved rule data withou
     setup: `alter table system_config add primary key(key);
       create table rule(id uuid primary key, status text, statement text);`,
   }, async ({ c, command }) => {
-    const migration = readFileSync(new URL('../../migrations/0848_private_contact_placeholder_config.sql', import.meta.url), 'utf8');
+    const migration = readFileSync(new URL('../../migrations/0849_private_contact_placeholder_config.sql', import.meta.url), 'utf8');
     await c.query("insert into rule values('54e2bcb9-0000-4000-8000-000000000000','active',$1)",
       [`Known placeholders: the phone ${protectedPhone}. Existing contact ${protectedPhone}.`]);
     await c.query("insert into system_config(key,value) values('contacts.protected_phone_numbers','[\"2025550199\"]')");

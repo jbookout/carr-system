@@ -47,7 +47,7 @@ test('registration preserves declared discovery order across domain batches', ()
 test('moved declarations retain runtime admission and reject their former locator', async () => {
   const { TOOLS } = await import('../src/tools.js');
   const { assertRegisteredOperation } = await import('../src/mutation-registry.js');
-  const { frozenInventory } = await import('../../ops/scac-mutation-inventory.mjs');
+  const { frozenInventory, CURRENT_REGISTRY_VERSION } = await import('../../ops/scac-mutation-inventory.mjs');
   for (const row of frozenInventory('scac-mutation-registry.v112').filter(row => row.ingress_kind === 'mcp_tool' && row.source_locator === 'mcp-server/src/tools.js')) {
     const name = row.operation, tool = TOOLS[name];
     const admitted = await assertRegisteredOperation(name, tool, {});
@@ -55,7 +55,8 @@ test('moved declarations retain runtime admission and reject their former locato
     assert.equal(admitted.write, row.write, name);
     assert.equal(admitted.human_only, row.human_only, name);
     assert.equal(admitted.authority_only, row.authority_only, name);
-    assert.equal(admitted.schema_digest, row.schema_digest, name);
+    const current = frozenInventory(CURRENT_REGISTRY_VERSION).find(entry => entry.ingress_key === row.ingress_key);
+    assert.equal(admitted.schema_digest, current.schema_digest, name);
     await assert.rejects(() => assertRegisteredOperation(name, { ...tool, registrySource: row.source_locator }, {}), error => error.error === 'mutation_contract_mismatch');
   }
 });

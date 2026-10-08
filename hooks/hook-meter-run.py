@@ -103,18 +103,17 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 MAX_FIELD = 300
 INVOCATION_REPO_ENV = "CARR_HOOK_INVOCATION_REPO"
 
-def bounded_grok_read_only():
-    # Keep one classifier for marked and ordinary context invocations. The
-    # protected probe returns immediately without ps for unmarked sessions.
-    # Missing optional plumbing must keep every gate running.
+def grok_session():
+    # Joe 2026-10-06: no context gate blocks his own model subscriptions. Any
+    # Grok session (read-only or writable) skips the context hooks below.
     sys.path.insert(0, REPO)
     try:
-        from hooks.grok_invocation import bounded_grok_read_only as probe
+        from hooks.grok_invocation import grok_session as probe
     except ImportError:
         return False
     return probe()
 
-# Bounded retrieval has no CARR session lifecycle. Keep effect guards running;
+# Grok sessions have no CARR session lifecycle. Keep effect guards running;
 # suppress only context delivery/state hooks imported through Claude settings.
 GROK_CONTEXT_HOOKS = frozenset({
     "gate-integrity.py", "rule-boot-gate.py", "context-handoff-gate.py",
@@ -509,7 +508,7 @@ def main():
         target = os.path.join(REPO, target)
     if (os.path.dirname(os.path.abspath(target)) == os.path.join(REPO, "hooks")
             and os.path.basename(target) in GROK_CONTEXT_HOOKS
-            and bounded_grok_read_only()):
+            and grok_session()):
         return 0
 
     # ── setup. The two steps that would change a verdict if they failed —

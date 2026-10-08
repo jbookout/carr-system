@@ -1385,18 +1385,6 @@ if [ "$LEADS_REGISTRY_APPLIED" = t ] && [ "$AUTOMATION_UNDO_REGISTRY_APPLIED" !=
   exit 1
 fi
 
-WORKER_REGISTRATION_REGISTRY_APPLIED="$("$PSQL" -Atqc \
-  "select exists (select 1 from schema_migrations where filename='0847_architecture_worker_registration_scac_successor.sql')" \
-  2>/dev/null)"
-case "$WORKER_REGISTRATION_REGISTRY_APPLIED" in
-  t|f) ;;
-  *) echo "schema-snapshot: could not read Worker registration v113 ledger state" >&2; exit 1 ;;
-esac
-if [ "$WORKER_REGISTRATION_REGISTRY_APPLIED" = t ] && [ "$LEADS_REGISTRY_APPLIED" != t ]; then
-  echo "schema-snapshot: Worker registration v113 is applied without v112 predecessor" >&2
-  exit 1
-fi
-
 # WR-000117. 0530 is the registry successor half of the atomic (0529,0530)
 # group, so probing the SUCCESSOR and not the domain migration is what says the
 # v34 registry surface exists. A snapshot taken between the two would be taken
@@ -2749,9 +2737,6 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                                        scac_select_registry 111
                                      if [ "$LEADS_REGISTRY_APPLIED" = t ]; then
                                        scac_select_registry 112
-                                       if [ "$WORKER_REGISTRATION_REGISTRY_APPLIED" = t ]; then
-                                         scac_select_registry 113
-                                       fi
                                      fi
                                      fi
                                      fi

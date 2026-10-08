@@ -5580,11 +5580,12 @@
     {
       "number": 113,
       "version": "scac-mutation-registry.v113",
-      "digest": "sha256:82f2a41e92190bb1b37246e6095b511ddce0bcfd341304c28ce348f14ed90303",
-      "source_set_digest": "sha256:b65b67e0acfa8636650162e37e5845231156d46eaf4945688844f71a7b213360",
+      "predecessor": "scac-mutation-registry.v112",
+      "digest": "sha256:0d6d3b75d58258a49ceccee4338d483178a1193fcbd640188c7d295647346de6",
+      "source_set_digest": "sha256:4bac5d4081fcfd300c8c31ca11de76ba06b88cd1dfba365253406dbe25c6e974",
       "catalog_digest": "sha256:214c1ba13bfb7e90f434facfaaee6b172305ea8db7a73eaa0c39d03589d25de1",
-      "artifact_sha256": "633caecf0cb8c864bc7113a2b9720b08b60be225f8fa9496803235a0a5823dd2",
-      "path": "mcp-server/src/scac-mutation-registry.v113.generated.js",
+      "artifact_sha256": "12c83c9074e2fbd2a6ac59d7cc2fde756deac484d099308d046e670e8924891e",
+      "path": "mcp-server/src/scac-mutation-registry.current.generated.js",
       "catalog": {
         "column_dml": {
           "count": 12,
@@ -5602,34 +5603,91 @@
           "count": 1246,
           "digest": "sha256:6e7ec210c949fbd87f47d04260ae03d9b4ccac569beb7b5439f69f754ed429ae"
         },
+        "job_definitions": {
+          "count": 2,
+          "digest": "sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"
+        },
         "projection_version": "scac-db-catalog-projection.v113",
         "runtime_dml_grants": {
           "count": 331,
           "digest": "sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"
+        }
+      },
+      "commit": "cf32f42c3d464f41ee9d68ea5654b36961037b64",
+      "source_count": 1157,
+      "entry_count": 2734,
+      "migration": "migrations/0848_lead_score_owner_scac_successor.sql",
+      "entry_set_digest": "sha256:f0e24d7c932237919a417a73c9d0f4d670df765e846a765167e44212ccc6cd54",
+      "atomic_pair": [
+        "0847_lead_score_owner_reader_repair.sql",
+        "0848_lead_score_owner_scac_successor.sql"
+      ],
+      "strict_atomic": true,
+      "dependencies": [
+        "0846_leads_scac_successor.sql",
+        "0847_lead_score_owner_reader_repair.sql"
+      ],
+      "snapshot": {
+        "include_current_entry_set": true,
+        "catalog_function": "ops.scac_mutation_catalog_v113_current()"
+      },
+      "migration_sha256": "96bd7c5b15818ded86ade05da80de884a53fefd2327f0ec96963c890b506df29"
+    },
+    {
+      "number": 114,
+      "version": "scac-mutation-registry.v114",
+      "predecessor": "scac-mutation-registry.v113",
+      "digest": "sha256:c2d91fd043ffb8f41880d6561ff883b8d652d7e237119936d5377c183488617b",
+      "source_set_digest": "sha256:a3e5c954ba70cb281da7be3a0631b8575e2877bcc4c7d6f501d6966cf9b573e5",
+      "catalog_digest": "sha256:533aab93c6fc55d42a96558ac3ac41395a187835e65be5998cd68c886a7bb2dc",
+      "artifact_sha256": "56c0e8b32e29ef7d4081c5a63a9f657421dfc900371a80053b5b0b9457ea7e85",
+      "path": "mcp-server/src/scac-mutation-registry.current.generated.js",
+      "catalog": {
+        "column_dml": {
+          "count": 12,
+          "digest": "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f"
+        },
+        "relation_dml": {
+          "count": 319,
+          "digest": "sha256:f7d0938050dc37e7cb9d3cbfbedec359675060a0197152a704d254dd45b032b6"
+        },
+        "role_authority": {
+          "count": 13,
+          "digest": "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"
+        },
+        "secdef_execute": {
+          "count": 1250,
+          "digest": "sha256:7193e7153d5cb0c1da637d65fc76d9101305cc46096022ce09f1a55d3aca0403"
         },
         "job_definitions": {
           "count": 2,
           "digest": "sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"
+        },
+        "projection_version": "scac-db-catalog-projection.v114",
+        "runtime_dml_grants": {
+          "count": 331,
+          "digest": "sha256:a0c0dac04eb52389187c87c255682565b6fa4470f496b4d54ff044b2756e68a8"
         }
       },
-      "predecessor": "scac-mutation-registry.v112",
-      "entry_count": 2707,
-      "source_count": 1130,
-      "migration": "migrations/0847_architecture_worker_registration_scac_successor.sql",
-      "migration_sha256": "4643416f7a98bd211a1db2f86ef12247f6f66f9a5ebb81bbe56a93a58e75d0ad",
-      "commit": "6797ea5a87ffaf88405a53ffaf02f58e6bf369d9",
-      "entry_set_digest": "sha256:cbf23259a96762f202c92b471860c6491ca0025ade2f17e0bbcf6eb6be2fb3ea",
+      "commit": "69e0cc0861afc49a20ee5872c716979057ffb71c",
+      "source_count": 1170,
+      "entry_count": 2751,
+      "migration": "migrations/0850_architecture_worker_registration_scac_successor.sql",
+      "entry_set_digest": "sha256:e18f3bae1e3af5b45b429fde2ac3cc00a7081a32cc1847aa84459c87d3f9ea56",
       "atomic_pair": [
-        "0847_architecture_worker_registration_scac_successor.sql"
+        "0849_private_contact_placeholder_config.sql",
+        "0850_architecture_worker_registration_scac_successor.sql"
       ],
-      "strict_atomic": false,
+      "strict_atomic": true,
       "dependencies": [
-        "0845_lead_archived_stage.sql",
-        "0846_leads_scac_successor.sql"
+        "0848_lead_score_owner_scac_successor.sql",
+        "0849_private_contact_placeholder_config.sql"
       ],
       "snapshot": {
-        "catalog_function": "ops.scac_mutation_catalog_v113_current()"
-      }
+        "include_current_entry_set": true,
+        "catalog_function": "ops.scac_mutation_catalog_v114_current()"
+      },
+      "migration_sha256": "04fd2f6f8230b293269c685496b9149e8004c55561667e8beb52afe0ba81776d"
     }
   ],
   "atomic_groups": [
@@ -5835,7 +5893,12 @@
       "0846_leads_scac_successor.sql"
     ],
     [
-      "0847_architecture_worker_registration_scac_successor.sql"
+      "0847_lead_score_owner_reader_repair.sql",
+      "0848_lead_score_owner_scac_successor.sql"
+    ],
+    [
+      "0849_private_contact_placeholder_config.sql",
+      "0850_architecture_worker_registration_scac_successor.sql"
     ]
   ],
   "strict_atomic_groups": [
@@ -5990,6 +6053,14 @@
     [
       "0845_lead_archived_stage.sql",
       "0846_leads_scac_successor.sql"
+    ],
+    [
+      "0847_lead_score_owner_reader_repair.sql",
+      "0848_lead_score_owner_scac_successor.sql"
+    ],
+    [
+      "0849_private_contact_placeholder_config.sql",
+      "0850_architecture_worker_registration_scac_successor.sql"
     ]
   ],
   "inactive_atomic_groups": [

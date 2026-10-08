@@ -1,9 +1,67 @@
 import { LEAD_WORKSPACE_SCHEMA, readLeadWorkspace } from "./lead-workspace.js";
 import { LOOP_KINDS } from "./verb-support.js";
-import { personalScopeForActor } from "./identity.js";
+import { organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { ToolError } from "./tool-error.js";
 import { executeRegisteredTool } from "./tool-execution.js";
 import { DEAL_ROOM_FIELDS } from "./dealroom.js";
+
+import { isCalendarDate } from "./calendar-date.js";
+
+function morningCostSnapshot(value) {
+  const unavailable = { state: "unavailable", reason: "source_unavailable", items: [],
+    providers: [], months: [], alerts: [],
+    action: "owner orchestrator: run the cost collector, restore missing billing reads, and verify a fresh complete-day snapshot; auto-clear after a valid snapshot younger than 36 hours." };
+  const money = (n) => typeof n === "number" && Number.isFinite(n) && n >= 0;
+  const text = (s) => typeof s === "string" && s.length > 0 && s.length <= 500;
+  const date = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) && isCalendarDate(s);
+  const month = (s) => typeof s === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
+  const amounts = (o) => {
+    if (!o || typeof o !== "object" || Array.isArray(o) || Object.keys(o).length > 500) throw Error("invalid cost map");
+    if (!Object.entries(o).every(([k, v]) => text(k) && money(v))) throw Error("invalid cost amount");
+    return Object.fromEntries(Object.entries(o));
+  };
+  try {
+    const age = Date.now() - Date.parse(value?.observed_at);
+    if (value?.schema !== "carr-system-costs.v1" || !["ready", "partial"].includes(value.state)
+        || !Number.isFinite(age) || age < -300000 || age > 36 * 3600000
+        || !month(value.month) || !date(value.through) || !text(value.action)
+        || !Array.isArray(value.providers) || value.providers.length > 30
+        || !Array.isArray(value.months) || value.months.length > 24
+        || !Array.isArray(value.alerts) || value.alerts.length > 100) return unavailable;
+    const providers = value.providers.map((row) => {
+      if (!text(row.provider) || !text(row.label) || !text(row.plan)
+          || !["ready", "partial", "unavailable"].includes(row.state)
+          || !(row.mtd_usd === null || money(row.mtd_usd))
+          || !(row.projection_usd === null || money(row.projection_usd))
+          || !(row.budget_usd === null || money(row.budget_usd))
+          || !(row.reason === null || text(row.reason))
+          || !Array.isArray(row.daily) || row.daily.length > 62) throw Error("invalid cost provider");
+      return { provider: row.provider, label: row.label, plan: row.plan, state: row.state,
+        reason: row.reason, mtd_usd: row.mtd_usd, projection_usd: row.projection_usd,
+        budget_usd: row.budget_usd, ...(typeof row.estimated === "boolean" ? { estimated: row.estimated } : {}),
+        call_sites: amounts(row.call_sites),
+        daily: row.daily.map((day) => {
+          if (!date(day.day) || !money(day.usd)) throw Error("invalid cost day");
+          return { day: day.day, usd: day.usd, drivers: amounts(day.drivers) };
+        }) };
+    });
+    const months = value.months.map((row) => {
+      if (!month(row.month) || !money(row.usd)) throw Error("invalid cost month");
+      return { month: row.month, usd: row.usd, providers: amounts(row.providers) };
+    });
+    const alerts = value.alerts.map((row) => {
+      if (!text(row.provider) || !text(row.driver) || !text(row.kind)
+          || !money(row.amount_usd) || !money(row.threshold_usd)) throw Error("invalid cost alert");
+      return { provider: row.provider, driver: row.driver, kind: row.kind,
+        amount_usd: row.amount_usd, threshold_usd: row.threshold_usd };
+    });
+    return { schema: value.schema, observed_at: value.observed_at, month: value.month,
+      through: value.through, state: value.state, providers, months, alerts, action: value.action, items: providers,
+      ...(money(value.budget_usd) ? { budget_usd: value.budget_usd } : {}),
+      ...(money(value.projection_usd) ? { projection_usd: value.projection_usd } : {}) };
+  } catch { return unavailable; }
+}
+
 
 // read-loop's amendment attachment. loop_amendment_history() (migration 0702)
 // is a SECURITY DEFINER function so carr_reader can call it without a
@@ -31,7 +89,7 @@ export function workspaceTools() {
     "morning-brief": {
       discoveryOrder: 9,
       write: false,
-      description: "The record-native morning brief for the authenticated Joe or Dell context. It composes live triage, claim-card, deal-room, loop-board, and the redacted renewal decision queue. Every section reports ready, empty, or unavailable; unavailable is never rewritten as empty. Takes no audience, sponsor, or partner argument.",
+      description: "The record-native morning brief for the authenticated Joe or Dell context. It composes live triage, claim-card, deal-room, loop-board, the redacted renewal decision queue, and published system costs. Costs reports ready, partial, or unavailable; other sections report ready, empty, or unavailable. Unavailable is never rewritten as empty. Takes no audience, sponsor, or partner argument.",
       inputSchema: { type: "object", properties: {} },
       handler: async (c, actor, args) => {
         // This is an audience boundary, not a convenience filter.  A shared-only
@@ -93,12 +151,12 @@ export function workspaceTools() {
             return { state: "unavailable", reason: "source_unavailable", items: [] };
           const rows = await c.query(
             `select display_name, org_name, vertical, city, county, state, est_lease_event,
-                  tier_status, flag_status, has_channel, decision_count, source_observed_at,
-                  freshness_state
-             from v_renewal_decision_queue
-            where owner_slug=$1
-            order by est_lease_event nulls last, display_name
-            limit 20`, [scope.sponsor]);
+                    tier_status, flag_status, has_channel, decision_count, source_observed_at,
+                    freshness_state
+               from v_renewal_decision_queue
+              where owner_slug=$1
+              order by est_lease_event nulls last, display_name
+              limit 20`, [scope.sponsor]);
           return { items: rows.rows, t1_candidate_count: status.rows[0].t1_candidate_count,
             source_observed_at: status.rows[0].source_observed_at,
             freshness_state: status.rows[0].freshness_state };
@@ -131,17 +189,34 @@ export function workspaceTools() {
           const batch = result.rows[0]?.batch;
           return { items: Array.isArray(batch) ? batch : [] };
         });
-        const sections = { today, claim_card: claimCard, deals, loops, renewals, assurance_cadence: assuranceCadence };
+        // Joe's brief leads with the one list of what waits on him. A partial list
+        // with nothing in it is unavailable, never empty: a failed source could be
+        // hiding the item he needs to see.
+        const needsJoe = scope.sponsor === "joe" ? await section(async () => {
+          const { state: list_state, ...list } = (await executeRegisteredTool(c, actor, "governance-queue", {})).needs_joe;
+          if (list_state === "partial" && !list.items.length) throw new Error("needs-joe sources unavailable");
+          return { ...list, list_state };
+        }) : null;
+        const costs = { ...morningCostSnapshot(undefined), ...await section(async () => {
+          // Existing carr_reader grant and authenticated scope, like read-progress-board.
+          // Ordinary brief reads never call billing providers.
+          const result = await c.query(
+            `select snapshot_json from board_snapshot
+              where organization_tenant_id=$1 and sponsoring_human_slug=$2 and board_id=$3`,
+            [organizationTenantForActor(actor), scope.sponsor, "system-costs"]);
+          return morningCostSnapshot(result.rows[0]?.snapshot_json?.costs);
+        }) };
+        const sections = { ...(needsJoe ? { needs_joe: needsJoe } : {}),
+          today, claim_card: claimCard, deals, loops, renewals, assurance_cadence: assuranceCadence, costs };
         return {
           state: Object.values(sections).some((value) => value.state === "unavailable")
             ? "unavailable"
-            : "ready",
+            : Object.values(sections).some((value) => value.state === "partial") ? "partial" : "ready",
           sponsor: scope.sponsor,
           sections,
         };
       },
     },
-
     "deal-board": {
       discoveryOrder: 10,
       write: false,
@@ -297,29 +372,24 @@ export function workspaceTools() {
         if (args.workspace === "leads") return readLeadWorkspace(c, args);
         const stages = (await c.query(
           `select slug,label,sort
-           from v_lead_board_stage
-          order by sort,slug`)).rows;
+             from v_lead_board_stage
+            order by sort,slug`)).rows;
         const leads = (await c.query(
           `select id,registry_ref,name,specialty,city,county,state,lane,stage,
-                (select party_id from lead where lead.id=v_lead_board.id) as party_id,
-                stage_label,stage_sort,score,segment,suppressed,est_lease_event,
-                event_confidence,last_touch,next_action_date,owner,owner_label,
-                base_version,created_at,updated_at,
-                (stage <> 'archived') as conversion_eligible,
-                (select client_id is not null from lead where lead.id=v_lead_board.id) as converted,
-                coalesce((select jsonb_agg(jsonb_build_object('move_id',m.id,'from_stage',m.from_stage,
-                  'to_stage',m.to_stage,'reason',m.reason,'evidence_ref',m.evidence_ref,'status',m.status,
-                  'created_at',m.created_at,'undone_at',m.undone_at,'undone_by',a.display_name) order by m.created_at,m.id)
-                  from lead_stage_move m left join actor a on a.id=m.undone_by where m.lead_id=v_lead_board.id),'[]') as stage_moves
-           from v_lead_board
-          order by stage_sort,suppressed,score desc nulls last,name,registry_ref`)).rows;
+                  party_id,
+                  stage_label,stage_sort,score,segment,suppressed,est_lease_event,
+                  event_confidence,last_touch,next_action_date,owner,owner_label,
+                  base_version,created_at,updated_at,
+                  (stage <> 'archived') as conversion_eligible,
+                  converted,stage_moves
+             from v_lead_board
+            order by stage_sort,suppressed,score desc nulls last,name,registry_ref`)).rows;
         const eligible=leads.filter(l=>l.stage!=="archived");
         return { generated_at: new Date().toISOString(), stages, leads,
           metrics:{nurture_count:eligible.filter(l=>l.stage==="nurture_drip" && !l.suppressed).length,
             conversion_denominator:eligible.length,converted_count:eligible.filter(l=>l.converted).length} };
       },
     },
-
     "claim-card": {
       discoveryOrder: 16, completionClass: "write",
       write: false,
