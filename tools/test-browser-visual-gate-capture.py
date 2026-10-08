@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +49,21 @@ def test_measurement_parser_requires_true_browser_observations():
     assert capture.chrome_binary("/not/a/browser") is None
 
 
+def test_installed_google_chrome_is_never_a_candidate():
+    assert not any(str(path).startswith("/Applications/Google Chrome.app/")
+                   for path in capture.CHROME_CANDIDATES)
+
+
+def test_playwright_releases_are_newest_first_numerically():
+    with tempfile.TemporaryDirectory() as directory:
+        cache = Path(directory)
+        (cache / "chromium-999").mkdir()
+        (cache / "chromium-1243").mkdir()
+        with patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(cache)}, clear=False):
+            candidates = capture._disposable_chrome_candidates()
+    assert "chromium-1243" in str(candidates[0])
+
+
 def test_job_passport_emits_the_semantic_tokens_the_browser_runner_measures():
     fixture = ROOT / "control-room" / "contracts" / "fixtures" / "execution-fabric" / "codex_desktop.observatory-projection.v1.json"
     rendered = job_passport_artifact.render_job_passport_html(json.loads(fixture.read_text()))
@@ -59,5 +76,9 @@ if __name__ == "__main__":
     print("ok  browser absence becomes typed not_verified report")
     test_measurement_parser_requires_true_browser_observations()
     print("ok  browser runner measures rendered DOM concerns")
+    test_installed_google_chrome_is_never_a_candidate()
+    print("ok  browser runner excludes installed Google Chrome")
+    test_playwright_releases_are_newest_first_numerically()
+    print("ok  browser runner chooses the newest Playwright release numerically")
     test_job_passport_emits_the_semantic_tokens_the_browser_runner_measures()
     print("ok  Job Passport emits measured semantic and narrow-width controls")
