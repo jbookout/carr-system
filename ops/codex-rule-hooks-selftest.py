@@ -204,7 +204,13 @@ def main():
                                           "page": page, "pages_total": 2, "total_chars": 12, "text": f"page {page}"}}
                 post = dict(fetch, hook_event_name="PostToolUse", tool_response=response)
                 invoke("rule-boot-gate.py", post, state)
-            assert invoke("rule-boot-gate.py", base, state) == {}
+            # Codex 0.159.0 flushes its rollout only before SessionEnd and
+            # Interrupt hooks, so nothing proves the current call (or a later
+            # compaction) is on disk at PreToolUse: a complete boot still holds
+            # ordinary tools, fail closed, until the host exports a freshness proof.
+            held = invoke("rule-boot-gate.py", dict(base, tool_use_id="codex-after-boot"),
+                          state)["hookSpecificOutput"]
+            assert held["permissionDecision"] == "deny" and "Codex" in held["permissionDecisionReason"], held
             os.environ["CARR_RULE_BOOT_FETCH_STUB"] = str(page_one)
             try:
                 notice = boot.arm_session(session, "compact")

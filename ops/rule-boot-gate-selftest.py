@@ -37,16 +37,121 @@ SESSION = "sess-selftest"
 RUN_SH = os.path.join(REPO, "run.sh")
 
 
+class Host:
+    """A synthetic Claude Code host transcript, in the shapes read from real
+    2.1.288 transcripts on 2026-10-08: one JSONL line per content block, each
+    entry linked to the previous one by parentUuid; a tool_result entry's
+    parentUuid and sourceToolAssistantUUID name its tool_use entry (so a
+    parallel batch's sibling results are off the parentUuid chain); a
+    subagent writes <session>/subagents/agent-<id>.jsonl while the hook input's
+    transcript_path stays the session file; compaction writes a system
+    compact_boundary whose parentUuid is null (logicalParentUuid names the old
+    tail), then the summary. Storage faults either queue entries until
+    recovery or drop them."""
+
+    def __init__(self, work):
+        self.dir = os.path.join(work, "projects", "-fixture-project")
+        self.main = os.path.join(self.dir, SESSION + ".jsonl")
+        self.last, self.uses, self.queue, self.drop, self.serial = {}, {}, None, False, 0
+        self.misroute = set()
+
+    def path(self, agent):
+        if not agent or agent in self.misroute:
+            return self.main
+        return os.path.join(self.dir, SESSION, "subagents", f"agent-{agent}.jsonl")
+
+    def write(self, agent, line):
+        if self.drop:
+            return
+        if self.queue is not None:
+            self.queue.append((agent, line))
+            return
+        os.makedirs(os.path.dirname(self.path(agent)), exist_ok=True)
+        with open(self.path(agent), "a", encoding="utf-8") as fh:
+            fh.write(line)
+
+    def entry(self, agent, kind, **fields):
+        self.serial += 1
+        uid = f"u-{agent or 'main'}-{self.serial:05d}"
+        record = {"parentUuid": self.last.get(agent), "isSidechain": bool(agent), "type": kind,
+                  "uuid": uid, "sessionId": SESSION, "cwd": fields.pop("cwd", REPO),
+                  "timestamp": "2026-10-08T00:00:00.000Z"}
+        if agent:
+            record["agentId"] = agent
+        record.update(fields)
+        self.last[agent] = uid
+        self.write(agent, json.dumps(record, separators=(",", ":")) + "\n")
+        return uid
+
+    def tool_use(self, agent, call, tool, tool_input, cwd=REPO):
+        if not call or call in self.uses:
+            return
+        uid = self.entry(agent, "assistant", cwd=cwd, message={
+            "role": "assistant", "content": [{"type": "tool_use", "id": call, "name": tool, "input": tool_input}]})
+        self.uses[call] = (agent, uid)
+
+    def tool_result(self, call, content, is_error=False):
+        if call not in self.uses:
+            return
+        agent, uid = self.uses[call]
+        self.entry(agent, "user", parentUuid=uid, sourceToolAssistantUUID=uid, message={
+            "role": "user", "content": [{"type": "tool_result", "tool_use_id": call,
+                                         "content": content, "is_error": is_error}]})
+
+    def compact(self, agent=None):
+        tail = self.last.get(agent)
+        self.last[agent] = None
+        self.entry(agent, "system", subtype="compact_boundary", content="Conversation compacted",
+                   logicalParentUuid=tail, compactMetadata={"trigger": "auto"})
+        self.entry(agent, "user", isCompactSummary=True,
+                   message={"role": "user", "content": "This session is being continued from a summary."})
+
+    def flush(self):
+        queued, self.queue = self.queue or [], None
+        for agent, line in queued:
+            self.write(agent, line)
+
+
+def model_visible(payload):
+    """What the host records as the tool_result a model sees."""
+    if payload.get("hook_event_name") == "PostToolUseFailure":
+        return str(payload.get("error") or ""), True
+    response = payload.get("tool_response")
+    if isinstance(response, list):
+        return response, False
+    if isinstance(response, dict) and "stdout" in response:
+        return str(response.get("stdout") or ""), False
+    return [{"type": "text", "text": json.dumps(response)}], False
+
+
 class Case:
     def __init__(self, tree, work):
         self.tree = tree
         self.work = work
         self.state = os.path.join(work, "state")
         self.env = {**os.environ, "CARR_RULE_BOOT_STATE_DIR": self.state,
-                    "CARR_HOOK_GUARD_LOG": os.path.join(work, "guard.log")}
+                    "CARR_HOOK_GUARD_LOG": os.path.join(work, "guard.log"),
+                    "CARR_RULE_BOOT_TRANSCRIPT_WAIT_S": "0.05"}
         self.env.pop("CARR_RULE_BOOT_FETCH_STUB", None)
         self.env.pop("PYTHONPATH", None)
         self.digest, self.pages = None, 0
+        self.host = Host(work)
+
+    def host_sees(self, payload):
+        """The host writes the call before PreToolUse and its result before
+        PostToolUse; every hook input names the session transcript."""
+        if "transcript_path" not in payload:
+            payload["transcript_path"] = self.host.main
+        elif payload["transcript_path"] is None:
+            del payload["transcript_path"]
+        call = payload.get("tool_use_id")
+        event = payload.get("hook_event_name")
+        if event == "PreToolUse":
+            self.host.tool_use(payload.get("agent_id"), call, payload.get("tool_name"),
+                               payload.get("tool_input"), payload.get("cwd") or REPO)
+        elif event in ("PostToolUse", "PostToolUseFailure"):
+            self.host.tool_result(call, *model_visible(payload))
+        return payload
 
     def stub(self, digest=None, pages=3):
         if digest in (None, "not_deployed"):
@@ -101,7 +206,9 @@ class Case:
         return [n for _r, _d, files in os.walk(folder) for n in files if re.fullmatch(r"d\d+-.*", n)]
 
     def disk_full(self, arm_only=False):
-        """Every write under the state directory raises ENOSPC from now on."""
+        """Every write under the state directory raises ENOSPC from now on.
+        A whole-disk fault also stops the host's transcript writes, which
+        queue until storage recovers (arm_only faults only the gate's arm)."""
         folder = os.path.join(self.work, "fault")
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "sitecustomize.py"), "w", encoding="utf-8") as fh:
@@ -109,10 +216,13 @@ class Case:
         self.env["PYTHONPATH"] = folder
         if arm_only:
             self.env["CARR_RULE_BOOT_FAULT_ARM_ONLY"] = "1"
+        elif self.host.queue is None:
+            self.host.queue = []
 
     def recover_storage(self):
         self.env.pop("PYTHONPATH", None)
         self.env.pop("CARR_RULE_BOOT_FAULT_ARM_ONLY", None)
+        self.host.flush()
 
     def subprocess_only(self):
         """The disk-full fault lives in a sitecustomize that only a fresh
@@ -120,6 +230,8 @@ class Case:
         return "PYTHONPATH" in self.env
 
     def arm(self, source="startup"):
+        if source == "compact":
+            self.host.compact()  # SessionStart(compact) follows the host's compaction
         if not self.subprocess_only():
             with InProcess(self) as (_hook, lib):
                 return lib.arm_session(SESSION, source) + "\n"
@@ -143,7 +255,7 @@ class Case:
         return payload
 
     def hook(self, payload):
-        payload = self.native_payload(payload)
+        payload = self.host_sees(self.native_payload(payload))
         if self.subprocess_only():
             out = subprocess.run([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
                                  input=json.dumps(payload), capture_output=True, text=True,
@@ -162,8 +274,8 @@ class Case:
 
     def hooks_parallel(self, payloads):
         """Run the hook for every payload at once (a model's parallel batch)."""
-        payloads = [self.native_payload(payload) for payload in payloads]
-        procs = [subprocess.Popen([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
+        payloads = [self.host_sees(self.native_payload(payload)) for payload in payloads]
+        procs =[subprocess.Popen([sys.executable, os.path.join(self.tree, "hooks", "rule-boot-gate.py")],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   text=True, env=self.env) for _ in payloads]
         for proc, payload in zip(procs, payloads):
@@ -216,7 +328,8 @@ class Case:
 
 
 _LOADED: dict = {}
-_ENV_KEYS = ("CARR_RULE_BOOT_STATE_DIR", "CARR_HOOK_GUARD_LOG", "CARR_RULE_BOOT_FETCH_STUB")
+_ENV_KEYS = ("CARR_RULE_BOOT_STATE_DIR", "CARR_HOOK_GUARD_LOG", "CARR_RULE_BOOT_FETCH_STUB",
+             "CARR_RULE_BOOT_TRANSCRIPT_WAIT_S")
 
 
 def _load(tree):
@@ -1162,7 +1275,207 @@ def case_arming_fetch_overlap(c):
     assert c.call(*READ) is None
 
 
-CASES = [case_completed_compact_storage_fault, case_completed_digest_storage_fault, case_completed_same_id_subagent_rearm,
+# --- host transcript freshness (2026-10-08). Revocation must not depend on a
+# write succeeding: the gate reads the host's own transcript and allows an
+# ordinary tool only when this call's entry is there and every page of the
+# armed boot sits on its parentUuid chain after the last compaction boundary.
+# Most cases below leave the completed markers in place and move only the
+# transcript, so they isolate the read-only proof.
+
+def stale(r, *words):
+    assert denied(r), f"held expected: {r}"
+    reason = r["permissionDecisionReason"]
+    assert "NOT FRESH" in reason and all(w in reason for w in words), reason
+    return reason
+
+
+def booted(c, pages=2, agent=None):
+    c.stub_sized("a", pages); c.arm()
+    for p in range(1, pages + 1):
+        c.fetch(p, agent=agent)
+    assert c.call(*READ, agent=agent) is None, "normal boot then tool: allowed"
+
+
+def host_only_fetch(c, page, boot, agent=None):
+    """A fetch the host recorded without the gate's hooks seeing it."""
+    call = f"host-only-{c.host.serial + 1}"
+    tool, args = mcp_fetch(page)
+    c.host.tool_use(agent, call, tool, args)
+    c.host.tool_result(call, [{"type": "text", "text": json.dumps({"ok": True, "rule_boot": boot})}])
+
+
+def case_tx_normal_boot_allows(c):
+    booted(c, 3)
+    never_denied(c, 3)
+
+
+def case_tx_compaction_after_boot_holds(c):
+    booted(c)
+    c.host.compact()  # no SessionStart re-arm: markers still say complete
+    stale(c.call(*READ), "compaction")
+    c.fetch(1)
+    stale(c.call(*READ), "1 of 2")
+    c.fetch(2)
+    assert c.call(*READ) is None, "every page re-read after the boundary: allowed"
+
+
+def case_tx_old_marker_stale_chain_holds(c):
+    """The reproduced 2026-10-08 defect: compaction could not revoke the arm,
+    storage recovered, and the old completed markers are all still there."""
+    booted(c, agent=None)
+    for p in (1, 2):
+        c.fetch(p, agent="sub-complete")
+    assert c.call(*READ, agent="sub-complete") is None
+    c.disk_full()
+    text = c.arm("compact")
+    assert "UNWRITABLE" in text, text
+    c.recover_storage()
+    # Put the completed generation back exactly as an unrevoked arm leaves it.
+    with open(os.path.join(c.state, SESSION, "arm.json"), "w") as fh:
+        json.dump({"schema": "carr-rule-boot-gate/v1", "status": "armed",
+                   "digest": "sha256:" + "a" * 8, "pages_total": 2,
+                   "total_chars": c.boot(1)["total_chars"], "epoch": "restored"}, fh)
+    for agent in (None, "sub-complete"):
+        folder = os.path.join(c.state, SESSION, "fetched", agent or "main", "aaaaaaaa-restored")
+        os.makedirs(folder, exist_ok=True)
+        for p in (1, 2):
+            with open(os.path.join(folder, f"c{p}"), "w") as fh:
+                fh.write(str(len(c.page_text(p))))
+    stale(c.call(*READ), "compaction")
+    # Freshness is per context: the child's own chain never compacted, so its
+    # pages are still in its context; its own compaction holds it.
+    assert c.call(*READ, agent="sub-complete") is None
+    c.host.compact(agent="sub-complete")
+    stale(c.call(*READ, agent="sub-complete"), "compaction")
+
+
+def case_tx_unwritable_transcript_holds(c):
+    booted(c)
+    c.host.queue = []  # the host cannot write: this call never reaches the transcript
+    stale(c.call(*READ), "not in the host transcript")
+    c.host.flush()
+    assert c.call(*READ) is None, "the entry landed and nothing was compacted: allowed"
+    c.host.drop = True
+    stale(c.call(*READ), "not in the host transcript")
+
+
+def case_tx_dropped_boundary_holds(c):
+    booted(c)
+    c.host.drop = True
+    c.host.compact()  # boundary and summary lost; later entries name them as parents
+    c.host.drop = False
+    stale(c.call(*READ))
+
+
+def case_tx_partial_last_line_holds(c):
+    booted(c)
+    real = c.host.write
+    c.host.write = lambda agent, line: real(agent, line[:len(line) // 2])
+    try:
+        stale(c.call(*READ), "not in the host transcript")
+    finally:
+        c.host.write = real
+    # A page whose result entry was torn mid-line (and later sealed) does not count.
+    c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c2.stub_sized("a", 2); c2.arm(); c2.fetch(1)
+    sealed = c2.host.write
+    torn = {"next_result": False}
+
+    def tear(agent, line):
+        if torn["next_result"] and '"tool_result"' in line:
+            torn["next_result"] = False
+            line = line.rstrip("\n")[:-40] + "\n"
+        sealed(agent, line)
+
+    c2.host.write = tear
+    torn["next_result"] = True
+    c2.fetch(2)
+    stale(c2.call(*READ), "1 of 2")
+
+
+def case_tx_stale_digest_pages_hold(c):
+    booted(c)
+    c.host.compact()
+    for p in (1, 2):
+        host_only_fetch(c, p, c.boot(p, "b", 2))
+    stale(c.call(*READ), "0 of 2")
+    for p in (1, 2):
+        host_only_fetch(c, p, c.boot(p))
+    assert c.call(*READ) is None, "current-digest pages after the boundary: allowed"
+
+
+def case_tx_child_contexts(c):
+    booted(c)
+    for p in (1, 2):
+        c.fetch(p, agent="child-own")
+    assert c.call(*READ, agent="child-own") is None, "child with its own boot: allowed"
+    assert denied(c.call(*READ, agent="child-none")), "child without a boot: held"
+    # A child whose pages the host wrote into the session file has no proof in its own.
+    c.host.misroute.add("child-misrouted")
+    for p in (1, 2):
+        c.fetch(p, agent="child-misrouted")
+    stale(c.call(*READ, agent="child-misrouted"), "subagent")
+    # The child's own compaction holds only the child.
+    c.host.compact(agent="child-own")
+    stale(c.call(*READ, agent="child-own"))
+    assert c.call(*READ) is None, "the parent's chain is untouched"
+
+
+def case_tx_retry_cannot_reuse_precompaction_pages(c):
+    booted(c, 3)
+    c.host.compact()
+    c.fetch(2)  # a retry of one page after the boundary
+    stale(c.call(*READ), "1 of 3")
+    c.fetch(2)
+    stale(c.call(*READ), "1 of 3")
+    c.fetch(1); c.fetch(3)
+    assert c.call(*READ) is None
+
+
+def case_tx_parallel_results_count_once(c):
+    c.stub_sized("a", 3); c.arm()
+    pres = [{"hook_event_name": "PreToolUse", "session_id": SESSION, "cwd": REPO,
+             "tool_name": mcp_fetch(p)[0], "tool_input": mcp_fetch(p)[1]} for p in (1, 2, 3)]
+    for r in c.hooks_parallel(pres):
+        assert not denied(r)
+    c.hooks_parallel([{**pre, "hook_event_name": "PostToolUse", "tool_response": [
+        {"type": "text", "text": json.dumps({"ok": True, "rule_boot": c.boot(p)})}]}
+        for p, pre in enumerate(pres, start=1)])
+    assert c.call(*READ) is None, "sibling results of a parallel batch count"
+    # A second result for the same call makes that page ambiguous.
+    c.host.compact()
+    calls = []
+    for p in (1, 2, 3):
+        host_only_fetch(c, p, c.boot(p))
+        calls.append(f"host-only-{c.host.serial - 1}")
+    c.host.tool_result(calls[0], "forged duplicate")
+    stale(c.call(*READ), "2 of 3")
+
+
+def case_tx_codex_holds(c):
+    booted(c)
+    r = c.call(*READ)
+    assert r is None
+    codex = {"hook_event_name": "PreToolUse", "session_id": SESSION, "turn_id": "turn-1", "cwd": REPO,
+             "tool_name": READ[0], "tool_input": READ[1]}
+    stale(c.hook(codex), "Codex")
+
+
+def case_tx_missing_transcript_holds(c):
+    booted(c)
+    stale(c.hook({"hook_event_name": "PreToolUse", "session_id": SESSION, "cwd": REPO,
+                  "tool_name": READ[0], "tool_input": READ[1], "transcript_path": None}),
+          "no host transcript")
+    os.rename(c.host.main, c.host.main + ".moved")
+    c.host.drop = True
+    stale(c.call(*READ), "not in the host transcript")
+
+
+CASES = [case_tx_normal_boot_allows, case_tx_compaction_after_boot_holds, case_tx_old_marker_stale_chain_holds,
+         case_tx_unwritable_transcript_holds, case_tx_dropped_boundary_holds, case_tx_partial_last_line_holds,
+         case_tx_stale_digest_pages_hold, case_tx_child_contexts, case_tx_retry_cannot_reuse_precompaction_pages,
+         case_tx_parallel_results_count_once, case_tx_codex_holds, case_tx_missing_transcript_holds,
+         case_completed_compact_storage_fault, case_completed_digest_storage_fault, case_completed_same_id_subagent_rearm,
          case_delayed_subagent, case_arming_fetch_overlap, case_delayed_old_epoch, case_correlation_failures, case_concurrent_compact, case_concurrent_digest, case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
