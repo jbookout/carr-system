@@ -1392,6 +1392,9 @@ def _branch_janitor_row():
 
 
 def _storage_hygiene_row():
+    if sys.platform != "darwin":
+        return ("SKIP storage hygiene — Studio Data volume check not applicable "
+                "outside macOS", False)
     import storage_hygiene
     _tmp, clone_root, _replay = storage_hygiene._defaults()
     used, clones = storage_hygiene.storage_snapshot(
@@ -1434,7 +1437,7 @@ def _canonical_health():
         if " over budget: " in _site_line or _site_line.startswith("UNKNOWN"):
             rc = _red("jev_site_budget", _site_line, hard_error=_site_line.startswith("UNKNOWN"))
     try:
-        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session", "uptime") else _canonical_snapshot()
+        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session", "storage", "uptime") else _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
         _red("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)

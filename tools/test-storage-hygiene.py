@@ -228,7 +228,10 @@ class StorageHygieneTests(unittest.TestCase):
              "--section", "storage"], cwd=ROOT, capture_output=True, text=True)
         self.assertIn(result.returncode, (0, 1), result.stderr)
         self.assertIn("storage hygiene", result.stdout)
-        self.assertIn("opens the storage investigation loop", result.stdout)
+        if sys.platform == "darwin":
+            self.assertIn("opens the storage investigation loop", result.stdout)
+        else:
+            self.assertIn("not applicable outside macOS", result.stdout)
 
     def test_launchd_job_uses_scheduled_wrapper_and_is_not_run_at_load(self):
         path = ROOT / "ops" / "launchd" / "com.carr.storage-hygiene.plist"

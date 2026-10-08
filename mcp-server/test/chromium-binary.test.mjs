@@ -43,3 +43,26 @@ test("browser tests refuse an alias that resolves to installed Chrome", async ()
   });
   assert.equal(result, null);
 });
+
+test("browser tests use the GitHub runner Chrome only inside CI", async () => {
+  const runnerChrome = "/usr/bin/google-chrome";
+  const result = await findDisposableChromium({
+    env: { GITHUB_ACTIONS: "true" },
+    home: "/home/runner",
+    platform: "linux",
+    exists: candidate => candidate === runnerChrome,
+    realpath: candidate => candidate,
+    listDirectories: async () => [],
+  });
+  assert.equal(result, runnerChrome);
+
+  const developerResult = await findDisposableChromium({
+    env: {},
+    home: "/home/developer",
+    platform: "linux",
+    exists: candidate => candidate === runnerChrome,
+    realpath: candidate => candidate,
+    listDirectories: async () => [],
+  });
+  assert.equal(developerResult, null);
+});

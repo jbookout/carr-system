@@ -54,6 +54,18 @@ def test_installed_google_chrome_is_never_a_candidate():
                    for path in capture.CHROME_CANDIDATES)
 
 
+def test_installed_google_chrome_alias_is_refused():
+    installed = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    alias = Path("/tmp/chrome-for-testing")
+
+    def resolved(path: Path, *_args, **_kwargs) -> Path:
+        return installed if path in (installed, alias) else path
+
+    with patch.object(Path, "is_file", return_value=True), \
+            patch.object(Path, "resolve", resolved):
+        assert capture.chrome_binary(str(alias)) is None
+
+
 def test_playwright_releases_are_newest_first_numerically():
     with tempfile.TemporaryDirectory() as directory:
         cache = Path(directory)
@@ -78,6 +90,8 @@ if __name__ == "__main__":
     print("ok  browser runner measures rendered DOM concerns")
     test_installed_google_chrome_is_never_a_candidate()
     print("ok  browser runner excludes installed Google Chrome")
+    test_installed_google_chrome_alias_is_refused()
+    print("ok  browser runner rejects aliases to installed Google Chrome")
     test_playwright_releases_are_newest_first_numerically()
     print("ok  browser runner chooses the newest Playwright release numerically")
     test_job_passport_emits_the_semantic_tokens_the_browser_runner_measures()

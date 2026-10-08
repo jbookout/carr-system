@@ -33,6 +33,9 @@ import design_kernel
 
 
 ROOT = Path(__file__).resolve().parents[2]
+SYSTEM_CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+
+
 def _disposable_chrome_candidates() -> list[Path]:
     candidates = []
     for name in ("CHROME_FOR_TESTING_PATH", "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"):
@@ -63,13 +66,30 @@ def now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _accepted_chrome(candidate: str | Path | None) -> str | None:
+    if not candidate:
+        return None
+    path = Path(candidate)
+    try:
+        if not path.is_file() or path.resolve() == SYSTEM_CHROME.resolve():
+            return None
+    except OSError:
+        return None
+    return str(path)
+
+
 def chrome_binary(explicit: str | None) -> str | None:
     if explicit:
-        return explicit if Path(explicit).is_file() else None
+        return _accepted_chrome(explicit)
     for path in CHROME_CANDIDATES:
-        if path.is_file():
-            return str(path)
-    return shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+        accepted = _accepted_chrome(path)
+        if accepted:
+            return accepted
+    for name in ("google-chrome", "chromium", "chromium-browser"):
+        accepted = _accepted_chrome(shutil.which(name))
+        if accepted:
+            return accepted
+    return None
 
 
 class _SilentHandler(http.server.SimpleHTTPRequestHandler):

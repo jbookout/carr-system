@@ -5,6 +5,12 @@ import path from "node:path";
 
 const SYSTEM_CHROME = path.normalize(
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+const CI_LINUX_CHROMIUM = [
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+];
 
 function accepted(candidate, exists, realpath) {
   if (!candidate) return false;
@@ -26,6 +32,12 @@ export async function findDisposableChromium({
   for (const candidate of [env.CHROME_FOR_TESTING_PATH,
     env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH]) {
     if (accepted(candidate, exists, realpath)) return path.normalize(candidate);
+  }
+
+  if (platform === "linux" && env.GITHUB_ACTIONS === "true") {
+    for (const candidate of CI_LINUX_CHROMIUM) {
+      if (accepted(candidate, exists, realpath)) return path.normalize(candidate);
+    }
   }
 
   const roots = [];
