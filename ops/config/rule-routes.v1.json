@@ -1908,6 +1908,7 @@
      "tools": [
       "EnterPlanMode",
       "UpdatePlan",
+      "update_plan",
       "functions.update_plan"
      ],
      "verbs": [
@@ -1916,7 +1917,10 @@
       "accept-ready-plan",
       "register-engineering-slice-plan"
      ],
-     "bash_patterns": []
+     "bash_patterns": [
+      "\\btools/room-bridge/dispatch\\.py\\s+send(?:\\s|$)",
+      "(?:^|[\\s;&|()])(?:\\./)?bin/dot-relay\\s+send-job(?:\\s|$)"
+     ]
     }
    ]
   },

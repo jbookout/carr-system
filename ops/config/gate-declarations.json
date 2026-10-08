@@ -1032,7 +1032,7 @@
       "wirings": [
         {
           "event": "PreToolUse",
-          "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|EnterPlanMode|UpdatePlan|functions\\.update_plan|mcp__.*",
+          "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|EnterPlanMode|UpdatePlan|update_plan|functions\\.update_plan|mcp__.*",
           "fixtures": [
             "bash",
             "edits",

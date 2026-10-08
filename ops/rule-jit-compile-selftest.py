@@ -209,7 +209,7 @@ check("new-work sizing rule has one planning-moment detector",
       and sizing_planning_rows[0]["rule_ids"] == [SIZING], sizing_rows)
 if len(sizing_planning_rows) == 1:
     sizing_pattern = re.compile(sizing_planning_rows[0]["pattern"], re.I)
-    planning_moments = ["EnterPlanMode", "functions.update_plan",
+    planning_moments = ["EnterPlanMode", "update_plan", "functions.update_plan",
                         "propose-ready-plan", "heavy-build plan",
                         "Codex brief", "Dot brief"]
     routine_work = ["Read", "git status", "review the finished plan",

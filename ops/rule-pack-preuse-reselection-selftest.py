@@ -503,7 +503,7 @@ claude_rows = [group for group in claude["PreToolUse"]
                if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
 codex_rows = [group for group in codex["PreToolUse"]
               if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
-CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|EnterPlanMode|UpdatePlan|functions\\.update_plan|mcp__.*"
+CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|EnterPlanMode|UpdatePlan|update_plan|functions\\.update_plan|mcp__.*"
 CODEX_MATCHER = ".*"  # Codex local tools use canonical names, including apply_patch.
 check("Claude wiring is exact and unique, widened for the generalized rail (S9)",
       len(claude_rows) == 1 and claude_rows[0]["matcher"] == CLAUDE_MATCHER)
