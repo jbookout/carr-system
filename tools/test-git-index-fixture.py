@@ -15,6 +15,9 @@ class IndexFixtureTests(unittest.TestCase):
             source = pathlib.Path(scratch) / 'source'
             source.mkdir()
             env = fixture_env()
+            for key in ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',
+                        'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'EMAIL'):
+                env.pop(key, None)
             def git(*args):
                 return subprocess.check_output(['git', '-C', str(source), *args],
                                                env=env, stderr=subprocess.PIPE, text=True).strip()
@@ -22,9 +25,11 @@ class IndexFixtureTests(unittest.TestCase):
                 git('add', path)
                 message = source / '.git/message'
                 message.write_text('Fixture source\n')
-                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-                    'commit', '-q', '-F', str(message))
+                git('commit', '-q', '-F', str(message))
             git('init', '-q', '-b', 'main')
+            git('config', 'user.useConfigOnly', 'true')
+            git('config', 'user.name', 'Fixture')
+            git('config', 'user.email', 'fixture@example.invalid')
             (source / 'seed.txt').write_text('seed\n')
             commit('seed.txt')
             git('switch', '-qc', 'feature')

@@ -369,6 +369,9 @@ RESULT
             self.adapter.verify(self.root, "origin/main", "", receipt)
 
     def test_inherited_scan_range_cannot_narrow_the_real_secret_scan(self):
+        self.enterContext(patch.dict(os.environ))
+        os.environ.pop('PYTHONDONTWRITEBYTECODE', None)
+        os.environ.pop('PYTHONPYCACHEPREFIX', None)
         copy_ci(self.root)
         for relative in ("ops/ci-secret-scan.py", "ops/pii_guard.py",
                          "ops/config/public-source-identities.v1.json"):
@@ -377,12 +380,14 @@ RESULT
         shutil.copy(ROOT / "bin/with-timeout.py", self.root / "bin/with-timeout.py")
         for stub in ["hooks/gate-integrity.py", "ops/no-client-deliverables-gate.py", "ops/stale-config-check.py"]:
             (self.root / stub).write_text("raise SystemExit(0)\n")
-        self.git("add", "ops", "bin", "hooks")
+        (self.root / ".gitignore").write_text("__pycache__/\n")
+        self.git("add", "ops", "bin", "hooks", ".gitignore")
         self.git("commit", "-qm", "real floor")
         self.git("update-ref", "refs/remotes/origin/main", self.git("rev-parse", "HEAD"))
         self.edit("README.md", "clean candidate\n")
         with patch.dict(os.environ, {"CARR_CI_RANGE": "HEAD..HEAD"}):
             receipt = self.collect()  # control: a clean tree passes the full scan
+        self.assertTrue(list((self.root / "ops/__pycache__").glob("pii_guard.*.pyc")))
         self.adapter.verify(self.root, "origin/main", "", receipt)
         self.edit("README.md", "-----BEGIN " + "OPENSSH PRIVATE KEY-----\n")
         with patch.dict(os.environ, {"CARR_CI_RANGE": "HEAD..HEAD"}):
