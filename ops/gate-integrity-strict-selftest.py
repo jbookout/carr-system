@@ -84,6 +84,8 @@ def make_fixture(tmp):
     (root / "hooks").mkdir(parents=True)
     (root / "ops" / "config").mkdir(parents=True)
     shutil.copy(GATE, root / "hooks" / "gate-integrity.py")
+    (root / "lib").mkdir()
+    shutil.copy(Path(GATE).parent.parent / "lib/hook_runtime.py", root / "lib/hook_runtime.py")
 
     # A couple of ordinary gate files plus the real gate-integrity.py, which
     # guards itself and therefore has to be in the baseline too.
@@ -109,7 +111,7 @@ def write_baseline(root: Path, omit=None, extra=None):
         "blessed_by": "fixture@example.invalid",
         "blessed_at_rev": "0000000",
         "hashes": hashes,
-        "contracts": {},
+        "contracts": {"hook_runtime.py": sha_of(root / "lib/hook_runtime.py")},
     }, indent=2) + "\n")
 
 

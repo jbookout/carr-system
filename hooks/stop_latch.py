@@ -264,12 +264,10 @@ def announce(message, event="Stop"):
     own audit log, which is where the telemetry rollup reads it from anyway.
     """
     try:
-        sys.stdout.write(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": event,
-                "additionalContext": message,
-            }
-        }) + "\n")
+        if REPO not in sys.path:
+            sys.path.insert(0, REPO)
+        from lib.hook_runtime import Verdict
+        Verdict.announce(message, event).emit(sys.stdout, sys.stderr)
         sys.stdout.flush()
     except Exception:
         pass
