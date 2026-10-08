@@ -1918,8 +1918,8 @@
       "register-engineering-slice-plan"
      ],
      "bash_patterns": [
-      "\\btools/room-bridge/dispatch\\.py\\s+send(?:\\s|$)",
-      "(?:^|[\\s;&|()])(?:\\./)?bin/dot-relay\\s+send-job(?:\\s|$)"
+      "(?:^|[\\s;&|()])['\"]?(?:[^\\s'\";&|()]+/)?(?:tools/room-bridge/)?dispatch\\.py['\"]?(?:\\s+--(?:registry|results)(?:=|\\s+)(?:\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\s'\";&|()]+))*\\s+send(?=[\\s;&|()<>]|$)",
+      "(?:^|[\\s;&|()])['\"]?(?:[^\\s'\";&|()]+/)?(?:bin/)?dot-relay['\"]?(?:\\s+--(?:credentials|state-dir)(?:=|\\s+)(?:\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\s'\";&|()]+))*\\s+send-job(?=[\\s;&|()<>]|$)"
      ]
     }
    ]

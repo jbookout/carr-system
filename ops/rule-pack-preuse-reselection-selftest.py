@@ -1390,6 +1390,55 @@ with tempfile.TemporaryDirectory() as dispatch_tmp:
                     if background:
                         check(f"background dispatch preserves scheduled rules: {index} {client}",
                               set(EXPECTED_IDS) <= set(delivered), sorted(delivered))
+                        if client == "claude":
+                            prior = {"type": "assistant", "sessionId": call["session_id"],
+                                     "message": {"role": "assistant", "content": [{
+                                         "type": "tool_use", "id": call["tool_use_id"],
+                                         "name": tool, "input": call["tool_input"]}]}}
+                            envelope = {"type": "attachment", "sessionId": call["session_id"],
+                                        "attachment": {"type": "hook_additional_context",
+                                                       "hookEvent": "PreToolUse",
+                                                       "hookName": f"PreToolUse:{tool}",
+                                                       "toolUseID": call["tool_use_id"],
+                                                       "content": [context(output)]}}
+                        else:
+                            prior = {"type": "response_item", "payload": {
+                                "type": "function_call", "call_id": call["tool_use_id"],
+                                "name": tool, "arguments": json.dumps(call["tool_input"]),
+                                "internal_chat_message_metadata_passthrough": {"turn_id": call["turn_id"]}}}
+                            envelope = {"type": "response_item", "payload": {
+                                "type": "message", "role": "developer",
+                                "content": [{"type": "input_text", "text": context(output)}],
+                                "internal_chat_message_metadata_passthrough": {"turn_id": call["turn_id"]}}}
+                        check(f"background route receipt credits scheduled pack: {index} {client}",
+                              contract.preuse_delivery(envelope, [prior], repo=REPO)
+                              == ("shadow", ["scheduled-automation"], []))
+                        for label in ("overflow", "not_found", "tampered", "wrong-call"):
+                            rejected = copy.deepcopy(row)
+                            previous = copy.deepcopy(prior)
+                            if label in {"overflow", "not_found"}:
+                                removed = next(r for r in rejected["rules"] if r["id"] == EXPECTED_IDS[0])
+                                rejected["rules"].remove(removed)
+                                if label == "overflow":
+                                    rejected["overflow"].append({"id": removed["id"], "summary": "fetch rule"})
+                                else:
+                                    rejected["not_found"].append(removed["id"])
+                                rejected["receipt_id"] = contract.receipt_id(rejected)
+                            elif label == "tampered":
+                                rejected["source_digest"] = "0" * 64
+                                rejected["receipt_id"] = contract.receipt_id(rejected)
+                            elif client == "claude":
+                                previous["message"]["content"][0]["input"]["command"] = "sleep 1"
+                            else:
+                                previous["payload"]["arguments"] = json.dumps({
+                                    "command": "sleep 1", "run_in_background": True})
+                            rejected_envelope = copy.deepcopy(envelope)
+                            if client == "claude":
+                                rejected_envelope["attachment"]["content"] = [json.dumps(rejected)]
+                            else:
+                                rejected_envelope["payload"]["content"][0]["text"] = json.dumps(rejected)
+                            check(f"scheduled route credit rejects {label}: {index} {client}",
+                                  contract.preuse_delivery(rejected_envelope, [previous], repo=REPO) is None)
     finally:
         os.environ.clear()
         os.environ.update(saved_env)
