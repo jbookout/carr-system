@@ -355,11 +355,12 @@ class DotReview(unittest.TestCase):
 
     def test_b23_same_basename_different_artifact(self):
         gate=load('hooks/unread-artifact-gate.py')
+        from lib.hook_runtime import Event
         records=[use('Read',{'file_path':'tests/config.py'}),assistant('production/config.py does validate every incoming request before accepting it')]
         with tempfile.TemporaryDirectory() as tmp:
             transcript=Path(tmp)/'trace.jsonl';transcript.write_text('fixture')
             payload={'transcript_path':str(transcript),'session_id':'selftest'}
-            with patch.object(gate,'helpers',return_value=(lambda *_args,**_kw:records,lambda text:text)),patch.object(gate,'latched',return_value=False),patch.object(gate,'record_fire'),patch.object(gate,'log'),patch.object(gate,'announce',return_value=0) as announce,patch.object(gate.sys,'stdin',io.StringIO(json.dumps(payload))):
+            with patch.object(gate,'helpers',return_value=(lambda *_args,**_kw:records,lambda text:text)),patch.object(Event, 'latch', return_value=False),patch.object(gate,'log'),patch.object(gate,'announce',return_value=0) as announce,patch.object(gate.sys,'stdin',io.StringIO(json.dumps(payload))):
                 with self.assertRaises(SystemExit):gate.main()
                 announce.assert_called_once()
 

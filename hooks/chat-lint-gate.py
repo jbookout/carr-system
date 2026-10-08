@@ -88,7 +88,6 @@ from datetime import datetime, timezone
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from stop_latch import claim_identity, latched, record_fire  # noqa: E402
 
 LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
@@ -595,111 +594,111 @@ def scan(assistant):
     return findings
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _decision_error(exc):
+    dlog(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    if (payload.get("hook_event_name") or "Stop") != "Stop":
+        sys.exit(0)
+    if payload.get("stop_hook_active"):
+        sys.exit(0)
+    path = payload.get("transcript_path")
+    if not path or not os.path.exists(path):
         sys.exit(0)
 
-    try:
-        if (payload.get("hook_event_name") or "Stop") != "Stop":
-            sys.exit(0)
-        if payload.get("stop_hook_active"):
-            sys.exit(0)
-        path = payload.get("transcript_path")
-        if not path or not os.path.exists(path):
+    assistant = ""
+    for rec in read_tail(path):
+        t = text_of(rec, ("assistant",))
+        if t and t.strip():
+            assistant = t.strip()
+    if not assistant:
+        sys.exit(0)
+
+    findings = scan(assistant)
+    if not findings:
+        sys.exit(0)
+
+    # ── THE AUDIENCE SPLIT (2026-08-23, Joe's Stop-gate rationing) ──────
+    # The 2026-08-23 gates audit measured this lint firing on EIGHT
+    # messages in one shipped session, several on reporting prose. The
+    # matcher narrowing above removes the misreadings; this removes the
+    # remaining per-message cost of the findings that are still true.
+    #
+    # A PARTNER-DIRECTED ASK is delivered immediately, before the next
+    # reply is written, exactly as before — that is the message where
+    # wording is doing work on Joe.
+    #
+    # REPORTING PROSE gets ONE consolidated note per session. The findings
+    # are all still recorded and the session is still told; it is told once
+    # rather than after every message. Joe's 2026-08-10 ruling is the
+    # authority for the shape as well as the narrowing: global friction and
+    # blanket keyword gates lost because they interrupt legitimate work and
+    # train sessions to route around controls, and a note that arrives on
+    # every turn is what being routed around looks like just before it
+    # happens.
+    session = payload.get("session_id")
+    directed = partner_directed(strip_fences(assistant))
+    register = "partner-ask" if directed else "report-summary"
+
+    if not directed:
+        if payload.latch("chat-lint-gate", "session-summary", ["once"]):
+            # Recorded, not delivered. The ledger keeps every fire so the
+            # telemetry rollup can still count them; the session is not
+            # charged context for hearing the same standing note again.
+            audit({"ts": now(), "hook": "chat-lint-gate",
+                   "classes": sorted({f[0] for f in findings}),
+                   "session": session, "audience": "report",
+                   "register": "logged-only",
+                   "excerpt": findings[0][1][:200]})
+            dlog(f"LOG-ONLY(summary already delivered) {sorted({f[0] for f in findings})}")
             sys.exit(0)
 
-        assistant = ""
-        for rec in read_tail(path):
-            t = text_of(rec, ("assistant",))
-            if t and t.strip():
-                assistant = t.strip()
-        if not assistant:
-            sys.exit(0)
-
-        findings = scan(assistant)
-        if not findings:
-            sys.exit(0)
-
-        # ── THE AUDIENCE SPLIT (2026-08-23, Joe's Stop-gate rationing) ──────
-        # The 2026-08-23 gates audit measured this lint firing on EIGHT
-        # messages in one shipped session, several on reporting prose. The
-        # matcher narrowing above removes the misreadings; this removes the
-        # remaining per-message cost of the findings that are still true.
-        #
-        # A PARTNER-DIRECTED ASK is delivered immediately, before the next
-        # reply is written, exactly as before — that is the message where
-        # wording is doing work on Joe.
-        #
-        # REPORTING PROSE gets ONE consolidated note per session. The findings
-        # are all still recorded and the session is still told; it is told once
-        # rather than after every message. Joe's 2026-08-10 ruling is the
-        # authority for the shape as well as the narrowing: global friction and
-        # blanket keyword gates lost because they interrupt legitimate work and
-        # train sessions to route around controls, and a note that arrives on
-        # every turn is what being routed around looks like just before it
-        # happens.
-        session = payload.get("session_id")
-        directed = partner_directed(strip_fences(assistant))
-        register = "partner-ask" if directed else "report-summary"
-
-        if not directed:
-            once = claim_identity("chat-lint-gate", "session-summary", ["once"])
-            if latched(session, once):
-                # Recorded, not delivered. The ledger keeps every fire so the
-                # telemetry rollup can still count them; the session is not
-                # charged context for hearing the same standing note again.
-                audit({"ts": now(), "hook": "chat-lint-gate",
-                       "classes": sorted({f[0] for f in findings}),
-                       "session": session, "audience": "report",
-                       "register": "logged-only",
-                       "excerpt": findings[0][1][:200]})
-                dlog(f"LOG-ONLY(summary already delivered) {sorted({f[0] for f in findings})}")
-                sys.exit(0)
-            record_fire(session, once)
-
-        audit({"ts": now(), "hook": "chat-lint-gate",
-               "classes": sorted({f[0] for f in findings}),
-               "session": session,
-               "audience": "partner-ask" if directed else "report",
-               "register": register,
-               "excerpt": findings[0][1][:200]})
-        lines = [
-            "CHAT LINT — your PREVIOUS reply broke writing rules that bind chat "
-            "(5be2f462 banned constructions / 3a9dbafd bare ids / named deal "
-            "questions / multi-clause task shape / agent-access rationale). It has "
-            "already reached Joe and cannot be unsent, so do NOT reissue it. Simply "
-            "avoid these from here on:",
-            ""]
-        for rid, quote, fix in findings[:6]:
-            lines.append(f"  [{rid}] …{quote}…")
-            lines.append(f"      fix: {fix}")
+    audit({"ts": now(), "hook": "chat-lint-gate",
+           "classes": sorted({f[0] for f in findings}),
+           "session": session,
+           "audience": "partner-ask" if directed else "report",
+           "register": register,
+           "excerpt": findings[0][1][:200]})
+    lines = [
+        "CHAT LINT — your PREVIOUS reply broke writing rules that bind chat "
+        "(5be2f462 banned constructions / 3a9dbafd bare ids / named deal "
+        "questions / multi-clause task shape / agent-access rationale). It has "
+        "already reached Joe and cannot be unsent, so do NOT reissue it. Simply "
+        "avoid these from here on:",
+        ""]
+    for rid, quote, fix in findings[:6]:
+        lines.append(f"  [{rid}] …{quote}…")
+        lines.append(f"      fix: {fix}")
+    lines.append("")
+    lines.append("Vocab and contrast-reframe bans are the same ones every "
+                 "client surface already enforces; a bare 8-hex id or "
+                 "'loop #N' needs its plain-language gloss in the same "
+                 "sentence. Deal questions name their deal; multi-step asks "
+                 "are numbered and marked 'all required'. Agent access is "
+                 "bounded by credentials and autonomous execution, not data "
+                 "confidentiality. Code fences are exempt.")
+    if not directed:
         lines.append("")
-        lines.append("Vocab and contrast-reframe bans are the same ones every "
-                     "client surface already enforces; a bare 8-hex id or "
-                     "'loop #N' needs its plain-language gloss in the same "
-                     "sentence. Deal questions name their deal; multi-step asks "
-                     "are numbered and marked 'all required'. Agent access is "
-                     "bounded by credentials and autonomous execution, not data "
-                     "confidentiality. Code fences are exempt.")
-        if not directed:
-            lines.append("")
-            lines.append(
-                "AUDIENCE: this was a REPORT, not something asked of Joe, so this "
-                "note is the once-per-session consolidation rather than a "
-                "per-message flag. Later reporting-prose findings this session are "
-                "recorded in the ledger and not repeated here. A message that "
-                "actually asks him something is still flagged on the spot.")
-        carry("\n".join(lines), session)
-        sys.exit(0)
+        lines.append(
+            "AUDIENCE: this was a REPORT, not something asked of Joe, so this "
+            "note is the once-per-session consolidation rather than a "
+            "per-message flag. Later reporting-prose findings this session are "
+            "recorded in the ledger and not repeated here. A message that "
+            "actually asks him something is still flagged on the spot.")
+    carry("\n".join(lines), session)
+    sys.exit(0)
 
-    except SystemExit:
-        raise
-    except Exception as exc:
-        dlog(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+
+def main():
+    sys.exit(run(decide))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

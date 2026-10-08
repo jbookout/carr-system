@@ -203,12 +203,12 @@ def save(data, session):
     os.replace(tmp, state_path(session))
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except (ValueError, OSError):
-        return 0  # never block on a malformed hook payload
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
+
+@decision(failure="raise")
+def decide(payload):
     tool = payload.get("tool_name") or ""
     if not tool.endswith("SendMessage"):
         return 0
@@ -281,6 +281,10 @@ def main():
     seen[who] = now
     save(seen, session)
     return 0
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":

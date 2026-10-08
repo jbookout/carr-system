@@ -137,6 +137,10 @@ KNOWN_HOSTS = (
     # and the signed-out progress-board check read this exact host.
     "api.practicecre.com", "api.doctorcre.com", "app.doctorcre.com",
     "api.anthropic.com", "console.neon.tech",
+    # OpenRouter (Joe 2026-10-06): his own pay-per-token model router, used as a
+    # Claude Code ANTHROPIC_BASE_URL so builders can run GLM or DeepSeek models
+    # inside this harness, with these hooks still on, when subscriptions run dry.
+    "openrouter.ai",
     "neon.tech", "cloudflareapi.com", "cloudflare.com", "r2.cloudflarestorage.com",
     "googleapis.com", "github.com", "api.github.com", "hc-ping.com",
     # Dot relay uses the Slack Web API; its user token stays in ~/.hermes/.env.
@@ -159,6 +163,8 @@ KNOWN_HOSTS = (
     # strip the link, which quietly drops the attribution it exists to give.
     "arxiv.org", "anthropic.com", "claude.com", "humanlayer.dev", "mem0.ai",
     "langchain.com", "emergentmind.com",
+    # Official vendor announcements and developer/API documentation.
+    "openai.com", "developers.openai.com", "platform.openai.com",
     # TypeSafe, added 2026-09-17 on Joe's ruling. docs.typesafe.ai is the
     # documentation host and is a plain research read like the row above it;
     # api.typesafe.ai is the inference endpoint for Jev, a model that takes text
@@ -1392,175 +1398,184 @@ def check(cmd, cwd=None):
     return None
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:                       # fail OPEN
-        log(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
 
-        # [2026-08-06, loop #163 closed on Joe's "Fix both now"] WebFetch joins
-        # the egress allowlist. Before this, `if tool != "Bash": sys.exit(0)`
-        # meant WebFetch reached ANY host while the identical curl was blocked —
-        # demonstrated live on 2026-08-03. Same KNOWN_HOSTS list, same tuning
-        # path (a block names the host to add). WebSearch is deliberately NOT
-        # gated: it reaches a search API, not an arbitrary host. Requires the
-        # settings matcher to include WebFetch — changed the same sitting.
-        if tool == "WebFetch":
-            url = (ti.get("url", "") if isinstance(ti, dict) else "") or ""
-            # urlsplit, not URL_RE, for the fetch path. The regex host class
-            # excludes ':' and '@', so `https://user:pass@evil.com/` captures
-            # "user" as the host — harmless while everything was deny-by-default,
-            # actively wrong now that a host can pass on policy rather than on a
-            # list. The Bash path below still uses URL_RE (it scans free text,
-            # where a parser has no single URL to parse).
-            try:
-                _p = urlsplit(url if url.startswith(("http://", "https://")) else f"https://{url}")
-                host = (_p.hostname or "").lower()
-            except Exception:
-                host = ""
-            if host and not host_allowlisted(host):
-                # Not on the list — fall through to the wider READ-ONLY class
-                # rather than refusing outright. This is the 2026-08-09 split:
-                # an allowlisted host keeps its unconditional pass, and anything
-                # else must satisfy the open-read policy instead.
-                reason = webfetch_open_read_reason(url)
-                if reason:
-                    log(f"DENY {reason} :: {url[:200]}")
-                    print(reason, file=sys.stderr)
-                    sys.exit(2)
-                log(f"ALLOW(open-read) {host} :: {url[:200]}")
-            sys.exit(0)
+def _parse_error(exc):
+    log(f"ALLOW(parse-error) {exc}")
+    return 0
 
-        # Codex may expose the outer functions.exec wrapper or its nested
-        # exec_command. Apply the same shell policy to the literal command.
-        if tool in {"functions.exec", "exec_command"}:
-            # The native Bash guard pre-dates Codex and is intentionally global.
-            # This new Codex alias is CARR-only so it cannot change Life AI or
-            # another repository's workflow merely because they share Codex.
-            cwd = ((ti.get("workdir") or payload.get("cwd") or "")
-                   if isinstance(ti, dict) else (payload.get("cwd") or ""))
-            try:
-                real_cwd = os.path.realpath(os.path.expanduser(cwd))
-            except Exception:
-                real_cwd = ""
-            if not (real_cwd == REPO or real_cwd.startswith(REPO + os.sep)
-                    or "/CARR AI" in real_cwd):
-                # A task rooted elsewhere can still target CARR by absolute
-                # path.  Scope by the target too, otherwise a non-CARR cwd is
-                # an accidental bypass for the very files this guard protects.
-                raw = (ti if isinstance(ti, str) else
-                       ((ti.get("cmd") or ti.get("code") or "")
-                        if isinstance(ti, dict) else ""))
-                if REPO not in raw and not raw_targets_carr(raw):
-                    sys.exit(0)
-            tool = "Bash"
-        if tool != "Bash":
-            sys.exit(0)
-        # Codex's local-function tool passes freeform JavaScript as a string;
-        # its embedded exec_command({cmd: ...}) must receive the same command
-        # inspection as a native Bash call. A dict remains the Claude shape.
-        cmd = (ti.get("command") or ti.get("cmd") or "") if isinstance(ti, dict) else ti
-        if not isinstance(cmd, str):
-            cmd = ""
-        if not cmd:
-            sys.exit(0)
 
-        # Effective cwd for the broad-add repo scope: the tool_input's own
-        # workdir (Codex), else the payload's cwd (Claude Code sends this for
-        # every Bash call), else this process's own cwd as a last resort.
-        effective_cwd = (
-            (ti.get("workdir") if isinstance(ti, dict) else None)
-            or payload.get("cwd") or os.getcwd())
+def _decision_error(exc):
+    log(f"ALLOW(internal-error) {exc}")
+    return 0
 
-        reason = check(cmd, effective_cwd)
 
-        # BYPASS AUDIT C33/C34 (2026-09-24), REDESIGNED (2026-09-24, Opus
-        # review). This hook used to re-run the four client verb gates
-        # client-side against a parsed `./run.sh call <verb> '<json>'`
-        # command (hooks/verb_gate_recheck.py, now deleted). A replay of
-        # 12,145 real Bash commands found the shell-text side of that
-        # approach fundamentally leaky (Jev: 0.93) — 62 legitimate commands
-        # would have been falsely denied (`git add -A <paths>`, a grep for
-        # the pattern text, fixture repos in /tmp…), and several trivial
-        # bypasses (a shell variable holding the verb, `$(cat f)` JSON,
-        # calling tools/call-verb.py or mcp-server/local-verb.mjs directly)
-        # could never be closed from Bash-command-text at all — every one of
-        # those doors recurses through the SAME server-side callTool(), so
-        # the checks now live in the verb handlers themselves
-        # (mcp-server/src/verb-gate-checks.js, wired into add-loop's handler
-        # in tools.js) and this hook no longer duplicates them. Jev agreed
-        # (0.94) that hosted CI is what actually stops a local-hook bypass
-        # from reaching main, which is the other reason a client-side
-        # regex recheck was the wrong enforcement point.
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
 
-        # THE SHELL HALF OF rule 76a53dfe. A record refused at the vault must not
-        # simply be written somewhere the gate does not look, and a heredoc into
-        # a scratchpad was exactly that path. One shared memory with
-        # record-home-gate.py, so a record refused through either door is
-        # recognised at the other (rule a8c55a47: two doors, one module).
-        session = payload.get("session_id") or payload.get("sessionId") or ""
-        body = heredoc_body(cmd)
-        if reason and "vault markdown" in reason:
-            remember_refusal(body or cmd, session)
-        elif not reason and body:
-            hidden, share = was_refused(body, session)
-            if hidden:
-                log(f"DENY re-routed refused content ({share:.2f})")
-                print(REFUSAL.format(pct=round(share * 100)), file=sys.stderr)
+    # [2026-08-06, loop #163 closed on Joe's "Fix both now"] WebFetch joins
+    # the egress allowlist. Before this, `if tool != "Bash": sys.exit(0)`
+    # meant WebFetch reached ANY host while the identical curl was blocked —
+    # demonstrated live on 2026-08-03. Same KNOWN_HOSTS list, same tuning
+    # path (a block names the host to add). WebSearch is deliberately NOT
+    # gated: it reaches a search API, not an arbitrary host. Requires the
+    # settings matcher to include WebFetch — changed the same sitting.
+    if tool == "WebFetch":
+        url = (ti.get("url", "") if isinstance(ti, dict) else "") or ""
+        # urlsplit, not URL_RE, for the fetch path. The regex host class
+        # excludes ':' and '@', so `https://user:pass@evil.com/` captures
+        # "user" as the host — harmless while everything was deny-by-default,
+        # actively wrong now that a host can pass on policy rather than on a
+        # list. The Bash path below still uses URL_RE (it scans free text,
+        # where a parser has no single URL to parse).
+        try:
+            _p = urlsplit(url if url.startswith(("http://", "https://")) else f"https://{url}")
+            host = (_p.hostname or "").lower()
+        except Exception:
+            host = ""
+        if host and not host_allowlisted(host):
+            # Not on the list — fall through to the wider READ-ONLY class
+            # rather than refusing outright. This is the 2026-08-09 split:
+            # an allowlisted host keeps its unconditional pass, and anything
+            # else must satisfy the open-read policy instead.
+            reason = webfetch_open_read_reason(url)
+            if reason:
+                log(f"DENY {reason} :: {url[:200]}")
+                print(reason, file=sys.stderr)
                 sys.exit(2)
+            log(f"ALLOW(open-read) {host} :: {url[:200]}")
+        sys.exit(0)
 
-        if not reason:
-            # THE GATE DOOR (loop #231, 2026-08-10). Runs only when nothing above
-            # denies, so a destructive shape (`rm -rf hooks/`) still DENIES on the
-            # stronger rule rather than being softened to an announcement here.
-            #
-            # Until today gate-edit-gate.py guarded Write/Edit on these files and
-            # its docstring claimed this file guarded the shell path. It did not —
-            # proven by firing the hook, not by reading it: append, sed -i, `>`
-            # onto settings.json and tee all returned ALLOW while the render
-            # control in the same run correctly DENIED. Shared matcher, one list,
-            # two doors (rule a8c55a47): hooks/gate_paths.py.
-            try:
-                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                from gate_paths import announcement, enforcement_write
-                hit = enforcement_write(cmd)
-                if hit:
-                    msg = announcement(hit, "a shell command")
-                    log(f"ANNOUNCE gate-write {hit} :: {cmd[:300]}")
-                    print(json.dumps({
-                        "systemMessage": msg,
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "allow",
-                            "permissionDecisionReason": msg,
-                        },
-                    }))
-                    sys.exit(0)
-            except SystemExit:
-                raise
-            except Exception as exc:
-                log(f"ALLOW(gate-door-error) {exc}")
+    # Codex may expose the outer functions.exec wrapper or its nested
+    # exec_command. Apply the same shell policy to the literal command.
+    if tool in {"functions.exec", "exec_command"}:
+        # The native Bash guard pre-dates Codex and is intentionally global.
+        # This new Codex alias is CARR-only so it cannot change Life AI or
+        # another repository's workflow merely because they share Codex.
+        cwd = ((ti.get("workdir") or payload.get("cwd") or "")
+               if isinstance(ti, dict) else (payload.get("cwd") or ""))
+        try:
+            real_cwd = os.path.realpath(os.path.expanduser(cwd))
+        except Exception:
+            real_cwd = ""
+        if not (real_cwd == REPO or real_cwd.startswith(REPO + os.sep)
+                or "/CARR AI" in real_cwd):
+            # A task rooted elsewhere can still target CARR by absolute
+            # path.  Scope by the target too, otherwise a non-CARR cwd is
+            # an accidental bypass for the very files this guard protects.
+            raw = (ti if isinstance(ti, str) else
+                   ((ti.get("cmd") or ti.get("code") or "")
+                    if isinstance(ti, dict) else ""))
+            if REPO not in raw and not raw_targets_carr(raw):
+                sys.exit(0)
+        tool = "Bash"
+    if tool != "Bash":
+        sys.exit(0)
+    # Codex's local-function tool passes freeform JavaScript as a string;
+    # its embedded exec_command({cmd: ...}) must receive the same command
+    # inspection as a native Bash call. A dict remains the Claude shape.
+    cmd = (ti.get("command") or ti.get("cmd") or "") if isinstance(ti, dict) else ti
+    if not isinstance(cmd, str):
+        cmd = ""
+    if not cmd:
+        sys.exit(0)
 
-        if reason:
-            log(f"DENY {reason} :: {cmd[:300]}")
-            # EXIT 2, NOT JSON, AND THE CHOICE MATTERS. The structured contract
-            # (exit 0 + hookSpecificOutput.permissionDecision) is richer, but it
-            # requires exit 0 — so on any build that does not parse the JSON, exit
-            # 0 reads as ALLOW and the gate fails open silently. Exit 2 blocks on
-            # every build and hands stderr back to the session as the reason. For
-            # a guard, degrading toward "blocked" beats degrading toward "allowed".
-            print(reason, file=sys.stderr)
+    # Effective cwd for the broad-add repo scope: the tool_input's own
+    # workdir (Codex), else the payload's cwd (Claude Code sends this for
+    # every Bash call), else this process's own cwd as a last resort.
+    effective_cwd = (
+        (ti.get("workdir") if isinstance(ti, dict) else None)
+        or payload.get("cwd") or os.getcwd())
+
+    reason = check(cmd, effective_cwd)
+
+    # BYPASS AUDIT C33/C34 (2026-09-24), REDESIGNED (2026-09-24, Opus
+    # review). This hook used to re-run the four client verb gates
+    # client-side against a parsed `./run.sh call <verb> '<json>'`
+    # command (hooks/verb_gate_recheck.py, now deleted). A replay of
+    # 12,145 real Bash commands found the shell-text side of that
+    # approach fundamentally leaky (Jev: 0.93) — 62 legitimate commands
+    # would have been falsely denied (`git add -A <paths>`, a grep for
+    # the pattern text, fixture repos in /tmp…), and several trivial
+    # bypasses (a shell variable holding the verb, `$(cat f)` JSON,
+    # calling tools/call-verb.py or mcp-server/local-verb.mjs directly)
+    # could never be closed from Bash-command-text at all — every one of
+    # those doors recurses through the SAME server-side callTool(), so
+    # the checks now live in the verb handlers themselves
+    # (mcp-server/src/verb-gate-checks.js, wired into add-loop's handler
+    # in tools.js) and this hook no longer duplicates them. Jev agreed
+    # (0.94) that hosted CI is what actually stops a local-hook bypass
+    # from reaching main, which is the other reason a client-side
+    # regex recheck was the wrong enforcement point.
+
+    # THE SHELL HALF OF rule 76a53dfe. A record refused at the vault must not
+    # simply be written somewhere the gate does not look, and a heredoc into
+    # a scratchpad was exactly that path. One shared memory with
+    # record-home-gate.py, so a record refused through either door is
+    # recognised at the other (rule a8c55a47: two doors, one module).
+    session = payload.get("session_id") or payload.get("sessionId") or ""
+    body = heredoc_body(cmd)
+    if reason and "vault markdown" in reason:
+        remember_refusal(body or cmd, session)
+    elif not reason and body:
+        hidden, share = was_refused(body, session)
+        if hidden:
+            log(f"DENY re-routed refused content ({share:.2f})")
+            print(REFUSAL.format(pct=round(share * 100)), file=sys.stderr)
             sys.exit(2)
-        sys.exit(0)
-    except Exception as exc:                       # fail OPEN
-        log(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+
+    if not reason:
+        # THE GATE DOOR (loop #231, 2026-08-10). Runs only when nothing above
+        # denies, so a destructive shape (`rm -rf hooks/`) still DENIES on the
+        # stronger rule rather than being softened to an announcement here.
+        #
+        # Until today gate-edit-gate.py guarded Write/Edit on these files and
+        # its docstring claimed this file guarded the shell path. It did not —
+        # proven by firing the hook, not by reading it: append, sed -i, `>`
+        # onto settings.json and tee all returned ALLOW while the render
+        # control in the same run correctly DENIED. Shared matcher, one list,
+        # two doors (rule a8c55a47): hooks/gate_paths.py.
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from gate_paths import announcement, enforcement_write
+            hit = enforcement_write(cmd)
+            if hit:
+                msg = announcement(hit, "a shell command")
+                log(f"ANNOUNCE gate-write {hit} :: {cmd[:300]}")
+                print(json.dumps({
+                    "systemMessage": msg,
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "permissionDecisionReason": msg,
+                    },
+                }))
+                sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            log(f"ALLOW(gate-door-error) {exc}")
+
+    if reason:
+        log(f"DENY {reason} :: {cmd[:300]}")
+        # EXIT 2, NOT JSON, AND THE CHOICE MATTERS. The structured contract
+        # (exit 0 + hookSpecificOutput.permissionDecision) is richer, but it
+        # requires exit 0 — so on any build that does not parse the JSON, exit
+        # 0 reads as ALLOW and the gate fails open silently. Exit 2 blocks on
+        # every build and hands stderr back to the session as the reason. For
+        # a guard, degrading toward "blocked" beats degrading toward "allowed".
+        print(reason, file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
+
+
+def main():
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

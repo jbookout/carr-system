@@ -96,6 +96,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from ops import business_data_patterns as bdp  # noqa: E402
 from ops import git_env  # noqa: E402
+from lib.gate_declarations import replay_hooks  # noqa: E402
 
 MANIFEST = REPO / "ops" / "config" / "gate-replay-manifest.json"
 FIXTURE_DIR = REPO / "ops" / "fixtures" / "real-replay"
@@ -137,6 +138,7 @@ NO_BACKGROUND_GIT = {"GIT_CONFIG_COUNT": "2",
 def load_manifest(path: Path = MANIFEST) -> Dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         data: Dict[str, Any] = json.load(handle)
+    data["hooks"] = replay_hooks(path.parent / data.pop("declarations"))
     return data
 
 
@@ -739,14 +741,14 @@ _METER: Any = None
 
 
 def meter_module() -> Any:
-    """hooks/hook-meter-run.py, loaded once for its classification functions."""
+    """The execution runtime, loaded once for its classification functions."""
     global _METER
     if _METER is None:
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            "gate_replay_hook_meter_run", REPO / "hooks" / "hook-meter-run.py")
+            "gate_replay_hook_execution", REPO / "lib" / "hook_execution.py")
         if spec is None or spec.loader is None:
-            raise ImportError("cannot load hooks/hook-meter-run.py")
+            raise ImportError("cannot load lib/hook_execution.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         _METER = module

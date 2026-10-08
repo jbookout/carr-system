@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run, Event
 
 PACK_DELIVERY_RAIL = (
     " RULE DELIVERY: use only exact canonical pack names from standing-context "
@@ -457,11 +459,8 @@ def close_before_open_brief(repo=None):
     )
 
 
-def main():
-    try:
-        json.load(sys.stdin)          # hook payload; nothing needed from it
-    except Exception:
-        pass
+@decision(failure="raise")
+def decide(payload):
     extra = ""
     # CLOSE-BEFORE-OPEN goes FIRST — before any other extra line, so a session
     # that skims the top of the brief cannot miss it.
@@ -487,6 +486,10 @@ def main():
         pass
     print(STATIC_RAIL + extra)
     sys.exit(0)
+
+
+def main():
+    return run(decide, invalid_event={})
 
 
 if __name__ == "__main__":

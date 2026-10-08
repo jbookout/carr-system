@@ -992,6 +992,22 @@ test("source-only migration diagnostics preserve the sealed runtime frontier", (
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
 });
 
+test("Worker upload retry evidence binds current script bytes without changing sealed authority", () => {
+  const fixture = JSON.parse(readRegistryArtifact(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const ingressKey = "external-admin:bin/deploy-worker.sh";
+  const sealed = frozenInventory(CURRENT_REGISTRY_VERSION).find(row => row.ingress_key === ingressKey);
+  const review = fixture.current_source_reviews[CURRENT_REGISTRY_VERSION];
+  const reviewed = review?.upsert.find(row => row.ingress_key === ingressKey) || sealed;
+  assert.ok(reviewed, "upload retry must have registered evidence at the current frontier");
+  const digest = sha256(readRegistryArtifact(new URL("../../bin/deploy-worker.sh", import.meta.url), "utf8"));
+  assert.equal(reviewed.schema_digest, digest);
+  assert.equal(reviewed.handler_digest, digest);
+  const authorityContract = row => Object.fromEntries(Object.entries(row)
+    .filter(([key]) => !["schema_digest", "handler_digest"].includes(key)));
+  assert.deepEqual(authorityContract(reviewed), authorityContract(sealed));
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, CURRENT_REGISTRY_VERSION), true);
   // The push toll calls the bare API; its default must follow the newest frontier.
