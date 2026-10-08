@@ -384,7 +384,8 @@ def dispatch(
             )
 
     if entry["kind"] in codex_models.CODEX_KINDS:
-        print(f"executor: {entry['model']} / {entry['effort']} (family {entry['family']}, desk {name})", flush=True)
+        print(f"executor: {entry['model']} / {entry['effort']} (family {entry['family']}, desk {name})",
+              file=sys.stderr, flush=True)
 
     if entry["kind"] == "claude-session":
         if name == "flash":

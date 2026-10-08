@@ -144,14 +144,17 @@ class FamilyDispatchTests(unittest.TestCase):
     def test_send_cli_names_resolved_executor_before_launch(self):
         self.reg.register('cx', 'codex-session')
         out = io.StringIO()
+        executor = io.StringIO()
         def execute(entry, *args, **kwargs):
-            self.assertIn('gpt-6-luna', out.getvalue())
-            self.assertIn('low', out.getvalue())
+            self.assertIn('gpt-6-luna', executor.getvalue())
+            self.assertIn('low', executor.getvalue())
             return {'status': 'completed'}
-        with contextlib.redirect_stdout(out), patch.object(dispatch, '_to_codex', side_effect=execute):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(executor), \
+             patch.object(dispatch, '_to_codex', side_effect=execute):
             code = dispatch.main(['--registry', str(self.reg.path), '--results', str(self.results),
                                   'send', 'cx', 'work', '--family', 'luna', '--effort', 'low'])
         self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())['model'], 'gpt-6-luna')
 
     def test_desks_without_default_names_job_requirement(self):
         self.reg.register('cx', 'codex-session')
