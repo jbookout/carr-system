@@ -2,10 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { launchChrome } from "../../dealroom/test/chrome-launch.mjs";
 
 const fixture = new URL("./fixtures/chrome-launch-fixture.mjs", import.meta.url);
+const realChrome = [
+  process.env.CHROME_PATH,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+].filter(Boolean).find(existsSync);
+const codeSignCloneDirectory = path.resolve(tmpdir(), "..", "X", "com.google.Chrome.code_sign_clone");
 function fakeChrome(scenarios, beforeSpawn = () => {}) {
   const calls = [];
   function spawnChrome(binary, args, options) {
@@ -23,6 +31,46 @@ function processAlive(pid) {
   try { process.kill(pid, 0); return true; }
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
+
+test("graceful Chrome shutdown does not grow the macOS code-sign clone directory", {
+  skip: process.platform !== "darwin" || !realChrome || !existsSync(codeSignCloneDirectory),
+  timeout: 90_000,
+}, async (t) => {
+  const before = (await readdir(codeSignCloneDirectory)).length;
+  const browser = await launchChrome(realChrome);
+  t.after(() => browser.close());
+  await browser.close();
+  const after = (await readdir(codeSignCloneDirectory)).length;
+  assert.equal(after, before, `Chrome code-sign clones grew ${before} -> ${after}`);
+});
+
+test("Chrome requests a DevTools shutdown before sending process signals", async (t) => {
+  const fake = fakeChrome(["ready"]);
+  const signals = [];
+  const kill = process.kill.bind(process);
+  let closeRequested = false;
+  t.mock.method(process, "kill", (pid, signal) => {
+    if (pid === -fake.calls[0]?.child.pid && signal !== 0) signals.push(signal);
+    return kill(pid, signal);
+  });
+  t.after(() => {
+    for (const { child } of fake.calls) {
+      try { kill(child.pid, "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+  });
+  const browser = await launchChrome("fake-chrome", {
+    spawnChrome: fake.spawnChrome,
+    timeoutMs: 1500,
+    closeBrowser: async () => {
+      closeRequested = true;
+      kill(fake.calls[0].child.pid, "SIGKILL");
+    },
+  });
+  await browser.close();
+  assert.equal(closeRequested, true);
+  assert.deepEqual(signals, [], "DevTools shutdown made process signals unnecessary");
+});
 
 test("Chrome waits through an exiting process group's transient EPERM probe", { skip: process.platform === "win32" }, async (t) => {
   const fake = fakeChrome(["ready"]);
