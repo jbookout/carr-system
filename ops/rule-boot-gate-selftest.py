@@ -111,13 +111,18 @@ class Case:
         interpreter loads, so those cases keep a real process per call."""
         return "PYTHONPATH" in self.env
 
-    def arm(self, source="startup"):
+    def arm(self, source="startup", agent=None):
+        """SessionStart as the host sends it. A subagent's own SessionStart
+        (its start, its compaction) carries the PARENT's session_id plus the
+        subagent's agent_id (Claude Code 2.1.288: compaction calls the
+        SessionStart hooks with the compacting context's agentContext)."""
         if not self.subprocess_only():
             with InProcess(self) as (_hook, lib):
-                return lib.arm_session(SESSION, source) + "\n"
+                return lib.arm_session(SESSION, source, **({"agent_id": agent} if agent else {})) + "\n"
         code = ("import sys; sys.path.insert(0, sys.argv[1]); "
-                "from lib.rule_boot_gate import arm_session; print(arm_session(sys.argv[2], sys.argv[3]))")
-        return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source],
+                "from lib.rule_boot_gate import arm_session; "
+                "print(arm_session(sys.argv[2], sys.argv[3], **({'agent_id': sys.argv[4]} if sys.argv[4] else {})))")
+        return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source, agent or ""],
                               capture_output=True, text=True, env=self.env, timeout=30).stdout
 
     def hook(self, payload):
@@ -866,7 +871,65 @@ def case_unreadable_input_holds_effects(c):
         assert denied((verdict or {}).get("hookSpecificOutput")), f"{raw!r} -> {out.stdout}{out.stderr}"
 
 
-CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
+def _booted_parent_and_child(c, child="sub-a"):
+    c.stub("a", pages=2)
+    c.arm()
+    for page in (1, 2):
+        c.fetch(page)
+        c.fetch(page, agent=child)
+    assert c.call(*READ) is None and c.call(*READ, agent=child) is None, "both contexts booted"
+
+
+def case_child_start_keeps_parent_boot(c):
+    """A subagent starting (its own SessionStart) must not re-arm its parent."""
+    _booted_parent_and_child(c)
+    c.arm("startup", agent="sub-b")
+    assert c.call(*READ) is None, "parent's completed boot survives a child starting"
+    assert c.call(*READ, agent="sub-a") is None, "a sibling's completed boot survives too"
+    assert denied(c.call(*READ, agent="sub-b")), "the new child still reads its own boot"
+
+
+def case_child_compaction_rearms_only_that_child(c):
+    """2026-10-08: subagent compactions at 08:25:30, 09:02:38 and 09:09:58
+    re-armed main within a second each time (main re-read 6 times for 2 real
+    compactions). A child's compaction re-arms that child and nothing else."""
+    _booted_parent_and_child(c)
+    c.arm("compact", agent="sub-a")
+    assert c.call(*READ) is None, "parent's completed boot survives a child compacting"
+    assert denied(c.call(*READ, agent="sub-a")), "the compacted child has lost its rules: re-fetch"
+    c.fetch(1, agent="sub-a")
+    c.fetch(2, agent="sub-a")
+    assert c.call(*READ, agent="sub-a") is None, "the child re-read every page"
+    c.arm("compact", agent="sub-a")
+    assert denied(c.call(*READ, agent="sub-a")), "every compaction of the child re-arms it"
+    assert c.call(*READ) is None, "and the parent stays booted throughout"
+    c.arm("compact")
+    assert denied(c.call(*READ)), "the parent's own compaction still re-arms the parent"
+
+
+def case_child_rearm_digest_change_regates_all(c):
+    """A child's SessionStart that sees a new digest is a digest change:
+    every context of the session reads the new boot."""
+    _booted_parent_and_child(c)
+    c.stub("b", pages=2)
+    c.arm("compact", agent="sub-a")
+    assert denied(c.call(*READ)), "a new digest re-gates the parent"
+    assert denied(c.call(*READ, agent="sub-a")), "and the child"
+
+
+def case_child_rearm_outage_keeps_parent(c):
+    """A child's SessionStart during a store outage holds the child, never
+    the parent that already read the current boot."""
+    _booted_parent_and_child(c)
+    c.stub(None)
+    c.arm("compact", agent="sub-a")
+    assert c.call(*READ) is None, "the parent's boot stands through a child's outage"
+    assert denied(c.call(*READ, agent="sub-a")), "the compacted child is held"
+
+
+CASES = [case_child_start_keeps_parent_boot, case_child_compaction_rearms_only_that_child,
+         case_child_rearm_digest_change_regates_all, case_child_rearm_outage_keeps_parent,
+         case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
          case_failure_not_sticky, case_state_unwritable_never_armed, case_disk_full_never_armed,
@@ -909,6 +972,16 @@ def check_gate_integrity_rearms():
         with open(os.path.join(c.state, SESSION, "arm.json"), encoding="utf-8") as fh:
             arm = json.load(fh)
         assert arm["status"] == "armed" and arm["source"] == "compact", arm
+        # A subagent's compaction: same session_id, plus agent_id. The hook must
+        # hand the agent through, so the session arm (and main's epoch) stand.
+        child = {**payload, "agent_id": "sub-gi"}
+        out = subprocess.run([sys.executable, os.path.join(REPO, "hooks", "gate-integrity.py")],
+                             input=json.dumps(child), capture_output=True, text=True,
+                             env=c.env, timeout=60).stdout
+        assert "RULE BOOT" in out, out[-800:]
+        with open(os.path.join(c.state, SESSION, "arm.json"), encoding="utf-8") as fh:
+            after = json.load(fh)
+        assert after["epoch"] == arm["epoch"], ("a child's SessionStart re-armed the session", arm, after)
         # A flagged (CI) run never arms and never reads stdin.
         out = subprocess.run([sys.executable, os.path.join(REPO, "hooks", "gate-integrity.py"), "--strict"],
                              input=json.dumps({**payload, "session_id": "other"}),
