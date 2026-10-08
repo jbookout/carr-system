@@ -118,6 +118,8 @@ def main() -> int:
         # this, a malformed poison would make the two checks below pass vacuously.
         control_repo = proot / "control-repo"
         (control_repo / "hooks").mkdir(parents=True)
+        (control_repo / "lib").mkdir()
+        shutil.copy2(REPO / "lib/hook_runtime.py", control_repo / "lib/hook_runtime.py")
         (control_repo / "claude-tree" / "agents").mkdir(parents=True)
         shutil.copy2(REPO / "hooks" / "executor-tier-gate.py",
                      control_repo / "hooks" / "executor-tier-gate.py")
@@ -192,6 +194,7 @@ def text_of(record, _roles):
     return "\\n".join(item.get("text", "") for item in content if isinstance(item, dict))
 def strip_fences(text): return text
 ''')
+        shutil.copy2(REPO / "lib/hook_runtime.py", root / "lib/hook_runtime.py")
         (root / "lib" / "__init__.py").write_text("")
         (root / "lib" / "record_sources.py").write_text('''
 import os

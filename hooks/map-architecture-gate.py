@@ -39,7 +39,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from stop_latch import announce  # noqa: E402
 sys.path.insert(0, REPO)
-from lib.transcript_read import load_transcript  # noqa: E402
 LOG = os.path.join(REPO, "out", "map-architecture-gate.jsonl")
 CARR_PATH_MARKERS = ("/carr-system/", "/carr-system", "my drive/carr ai")
 SYNTHETIC_PREFIXES = ("The following is the Codex agent history", "<environment_context>",
@@ -279,10 +278,28 @@ def audit(row):
         pass
 
 
-def main():
-    payload = {}
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _handle_error(payload, exc):
+    if payload_is_carr(payload):
+        audit({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "hook": "map-architecture-gate",
+               "session": payload.get("session_id") or payload.get("sessionId"),
+               "reason": "gate internal failure", "error": type(exc).__name__})
+        announce(
+            "MAP ARCHITECTURE GATE COULD NOT RUN — the governed map-method check "
+            "did not complete, so nothing here has confirmed the live method was "
+            "loaded. It used to hold the turn open on this path; it now says so "
+            "instead. Repair the gate or the transcript read, and treat the map "
+            "method as unverified until you have.")
+    return 0
+
+
+@decision(failure="raise")
+def decide(payload):
     try:
-        payload = json.load(sys.stdin)
         if payload.get("stop_hook_active") or not payload_is_carr(payload):
             return 0
         path = payload.get("transcript_path") or payload.get("transcriptPath")
@@ -291,9 +308,7 @@ def main():
         # One bad line in the session's own transcript must not switch the
         # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
         # and records a transcript_tamper event instead of raising.
-        records = load_transcript(path, hook="map-architecture-gate",
-                                  session=payload.get("session_id") or payload.get("sessionId"),
-                                  log_path=LOG)
+        records = payload.transcript(hook="map-architecture-gate", log_path=LOG)
         blocked, reason = evaluate(records)
         if not blocked:
             return 0
@@ -308,18 +323,11 @@ def main():
             "This no longer holds your turn open, so make the call before the map "
             "work goes any further rather than after.")
     except Exception as exc:
-        if payload_is_carr(payload):
-            audit({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                   "hook": "map-architecture-gate",
-                   "session": payload.get("session_id") or payload.get("sessionId"),
-                   "reason": "gate internal failure", "error": type(exc).__name__})
-            announce(
-                "MAP ARCHITECTURE GATE COULD NOT RUN — the governed map-method check "
-                "did not complete, so nothing here has confirmed the live method was "
-                "loaded. It used to hold the turn open on this path; it now says so "
-                "instead. Repair the gate or the transcript read, and treat the map "
-                "method as unverified until you have.")
-        return 0
+        return _handle_error(payload, exc)
+
+
+def main():
+    return run(decide, parse_error=lambda exc: _handle_error({}, exc))
 
 
 if __name__ == "__main__":

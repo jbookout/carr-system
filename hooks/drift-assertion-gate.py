@@ -103,7 +103,6 @@ except Exception:
 if os.environ.get("CARR_DRIFT_ASSERTION_STATE") and not os.environ.get("CARR_STOP_LATCH_STATE"):
     os.environ["CARR_STOP_LATCH_STATE"] = os.environ["CARR_DRIFT_ASSERTION_STATE"]
 
-from stop_latch import claim_identity, latched, record_fire  # noqa: E402
 LOG = _GUARD_LOG
 STATE = os.environ.get("CARR_DRIFT_ASSERTION_STATE") or os.path.join(
     REPO, "out", "drift-assertion")
@@ -175,73 +174,79 @@ def already_raised(session, hits):
     ledger cannot be read or written, this returns False and the gate speaks,
     which is the safe direction for a check whose whole value is speaking.
     """
-    identity = claim_identity("drift-assertion-gate", "governed-drift-claim",
-                              [line for _, line in hits])
-    if latched(session, identity):
-        return True
-    record_fire(session, identity)
-    return False
+    return Event({"session_id": session}).latch(
+        "drift-assertion-gate", "governed-drift-claim", [line for _, line in hits])
+
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import Event, decision, run
+
+
+def _parse_error(exc):
+    # Logged, never silent (2026-09-24). This exit was bare, and when
+    # run-record-gate handed this gate a drained stdin it allowed every
+    # Stop with no trace; drift-claim-gate's ALLOW(parse-error) line is how
+    # the same fault was found there.
+    log(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    log(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    if (payload.get("hook_event_name") or "Stop") != "Stop":
+        sys.exit(0)
+    if payload.get("stop_hook_active"):
+        sys.exit(0)
+    path = payload.get("transcript_path")
+    if not path or not os.path.exists(path):
+        sys.exit(0)
+
+    text = final_assistant_text(path)
+    if len(text) < 60:
+        sys.exit(0)
+
+    module = policy()
+    prose = chat().strip_fences(text)
+    if not module.DRIFT.search(prose):
+        sys.exit(0)
+    hits = module.search_decisions(module.salient_tokens(prose))
+    if not hits:
+        sys.exit(0)                     # no ruling: probably a real finding
+    if already_raised(payload.get("session_id"), hits):
+        sys.exit(0)                     # said once; the call is the session's
+
+    body = "\n".join(f"  · [{tag}] {line[:300]}" for tag, line in hits)
+    log(f"BLOCK hits={len(hits)}")
+    print(
+        "DRIFT ASSERTION — you are about to tell Joe that a present state is "
+        "WRONG, and the decision log has something on this subject.\n\n"
+        "This is the most frequent failure class on record here, running since "
+        "2026-08-04, most of them caught by him rather than by a session, and it "
+        "always has the same shape: a current artifact read accurately, the "
+        "decision behind it left unread. `standing-context` returns the live "
+        "count if you want it. "
+        "The write-door version of this check only fires when a record gets "
+        "filed — by then the claim has usually already reached him in chat, "
+        "which is what this door is for.\n\nMatching rulings, newest first:\n\n"
+        + body +
+        "\n\nRead them before this reply goes out. If one explains the state "
+        "you are calling broken, the state was CHOSEN and the finding is either "
+        "nothing or a stale prompt to correct instead. If none apply, say so "
+        "and send it — a drift claim with no governing ruling is usually real. "
+        "This will not stop you twice over the same rulings, however you word "
+        "the reply, so answer the rulings rather than rewriting around them.",
+        file=sys.stderr)
+    sys.exit(2)
 
 
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        # Logged, never silent (2026-09-24). This exit was bare, and when
-        # run-record-gate handed this gate a drained stdin it allowed every
-        # Stop with no trace; drift-claim-gate's ALLOW(parse-error) line is how
-        # the same fault was found there.
-        log(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
-    try:
-        if (payload.get("hook_event_name") or "Stop") != "Stop":
-            sys.exit(0)
-        if payload.get("stop_hook_active"):
-            sys.exit(0)
-        path = payload.get("transcript_path")
-        if not path or not os.path.exists(path):
-            sys.exit(0)
-
-        text = final_assistant_text(path)
-        if len(text) < 60:
-            sys.exit(0)
-
-        module = policy()
-        prose = chat().strip_fences(text)
-        if not module.DRIFT.search(prose):
-            sys.exit(0)
-        hits = module.search_decisions(module.salient_tokens(prose))
-        if not hits:
-            sys.exit(0)                     # no ruling: probably a real finding
-        if already_raised(payload.get("session_id"), hits):
-            sys.exit(0)                     # said once; the call is the session's
-
-        body = "\n".join(f"  · [{tag}] {line[:300]}" for tag, line in hits)
-        log(f"BLOCK hits={len(hits)}")
-        print(
-            "DRIFT ASSERTION — you are about to tell Joe that a present state is "
-            "WRONG, and the decision log has something on this subject.\n\n"
-            "This is the most frequent failure class on record here, running since "
-            "2026-08-04, most of them caught by him rather than by a session, and it "
-            "always has the same shape: a current artifact read accurately, the "
-            "decision behind it left unread. `standing-context` returns the live "
-            "count if you want it. "
-            "The write-door version of this check only fires when a record gets "
-            "filed — by then the claim has usually already reached him in chat, "
-            "which is what this door is for.\n\nMatching rulings, newest first:\n\n"
-            + body +
-            "\n\nRead them before this reply goes out. If one explains the state "
-            "you are calling broken, the state was CHOSEN and the finding is either "
-            "nothing or a stale prompt to correct instead. If none apply, say so "
-            "and send it — a drift claim with no governing ruling is usually real. "
-            "This will not stop you twice over the same rulings, however you word "
-            "the reply, so answer the rulings rather than rewriting around them.",
-            file=sys.stderr)
-        sys.exit(2)
-    except Exception as exc:
-        log(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
