@@ -1487,16 +1487,18 @@ def test_hosted_zsh_setup_does_not_refresh_working_indexes():
         fixture = pathlib.Path(tmp)
         sudo = fixture / "sudo"
         sudo.write_text("#!" + sys.executable + "\n" + '''
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 log = pathlib.Path(os.environ["CI_SETUP_CALLS"])
 calls = json.loads(log.read_text()) if log.exists() else []
 calls.append(sys.argv[1:])
 log.write_text(json.dumps(calls))
 args = sys.argv[1:]
 mode = os.environ["CI_SETUP_FIXTURE"]
+if mode == "hung-install" and "install" in args:
+    time.sleep(30)
 if mode == "working" and "update" in args:
     sys.exit(91)
-if mode != "working" and len(calls) == 1:
+if mode not in ("working", "hung-install") and len(calls) == 1:
     sys.exit(100)
 if mode == "unavailable" and "update" in args:
     sys.exit(100)
@@ -1504,32 +1506,68 @@ if mode == "retry-failed" and len(calls) == 3:
     sys.exit(100)
 ''')
         sudo.chmod(0o755)
-        for mode, expected in (("working", ["install"]),
+        zsh = fixture / "zsh"
+        zsh.write_text("#!/bin/sh\n[ \"$CI_SETUP_FIXTURE\" = preinstalled ]\n")
+        zsh.chmod(0o755)
+        timeout = fixture / "timeout"
+        timeout.write_text("#!" + sys.executable + "\n" + '''
+import json, os, pathlib, subprocess, sys
+log = pathlib.Path(os.environ["CI_SETUP_DEADLINES"])
+calls = json.loads(log.read_text()) if log.exists() else []
+calls.append(sys.argv[1:3])
+log.write_text(json.dumps(calls))
+assert sys.argv[1] == "--kill-after=5s"
+assert 0 < int(sys.argv[2].removesuffix("s")) <= 60
+try:
+    result = subprocess.run(sys.argv[3:], timeout=1)
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+''')
+        timeout.chmod(0o755)
+        for mode, expected in (("preinstalled", []),
+                               ("working", ["install"]),
                                ("stale", ["install", "update", "install"]),
                                ("unavailable", ["install", "update"]),
-                               ("retry-failed", ["install", "update", "install"])):
+                               ("retry-failed", ["install", "update", "install"]),
+                               ("hung-install", ["install", "update", "install"])):
             log = fixture / (mode + ".json")
+            deadlines_log = fixture / (mode + "-deadlines.json")
             env = scrubbed_env()
             env.update(PATH=str(fixture) + os.pathsep + os.environ["PATH"],
-                       CI_SETUP_CALLS=str(log), CI_SETUP_FIXTURE=mode)
-            ran = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", setup["run"]],
-                                 cwd=fixture, env=env, capture_output=True, text=True,
-                                 timeout=10)
+                       CI_SETUP_CALLS=str(log), CI_SETUP_FIXTURE=mode,
+                       CI_SETUP_DEADLINES=str(deadlines_log))
+            try:
+                process = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", setup["run"]],
+                                           cwd=fixture, env=env, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True, start_new_session=True)
+                stdout, stderr = process.communicate(timeout=8)
+                ran = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                check(f"zsh setup {mode} finishes within its process budget", False)
+                continue
             calls = json.loads(log.read_text()) if log.exists() else []
+            deadlines = json.loads(deadlines_log.read_text()) if deadlines_log.exists() else []
             actions = [next((arg for arg in args if arg in ("install", "update")), "unknown")
                        for args in calls]
             check(f"zsh setup {mode} uses the required install/refresh path",
                   actions == expected, actions)
             check(f"zsh setup {mode} propagates its outcome",
-                  (ran.returncode != 0) == (mode in ("unavailable", "retry-failed")),
+                  (ran.returncode != 0) == (mode in ("unavailable", "retry-failed", "hung-install")),
                   ran.returncode)
+            check(f"zsh setup {mode} bounds every apt process",
+                  len(deadlines) == len(calls) and
+                  sum(int(args[1].removesuffix("s")) + 5 for args in deadlines) < 180,
+                  deadlines)
             check(f"zsh setup {mode} bounds every apt network request",
-                  bool(calls) and all(args[0] == "apt-get" and
+                  all(args[0] == "apt-get" and
                       all(option in args for option in ("Acquire::Retries=1",
                           "Acquire::http::Timeout=15", "Acquire::https::Timeout=15"))
                       for args in calls), calls)
-        check("zsh remains a required installed package",
-              all("zsh" in args for args in calls if "install" in args))
+            check(f"zsh setup {mode} requires the zsh package when installing",
+                  all("zsh" in args for args in calls if "install" in args), calls)
 
 
 def main(argv=None):
