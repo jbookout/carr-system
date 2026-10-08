@@ -1387,12 +1387,18 @@ def main() -> int:
             # The append records start only after the exact 0532a transition.
             # Their evidence timestamp is captured before release and must not
             # extend the old live authority window.
+            # Cross a second boundary so transaction-time defaults fail reliably.
+            one(cur, "select pg_sleep(1.1)")
             terminal_evidence_time = one(
                 cur, "select date_trunc('second',clock_timestamp())")[0]
             cc.set_jobs(cur)
             receipt_id = cc.receipt(cur, fixture, claim, "claimed_complete")
             cc.reset_role(cur)
             a2.insert_review(cur, fixture, receipt_id)
+            check("review fact timestamp follows terminal evidence in a long transaction",
+                  one(cur, """select date_trunc('second',created_at)>=%s
+                    from ops.engineering_reviewer_fact where receipt_id=%s""",
+                      (terminal_evidence_time, receipt_id))[0])
             released_at = one(cur, "select released_at from ops.canonical_ownership_lease where id=%s",
                               (lease["lease_id"],))[0]
             check("0532a releases the A2 lease before terminal assurance append",
