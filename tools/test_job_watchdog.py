@@ -15,16 +15,19 @@ FIXTURES = ROOT / "tools/fixtures/job-watchdog"
 
 def setUpModule():
     from unittest.mock import patch
-    global board_publication, scheduled_machine
+    global board_publication, scheduled_machine, vendor_sources
     board_publication = patch.dict(os.environ, {"PROGRESS_BOARD_LOCAL_ONLY": "1"})
     board_publication.start()
     scheduled_machine = patch("scheduled_jobs.check", return_value=[])
     scheduled_machine.start()
+    vendor_sources = patch("job_watchdog.vendor_release_findings", return_value=[])
+    vendor_sources.start()
 
 
 def tearDownModule():
     board_publication.stop()
     scheduled_machine.stop()
+    vendor_sources.stop()
 
 
 class ReplayTests(unittest.TestCase):
@@ -146,6 +149,7 @@ class ReplayTests(unittest.TestCase):
             "parse error: synthetic queue", "synthetic fixture",
             "SUCCESS", "COMPLETED", "FAILURE", "MERGEABLE", "CONFLICTING",
             "UNKNOWN", "DIRTY", "CLEAN", "APPROVED", "CHANGES_REQUESTED",
+            "Service Unavailable", "Responses", "Decisions", "Synthetic",
         }
         allowed = set(re.findall(r"[A-Z][a-z]+", " ".join(synthetic_set)))
 
@@ -752,6 +756,7 @@ class RunnerTests(unittest.TestCase):
             executable.write_text("#!/bin/sh\nprintf 'HTTP/2.0 200\\nX-RateLimit-Remaining: 20\\n\\n[]\\n'\n")
             executable.chmod(0o755)
             config = json.loads((ROOT / "ops/config/job-watchdog.json").read_text())
+            config["vendor_release_watches"] = []  # Offline clean-scan fixture.
             config["paths"]["merge_queue"] = "queue.txt"
             config["paths"]["queue_logs"] = []
             config["actions"]["file_defects"] = False
