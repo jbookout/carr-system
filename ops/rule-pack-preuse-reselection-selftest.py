@@ -1297,6 +1297,7 @@ def rules_routed_by(predicate) -> set[str]:
 for planning_tool, planning_input in (
         ("EnterPlanMode", {}),
         ("UpdatePlan", {"plan": [{"step": "size the work"}]}),
+        ("update_plan", {"plan": [{"step": "size the work"}]}),
         ("functions.update_plan", {"plan": [{"step": "size the work"}]}),
         ("mcp__carr__propose-ready-plan", {"scope_summary": "new capability"})):
     hits = routed_for(planning_tool, planning_input)
@@ -1308,6 +1309,20 @@ for routine_tool, routine_input in (
         ("Write", {"file_path": "notes.txt", "content": "review the finished plan"})):
     hits = routed_for(routine_tool, routine_input)
     check(f"{routine_tool} routine work does not deliver the sizing rule",
+          "8400cd3d" not in hits, hits)
+
+for dispatch_name, dispatch_command in (
+        ("Codex Model Room brief",
+         'python3 tools/room-bridge/dispatch.py send codex-desk "fix the review"'),
+        ("Dot brief", "bin/dot-relay send-job /tmp/dot-brief.txt")):
+    hits = routed_for("Bash", {"command": dispatch_command})
+    check(f"{dispatch_name} delivers the new-work sizing rule",
+          "8400cd3d" in hits, hits)
+for non_dispatch_name, non_dispatch_command in (
+        ("Model Room desk listing", "python3 tools/room-bridge/dispatch.py desks"),
+        ("Dot watch", "bin/dot-relay watch 123.456")):
+    hits = routed_for("Bash", {"command": non_dispatch_command})
+    check(f"{non_dispatch_name} does not deliver the sizing rule",
           "8400cd3d" not in hits, hits)
 
 
