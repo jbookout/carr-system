@@ -828,9 +828,11 @@ class RunnerTests(unittest.TestCase):
             executable.chmod(0o755)
             dispatch = ROOT / "tools/room-bridge/dispatch.py"
             registry = root / "desk.json"
-            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"])
+            (root / "models_cache.json").write_text(json.dumps({"models": [
+                {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol"}]}))
+            env = dict(os.environ, CODEX_HOME=str(root), PATH=str(root) + os.pathsep + os.environ["PATH"])
             registration = subprocess.run([sys.executable, str(dispatch), "--registry", str(registry),
-                                           "register", "fixture", "--kind", "codex-session", "--model", "gpt-6.1-sol",
+                                           "register", "fixture", "--kind", "codex-session", "--family", "sol",
                                            "--effort", "high", "--sandbox", "workspace-write", "--cwd", directory],
                                           env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
             self.assertEqual(registration.returncode, 0, registration.stderr)

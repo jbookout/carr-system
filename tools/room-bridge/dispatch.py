@@ -7,6 +7,7 @@ to route costs the tokens the routing was supposed to save.
 
     dispatch.py send claude-desk "reconcile the loop board"
     dispatch.py send codex-desk "rename this variable across the package" --family luna --effort low
+    dispatch.py send codex-desk "Own PR: #1667\nWrites: tools/room-bridge/*.py\nrepair dispatch" --effort high
     dispatch.py desks
     dispatch.py register claude-desk --socket /tmp/cc-socks/claude-desk.sock
     dispatch.py register codex-desk --family sol --effort high --cwd ~/carr-system
@@ -45,6 +46,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import codex_models  # noqa: E402
+import write_ownership  # noqa: E402
 import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
@@ -82,9 +84,7 @@ def _now() -> str:
 
 
 def _record(results_path: Path, row: dict) -> None:
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    with results_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+    write_ownership.record(results_path, row)
 
 
 def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
@@ -332,6 +332,7 @@ def dispatch(
     codex_timeout_s: float | None = None,
     family: str | None = None,
     effort: str | None = None,
+    writes: list[str] | None = None,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
 
@@ -383,56 +384,69 @@ def dispatch(
                 "and a reasoning effort, or pass --family and --effort for this job.",
             )
 
+    base = {"msg_id": msg_id, "desk": name, "kind": entry["kind"],
+            "task": original_task, "dispatched_at": _now(),
+            **({key: entry[key] for key in ("family", "model", "effort")}
+               if entry["kind"] in codex_models.CODEX_KINDS else {})}
+    declared_writes = write_ownership.declaration(original_task, writes)
+    ownership = {}
+    if declared_writes:
+        ownership = write_ownership.reserve(results_path, base,
+                                             cwd or entry.get("cwd") or str(Path.cwd()), declared_writes)
+    else:
+        print("warning: no write set declared; pass --writes or add Writes: to the brief",
+              file=sys.stderr, flush=True)
+
     if entry["kind"] in codex_models.CODEX_KINDS:
         print(f"executor: {entry['model']} / {entry['effort']} (family {entry['family']}, desk {name})",
               file=sys.stderr, flush=True)
 
-    if entry["kind"] == "claude-session":
-        if name == "flash":
-            with flashlib.activity_scope():
+    try:
+        if entry["kind"] == "claude-session":
+            if name == "flash":
+                with flashlib.activity_scope():
+                    outcome = _to_claude(entry, task, msg_id)
+            else:
                 outcome = _to_claude(entry, task, msg_id)
+        elif entry["kind"] == "claude-desktop":
+            outcome = _to_claude_desktop(entry, task)
+        elif entry["kind"] == "claude-remote":
+            outcome = claude_remote_wire.run_task(entry, task, msg_id)
+        elif entry["kind"] == "grok-cli":
+            outcome = grok_wire.run_task(entry, task, **({"retrieval": True} if retrieval else {}))
+        elif entry["kind"] == "flash-local":
+            outcome = flash_wire.run_task(task)
+        elif entry["kind"] == "codex-live":
+            outcome = codex_wire.run_turn(
+                entry["socket"], task,
+                thread_id=None if fresh else entry.get("thread_id"),
+                cwd=entry.get("cwd"), model=entry.get("model"), effort=entry["effort"],
+                deadline_s=codex_timeout_s,
+            )
+            if outcome.get("thread_id"):
+                registry.remember_thread(name, outcome["thread_id"])
+        elif cwd:
+            outcome = _to_codex(
+                {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+                timeout_s=codex_timeout_s, **stream_options,
+            )
         else:
-            outcome = _to_claude(entry, task, msg_id)
-    elif entry["kind"] == "claude-desktop":
-        outcome = _to_claude_desktop(entry, task)
-    elif entry["kind"] == "claude-remote":
-        outcome = claude_remote_wire.run_task(entry, task, msg_id)
-    elif entry["kind"] == "grok-cli":
-        outcome = grok_wire.run_task(entry, task, **({"retrieval": True} if retrieval else {}))
-    elif entry["kind"] == "flash-local":
-        outcome = flash_wire.run_task(task)
-    elif entry["kind"] == "codex-live":
-        outcome = codex_wire.run_turn(
-            entry["socket"], task,
-            thread_id=None if fresh else entry.get("thread_id"),
-            cwd=entry.get("cwd"), model=entry.get("model"), effort=entry["effort"],
-            deadline_s=codex_timeout_s,
-        )
-        if outcome.get("thread_id"):
-            registry.remember_thread(name, outcome["thread_id"])
-    elif cwd:
-        outcome = _to_codex(
-            {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
-            timeout_s=codex_timeout_s, **stream_options,
-        )
-    else:
-        outcome = _to_codex(
-            entry, task, env, fresh=fresh, config_overrides=config_overrides,
-            live_desktop=live_desktop, timeout_s=codex_timeout_s,
-            **stream_options,
-        )
-        # pin the desk to its thread so the next task lands in the same one
-        if outcome.get("thread_id"):
-            registry.remember_thread(name, outcome["thread_id"])
+            outcome = _to_codex(
+                entry, task, env, fresh=fresh, config_overrides=config_overrides,
+                live_desktop=live_desktop, timeout_s=codex_timeout_s,
+                **stream_options,
+            )
+            # pin the desk to its thread so the next task lands in the same one
+            if outcome.get("thread_id"):
+                registry.remember_thread(name, outcome["thread_id"])
+    except BaseException:
+        if ownership:
+            _record(results_path, {**base, **ownership, "status": "failed", "detail": "executor raised"})
+        raise
 
     row = {
-        "msg_id": msg_id,
-        "desk": name,
-        "kind": entry["kind"],
-        "task": original_task,
-        **({key: entry[key] for key in ("family", "model", "effort")}
-           if entry["kind"] in codex_models.CODEX_KINDS else {}),
-        "dispatched_at": _now(),
+        **base,
+        **ownership,
         **outcome,
     }
     _record(results_path, row)
@@ -776,6 +790,7 @@ def main(argv: list[str]) -> int:
     s.add_argument("task")
     s.add_argument("--family", choices=codex_models.FAMILIES)
     s.add_argument("--effort", choices=desks.EFFORT_CHOICES)
+    s.add_argument("--writes", action="append", help="repository-relative write glob (repeatable)")
     s.add_argument("--fresh", action="store_true",
                    help="start a new Codex thread instead of resuming the desk's")
     s.add_argument("--stream-output", action="store_true",
@@ -846,7 +861,7 @@ def main(argv: list[str]) -> int:
             raise DeskError("empty_task", "dispatch requires a non-empty task")
         row = dispatch(a.name, task, registry=reg, results_path=results,
                        fresh=getattr(a, "fresh", False), stream_output=a.stream_output,
-                       retrieval=a.retrieve, family=a.family, effort=a.effort)
+                       retrieval=a.retrieve, family=a.family, effort=a.effort, writes=a.writes)
         print(json.dumps(row, indent=2))
         return 0 if row["status"] in ("delivered", "completed") else 1
 

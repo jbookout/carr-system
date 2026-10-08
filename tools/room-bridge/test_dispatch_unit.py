@@ -111,6 +111,10 @@ class Listener:
             pass
 
 
+from test_codex_models_unit import catalog_fixture
+
+
+@catalog_fixture()
 def main() -> int:
     tmp = tempfile.TemporaryDirectory(prefix="hermes-dispatch-test-")
     root = Path(tmp.name)
@@ -704,6 +708,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    from test_codex_models_unit import catalog_fixture
-    with catalog_fixture():
-        raise SystemExit(main())
+    raise SystemExit(main())
