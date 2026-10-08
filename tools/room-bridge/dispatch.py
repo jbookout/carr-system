@@ -51,6 +51,7 @@ import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
 import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
+import claude_remote_wire
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 import codex_ipc  # noqa: E402  — a thread Codex Desktop holds open, see the module
 import grok_wire  # noqa: E402 — authenticated public retrieval, provider metadata checked
@@ -346,7 +347,7 @@ def dispatch(
     if entry["kind"] != "claude-desktop":
         task = desks.desk_prompt(task)
     msg_id = str(uuid.uuid4())
-    if entry["kind"] in ("claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli"):
+    if entry["kind"] in ("claude-desktop", "claude-remote", "codex-session", "codex-live", "flash-local", "grok-cli"):
         if not entry.get("model") or not str(entry.get("model")).strip():
             raise DeskError(
                 "unnamed_model_or_effort",
@@ -370,6 +371,8 @@ def dispatch(
             outcome = _to_claude(entry, task, msg_id)
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
+    elif entry["kind"] == "claude-remote":
+        outcome = claude_remote_wire.run_task(entry, task, msg_id)
     elif entry["kind"] == "grok-cli":
         outcome = grok_wire.run_task(entry, task, **({"retrieval": True} if retrieval else {}))
     elif entry["kind"] == "flash-local":
@@ -716,8 +719,10 @@ def main(argv: list[str]) -> int:
     r.add_argument("--kind", default=None, choices=list(desks.KINDS))
     r.add_argument("--socket", default=None)
     r.add_argument("--model", default=None)
-    r.add_argument("--effort", default=None, choices=list(desks.EFFORT_CHOICES))
+    r.add_argument("--effort", default=None, choices=[*desks.EFFORT_CHOICES, "max"])
     r.add_argument("--cwd", default=None)
+    r.add_argument("--host", default=None, help="SSH destination for a claude-remote desk")
+    r.add_argument("--timeout", type=float, default=900, help="remote execution deadline in seconds")
     r.add_argument("--sandbox", default=None,
                    choices=["read-only", "workspace-write", "danger-full-access"],
                    help="Codex sandbox for this desk; omit to leave Codex's default")
@@ -776,7 +781,7 @@ def main(argv: list[str]) -> int:
             entry = reg.register(a.name, kind, socket=a.socket, model=a.model, cwd=a.cwd,
                                  effort=a.effort,
                                  sandbox=getattr(a, "sandbox", None),
-                                 add_dirs=getattr(a, "add_dirs", None))
+                                 add_dirs=getattr(a, "add_dirs", None), host=a.host, timeout_s=a.timeout)
             print(json.dumps({a.name: entry}, indent=2))
             return 0
 
@@ -804,7 +809,10 @@ def main(argv: list[str]) -> int:
                     print(f"{name:20} {kind:15} {e.get('model')}  in {e.get('cwd')}  [{where}]")
             return 0
 
-        row = dispatch(a.name, a.task, registry=reg, results_path=results,
+        task = sys.stdin.read() if a.task == "-" else a.task
+        if not task.strip():
+            raise DeskError("empty_task", "dispatch requires a non-empty task")
+        row = dispatch(a.name, task, registry=reg, results_path=results,
                        fresh=getattr(a, "fresh", False), stream_output=a.stream_output,
                        retrieval=a.retrieve)
         print(json.dumps(row, indent=2))
