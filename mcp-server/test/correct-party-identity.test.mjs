@@ -44,14 +44,14 @@ class Fake {
   }
 }
 
-function basePlan({ org = { id: OLD_ORG, name: "Hand Arendalll Harrison" }, others = [],
+function basePlan({ org = { id: OLD_ORG, name: "Harbr Point Legal" }, others = [],
   existing = [], kind = "person", version = 4 } = {}) {
   return {
     "select subject_id from v_ref_index where subject_type='party' and ref ilike $1": [{ subject_id: TARGET }],
     "select merged_into from party where id=$1": [{ merged_into: null }],
     "select version from party where id=$1 for update": [{ version }],
     "select p.kind, p.name, p.state, p.org_id, o.name as org_name from party p": [{
-      kind, name: "Shuan McCormick", state: null, org_id: org?.id ?? null, org_name: org?.name ?? null }],
+      kind, name: "Alx Morgan", state: null, org_id: org?.id ?? null, org_name: org?.name ?? null }],
     "select id, name from party where org_id=$1": others,
     "select id, name from party where kind='org'": existing,
     "insert into party (kind,name,created_by,updated_by) values ('org'": [{ id: NEW_ORG }],
@@ -61,7 +61,7 @@ function basePlan({ org = { id: OLD_ORG, name: "Hand Arendalll Harrison" }, othe
 function call(fake, args) {
   return TOOLS["correct-party-identity"].handler(fake, joe, {
     idempotency_key: "cpi-1", party: "P-0301", base_version: 4,
-    source: "record-finding name observed 2026-10-08 techjr.com", ...args,
+    source: "record-finding name observed 2026-10-08 example-it.test", ...args,
   });
 }
 
@@ -87,14 +87,14 @@ test("profiles: held by the full profile, never by the unattended capture or awa
 
 test("source is required; an empty one is refused before any read", async () => {
   const fake = new Fake(basePlan());
-  await assert.rejects(call(fake, { source: "  ", fields: { name: "Shaun McCormick" } }),
+  await assert.rejects(call(fake, { source: "  ", fields: { name: "Alex Morgan" } }),
     e => e instanceof ToolError && e.payload.error === "missing_source");
   assert.equal(fake.writes("update party").length, 0);
 });
 
 test("field normalisation: state is a two-letter US code, names are trimmed, placeholders refused", () => {
-  assert.deepEqual(normalizeIdentityFields({ state: " fl ", name: " Shaun McCormick " }),
-    { state: "FL", name: "Shaun McCormick" });
+  assert.deepEqual(normalizeIdentityFields({ state: " fl ", name: " Alex Morgan " }),
+    { state: "FL", name: "Alex Morgan" });
   for (const bad of ["Florida", "F", "XX1", "ZZ"])
     assert.throws(() => normalizeIdentityFields({ state: bad }),
       e => e.payload.error === "invalid_state", bad);
@@ -108,46 +108,46 @@ test("field normalisation: state is a two-letter US code, names are trimmed, pla
 });
 
 test("the org plan follows rule 8cddc6ad", () => {
-  const base = { currentOrg: { id: OLD_ORG, name: "Smart Bank" }, newName: "SmartBank" };
+  const base = { currentOrg: { id: OLD_ORG, name: "Coastln Bank" }, newName: "Coastline Bank" };
   assert.deepEqual(planOrgCorrection({ ...base, othersOnOrg: [], existing: [] }),
     { mode: "rename_in_place", org_id: OLD_ORG });
   assert.deepEqual(planOrgCorrection({ ...base, othersOnOrg: [{ id: OTHER }], existing: [] }),
     { mode: "mint_and_repoint" });
   assert.deepEqual(planOrgCorrection({ ...base, othersOnOrg: [{ id: OTHER }],
-    existing: [{ id: EXISTING_ORG, name: "SmartBank" }] }),
+    existing: [{ id: EXISTING_ORG, name: "Coastline Bank" }] }),
     { mode: "repoint_existing", org_id: EXISTING_ORG });
   // An existing org of the right name wins even when the old row is unshared:
   // renaming in place would mint a second row carrying the same firm.
   assert.deepEqual(planOrgCorrection({ ...base, othersOnOrg: [],
-    existing: [{ id: EXISTING_ORG, name: "SmartBank" }] }),
+    existing: [{ id: EXISTING_ORG, name: "Coastline Bank" }] }),
     { mode: "repoint_existing", org_id: EXISTING_ORG });
-  assert.deepEqual(planOrgCorrection({ currentOrg: null, newName: "Dental Exchange, LLC",
+  assert.deepEqual(planOrgCorrection({ currentOrg: null, newName: "Brightside Exchange, LLC",
     othersOnOrg: [], existing: [] }), { mode: "mint_and_repoint" });
-  assert.deepEqual(planOrgCorrection({ ...base, newName: "Smart Bank", othersOnOrg: [], existing: [] }),
+  assert.deepEqual(planOrgCorrection({ ...base, newName: "Coastln Bank", othersOnOrg: [], existing: [] }),
     { mode: "unchanged", org_id: OLD_ORG });
   assert.throws(() => planOrgCorrection({ ...base, othersOnOrg: [], existing: [
-    { id: EXISTING_ORG, name: "SmartBank" }, { id: NEW_ORG, name: "smartbank" }] }),
+    { id: EXISTING_ORG, name: "Coastline Bank" }, { id: NEW_ORG, name: "coastline bank" }] }),
   e => e.payload.error === "org_ambiguous" && e.payload.candidates.length === 2);
 });
 
 test("a name correction checks base_version, writes the name, and records the prior value", async () => {
   const fake = new Fake(basePlan());
-  const out = await call(fake, { fields: { name: "Shaun McCormick" } });
+  const out = await call(fake, { fields: { name: "Alex Morgan" } });
   assert.equal(out.ok, true);
   assert.deepEqual(out.updated, ["name"]);
   assert.ok(fake.writes("select version from party where id=$1 for update").length, "version guard ran");
   const [sql, params] = fake.writes("update party set name=")[0];
   assert.match(sql, /where id=\$3/);
-  assert.deepEqual(params, ["Shaun McCormick", joe.id, TARGET]);
+  assert.deepEqual(params, ["Alex Morgan", joe.id, TARGET]);
   const events = fake.events().map(([, p]) => JSON.stringify(p));
-  assert.ok(events.some(e => e.includes("Shuan McCormick") && e.includes("Shaun McCormick")),
+  assert.ok(events.some(e => e.includes("Alx Morgan") && e.includes("Alex Morgan")),
     "the event carries old and new name");
-  assert.ok(events.some(e => e.includes("techjr.com")), "the event carries the source");
+  assert.ok(events.some(e => e.includes("example-it.test")), "the event carries the source");
 });
 
 test("a stale base_version is refused and nothing is written", async () => {
   const fake = new Fake({ ...basePlan({ version: 5 }) });
-  await assert.rejects(call(fake, { fields: { name: "Shaun McCormick" } }),
+  await assert.rejects(call(fake, { fields: { name: "Alex Morgan" } }),
     e => e instanceof ToolError && /conflict/.test(e.payload.error));
   assert.equal(fake.writes("update party set").length, 0);
 });
@@ -160,44 +160,44 @@ test("state is written uppercase with its prior value", async () => {
 });
 
 test("an unshared org row is renamed in place, with the old name kept on the org's event", async () => {
-  const fake = new Fake(basePlan({ org: { id: OLD_ORG, name: "Smart Bank" } }));
-  const out = await call(fake, { fields: { org: "SmartBank" } });
+  const fake = new Fake(basePlan({ org: { id: OLD_ORG, name: "Coastln Bank" } }));
+  const out = await call(fake, { fields: { org: "Coastline Bank" } });
   assert.equal(out.org.mode, "rename_in_place");
-  assert.deepEqual(fake.writes("update party set name=")[0][1], ["SmartBank", joe.id, OLD_ORG]);
+  assert.deepEqual(fake.writes("update party set name=")[0][1], ["Coastline Bank", joe.id, OLD_ORG]);
   assert.equal(fake.writes("update party set org_id=").length, 0);
-  assert.ok(fake.events().some(([, p]) => JSON.stringify(p).includes("Smart Bank")));
+  assert.ok(fake.events().some(([, p]) => JSON.stringify(p).includes("Coastln Bank")));
 });
 
 test("a shared org row is NEVER renamed: the target alone is re-pointed to a minted org, the others are verified", async () => {
-  const others = [{ id: OTHER, name: "Jane Roe" }];
+  const others = [{ id: OTHER, name: "Pat Example" }];
   const plan = basePlan({ others });
   // the read-back after the write: the other party still points at the old org
   plan["select id, org_id from party where id = any($1::uuid[])"] = [{ id: OTHER, org_id: OLD_ORG }];
-  plan["select name from party where id=$1"] = [{ name: "Hand Arendalll Harrison" }];
+  plan["select name from party where id=$1"] = [{ name: "Harbr Point Legal" }];
   const fake = new Fake(plan);
-  const out = await call(fake, { fields: { org: "Hand Arendall Harrison Sale LLC" } });
+  const out = await call(fake, { fields: { org: "Harbor Point Legal LLC" } });
   assert.equal(out.org.mode, "mint_and_repoint");
   assert.equal(out.org.attached_before, 2);
   assert.equal(fake.writes("update party set name=").length, 0, "the shared row keeps its name");
   assert.deepEqual(fake.writes("insert into party (kind,name,created_by,updated_by) values ('org'")[0][1],
-    ["Hand Arendall Harrison Sale LLC", joe.id]);
+    ["Harbor Point Legal LLC", joe.id]);
   assert.deepEqual(fake.writes("update party set org_id=")[0][1], [NEW_ORG, joe.id, TARGET]);
-  assert.deepEqual(out.org.untouched, [{ id: OTHER, name: "Jane Roe", org_id: OLD_ORG }]);
+  assert.deepEqual(out.org.untouched, [{ id: OTHER, name: "Pat Example", org_id: OLD_ORG }]);
 });
 
 test("a re-point that moved an untouched party is refused, so the transaction rolls back", async () => {
-  const plan = basePlan({ others: [{ id: OTHER, name: "Jane Roe" }] });
+  const plan = basePlan({ others: [{ id: OTHER, name: "Pat Example" }] });
   plan["select id, org_id from party where id = any($1::uuid[])"] = [{ id: OTHER, org_id: NEW_ORG }];
-  plan["select name from party where id=$1"] = [{ name: "Hand Arendalll Harrison" }];
-  await assert.rejects(call(new Fake(plan), { fields: { org: "Hand Arendall Harrison Sale LLC" } }),
+  plan["select name from party where id=$1"] = [{ name: "Harbr Point Legal" }];
+  await assert.rejects(call(new Fake(plan), { fields: { org: "Harbor Point Legal LLC" } }),
     e => e.payload.error === "untouched_party_moved");
 });
 
 test("an existing org with the corrected name is reused rather than duplicated", async () => {
-  const plan = basePlan({ org: { id: OLD_ORG, name: "Smart Bank" },
-    existing: [{ id: EXISTING_ORG, name: "SmartBank" }] });
+  const plan = basePlan({ org: { id: OLD_ORG, name: "Coastln Bank" },
+    existing: [{ id: EXISTING_ORG, name: "Coastline Bank" }] });
   const fake = new Fake(plan);
-  const out = await call(fake, { fields: { org: "SmartBank" } });
+  const out = await call(fake, { fields: { org: "Coastline Bank" } });
   assert.equal(out.org.mode, "repoint_existing");
   assert.equal(fake.writes("insert into party (kind,name").length, 0);
   assert.deepEqual(fake.writes("update party set org_id=")[0][1], [EXISTING_ORG, joe.id, TARGET]);
