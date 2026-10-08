@@ -163,6 +163,7 @@ def _to_codex(
     fresh: bool = False,
     config_overrides: tuple[str, ...] = (),
     live_desktop: bool = False,
+    provider_run=None,
     stream_output: bool = False,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
@@ -257,7 +258,7 @@ def _to_codex(
             if stream_output:
                 proc = _run_codex_streamed(argv, env or os.environ.copy(), CODEX_TIMEOUT_S)
             else:
-                proc = subprocess.run(
+                proc = (provider_run or subprocess.run)(
                     argv, env=env or os.environ.copy(), capture_output=True,
                     text=True, timeout=CODEX_TIMEOUT_S, stdin=subprocess.DEVNULL,
                 )
@@ -315,6 +316,7 @@ def dispatch(
     config_overrides: tuple[str, ...] = (),
     cwd: str | None = None,
     live_desktop: bool = False,
+    provider_run=None,
     stream_output: bool = False,
     retrieval: bool = False,
 ) -> dict:
@@ -326,7 +328,11 @@ def dispatch(
 
     `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
     thread and leaves the desk's standing thread untouched: flash-run's escalation gives
-    the Sol fixer desk a throwaway copy per task (2026-09-24)."""
+    the Sol fixer desk a throwaway copy per task (2026-09-24).
+
+    `provider_run` lets a bounded adapter confine the Codex/Grok child while
+    retaining this module's dispatch and result contract. Ordinary callers
+    keep the default runner."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     if name == "flash" and registry.entries().get(name, {}).get("kind") == "claude-session":
@@ -337,8 +343,9 @@ def dispatch(
     entry = registry.resolve(name)          # every refusal happens here
     if retrieval and entry["kind"] != "grok-cli":
         raise DeskError("unsupported_retrieval", "explicit source retrieval requires a Grok desk")
-    if stream_output and entry["kind"] not in ("codex-session", "codex-exec"):
-        raise DeskError("unsupported_stream", "stream output requires a headless Codex desk")
+    if stream_output and (entry["kind"] not in ("codex-session", "codex-exec") or provider_run is not None):
+        raise DeskError("unsupported_stream", "stream output requires a headless Codex desk without a custom runner")
+    runner_kwargs = {"provider_run": provider_run} if provider_run is not None else {}
     stream_options = {"stream_output": True} if stream_output else {}
     original_task = task
     # The background wire validates the original task before adding its own
@@ -371,7 +378,10 @@ def dispatch(
     elif entry["kind"] == "claude-desktop":
         outcome = _to_claude_desktop(entry, task)
     elif entry["kind"] == "grok-cli":
-        outcome = grok_wire.run_task(entry, task, **({"retrieval": True} if retrieval else {}))
+        grok_options = {"retrieval": True} if retrieval else {}
+        if provider_run is not None:
+            grok_options["run"] = provider_run
+        outcome = grok_wire.run_task(entry, task, **grok_options)
     elif entry["kind"] == "flash-local":
         outcome = flash_wire.run_task(task)
     elif entry["kind"] == "codex-live":
@@ -385,13 +395,13 @@ def dispatch(
     elif cwd:
         outcome = _to_codex(
             {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
-            **stream_options,
+            **runner_kwargs, **stream_options,
         )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
             live_desktop=live_desktop,
-            **stream_options,
+            **runner_kwargs, **stream_options,
         )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):
