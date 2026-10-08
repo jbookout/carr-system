@@ -56,7 +56,7 @@ from urllib.parse import urlsplit
 # for the reason its own docstring gives: two copies of "what counts as inert"
 # drift silently, because each copy still passes its own tests.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cmd_text import strip_inert_text  # noqa: E402
+from cmd_text import SHELL_BOUNDARIES, shell_operands, shell_tokens, strip_inert_text  # noqa: E402
 # Shared with hooks/record-home-gate.py, which refuses the FILE-TOOL spelling of
 # the same write. One memory, so a record refused through either door is
 # recognised at the other (rule 76a53dfe).
@@ -761,21 +761,29 @@ def is_sql_context(cmd):
     return bool(SQL_CONTEXT.search(cmd))
 
 
-def hosts_in(cmd):
-    """Every host this command could reach: URL hosts plus remote-copy targets."""
-    hosts = []
-    from cmd_text import shell_tokens
+_URL_IN_TOKEN = re.compile(r'https?://[^\s\'"<>]+', re.I)
+
+
+def urls_in(cmd):
+    """Every http(s) URL in the command's shell words, quotes removed."""
     try:
         tokens = shell_tokens(cmd)
     except ValueError:
         tokens = re.split(r'[\s;&|]', cmd)
-    for token in tokens:
-        for url in re.findall(r'https?://[^\s\'"<>]+', token, re.I):
-            try:
-                hosts.append(urlsplit(url).hostname or "invalid-url")
-            except ValueError:
-                hosts.append("invalid-url")
-    return hosts + REMOTE_TARGET_RE.findall(cmd)
+    return [url for token in tokens for url in _URL_IN_TOKEN.findall(token)]
+
+
+def url_host(url):
+    """The URL's hostname, or "invalid-url" when it has none or does not parse."""
+    try:
+        return urlsplit(url).hostname or "invalid-url"
+    except ValueError:
+        return "invalid-url"
+
+
+def hosts_in(cmd):
+    """Every host this command could reach: URL hosts plus remote-copy targets."""
+    return [url_host(url) for url in urls_in(cmd)] + REMOTE_TARGET_RE.findall(cmd)
 
 
 def is_send_context(cmd):
@@ -786,6 +794,220 @@ def is_send_context(cmd):
     command that merely quotes a URL matches neither.
     """
     return bool(SEND_CTX.search(cmd) or NET_CLIENT.search(cmd))
+
+# ── THE PLAIN READ-ONLY FETCH (Joe, 2026-10-07) ──────────────────────────────
+#
+# Joe: research should "use the full internet". Until this ruling the Bash path
+# was allowlist-only for EVERY curl, because curl picks its own method and body
+# and so a host list was the only control. That is right for a command that can
+# SEND and wrong for one that can only READ: a GET or a download whose only
+# outbound bytes are a URL carries no more than WebFetch's open-read class does.
+#
+# So an unlisted host is allowed when the whole command is a plain read-only
+# fetch, decided from what the command SAYS — nothing here resolves DNS or runs
+# anything:
+#   - every network executable in command position is curl or wget, called
+#     directly (not through xargs/sudo/env, which hide the URL or the method);
+#   - no flag that sends: a body, a form, an upload, a non-GET/HEAD method, a
+#     header, a cookie, a credential, a config file, an input file of URLs, or
+#     curl's file-reading variables;
+#   - nothing the guard cannot read: no $-expansion, backtick or process
+#     substitution anywhere in the command, so the URL seen is the URL sent;
+#   - no interpreter network client and no scp/rsync remote target;
+#   - every unlisted URL passes webfetch_open_read_reason: the length and query
+#     caps, no secret or blob in the query, no credentials, a standard port, and
+#     a public DNS name (no IP, loopback, metadata or private suffix).
+# Anything else falls back to the allowlist, exactly as before.
+#
+# LIMITS, stated plainly. This judges flags lexically, the same way every other
+# rule here does; it does not chase obfuscation. A URL path can still carry up to
+# the open-read cap of text, which is the same residual channel WebFetch has had
+# since 2026-08-09. DNS rebinding is not caught, as for WebFetch. Unlike WebFetch,
+# curl -L and wget follow redirects, so a public host can bounce a GET to a
+# loopback address; that GET still carries only the URL out, and its response
+# comes back to this session, not to the host — the same accepted residual.
+READ_ONLY_FETCHERS = frozenset({"curl", "wget"})
+_SENDER_NAMES = frozenset(SENDER.lower().split("|"))
+_SENDER_WRAPPERS = frozenset({"xargs", "sudo", "doas", "env", "time", "nohup", "command",
+                              "exec", "watch", "timeout", "parallel"})
+_UNREADABLE = re.compile(r"[`]|\$[({A-Za-z_0-9@*#?$!-]|<\(|>\(")
+_CURL_SEND_LONG = frozenset({
+    "data", "data-ascii", "data-binary", "data-raw", "data-urlencode", "json",
+    "form", "form-string", "form-escape", "upload-file", "header", "proxy-header",
+    "user", "proxy-user", "cookie", "config", "url-query", "oauth2-bearer",
+    "aws-sigv4", "variable", "mail-from", "mail-rcpt", "telnet-option", "netrc-file",
+    "netrc", "netrc-optional", "delegation", "negotiate", "ntlm", "digest", "anyauth",
+    "basic", "cert", "key", "pass", "upload-flags"})
+_CURL_SEND_SHORT = frozenset("bdFHKTu")
+# curl short options that consume the rest of the cluster (or the next word) as
+# their value, so the letters after them are a value, not more options.
+_CURL_ARG_SHORT = frozenset("AbcCdDeEFHKmoQrtTuUwxXYyz")
+_WGET_SEND_LONG = frozenset({
+    "post-data", "post-file", "body-data", "body-file", "method", "header",
+    "input-file", "user", "password", "http-user", "http-password", "ftp-user",
+    "ftp-password", "proxy-user", "proxy-password", "load-cookies", "config",
+    "execute", "use-askpass", "ask-password", "certificate", "private-key"})
+_WGET_SEND_SHORT = frozenset("ei")
+_WGET_ARG_SHORT = frozenset("aABDeiIlOoPQRtTUwX")
+_READ_METHODS = frozenset({"GET", "HEAD"})
+# Flags naming a local file the fetch WRITES. Bytes from an unlisted host are
+# untrusted, so where they land is checked (_safe_fetch_output).
+_CURL_OUT_LONG = frozenset({"output", "output-dir", "dump-header", "cookie-jar", "trace",
+                            "trace-ascii", "stderr", "libcurl", "etag-save", "hsts", "alt-svc"})
+_CURL_OUT_SHORT = frozenset("oDc")
+_WGET_OUT_LONG = frozenset({"output-document", "output-file", "append-output",
+                            "directory-prefix", "save-cookies"})
+_WGET_OUT_SHORT = frozenset("OoaP")
+# Fetched text piped into one of these runs code from a host nobody vetted.
+_INTERPRETER = re.compile(r"^(?:(?:ba|z|da|k|c|tc|fi)?sh|python[0-9.]*|node|deno|bun|perl|ruby|"
+                          r"php|osascript|lua|tclsh|source|eval|\.)$")
+_SAFE_DEVICES = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "-"})
+_SAFE_ABS_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/")
+
+
+def _safe_fetch_output(path, cwd=None):
+    """True if untrusted downloaded bytes may land at `path`: a harmless device,
+    a temp directory, or a NEW file below the working directory. Never ~, any
+    other absolute path, a `..` climb, a dotfile (shell rc, .git, .claude), or an
+    existing file there — a download creates, it does not overwrite a script."""
+    if path in _SAFE_DEVICES:
+        return True
+    if path.startswith(_SAFE_ABS_PREFIXES):
+        return ".." not in path.split("/")
+    if not path or path.startswith(("/", "~")):
+        return False
+    if any(part == ".." or (part.startswith(".") and part != ".") for part in path.split("/")):
+        return False
+    full = os.path.join(cwd or os.getcwd(), path)
+    return os.path.isdir(full) or not os.path.lexists(full)
+
+
+def _fetch_flag_refusal(tool, words, cwd=None):
+    """None when every flag of one curl/wget invocation is read-only and every
+    file it writes is a safe place for untrusted bytes."""
+    send_long = _CURL_SEND_LONG if tool == "curl" else _WGET_SEND_LONG
+    send_short = _CURL_SEND_SHORT if tool == "curl" else _WGET_SEND_SHORT
+    arg_short = _CURL_ARG_SHORT if tool == "curl" else _WGET_ARG_SHORT
+    out_long = _CURL_OUT_LONG if tool == "curl" else _WGET_OUT_LONG
+    out_short = _CURL_OUT_SHORT if tool == "curl" else _WGET_OUT_SHORT
+    outputs = []
+    remote_name = False
+    i = 0
+    while i < len(words):
+        w = words[i]
+        i += 1
+        if w.startswith("--") and len(w) > 2:
+            name, eq, value = w[2:].partition("=")
+            name = name.lower()
+            if name in send_long or name.startswith("expand-"):
+                return f"{tool} --{name} sends data"
+            if tool == "curl" and name == "remote-header-name":
+                return "curl --remote-header-name lets the server name the file it writes"
+            if tool == "curl" and name in ("remote-name", "remote-name-all"):
+                remote_name = True
+            if name in ("request", "method") or name in out_long:
+                if not eq and i < len(words):
+                    value = words[i]
+                    i += 1
+                if name in out_long:
+                    outputs.append(value)
+                elif value.upper() not in _READ_METHODS:
+                    return f"{tool} method {value or '(none)'} is not a read"
+        elif w.startswith("-") and len(w) > 1:
+            cluster = w[1:]
+            for k, ch in enumerate(cluster):
+                if ch in send_short:
+                    return f"{tool} -{ch} sends data"
+                if tool == "curl" and ch == "J":
+                    return "curl -J lets the server name the file it writes"
+                if tool == "curl" and ch == "O":
+                    remote_name = True
+                if ch in arg_short:
+                    value = cluster[k + 1:]
+                    if not value and i < len(words):
+                        value = words[i]
+                        i += 1
+                    if tool == "curl" and ch == "X" and value.upper() not in _READ_METHODS:
+                        return f"curl method {value or '(none)'} is not a read"
+                    if ch in out_short:
+                        outputs.append(value)
+                    break
+    if remote_name:
+        # curl -O names the file after the URL's last path segment, and overwrites.
+        outputs += [urlsplit(w).path.rsplit("/", 1)[-1]
+                    for w in words if re.match(r"https?://", w, re.I)]
+    for path in outputs:
+        if not _safe_fetch_output(path, cwd):
+            return f"{tool} would write fetched bytes to {path or '(none)'}"
+    return None
+
+
+def read_only_fetch_refusal(cmd, cwd=None):
+    """None if `cmd` is a plain read-only fetch whose unlisted URLs all pass the
+    open-read policy; otherwise the reason it is not."""
+    if NET_CLIENT.search(cmd):
+        return "an interpreter network client is not a plain fetch"
+    if _UNREADABLE.search(cmd):
+        return "the command carries a $-expansion, backtick or process substitution the guard cannot read"
+    if REMOTE_TARGET_RE.search(cmd):
+        return "a remote copy target is a send"
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        return "the command could not be parsed"
+    segments, current = [], []
+    for t in tokens:
+        if t in SHELL_BOUNDARIES:
+            segments.append(current)
+            current = []
+        else:
+            current.append(t)
+    segments.append(current)
+    fetches = 0
+    for seg in segments:
+        words = [w for w in seg if w not in ("(", ")", "{", "}")]
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words = words[1:]
+        try:
+            words, redirects = shell_operands(words)
+        except ValueError:
+            return "the command could not be parsed"
+        for path in redirects:
+            if not _safe_fetch_output(path, cwd):
+                return f"the command would write fetched bytes to {path}"
+        if not words:
+            continue
+        exe = os.path.basename(words[0]).lower()
+        if exe in ("cd", "pushd"):
+            # Follow a directory change so an output path is judged where it lands.
+            target = os.path.expanduser(words[1]) if len(words) > 1 else os.path.expanduser("~")
+            cwd = os.path.join(cwd or os.getcwd(), target)
+            continue
+        if _INTERPRETER.match(exe):
+            return f"{exe} in a fetch command could run what the fetch returns"
+        if exe == "tee" and not all(_safe_fetch_output(a, cwd) for a in words[1:] if not a.startswith("-")):
+            return "tee would write fetched bytes over a file or outside the working directory"
+        if exe in _SENDER_WRAPPERS and any(
+                os.path.basename(w).lower() in _SENDER_NAMES for w in words[1:]):
+            return f"a network client run through {exe} is not a plain fetch"
+        if exe not in _SENDER_NAMES:
+            continue
+        if exe not in READ_ONLY_FETCHERS:
+            return f"{exe} is not a plain fetch"
+        why = _fetch_flag_refusal(exe, words[1:], cwd)
+        if why:
+            return why
+        fetches += 1
+    if not fetches:
+        return "no curl or wget fetch in command position"
+    for url in urls_in(cmd):
+        if host_allowlisted(url_host(url)):
+            continue
+        why = webfetch_open_read_reason(url)
+        if why:
+            return why.replace("WebFetch ", "the fetch ").split(" — blocked")[0]
+    return None
+
 
 # ── THE DERIVED HOST LIST (2026-08-09, the "B" half of Joe's "build A and B") ─
 #
@@ -862,8 +1084,10 @@ def host_allowlisted(host):
 #
 # The guard's own stated job (see the header, class 4) is the EXFILTRATION
 # guard. A GET whose entire outbound payload is a URL is a different risk from a
-# POST that can carry a database, so it gets a different policy. KNOWN_HOSTS is
-# untouched and still governs Bash.
+# POST that can carry a database, so it gets a different policy. KNOWN_HOSTS
+# still governs every Bash command that SENDS; since 2026-10-07 a Bash curl/wget
+# that is a plain read-only fetch gets this same per-URL policy (see THE PLAIN
+# READ-ONLY FETCH above).
 #
 # WHAT THIS BUYS. Client verification needs the practice's own website, and
 # practice websites cannot be enumerated — there is a different one per client,
@@ -1374,17 +1598,19 @@ def check(cmd, cwd=None):
             return f"{label} — blocked by the CARR unattended guard"
 
     if is_send_context(cmd):
-        for host in hosts_in(cmd):
-            # host_allowlisted covers KNOWN_HOSTS plus the record-derived client
-            # and lead domains. The Bash path gets NO equivalent of the WebFetch
-            # open-read class and must not: curl chooses its own method and body,
-            # so the length cap that makes an open GET safe buys nothing here.
-            # This path stays allowlist-only, by design.
-            if not host_allowlisted(host):
-                return (f"network send to an unrecognised host ({host}) — blocked by the "
-                        f"CARR unattended guard. Add it to KNOWN_HOSTS if it is legitimate, "
-                        f"or — if it is a client's own domain — check that they carry a "
-                        f"practice email and re-run ops/fetch-allowlist.py.")
+        # host_allowlisted covers KNOWN_HOSTS plus the record-derived client and
+        # lead domains. An unlisted host is still reachable by a PLAIN READ-ONLY
+        # FETCH (see read_only_fetch_refusal): Joe's 2026-10-07 ruling that
+        # research may use the whole internet. Anything that sends stays
+        # allowlist-only, by design.
+        unlisted = [h for h in hosts_in(cmd) if not host_allowlisted(h)]
+        if unlisted:
+            why = read_only_fetch_refusal(cmd, cwd)
+            if why is not None:
+                return (f"network send to an unrecognised host ({unlisted[0]}) — blocked by the "
+                        f"CARR unattended guard: {why}. A plain curl/wget GET or download "
+                        f"(no body, upload, header, cookie, credential or $-expansion) may reach "
+                        f"any public host; a command that SENDS data needs the host in KNOWN_HOSTS.")
 
     reason = render_write_target(cmd)
     if reason:
