@@ -8,14 +8,33 @@ import path from "node:path";
 import { launchChrome } from "../../dealroom/test/chrome-launch.mjs";
 
 const fixture = new URL("./fixtures/chrome-launch-fixture.mjs", import.meta.url);
+const nativeKill = process.kill.bind(process);
 const realChrome = [
   process.env.CHROME_PATH,
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
 ].filter(Boolean).find(existsSync);
 const codeSignCloneDirectory = path.resolve(tmpdir(), "..", "X", "com.google.Chrome.code_sign_clone");
-function fakeChrome(scenarios, beforeSpawn = () => {}) {
+function fakeChrome(t, scenarios, beforeSpawn = () => {}) {
   const calls = [];
+  t.after(async () => {
+    for (const { child, profile } of calls) {
+      const target = process.platform === "win32" ? child.pid : -child.pid;
+      try { nativeKill(target, "SIGKILL"); }
+      catch (error) { if (error.code !== "ESRCH") throw error; }
+      const deadline = performance.now() + 1000;
+      for (;;) {
+        try { nativeKill(target, 0); }
+        catch (error) {
+          if (error.code === "ESRCH") break;
+          throw error;
+        }
+        assert.ok(performance.now() < deadline, `fake Chrome process tree ${child.pid} survived SIGKILL`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await rm(profile, { recursive: true, force: true });
+    }
+  });
   function spawnChrome(binary, args, options) {
     beforeSpawn(calls);
     const profile = args.find((arg) => arg.startsWith("--user-data-dir=")).split("=").slice(1).join("=");
@@ -28,7 +47,7 @@ function fakeChrome(scenarios, beforeSpawn = () => {}) {
 }
 
 function processAlive(pid) {
-  try { process.kill(pid, 0); return true; }
+  try { nativeKill(pid, 0); return true; }
   catch (error) { if (error.code === "ESRCH") return false; throw error; }
 }
 
@@ -37,7 +56,9 @@ test("graceful Chrome shutdown does not grow the macOS code-sign clone directory
   timeout: 90_000,
 }, async (t) => {
   const before = (await readdir(codeSignCloneDirectory)).length;
-  const browser = await launchChrome(realChrome);
+  let browser;
+  try { browser = await launchChrome(realChrome); }
+  catch (error) { t.skip(`Chrome could not launch: ${error.message}`); return; }
   t.after(() => browser.close());
   await browser.close();
   const after = (await readdir(codeSignCloneDirectory)).length;
@@ -45,44 +66,84 @@ test("graceful Chrome shutdown does not grow the macOS code-sign clone directory
 });
 
 test("Chrome requests a DevTools shutdown before sending process signals", async (t) => {
-  const fake = fakeChrome(["ready"]);
-  const signals = [];
-  const kill = process.kill.bind(process);
-  let closeRequested = false;
+  const fake = fakeChrome(t, ["ready"]);
+  const shutdown = [];
+  const spawnChrome = (...args) => {
+    const child = fake.spawnChrome(...args);
+    const kill = child.kill.bind(child);
+    child.kill = (signal) => {
+      shutdown.push([child.pid, signal]);
+      return kill(signal);
+    };
+    return child;
+  };
   t.mock.method(process, "kill", (pid, signal) => {
-    if (pid === -fake.calls[0]?.child.pid && signal !== 0) signals.push(signal);
-    return kill(pid, signal);
-  });
-  t.after(() => {
-    for (const { child } of fake.calls) {
-      try { kill(child.pid, "SIGKILL"); }
-      catch (error) { if (error.code !== "ESRCH") throw error; }
-    }
+    if (pid === -fake.calls[0]?.child.pid && signal !== 0) shutdown.push([pid, signal]);
+    return nativeKill(pid, signal);
   });
   const browser = await launchChrome("fake-chrome", {
-    spawnChrome: fake.spawnChrome,
+    spawnChrome,
     timeoutMs: 1500,
     closeBrowser: async () => {
-      closeRequested = true;
-      kill(fake.calls[0].child.pid, "SIGKILL");
+      shutdown.push("Browser.close");
+      nativeKill(fake.calls[0].child.pid, "SIGKILL");
+      return true;
     },
   });
   await browser.close();
-  assert.equal(closeRequested, true);
-  assert.deepEqual(signals, [], "DevTools shutdown made process signals unnecessary");
+  assert.deepEqual(shutdown, ["Browser.close"], "DevTools shutdown precedes and avoids process signals");
+});
+
+test("Chrome falls back to the browser PID when DevTools shutdown fails", async (t) => {
+  const fake = fakeChrome(t, ["ready"]);
+  const browser = await launchChrome("fake-chrome", {
+    spawnChrome: fake.spawnChrome,
+    timeoutMs: 1500,
+    closeBrowser: async () => { throw new Error("DevTools connection closed"); },
+  });
+  await browser.close();
+  assert.equal(fake.calls[0].child.signalCode, "SIGTERM");
+  assert.equal(processAlive(fake.calls[0].child.pid), false);
+});
+
+test("Chrome bounds a stalled DevTools shutdown before falling back to the browser PID", async (t) => {
+  const fake = fakeChrome(t, ["ready"]);
+  const shutdown = [];
+  const spawnChrome = (...args) => {
+    const child = fake.spawnChrome(...args);
+    const kill = child.kill.bind(child);
+    child.kill = (signal) => {
+      shutdown.push([child.pid, signal]);
+      return kill(signal);
+    };
+    return child;
+  };
+  const browser = await launchChrome("fake-chrome", {
+    spawnChrome,
+    timeoutMs: 1500,
+    stopTimeoutMs: 50,
+    closeBrowser: () => {
+      shutdown.push("Browser.close");
+      return new Promise(() => {});
+    },
+  });
+  await browser.close();
+  assert.deepEqual(shutdown, [
+    "Browser.close",
+    [fake.calls[0].child.pid, "SIGTERM"],
+  ], "a stalled DevTools request times out before PID fallback");
 });
 
 test("Chrome waits through an exiting process group's transient EPERM probe", { skip: process.platform === "win32" }, async (t) => {
-  const fake = fakeChrome(["ready"]);
+  const fake = fakeChrome(t, ["ready"]);
   const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
   t.after(() => browser.close());
-  const kill = process.kill;
   let probes = 0;
   t.mock.method(process, "kill", (pid, signal) => {
     if (pid === -fake.calls[0].child.pid && signal === 0 && ++probes <= 2) {
       throw Object.assign(new Error("exiting group"), { code: "EPERM" });
     }
-    return kill.call(process, pid, signal);
+    return nativeKill(pid, signal);
   });
   await browser.close();
   assert.ok(probes >= 3, "EPERM is pending cleanup, never proof that the group is gone");
@@ -93,7 +154,7 @@ test("Chrome waits through an exiting process group's transient EPERM probe", { 
 for (const scenario of ["ready-helper", "hang-helper"]) {
   test(`Chrome reaps a SIGTERM-resistant helper after its leader exits (${scenario})`, { skip: process.platform === "win32" }, async (t) => {
     let helperPid;
-    const fake = fakeChrome([scenario, "ready"], (calls) => {
+    const fake = fakeChrome(t, [scenario, "ready"], (calls) => {
       if (calls.length === 1) {
         assert.equal(processAlive(helperPid), false, "the owned helper must be gone before retry");
         assert.equal(existsSync(calls[0].profile), false);
@@ -109,12 +170,6 @@ for (const scenario of ["ready-helper", "hang-helper"]) {
       });
       return child;
     };
-    t.after(() => {
-      for (const { child } of fake.calls) {
-        try { process.kill(-child.pid, "SIGKILL"); }
-        catch (error) { if (error.code !== "ESRCH") throw error; }
-      }
-    });
     const browser = await launchChrome("fake-chrome", { spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 });
     t.after(() => browser.close());
     assert.ok(helperPid > 0, "fixture published its owned helper PID");
@@ -128,7 +183,7 @@ for (const scenario of ["ready-helper", "hang-helper"]) {
 
 for (const scenario of ["partial", "http-late", "page-late"]) {
   test(`Chrome discovers a complete port file and ready page after ${scenario} publication without a stderr endpoint`, async (t) => {
-    const fake = fakeChrome([scenario]);
+    const fake = fakeChrome(t, [scenario]);
     const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 });
     t.after(() => browser.close());
     assert.match(browser.pageWsUrl, /^ws:\/\/127\.0\.0\.1:\d+\/devtools\/page\/fixture$/);
@@ -138,7 +193,7 @@ for (const scenario of ["partial", "http-late", "page-late"]) {
 
 for (const scenario of ["exit", "hang"]) {
   test(`Chrome retries ${scenario} once with a fresh profile after reaping the first process`, async (t) => {
-    const fake = fakeChrome([scenario, "ready"]);
+    const fake = fakeChrome(t, [scenario, "ready"]);
     const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 });
     t.after(() => browser.close());
     assert.equal(fake.calls.length, 2);
@@ -155,8 +210,8 @@ for (const scenario of ["exit", "hang"]) {
   });
 }
 
-test("Chrome fails after two launches with per-attempt stderr, elapsed time and exit status, leaving no profile", async () => {
-  const fake = fakeChrome(["exit", "hang"]);
+test("Chrome fails after two launches with per-attempt stderr, elapsed time and exit status, leaving no profile", async (t) => {
+  const fake = fakeChrome(t, ["exit", "hang"]);
   await assert.rejects(launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500, pollIntervalMs: 10 }), (error) => {
     assert.match(error.message, /attempt 1.*code 17/s);
     assert.match(error.message, /attempt 2.*deadline/s);
@@ -174,17 +229,31 @@ test("Chrome handles spawn errors within the launch lifecycle", async () => {
 });
 
 test("an exited browser's detached stderr holder cannot hang teardown", async (t) => {
-  const fake = fakeChrome(["inherited-stderr"]);
-  const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+  const fake = fakeChrome(t, ["inherited-stderr"]);
+  let holderPid;
+  const spawnChrome = (...args) => {
+    const child = fake.spawnChrome(...args);
+    child.stderr.on("data", (chunk) => {
+      const match = String(chunk).match(/holder-pid:(\d+)/);
+      if (match) holderPid = Number(match[1]);
+    });
+    return child;
+  };
+  const browser = await launchChrome("fake-chrome", { spawnChrome, timeoutMs: 1500 });
   t.after(() => browser.close());
   const started = performance.now();
   await browser.close();
   assert.ok(performance.now() - started < 1000, "teardown waits for the browser, not detached stderr holders");
   assert.equal(existsSync(fake.calls[0].profile), false);
+  assert.ok(holderPid > 0 && processAlive(holderPid), "fixture leaves stderr inherited while browser cleanup returns");
+  for (let attempt = 0; attempt < 200 && processAlive(holderPid); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(processAlive(holderPid), false, "the detached stderr holder exits within its fixture bound");
 });
 
-test("a stalled HTTP probe shares the startup deadline and does not hang the launch", async () => {
-  const fake = fakeChrome(["http-hang", "ready"]);
+test("a stalled HTTP probe shares the startup deadline and does not hang the launch", async (t) => {
+  const fake = fakeChrome(t, ["http-hang", "ready"]);
   const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
   try {
     assert.equal(fake.calls.length, 2);
@@ -192,8 +261,8 @@ test("a stalled HTTP probe shares the startup deadline and does not hang the lau
   } finally { await browser.close(); }
 });
 
-test("a browser that ignores SIGTERM is killed before the retry", async () => {
-  const fake = fakeChrome(["hang-ignore-term", "ready"]);
+test("a browser that ignores SIGTERM is killed before the retry", async (t) => {
+  const fake = fakeChrome(t, ["hang-ignore-term", "ready"]);
   const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
   try {
     assert.equal(fake.calls[0].child.signalCode, "SIGKILL");
@@ -202,16 +271,26 @@ test("a browser that ignores SIGTERM is killed before the retry", async () => {
 });
 
 test("Chrome waits through a transient EPERM group probe after SIGKILL before retrying", { skip: process.platform === "win32" }, async (t) => {
-  const kill = process.kill.bind(process);
   let killed = false, injected = false;
-  const fake = fakeChrome(["hang-ignore-term", "ready"], (calls) => {
+  const shutdownSignals = [];
+  const fake = fakeChrome(t, ["hang-ignore-term", "ready"], (calls) => {
     if (calls.length === 1) {
       assert.equal(injected, true, "the post-kill probe exercised EPERM");
-      assert.throws(() => kill(-calls[0].child.pid, 0), { code: "ESRCH" }, "the group must disappear before retry");
+      assert.throws(() => nativeKill(-calls[0].child.pid, 0), { code: "ESRCH" }, "the group must disappear before retry");
       assert.equal(existsSync(calls[0].profile), false);
     }
   });
+  const spawnChrome = (...args) => {
+    const child = fake.spawnChrome(...args);
+    const kill = child.kill.bind(child);
+    child.kill = (signal) => {
+      shutdownSignals.push([child.pid, signal]);
+      return kill(signal);
+    };
+    return child;
+  };
   t.mock.method(process, "kill", (pid, signal) => {
+    if (pid === -fake.calls[0]?.child.pid && signal !== 0) shutdownSignals.push([pid, signal]);
     if (pid === -fake.calls[0]?.child.pid) {
       if (signal === "SIGKILL") killed = true;
       if (signal === 0 && killed && !injected) {
@@ -219,45 +298,54 @@ test("Chrome waits through a transient EPERM group probe after SIGKILL before re
         throw Object.assign(new Error("group awaiting reap"), { code: "EPERM" });
       }
     }
-    return kill(pid, signal);
+    return nativeKill(pid, signal);
   });
-  t.after(() => {
-    for (const { child } of fake.calls) {
-      try { kill(-child.pid, "SIGKILL"); }
-      catch (error) { if (error.code !== "ESRCH") throw error; }
-    }
-  });
-  const browser = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+  const browser = await launchChrome("fake-chrome", { spawnChrome, timeoutMs: 1500 });
   try {
     assert.equal(fake.calls.length, 2);
     assert.equal(fake.calls[0].child.signalCode, "SIGKILL");
+    assert.deepEqual(shutdownSignals.slice(0, 2), [
+      [fake.calls[0].child.pid, "SIGTERM"],
+      [-fake.calls[0].child.pid, "SIGKILL"],
+    ], "fallback signals the browser PID before its owned process group");
   } finally { await browser.close(); }
 });
 
 test("Chrome refuses retry when EPERM probes never establish group disappearance", { skip: process.platform === "win32" }, async (t) => {
-  const kill = process.kill.bind(process);
-  const fake = fakeChrome(["exit", "ready"]);
-  t.after(async () => {
-    for (const { profile, child } of fake.calls) {
-      try { kill(-child.pid, "SIGKILL"); }
-      catch (error) { if (error.code !== "ESRCH") throw error; }
-      await rm(profile, { recursive: true, force: true });
-    }
-  });
+  const fake = fakeChrome(t, ["exit", "ready"]);
   t.mock.method(process, "kill", (pid, signal) => {
     if (pid === -fake.calls[0]?.child.pid && signal === 0) {
       throw Object.assign(new Error("group remains unsignalable"), { code: "EPERM" });
     }
-    return kill(pid, signal);
+    return nativeKill(pid, signal);
   });
   await assert.rejects(launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 }), /process tree did not exit after SIGKILL/);
   assert.equal(fake.calls.length, 1, "an unverified group never competes with a retry");
 });
 
 test("simultaneous browser launches use independent profiles and ports", async (t) => {
-  const fake = fakeChrome(["ready", "ready"]);
+  const fake = fakeChrome(t, ["ready", "ready"]);
   const browsers = await Promise.all([0, 1].map(() => launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 })));
   t.after(() => Promise.all(browsers.map((browser) => browser.close())));
   assert.notEqual(fake.calls[0].profile, fake.calls[1].profile);
   assert.notEqual(browsers[0].pageWsUrl, browsers[1].pageWsUrl);
+});
+
+test("fake Chrome after hooks leave no fixture process alive", async (t) => {
+  const pids = [];
+  const profiles = [];
+  await t.test("starts fixtures without explicit browser cleanup", async (t) => {
+    const fake = fakeChrome(t, ["ready", "hang-ignore-term"]);
+    const first = await launchChrome("fake-chrome", { spawnChrome: fake.spawnChrome, timeoutMs: 1500 });
+    pids.push(fake.calls[0].child.pid);
+    profiles.push(fake.calls[0].profile);
+    await first.close();
+    const second = fake.spawnChrome("fake-chrome", [`--user-data-dir=${path.join(tmpdir(), `fixture-orphan-${process.pid}`)}`], {
+      stdio: ["ignore", "ignore", "pipe"], detached: process.platform !== "win32",
+    });
+    pids.push(second.pid);
+    profiles.push(fake.calls[1].profile);
+  });
+  assert.ok(pids.every((pid) => !processAlive(pid)), `fixture processes survived: ${pids.filter(processAlive).join(", ")}`);
+  assert.ok(profiles.every((profile) => !existsSync(profile)), "fake Chrome profiles survive after-hook cleanup");
 });

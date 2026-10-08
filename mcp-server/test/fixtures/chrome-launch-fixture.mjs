@@ -7,7 +7,8 @@ const [profile, scenario] = process.argv.slice(2);
 const portFile = path.join(profile, "DevToolsActivePort");
 process.stderr.write(`fixture:${scenario}\n`);
 if (scenario === "inherited-stderr") {
-  const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 4000)"], { detached: true, stdio: ["ignore", "ignore", "inherit"] });
+  const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 1500)"], { detached: true, stdio: ["ignore", "ignore", "inherit"] });
+  process.stderr.write(`holder-pid:${holder.pid}\n`);
   holder.unref();
 }
 if (scenario === "hang-ignore-term") process.on("SIGTERM", () => {});
