@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -18,6 +18,7 @@ from typing import Callable
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
 AGE_SECONDS = 24 * 60 * 60
 DATA_THRESHOLD_BYTES = 1_000_000_000_000
 TMP_PREFIXES = (
@@ -26,6 +27,12 @@ TMP_PREFIXES = (
     "design", "branch", "doctorcre",
 )
 UNKNOWN_SAMPLE_LIMIT = 25
+PHYSICAL_ESTIMATE_METHOD = (
+    "APFS shared extents make du totals logical, not physical reclaim. "
+    "Estimate physical reclaim from volume free space before and after cleanup, "
+    "with other writers idle; snapshots can retain blocks.")
+
+
 @dataclass(frozen=True)
 class Candidate:
     kind: str
@@ -35,6 +42,7 @@ class Candidate:
 
 @dataclass
 class CleanupPlan:
+    roots: dict[Path, tuple[int, int]] = field(default_factory=dict)
     removable: list[Candidate] = field(default_factory=list)
     protected: set[Path] = field(default_factory=set)
     unrecognized: set[Path] = field(default_factory=set)
@@ -59,22 +67,54 @@ def _inside_worktree(path: Path) -> bool:
     return (path / ".git").exists()
 
 
+def _open_root(path: Path, expected: tuple[int, int] | None = None) -> int:
+    """Open a canonical absolute directory without following any symlink."""
+    if not path.is_absolute() or path.resolve() != path or ".." in path.parts:
+        raise OSError(f"noncanonical cleanup root: {path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        if expected is not None:
+            info = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) != expected:
+                raise OSError("cleanup root changed since planning")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def plan_cleanup(*, clone_root: Path, tmp_root: Path, replay_root: Path,
                  now: float, older_than_seconds: float, max_items: int,
                  is_open: Callable[[Path], bool], is_locked: Callable[[Path], bool],
-                 deadline: Callable[[], bool]) -> CleanupPlan:
+                 deadline: Callable[[], bool],
+                 include_scratch: bool = False, include_replay: bool = False) -> CleanupPlan:
     plan = CleanupPlan()
     pending: dict[str, list[Candidate]] = {
         "chrome-clone": [], "scratch": [], "gate-replay": []}
 
     def visit(root: Path, kind: str, recognized: Callable[[str], bool]) -> bool:
-        if not root.is_dir():
+        try:
+            descriptor = _open_root(root)
+        except FileNotFoundError:
+            return True
+        except (OSError, RuntimeError):
+            plan.protected.add(root)
             return True
         try:
-            entries = sorted(root.iterdir(), key=lambda item: item.name)
+            info = os.fstat(descriptor)
+            plan.roots[root] = (info.st_dev, info.st_ino)
+            entries = sorted((root / name for name in os.listdir(descriptor)),
+                             key=lambda item: item.name)
         except OSError:
             plan.protected.add(root)
             return True
+        finally:
+            os.close(descriptor)
         if kind == "chrome-clone":
             plan.clone_count = sum(
                 entry.name.startswith("code_sign_clone.")
@@ -107,9 +147,9 @@ def plan_cleanup(*, clone_root: Path, tmp_root: Path, replay_root: Path,
 
     if not visit(clone_root, "chrome-clone", lambda name: name.startswith("code_sign_clone.")):
         return plan
-    if not visit(tmp_root, "scratch", lambda name: name.startswith(TMP_PREFIXES)):
+    if include_scratch and not visit(tmp_root, "scratch", lambda name: name.startswith(TMP_PREFIXES)):
         return plan
-    if not visit(replay_root, "gate-replay", lambda name: name.startswith("run-")):
+    if include_replay and not visit(replay_root, "gate-replay", lambda name: name.startswith("run-")):
         return plan
 
     kinds = tuple(pending)
@@ -146,7 +186,9 @@ def plan_cleanup(*, clone_root: Path, tmp_root: Path, replay_root: Path,
                     candidate.kind == "gate-replay" and is_locked(entry)):
                 plan.protected.add(entry)
                 continue
-        except (OSError, subprocess.SubprocessError):
+            descriptor = _open_root(entry.parent, plan.roots[entry.parent])
+            os.close(descriptor)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
             plan.protected.add(entry)
             continue
         plan.removable.append(candidate)
@@ -158,9 +200,11 @@ def path_has_open_files(path: Path, timeout_seconds: float = 3.0) -> bool:
         ["/usr/sbin/lsof", "-n", "-P", "+D", str(path)],
         stdin=subprocess.DEVNULL, capture_output=True, text=True,
         timeout=timeout_seconds, check=False)
-    if result.returncode not in (0, 1):
-        raise OSError(f"lsof returned {result.returncode}")
-    return result.returncode == 0 and bool(result.stdout.strip())
+    if result.returncode not in (0, 1) or result.stderr.strip():
+        raise OSError(f"incomplete lsof scan (exit {result.returncode})")
+    if result.returncode == 0 and not result.stdout.strip():
+        raise OSError("lsof succeeded without scan results")
+    return bool(result.stdout.strip())
 
 
 def replay_is_locked(path: Path) -> bool:
@@ -187,7 +231,7 @@ def storage_snapshot(data_volume: Path, clone_root: Path) -> tuple[int, int]:
     return used, clones
 
 
-def allocated_bytes(candidates: list[Candidate], timeout_seconds: float) -> int | None:
+def logical_allocated_bytes(candidates: list[Candidate], timeout_seconds: float) -> int | None:
     if not candidates:
         return 0
     try:
@@ -275,7 +319,7 @@ def _record_finding(payload: dict) -> dict:
 def apply_plan(plan: CleanupPlan, *, dry_run: bool, ledger_path: Path,
                record_finding: Callable[[dict], dict], disk_used: int | None = None,
                disk_threshold: int = DATA_THRESHOLD_BYTES,
-               eligible_allocated_bytes: int | None = None,
+               eligible_logical_bytes: int | None = None,
                is_open: Callable[[Path], bool] = path_has_open_files,
                is_locked: Callable[[Path], bool] = replay_is_locked,
                deadline: Callable[[], bool] = lambda: False,
@@ -288,19 +332,33 @@ def apply_plan(plan: CleanupPlan, *, dry_run: bool, ledger_path: Path,
                 plan.stop_reason = "time-cap"
                 break
             path = candidate.path
-            if not path.is_dir() or path.is_symlink():
-                continue
+            descriptor = None
             try:
+                root = path.parent
+                if root not in plan.roots:
+                    raise OSError("candidate has no pinned cleanup root")
+                descriptor = _open_root(root, plan.roots[root])
+                if not path.is_dir() or path.is_symlink():
+                    plan.protected.add(path)
+                    continue
                 stale, _age = _old(path, now(), older_than_seconds)
                 active = not stale or is_open(path) or (
                     candidate.kind == "gate-replay" and is_locked(path))
-            except (OSError, subprocess.SubprocessError):
-                active = True
-            if active:
+                if active:
+                    plan.protected.add(path)
+                    continue
+                rechecked = _open_root(root, plan.roots[root])
+                os.close(rechecked)
+                if _inside_worktree(path):
+                    plan.protected.add(path)
+                    continue
+                shutil.rmtree(path.name, dir_fd=descriptor)
+                removed += 1
+            except (OSError, RuntimeError, subprocess.SubprocessError):
                 plan.protected.add(path)
-                continue
-            shutil.rmtree(path)
-            removed += 1
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
     findings = (len(plan.removable) + plan.unrecognized_count
                 + int(disk_used is not None and disk_used > disk_threshold))
     previous = _previous_run(ledger_path)
@@ -327,7 +385,9 @@ def apply_plan(plan: CleanupPlan, *, dry_run: bool, ledger_path: Path,
         "previous_run_at": previous.get("at"),
         "mode": "dry-run" if dry_run else "apply",
         "eligible": len(plan.removable),
-        "eligible_allocated_bytes": eligible_allocated_bytes,
+        "eligible_logical_bytes": eligible_logical_bytes,
+        "physical_reclaim_bytes": None,
+        "physical_estimate_method": PHYSICAL_ESTIMATE_METHOD,
         "removed": removed,
         "protected": len(plan.protected),
         "unrecognized": plan.unrecognized_count,
@@ -343,7 +403,15 @@ def apply_plan(plan: CleanupPlan, *, dry_run: bool, ledger_path: Path,
 
 
 def _defaults() -> tuple[Path, Path, Path]:
-    tmp_root = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()).resolve()
+    if sys.platform != "darwin":
+        raise OSError("storage hygiene root discovery requires macOS")
+    result = subprocess.run(
+        ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"],
+        capture_output=True, text=True, check=True, timeout=3)
+    tmp_root = Path(result.stdout.strip()).resolve()
+    if (not tmp_root.is_absolute() or tmp_root.name != "T"
+            or not tmp_root.is_relative_to(Path("/private/var/folders"))):
+        raise OSError("getconf did not return the macOS user temporary directory")
     clone_root = tmp_root.parent / "X" / "com.google.Chrome.code_sign_clone"
     replay_root = Path.home() / ".cache" / "carr-gate-replay"
     return tmp_root, clone_root, replay_root
@@ -353,6 +421,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--health-row", action="store_true")
+    parser.add_argument("--include-scratch", action="store_true",
+                        help="also clean allowlisted scratch in the pinned user temp root")
+    parser.add_argument("--include-gate-replay", action="store_true",
+                        help="also clean unlocked runs in ~/.cache/carr-gate-replay")
     parser.add_argument("--max-items", type=int, default=100)
     parser.add_argument("--max-seconds", type=float, default=60.0)
     parser.add_argument("--older-than-hours", type=float, default=AGE_SECONDS / 3600)
@@ -370,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     plan = plan_cleanup(
         clone_root=clone_root, tmp_root=tmp_root, replay_root=replay_root,
+        include_scratch=args.include_scratch, include_replay=args.include_gate_replay,
         now=time.time(), older_than_seconds=args.older_than_hours * 3600,
         max_items=args.max_items, is_open=path_has_open_files,
         is_locked=replay_is_locked,
@@ -377,23 +450,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     plan.clone_count = clone_count
     remaining = max(0.1, args.max_seconds - (time.monotonic() - started))
-    estimated = allocated_bytes(plan.removable, remaining)
+    estimated = logical_allocated_bytes(plan.removable, remaining)
     result = apply_plan(plan, dry_run=args.dry_run,
                         ledger_path=REPO / "out" / "storage-hygiene.jsonl",
                         record_finding=_record_finding, disk_used=used,
-                        eligible_allocated_bytes=estimated,
+                        eligible_logical_bytes=estimated,
                         is_open=path_has_open_files, is_locked=replay_is_locked,
                         deadline=lambda: time.monotonic() - started >= args.max_seconds,
                         older_than_seconds=args.older_than_hours * 3600)
     action = "would remove" if args.dry_run else "removed"
     print(row)
-    size = ("unknown allocated size" if estimated is None
-            else f"{estimated / 1e9:.3f} GB allocated size")
+    size = ("unknown logical allocated size" if estimated is None
+            else f"{estimated / 1e9:.3f} GB logical allocated size")
     print(f"storage hygiene: {action} {len(plan.removable) if args.dry_run else result.removed_count} "
           f"director{'y' if (len(plan.removable) if args.dry_run else result.removed_count) == 1 else 'ies'}; "
           f"total={size}; "
           f"protected={len(plan.protected)} unrecognized={plan.unrecognized_count} "
           f"stop={plan.stop_reason or 'complete'} record={result.record_status}")
+    print(PHYSICAL_ESTIMATE_METHOD)
     for candidate in plan.removable:
         print(f"  {candidate.kind}: {candidate.path}")
     for path in sorted(plan.unrecognized):

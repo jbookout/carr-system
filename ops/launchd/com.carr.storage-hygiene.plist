@@ -2,13 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- doctrine: repo-hygiene-program-build-plan -->
 <!--
-  com.carr.storage-hygiene: daily bounded cleanup of known local scratch.
+  com.carr.storage-hygiene: daily bounded cleanup of stale Chrome code-sign clones.
 
   The job is intentionally source-only in this change. Installation is a
   separate reviewed machine effect. It runs after the nightly record-layer
   chain, uses run-scheduled.sh for durable ops.run evidence, and delegates all
   selection, open-file checks, caps, ledger output and record-layer findings to
-  tools/storage_hygiene.py.
+  tools/storage_hygiene.py. The scheduled invocation selects only clones;
+  scratch and gate-replay cleanup require explicit command-line opt-in.
 
   DONE: run-scheduled records launchd.run and the script appends one dated line
   to out/storage-hygiene.jsonl after reading the previous line. FAILURE: any

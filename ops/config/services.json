@@ -321,7 +321,7 @@
     {
       "key": "storage-hygiene",
       "name": "Studio storage hygiene",
-      "purpose": "Daily bounded cleanup of known stale Chrome code-sign clones, allowlisted CARR scratch, and unlocked gate-replay residue. Reports unknown paths without deleting them and opens a record-layer investigation on findings or a Data-volume threshold breach.",
+      "purpose": "Daily bounded cleanup of known stale Chrome code-sign clones. Allowlisted CARR scratch and unlocked gate-replay residue require explicit command-line opt-in. Reports unknown paths without deleting them and opens a record-layer investigation on findings or a Data-volume threshold breach.",
       "family": "Local Mac edge",
       "criticality": "medium",
       "owner_actor": "orchestrator",
