@@ -1,14 +1,57 @@
 {
   "activation_hold": true,
+  "adapter_generation_scope": "Every observed SessionStart re-arm invalidates same-ID child completion as well as main completion. Actual deployed lost-context signaling remains unverified.",
   "baseline_ref": "b14473e5e84d92c7c415599c57883308dfef24fc",
   "candidate_suite": {
-    "cases": 35,
+    "cases": 38,
     "codex_source_fixture": "passed; stable paired IDs and missing-ID recovery control",
-    "mutants_killed": 25,
-    "mutants_total": 25,
+    "mutants_killed": 29,
+    "mutants_total": 29,
     "result": "passed"
   },
   "claims": "Offline native-hook correlation and concurrency controls only. No deployed adapter, no-tool message, model obedience, or billed-cost claim.",
+  "completed_state_edge_controls": {
+    "activation_hold": true,
+    "baseline_ref": "ec166e6c205c81bd8a02e304a87f749a2f0d53b2",
+    "controls": {
+      "case_completed_compact_storage_fault": {
+        "baseline": {
+          "error_type": "AssertionError",
+          "reason": "",
+          "result": "failed"
+        },
+        "candidate": {
+          "result": "passed"
+        }
+      },
+      "case_completed_digest_storage_fault": {
+        "baseline": {
+          "error_type": "AssertionError",
+          "reason": "{'hookEventName': 'PostToolUse', 'additionalContext': 'RULE BOOT UNVERIFIED: the delivery check failed; repair it and fetch the missing pages.'}",
+          "result": "failed"
+        },
+        "candidate": {
+          "result": "passed"
+        }
+      },
+      "case_completed_same_id_subagent_rearm": {
+        "baseline": {
+          "error_type": "AssertionError",
+          "reason": "Read",
+          "result": "failed"
+        },
+        "candidate": {
+          "result": "passed"
+        }
+      }
+    },
+    "passed": true,
+    "schema": "rule-boot-completed-edge-controls/v1",
+    "source_sha256": {
+      "lib/rule_boot_gate.py": "2a5054484c1da88a2a599c099ad674b7a81704dc05e6415f6659f51342b159eb",
+      "ops/rule-boot-gate-selftest.py": "4b4de23da3376f2b9432aab091a46a13eec5c570db74312871291f8667f29395"
+    }
+  },
   "controls": {
     "case_arming_fetch_overlap": {
       "baseline": "failed_expected",
@@ -41,12 +84,14 @@
       "reason": ""
     }
   },
+  "historical_baseline_control_evidence": "The six b14473e5 controls are retained from the earlier measured repair; the three completed-state controls were freshly measured against ec166e6c and this candidate.",
+  "protected_operations_executed": false,
   "schema": "rule-boot-epoch-control-measurement/v1",
   "source_sha256": {
     "evals/rule-delivery/boot_epoch_probe.py": "68b96daa14de62374723d87637f261fb0540a83d1e08a5de21e7adbeb8584760",
     "hooks/rule-boot-gate.py": "a2cbda4604f7429e3278fae4badce0d33b5e57faa6ae5740ae8247d9f47a5643",
-    "lib/rule_boot_gate.py": "0d1def5f4356fb92eae65977c25518c895280b145cbb827368fe873b3841cbb0",
+    "lib/rule_boot_gate.py": "2a5054484c1da88a2a599c099ad674b7a81704dc05e6415f6659f51342b159eb",
     "ops/codex-rule-hooks-selftest.py": "4e82435c3dd2aecd242182d656ee0025f08e811357e8027c962a546ad9bc7c7c",
-    "ops/rule-boot-gate-selftest.py": "1dc82259bae3423e72620f1d4a85ca4faa022122f6a4c6048295b9814820f049"
+    "ops/rule-boot-gate-selftest.py": "4b4de23da3376f2b9432aab091a46a13eec5c570db74312871291f8667f29395"
   }
 }

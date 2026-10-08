@@ -100,13 +100,19 @@ class Case:
         folder = os.path.join(self.state, SESSION, "fetched", agent or "main")
         return [n for _r, _d, files in os.walk(folder) for n in files if re.fullmatch(r"d\d+-.*", n)]
 
-    def disk_full(self):
+    def disk_full(self, arm_only=False):
         """Every write under the state directory raises ENOSPC from now on."""
         folder = os.path.join(self.work, "fault")
         os.makedirs(folder, exist_ok=True)
         with open(os.path.join(folder, "sitecustomize.py"), "w", encoding="utf-8") as fh:
             fh.write(FAULT_SITECUSTOMIZE)
         self.env["PYTHONPATH"] = folder
+        if arm_only:
+            self.env["CARR_RULE_BOOT_FAULT_ARM_ONLY"] = "1"
+
+    def recover_storage(self):
+        self.env.pop("PYTHONPATH", None)
+        self.env.pop("CARR_RULE_BOOT_FAULT_ARM_ONLY", None)
 
     def subprocess_only(self):
         """The disk-full fault lives in a sitecustomize that only a fresh
@@ -272,8 +278,11 @@ class InProcess:
 FAULT_SITECUSTOMIZE = """
 import builtins, errno, os
 _ROOT = os.path.abspath(os.environ.get("CARR_RULE_BOOT_STATE_DIR") or "/nonexistent-root")
+_ARM_ONLY = os.environ.get("CARR_RULE_BOOT_FAULT_ARM_ONLY") == "1"
 def _hit(p):
     try:
+        if _ARM_ONLY and not os.path.basename(os.fsdecode(p)).startswith(".arm."):
+            return False
         return os.path.abspath(os.fsdecode(p)).startswith(_ROOT)
     except TypeError:
         return False
@@ -896,7 +905,9 @@ def answer(c, payload, boot):
 
 
 def current_arm(c):
-    with open(os.path.join(c.state, SESSION, "arm.json")) as handle:
+    path = os.path.join(c.state, SESSION, "arm.json")
+    assert os.path.isfile(path), "expected a freshly established arm"
+    with open(path) as handle:
         return json.load(handle)
 
 
@@ -912,6 +923,90 @@ def protected_held(c, agent=None):
     for tool, args in (READ, ("Bash", {"command": "git push origin HEAD"}),
                        ("Agent", {"prompt": "Inspect diagnosis"})):
         assert denied(c.call(tool, args, agent=agent)), tool
+
+
+def protected_allowed(c, agent=None):
+    for tool, args in (READ, ("Bash", {"command": "git push origin HEAD"}),
+                       ("Agent", {"prompt": "Inspect diagnosis"})):
+        assert c.call(tool, args, agent=agent) is None, tool
+
+
+def complete_contexts(c):
+    for agent in (None, "sub-complete"):
+        for page in (1, 2):
+            c.fetch(page, agent=agent)
+        protected_allowed(c, agent)
+
+
+def recovery_reads_available(c):
+    for agent in (None, "sub-complete"):
+        assert not denied(c.call(*mcp_fetch(1), agent=agent))
+        assert not denied(c.call("ToolSearch", {"query": "standing-context"}, agent=agent))
+
+
+def case_completed_compact_storage_fault(c):
+    # Both a fault before lock acquisition and a failed arm allocation after
+    # acquiring the lock start with main AND child fully confirmed/allowed.
+    for arm_only in (False, True):
+        c.stub_sized("a", 2); c.arm(); complete_contexts(c)
+        old = initiate(c, 1, "compact-fault-old-" + str(arm_only), "sub-complete")
+        old_boot = c.boot(1)
+        c.disk_full(arm_only=arm_only)
+        notice = c.arm("compact")
+        assert "STATE UNWRITABLE" in notice, notice
+        assert not os.path.exists(os.path.join(c.state, SESSION, "arm.json")), "old completed arm survived compact fault"
+        protected_held(c); protected_held(c, "sub-complete")
+        recovery_reads_available(c)
+        # The latent bug appears after writes recover: prior completion must
+        # still be held BEFORE any new arming or rule fetch is performed.
+        c.recover_storage()
+        protected_held(c); protected_held(c, "sub-complete")
+        c.arm("compact"); before = current_arm(c)
+        answer(c, old, old_boot)
+        assert current_arm(c) == before
+        protected_held(c); protected_held(c, "sub-complete")
+        complete_contexts(c)
+
+
+def case_completed_digest_storage_fault(c):
+    for arm_only in (False, True):
+        c.stub_sized("a", 2); c.arm(); complete_contexts(c)
+        payload = initiate(c, 1, "digest-fault-" + str(arm_only))
+        newer = c.boot(1, "b", 2)
+        c.disk_full(arm_only=arm_only)
+        notice = answer(c, payload, newer)
+        assert notice and "STATE UNWRITABLE" in notice.get("additionalContext", ""), notice
+        assert not os.path.exists(os.path.join(c.state, SESSION, "arm.json")), "old completed arm survived digest fault"
+        protected_held(c); protected_held(c, "sub-complete")
+        recovery_reads_available(c)
+        c.recover_storage()
+        protected_held(c); protected_held(c, "sub-complete")
+        # No SessionStart is required to recover a transient state failure:
+        # fresh correlated full reads establish a new generation.
+        c.stub_sized("b", 2)
+        c.fetch(1); before = current_arm(c)
+        answer(c, payload, newer)
+        assert current_arm(c) == before
+        protected_held(c); protected_held(c, "sub-complete")
+        c.fetch(2); protected_allowed(c)
+        for page in (1, 2): c.fetch(page, agent="sub-complete")
+        protected_allowed(c, "sub-complete")
+
+
+def case_completed_same_id_subagent_rearm(c):
+    c.stub_sized("a", 2); c.arm(); complete_contexts(c)
+    for source in ("compact", "resume", "clear", "fork"):
+        late = initiate(c, 1, "same-child-" + source, "sub-complete")
+        old_boot = c.boot(1)
+        c.arm(source); before = current_arm(c)
+        protected_held(c); protected_held(c, "sub-complete")
+        answer(c, late, old_boot)
+        assert current_arm(c) == before
+        protected_held(c, "sub-complete")
+        for page in (1, 2): c.fetch(page, agent="sub-complete")
+        protected_allowed(c, "sub-complete"); protected_held(c)
+        for page in (1, 2): c.fetch(page)
+        protected_allowed(c)
 
 
 def case_delayed_old_epoch(c):
@@ -1067,7 +1162,8 @@ def case_arming_fetch_overlap(c):
     assert c.call(*READ) is None
 
 
-CASES = [case_delayed_subagent, case_arming_fetch_overlap, case_delayed_old_epoch, case_correlation_failures, case_concurrent_compact, case_concurrent_digest, case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
+CASES = [case_completed_compact_storage_fault, case_completed_digest_storage_fault, case_completed_same_id_subagent_rearm,
+         case_delayed_subagent, case_arming_fetch_overlap, case_delayed_old_epoch, case_correlation_failures, case_concurrent_compact, case_concurrent_digest, case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
          case_failure_not_sticky, case_state_unwritable_never_armed, case_disk_full_never_armed,
@@ -1147,6 +1243,14 @@ def check_pending_install():
 # ------------------------------------------------------------------ mutants
 
 MUTANTS = {
+    "generation-fault-retains-completed-arm": [('def _invalidate_arm(session_id):\n',
+                                              'def _invalidate_arm(session_id):\n    return\n')],
+    "compact-lock-fault-skips-revoke": [('        return _state_fault(session_id, exc)',
+                                         '        return STATE_UNWRITABLE_NOTICE.format(why=type(exc).__name__)')],
+    "observe-lock-fault-skips-revoke": [('        with session_lock(session):\n            return _observe(payload)\n    except OSError as exc:\n        return _state_fault(session, exc)',
+                                         '        with session_lock(session):\n            return _observe(payload)\n    except OSError as exc:\n        return STATE_UNWRITABLE_NOTICE.format(why=type(exc).__name__)')],
+    "subagent-epoch-ignored": [('    key = f"{digest}-{safe_key(arm.get(\'epoch\'), \'e0\')}"',
+                                '    key = digest if agent_id else f"{digest}-{safe_key(arm.get(\'epoch\'), \'e0\')}"')],
     "generation-validation-removed": [('and request.get("arm") == _arm_binding(arm)', 'and True')],
     # First round (the coordinator's three, plus two).
     "never-denies": [('\n    return "deny", reason\n', '\n    return "allow", reason\n')],
@@ -1154,8 +1258,8 @@ MUTANTS = {
                                  '    if False:\n        if page is not None:')],
     "no-re-arm-after-compact": [('"epoch": secrets.token_hex(6)}',
                                  '"epoch": (read_arm(session_id) or {}).get("epoch") or secrets.token_hex(6)}')],
-    "digest-change-ignored": [('    digest = safe_key(str(arm.get("digest") or "").replace("sha256:", ""), "none")[:24]',
-                               '    digest = "same"')],
+    "digest-change-detection-removed": [('                                      or arm.get("digest") != digest',
+                                          '                                      or False')],
     "escape-after-cap": [('\n        return "deny", reason\n', '\n        return "allow", reason\n')],
     "escape-after-unwritten-state": [('        return "deny", reason + "\\n"', '        return "allow", reason + "\\n"')],
     "out-of-range-read-as-outage": [('        if _OUT_OF_RANGE in text:', '        if False:')],

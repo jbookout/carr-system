@@ -5,7 +5,7 @@
   "epoch_changed": true,
   "expected": "After compact into a newer corpus, delayed answers initiated in the old arm must not roll the corpus back or authorize protected actions.",
   "final_corpus_digest": "sha256:49a3772ab3d8b50774f4d9343c529e20c4006e64f107aeb70f1d42b9a74f278e",
-  "gate_source_sha256": "0d1def5f4356fb92eae65977c25518c895280b145cbb827368fe873b3841cbb0",
+  "gate_source_sha256": "2a5054484c1da88a2a599c099ad674b7a81704dc05e6415f6659f51342b159eb",
   "limitation": "Source-only native-hook probe. Barrier-driven process concurrency and fresh recovery are separately covered by the hook selftest. No deployed adapter or no-tool-turn proof; activation remains held.",
   "new_corpus_digest": "sha256:49a3772ab3d8b50774f4d9343c529e20c4006e64f107aeb70f1d42b9a74f278e",
   "probe_sha256": "68b96daa14de62374723d87637f261fb0540a83d1e08a5de21e7adbeb8584760",

@@ -30,9 +30,9 @@ STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
         d<H>-<rnd>  one deny, made when H pages were confirmed
 Marker files, not a read-modify-write JSON, because a model often fetches the
 pages in parallel and parallel hooks would otherwise lose each other's pages.
-<key> is the digest for a subagent and digest+epoch for the main context, so
-a SessionStart re-arm (startup, resume, clear, compact, fork) makes the main
-context fetch again, and a digest change re-gates every context.
+<key> is digest+epoch for every context, so a SessionStart re-arm (startup,
+resume, clear, compact, fork) forces main and same-ID subagent contexts to
+fetch again, and a digest change re-gates every context.
 
 Each answer must match its native PreToolUse identity and captured generation.
 Stale/ambiguous answers change no current arm or page markers. Digest changes
@@ -269,13 +269,42 @@ def read_arm(session_id):
         return None
 
 
+def _invalidate_arm(session_id):
+    """Revoke the old permit without allocating a new file (including ENOSPC)."""
+    try:
+        os.unlink(os.path.join(_session_dir(session_id), "arm.json"))
+    except FileNotFoundError:
+        pass
+
+
+def _state_fault(session_id, exc):
+    # A failed lock/write must not leave a completed old generation usable
+    # when storage recovers. Unlink also covers faults before lock acquisition;
+    # revoking a concurrently newer arm is conservative, never a grant.
+    why = type(exc).__name__
+    try:
+        _invalidate_arm(session_id)
+    except OSError as revoke:
+        why += "; generation revocation failed: " + type(revoke).__name__
+    return STATE_UNWRITABLE_NOTICE.format(why=why)
+
+
 def write_arm(session_id, arm):
     folder = _session_dir(session_id)
+    # Successful publication is atomic under the session lock. Revoke first:
+    # an allocation/write/replace failure cannot preserve old page permits.
+    _invalidate_arm(session_id)
     os.makedirs(folder, exist_ok=True)
     tmp = os.path.join(folder, f".arm.{os.getpid()}.{secrets.token_hex(3)}.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(arm, fh, sort_keys=True)
-    os.replace(tmp, os.path.join(folder, "arm.json"))
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(arm, fh, sort_keys=True)
+        os.replace(tmp, os.path.join(folder, "arm.json"))
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def _stand_in(arm):
@@ -288,7 +317,7 @@ def _stand_in(arm):
 def _fetch_dir(session_id, agent_id, arm):
     agent = safe_key(agent_id, "main")
     digest = safe_key(str(arm.get("digest") or "").replace("sha256:", ""), "none")[:24]
-    key = digest if agent_id else f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
+    key = f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
     return os.path.join(_session_dir(session_id), "fetched", agent, key)
 
 
@@ -700,7 +729,7 @@ def _live_page_one(timeout=10):
     return None, f"unreachable (exit {proc.returncode})"
 
 
-def arm_session(session_id, source, now=None):
+def _arm_session(session_id, source, now=None):
     """Arm the gate for a session at SessionStart and return the context text
     (always under 10k characters: SessionStart context is capped there)."""
     arm = {"schema": SCHEMA, "source": str(source or ""), "armed_at": int(now or time.time()),
@@ -726,6 +755,14 @@ def arm_session(session_id, source, now=None):
         arm.update(status="unavailable", reason=reason or "unreachable")
         write_arm(session_id, arm)
         return f"{UNAVAILABLE_NOTICE} ({arm['reason']})"
+
+
+def arm_session(session_id, source, now=None):
+    """Re-arm or revoke the prior generation, retaining the recovery read door."""
+    try:
+        return _arm_session(session_id, source, now)
+    except OSError as exc:
+        return _state_fault(session_id, exc)
 
 
 # ---------------------------------------------------------------- verdicts
@@ -947,16 +984,10 @@ def _observe(payload):
             arm.pop("total_chars", None)
             if int((boot or {}).get("total_chars") or 0) >= 1:
                 arm["total_chars"] = int(boot["total_chars"])
-            try:
-                write_arm(session_id, arm)
-            except OSError:
-                return None
+            write_arm(session_id, arm)
         if answer == "boot" and not arm.get("total_chars"):
             arm["total_chars"] = int(boot["total_chars"])
-            try:
-                write_arm(session_id, arm)
-            except OSError:
-                return None
+            write_arm(session_id, arm)
         folder = _fetch_dir(session_id, agent_id, _stand_in(arm))
         if answer == "out_of_range":
             return (f"RULE BOOT: page {page} does not exist; this boot has {total or 'fewer'} "
@@ -1003,11 +1034,15 @@ def verdict(payload, now=None):
     except OSError as exc:
         kind, _page = classify(payload.get("tool_name") or payload.get("toolName") or "",
                                payload.get("tool_input") or payload.get("toolInput") or {}, payload.get("cwd"))
-        text = STATE_UNWRITABLE_NOTICE.format(why=type(exc).__name__)
+        text = _state_fault(session, exc)
         return ("allow" if kind in ("fetch", "readonly") else "deny"), text
 
 
 def observe(payload):
     """Never let a stale request race a new arm or change current markers."""
-    with session_lock(payload.get("session_id") or payload.get("sessionId")):
-        return _observe(payload)
+    session = payload.get("session_id") or payload.get("sessionId")
+    try:
+        with session_lock(session):
+            return _observe(payload)
+    except OSError as exc:
+        return _state_fault(session, exc)
