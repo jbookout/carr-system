@@ -1900,6 +1900,26 @@
     }
    ]
   },
+  "8400cd3d": {
+   "moment": "starting a plan, a heavy-build plan, propose-ready-plan, or a Codex or Dot brief",
+   "routes": [
+    {
+     "kind": "trigger",
+     "tools": [
+      "EnterPlanMode",
+      "UpdatePlan",
+      "functions.update_plan"
+     ],
+     "verbs": [
+      "propose-ready-plan",
+      "review-heavy-build-plan",
+      "accept-ready-plan",
+      "register-engineering-slice-plan"
+     ],
+     "bash_patterns": []
+    }
+   ]
+  },
   "83b9a362": {
    "moment": "vendor introduction work (intro_politics scope)",
    "note": "active intro_politics rule of the vendor-intros pack; not in the classification CSV because standing-context recitation excludes that scope by design",

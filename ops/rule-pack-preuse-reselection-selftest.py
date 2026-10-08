@@ -503,7 +503,7 @@ claude_rows = [group for group in claude["PreToolUse"]
                if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
 codex_rows = [group for group in codex["PreToolUse"]
               if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
-CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*"
+CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|EnterPlanMode|UpdatePlan|functions\\.update_plan|mcp__.*"
 CODEX_MATCHER = ".*"  # Codex local tools use canonical names, including apply_patch.
 check("Claude wiring is exact and unique, widened for the generalized rail (S9)",
       len(claude_rows) == 1 and claude_rows[0]["matcher"] == CLAUDE_MATCHER)
@@ -949,6 +949,7 @@ silent_runner = Runner()
 check("a routine Read delivers nothing and makes no selector call",
       rail.process(gen_payload(tool="Read", tool_input={"file_path": "README.md"}),
                    runner=silent_runner) is None and silent_runner.calls == [])
+
 missing_session = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
 missing_session["session_id"] = ""
 missing_session_runner = Runner()
@@ -1289,6 +1290,25 @@ def routed_for(tool: str, tool_input: dict) -> list[str]:
 def rules_routed_by(predicate) -> set[str]:
     return {rid for rid, entry in ROUTES["rules"].items()
             if any(predicate(route) for route in entry["routes"])}
+
+
+# Rule 8400cd3d is delivered when planning begins, before the session chooses a
+# build protocol. These calls use the production deterministic route rail.
+for planning_tool, planning_input in (
+        ("EnterPlanMode", {}),
+        ("UpdatePlan", {"plan": [{"step": "size the work"}]}),
+        ("functions.update_plan", {"plan": [{"step": "size the work"}]}),
+        ("mcp__carr__propose-ready-plan", {"scope_summary": "new capability"})):
+    hits = routed_for(planning_tool, planning_input)
+    check(f"{planning_tool} delivers the new-work sizing rule",
+          "8400cd3d" in hits, hits)
+for routine_tool, routine_input in (
+        ("Read", {"file_path": "README.md"}),
+        ("Bash", {"command": "git status"}),
+        ("Write", {"file_path": "notes.txt", "content": "review the finished plan"})):
+    hits = routed_for(routine_tool, routine_input)
+    check(f"{routine_tool} routine work does not deliver the sizing rule",
+          "8400cd3d" not in hits, hits)
 
 
 # The Bash route (production route rail) fires on every supported cloud launch

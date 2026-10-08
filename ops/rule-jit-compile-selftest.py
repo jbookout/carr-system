@@ -190,6 +190,35 @@ if len(routing_rows) == 1:
           not any(routing_pattern.search(v) for v in routine_verbs),
           [v for v in routine_verbs if routing_pattern.search(v)])
 
+# 10. rule 8400cd3d (size every new piece of work) arrives at the planning
+# moment, including the two native plan tools, governed heavy-build planning,
+# and the briefs handed to Codex or Dot.
+SIZING = "8400cd3d"
+sizing_rows = [t for t in triggers if SIZING in t["rule_ids"]]
+check("new-work sizing rule is registered for JIT pack delivery",
+      SIZING in MAP["rule_controls"]
+      and SIZING in MAP["active_rule_ids"]["shared"]
+      and SIZING in JIT_IDS
+      and MAP["rule_load_layers"].get(SIZING, {}).get("load_layer") == "pack",
+      sizing_rows)
+check("new-work sizing rule has one planning-moment detector",
+      len(sizing_rows) == 1 and sizing_rows[0]["kind"] == "content_regex"
+      and sizing_rows[0]["source"] == "seeded_detector"
+      and sizing_rows[0]["rule_ids"] == [SIZING], sizing_rows)
+if len(sizing_rows) == 1:
+    sizing_pattern = re.compile(sizing_rows[0]["pattern"], re.I)
+    planning_moments = ["EnterPlanMode", "functions.update_plan",
+                        "propose-ready-plan", "heavy-build plan",
+                        "Codex brief", "Dot brief"]
+    routine_work = ["Read", "git status", "review the finished plan",
+                    "run the unit tests"]
+    check("sizing detector matches every required planning moment",
+          all(sizing_pattern.search(value) for value in planning_moments),
+          [value for value in planning_moments if not sizing_pattern.search(value)])
+    check("sizing detector stays silent on routine work",
+          not any(sizing_pattern.search(value) for value in routine_work),
+          [value for value in routine_work if sizing_pattern.search(value)])
+
 if FAILURES:
     print("rule-jit-compile-selftest: FAIL")
     for failure in FAILURES:
