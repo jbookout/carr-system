@@ -1488,8 +1488,8 @@ def test_hosted_zsh_setup_does_not_refresh_working_indexes():
     # Three download attempts, one refresh, one unpack; each timeout also
     # permits five seconds to kill its process group. Reserve one minute for
     # shell/setup overhead. Backoff occurs after attempts one and two only.
-    check("hosted zsh setup uses the shared installer", setup["run"] == "ops/ci-install-zsh.sh")
-    installer_source = (REPO / "ops/ci-install-zsh.sh").read_text()
+    check("hosted zsh setup uses the shared installer", setup["run"] == "ops/ci-zsh.sh")
+    installer_source = (REPO / "ops/ci-zsh.sh").read_text()
     backoff = int(setup["env"]["ZSH_RETRY_BACKOFF"])
     attempts = len(re.search(r"for attempt in ([0-9 ]+); do", installer_source).group(1).split())
     download, refresh, unpack = [int(grace) + int(limit) for grace, limit in
