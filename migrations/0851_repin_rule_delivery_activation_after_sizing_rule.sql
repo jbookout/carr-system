@@ -1,6 +1,7 @@
 -- Rule 8400cd3d entering the reviewed enforcement map moves the map digest.
 -- The eight pack-cutover contracts stay unchanged, so advance only their
 -- guarded identity from the post-0837 map to the reviewed sizing-rule map.
+-- rollback: repin the same eight targets to v_old after verifying the exact v_new preimage
 do $rule_delivery_0851$
 declare
   v_old constant text := 'b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308';
