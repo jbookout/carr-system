@@ -402,6 +402,55 @@ def main() -> int:
     check("a finished job whose output quotes the limit text is completed",
           finished_job_that_quotes_the_limit_text_is_completed)
 
+    def each_quota_signal_is_caught_on_its_own():
+        """PR 1660 review: the combined fixture let the JSON error win, so the
+        turn.failed path and the plain-line fallback were never tested alone."""
+        msg = ("You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
+               "to purchase more credits or try again at 11:36 PM.")
+        shapes = {
+            "turn.failed only": f"print(json.dumps({{'type':'turn.failed','error':{{'message':{msg!r}}}}}))\n",
+            "plain line only": f"print('ERROR: ' + {msg!r})\n",
+            "stderr only": f"sys.stderr.write('ERROR: ' + {msg!r} + chr(10))\n",
+        }
+        shim = fake_bin / "codex"
+        saved = shim.read_text()
+        try:
+            for label, body in shapes.items():
+                shim.write_text("#!/usr/bin/env python3\nimport json,sys\n" + body
+                                + "raise SystemExit(0)\n")
+                shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+                env = dict(os.environ, PATH=f"{fake_bin}:{os.environ['PATH']}")
+                out = dispatch.dispatch("codex-desk", "anything", registry=reg,
+                                        results_path=root / "quota-shapes.ndjson", env=env)
+                assert out["status"] == "quota_exhausted", (label, out)
+                assert out["retry_after"] == "11:36 PM", (label, out)
+        finally:
+            shim.write_text(saved)
+            shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+
+    check("each quota signal is caught on its own",
+          each_quota_signal_is_caught_on_its_own)
+
+    def a_per_call_limit_reaches_the_codex_run():
+        """PR 1660 review: nothing proved dispatch() forwards codex_timeout_s."""
+        seen = {}
+        real = dispatch._to_codex
+
+        def recording(entry, task, env, *args, **kwargs):
+            seen["timeout_s"] = kwargs.get("timeout_s")
+            return {"status": "completed", "result": "ok"}
+
+        dispatch._to_codex = recording
+        try:
+            dispatch.dispatch("codex-desk", "anything", registry=reg,
+                              results_path=root / "limit.ndjson", codex_timeout_s=123)
+        finally:
+            dispatch._to_codex = real
+        assert seen.get("timeout_s") == 123, seen
+
+    check("a per-call Codex limit reaches the Codex run",
+          a_per_call_limit_reaches_the_codex_run)
+
     def codex_keeps_its_own_context():
         """The second task must land in the SAME thread as the first.
 

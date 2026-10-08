@@ -1532,5 +1532,30 @@ def main() -> int:
     return 0 if result.result.wasSuccessful() else 1
 
 
+class QueueCodexLimitInsideClaimTests(unittest.TestCase):
+    """PR 1660 review: the router default rose to 5400 s while a queue claim
+    lasts 900 s, so a long queued Codex job could outlive its claim and be
+    handed out twice."""
+
+    def test_codex_queue_job_ends_inside_its_claim(self):
+        import kanban_adapter
+        for kind in ("codex-session", "codex-live"):
+            limit = bridge.queue_dispatch_kwargs({"kind": kind})["codex_timeout_s"]
+            self.assertLess(limit, kanban_adapter.CLAIM_TTL_S)
+
+    def test_other_desks_get_no_codex_limit(self):
+        for kind in ("claude-session", "flash-local", "grok-cli"):
+            self.assertEqual(bridge.queue_dispatch_kwargs({"kind": kind}), {})
+
+    def test_claim_uses_the_shared_ttl(self):
+        import kanban_adapter
+        seen = []
+        adapter = kanban_adapter.KanbanAdapter.__new__(kanban_adapter.KanbanAdapter)
+        adapter.command_runner = seen.append
+        adapter.claim("t-1")
+        argv = seen[0]
+        self.assertEqual(argv[argv.index("--ttl") + 1], str(kanban_adapter.CLAIM_TTL_S))
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
