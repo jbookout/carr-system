@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the retirement repin against PostgreSQL and the current overlay."""
+"""Exercise the sizing-rule repin against PostgreSQL and the current overlay."""
 import importlib.util
 import os
 from pathlib import Path
@@ -16,10 +16,10 @@ from lib.rule_delivery_activation import EXPECTED_IDS, load_validated
 
 
 def main():
-    migrations = list(ROOT.glob("migrations/[0-9][0-9][0-9][0-9]_repin_rule_delivery_activation_after_control_retirement.sql"))
-    assert len(migrations) == 1, "control retirement needs one forward activation repin"
+    migrations = list(ROOT.glob("migrations/[0-9][0-9][0-9][0-9]_repin_rule_delivery_activation_after_sizing_rule.sql"))
+    assert len(migrations) == 1, "the sizing rule needs one forward activation repin"
     repin = migrations[0].read_text()
-    prior = (ROOT / "migrations/0772_repin_rule_delivery_activation_after_model_choice_rule.sql").read_text()
+    prior = (ROOT / "migrations/0837_repin_rule_delivery_activation_after_control_retirement.sql").read_text()
     old_digest = re.search(r"v_new constant text := '([0-9a-f]{64})'", prior)[1]
     _, overlay = load_validated()
     new_digest = overlay["base_map_sha256"]

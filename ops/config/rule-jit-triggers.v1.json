@@ -1,14 +1,14 @@
 {
  "counts": {
-  "jev_compiled_triggers": 119,
+  "jev_compiled_triggers": 120,
   "pack_fallback_triggers": 7,
   "seeded_detector_rule_ids": 52,
   "seeded_detector_triggers": 16,
   "structural_extra_triggers": 2,
-  "triggers": 150
+  "triggers": 151
  },
  "generated_from": {
-  "jev_triggers_sha256": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
+  "jev_triggers_sha256": "b51679ed1288c439edd18d0b97f763a88513367f8a3d0bff771f62c49591291a",
   "map_sha256": "2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4",
   "triage_sha256": "8448ff314937781e9eeaa586dd1b24ab12b5285c4311a656c99e65245bec87ea"
  },
@@ -1367,6 +1367,19 @@
    ],
    "source": "jev_compiled",
    "trigger_id": "c3ac9bf9cbb8"
+  },
+  {
+   "kind": "prompt_regex",
+   "negative_pattern": "\\bvisible\\s+step\\b",
+   "packs": [
+    "governance-rules"
+   ],
+   "pattern": "\\bopens\\s+grill\\-with\\-docs\\b|\\bgrill\\-with\\-docs\\s+work\\b|\\bmedium\\-to\\-large\\s+work\\b|\\bgrill\\-with\\-docs\\b|\\bmedium\\-to\\-large\\b|\\bmoves\\s+wayfinder\\b|\\bstarts\\s+sizing\\b|\\bsizing\\s+step\\b|\\boutgrows\\b|\\bsizing\\b",
+   "rule_ids": [
+    "8400cd3d"
+   ],
+   "source": "jev_compiled",
+   "trigger_id": "3af6fc775ffc"
   },
   {
    "kind": "prompt_regex",
