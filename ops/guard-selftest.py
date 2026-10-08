@@ -453,7 +453,12 @@ for _cmd in (f"env -C /tmp {_S}", f"flock /tmp/lk {_S}", f"sudo -D /tmp {_S}",
              f"sandbox-exec -f /tmp/p.sb {_S}", f"time -o /tmp/t {_S}",
              f"ionice -c 3 -p /tmp {_S}", f"sudo -u joe -g /tmp {_S}",
              f"flock /tmp/lk /usr/bin/{_S}", f"env -C /tmp /usr/bin/{_S}",
-             f"timeout --bogus 30 ./run.sh x {_S}", f"sudo -X /tmp {_S}"):
+             f"timeout --bogus 30 ./run.sh x {_S}", f"sudo -X /tmp {_S}",
+             # Nesting past the recursion cap still reads the remaining words.
+             f"nice nice nice nice nice /usr/bin/{_S}",
+             f"nice nice nice nice nice nice /usr/bin/{_S}",
+             f"sudo env nice timeout 5 nohup /usr/bin/{_S}",
+             f"sudo env nice timeout 5 nohup nice /usr/bin/{_S}"):
     case(f"sender after a wrapper's path operand still found: {_cmd!r}",
          bash(_cmd, cwd=REPO), DENY)
 

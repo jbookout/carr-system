@@ -1050,7 +1050,8 @@ def command_invocations(words, depth=0):
         # values and operands (`sudo -D /tmp`, `flock /tmp/lk`) can sit in front
         # of the sender. The scan stops only where _wrapped_program places the
         # program at a path or at another wrapper: the words after it are that
-        # program's arguments (`timeout 30 ./run.sh fetch <url>`).
+        # program's arguments (`timeout 30 ./run.sh fetch <url>`). Past the
+        # recursion cap it does not stop at all, so deep nesting reads every word.
         p = _wrapped_program(exe, rest)
         stop = p if p is not None and ("/" in rest[p] or
                                        _exe_name(rest[p]) in COMMAND_WRAPPERS) else None
@@ -1059,8 +1060,8 @@ def command_invocations(words, depth=0):
                 found += invocations_in(w, depth + 1) if depth < 4 else []
             elif "://" in w:
                 continue
-            elif k == stop:
-                found += command_invocations(rest[k:], depth + 1) if depth < 4 else []
+            elif k == stop and depth < 4:
+                found += command_invocations(rest[k:], depth + 1)
                 break
             else:
                 found.append((_exe_name(w), rest[k + 1:]))
