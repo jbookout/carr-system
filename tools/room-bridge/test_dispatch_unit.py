@@ -301,7 +301,7 @@ def main() -> int:
         assert out["result"] == "the cheap model answered", out
         argv = json.loads(argv_log.read_text().splitlines()[0])
         assert argv[0] == "exec", argv
-        assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-5.1-codex-mini", argv
+        assert "-m" in argv and argv[argv.index("-m") + 1] == "gpt-6.1-sol", argv
         assert "-c" in argv and argv[argv.index("-c") + 1] == "model_reasoning_effort=low", argv
         assert "-C" in argv and argv[argv.index("-C") + 1] == str(root), argv
         assert argv[-1] == desks.DESK_INSTRUCTION + "\n\nrename the variable", argv
@@ -704,4 +704,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from test_codex_models_unit import catalog_fixture
+    with catalog_fixture():
+        raise SystemExit(main())

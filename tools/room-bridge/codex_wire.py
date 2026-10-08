@@ -174,6 +174,7 @@ def run_turn(
     approval_policy: str = "never",
     timeout: float = 300.0,
     deadline_s: float | None = None,
+    effort: str | None = None,
 ) -> dict:
     """Deliver one turn to a live Codex session and wait for its answer.
 
@@ -193,14 +194,14 @@ def run_turn(
         wire.deadline = started + deadline_s
     try:
         return _run_turn(wire, task, thread_id=thread_id, cwd=cwd, model=model,
-                         sandbox=sandbox, approval_policy=approval_policy, timeout=timeout)
+                         sandbox=sandbox, approval_policy=approval_policy, timeout=timeout, effort=effort)
     except TimeoutError:
         return {"status": "timed_out", "thread_id": getattr(wire, "thread_id", None) or thread_id,
                 "detail": f"no answer within {deadline_s if deadline_s is not None else timeout:.0f}s"}
 
 
 def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
-              approval_policy, timeout) -> dict:
+              approval_policy, timeout, effort=None) -> dict:
     transcript: list[dict] = []
     wire.upgrade()
 
@@ -236,6 +237,8 @@ def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
                    "approvalPolicy": "never"}
     if model:
         turn_params["model"] = model
+    if effort:
+        turn_params["effort"] = effort
     wire.send_json({"id": "turn-start", "method": "turn/start", "params": turn_params})
     wait_response(wire, "turn-start", transcript)
 

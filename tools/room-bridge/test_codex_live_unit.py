@@ -197,6 +197,9 @@ def main() -> int:
             assert row["result"] == "the live seat answered", row
             assert row["resumed"] is False, row
             assert row["thread_id"] == "thread-live-0001", row
+            turn = next(m for m in srv.seen if m.get("method") == "turn/start")
+            assert turn["params"]["model"] == "gpt-6.1-sol", turn
+            assert turn["params"]["effort"] == "medium", turn
         finally:
             srv.close()
 
@@ -333,4 +336,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from test_codex_models_unit import catalog_fixture
+    with catalog_fixture():
+        raise SystemExit(main())

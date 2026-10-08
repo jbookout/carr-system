@@ -47,6 +47,8 @@ import socket
 from datetime import datetime, timezone
 from pathlib import Path
 
+import codex_models
+
 # a desk name a human can say out loud and a shell will not mangle
 NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
@@ -169,7 +171,15 @@ class Registry:
 
     def _load(self) -> dict:
         try:
-            return json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text())
+            changed = False
+            for entry in data.get("desks", {}).values():
+                if entry.get("kind") in codex_models.CODEX_KINDS and "model" in entry:
+                    entry["family"] = codex_models.family_default(entry.get("family"), entry.pop("model"))
+                    changed = True
+            if changed:
+                self._save(data)
+            return data
         except (FileNotFoundError, json.JSONDecodeError):
             return {"desks": {}}
 
@@ -195,6 +205,7 @@ class Registry:
         permission_mode: str | None = None,
         host: str | None = None,
         timeout_s: float = 900,
+        family: str | None = None,
     ) -> dict:
         if not NAME_OK.match(name or ""):
             raise DeskError(
@@ -206,6 +217,10 @@ class Registry:
         if kind not in KINDS:
             raise DeskError("bad_kind", f"{kind!r} is not one of {', '.join(KINDS)}")
         effort = _normalize_effort(kind, effort)
+        if kind in codex_models.CODEX_KINDS:
+            family = codex_models.family_default(family, model)
+        elif family is not None:
+            raise DeskError("bad_family", "family is only supported by Codex desks")
 
         # dict[str, object]: a desk entry's values are a genuine mix (str,
         # None, list[str]) depending on kind — a bare literal makes mypy infer
@@ -253,14 +268,14 @@ class Registry:
             entry = {"kind": kind, "socket": str(socket), "thread_id": None,
                      "cwd": str(cwd or Path.cwd())}
             entry["effort"] = effort
-            if model:
-                entry["model"] = model
+            if family:
+                entry["family"] = family
         else:
-            if not model:
-                raise DeskError("missing_model", "a codex-session desk needs --model")
             # thread_id is filled in by the first dispatch and reused after
-            entry = {"kind": kind, "model": model, "cwd": str(cwd or Path.cwd()),
+            entry = {"kind": kind, "cwd": str(cwd or Path.cwd()),
                      "thread_id": None, "effort": effort}
+            if family:
+                entry["family"] = family
             # A seat that cannot bind a socket or write where the work lives
             # reports its own cage as a fact about the machine. Carrying the
             # posture on the desk is how a task that genuinely needs more room
