@@ -474,7 +474,7 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
                expected_task=None, reason=None, next_action=None):
     project = project or config["board"]
     board = root / "out/boards" / (project + ".json")
-    env = dict(os.environ, PROGRESS_BOARD_ROOT=str(root / "out"))
+    env = dict(os.environ, PROGRESS_BOARD_ROOT=str(root / "out"), PROGRESS_BOARD_LOCAL_ONLY="1")
     with locked(root / "out/watchdog/board.lock"):
         if not board.exists():
             result = subprocess.run([sys.executable, str(SOURCE / "tools/progress_board.py"), "init",
@@ -483,10 +483,14 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
                                     timeout=config["thresholds"]["command_timeout_seconds"])
             if result.returncode:
                 raise RuntimeError(result.stderr)
-        prior = json.loads(board.read_text()).get("tasks", {}).get(card, {})
+        prior = json.loads(board.read_text()).get("tasks", {}).get(card)
         argv = [sys.executable, str(SOURCE / "tools/progress_board.py"), "task", project, card,
-                "--title", prior.get("title", card), "--executor", prior.get("executor", executor) if executor == "orchestrator" else executor, "--status", status,
-                "--health", health or ("blocked" if status == "blocked" else "healthy"), "--note", note]
+                "--status", status, "--health", health or ("blocked" if status == "blocked" else "healthy"),
+                "--note", note, "--receipt"]
+        if prior is None:
+            argv.extend(["--title", card, "--executor", executor])
+        elif executor != "orchestrator":
+            argv.extend(["--executor", executor])
         argv.extend(["--lane", config["needs_joe_lane"] if needs_joe else "status"])
         if expected_task is not None:
             argv.extend(["--expected-task", json.dumps(expected_task)])
@@ -499,7 +503,15 @@ def board_task(root, config, card, executor, status, note, project=None, pr=None
                                 timeout=config["thresholds"]["command_timeout_seconds"])
         if result.returncode:
             raise RuntimeError(result.stderr)
-        return prior
+        try:
+            receipt = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("progress board returned an invalid task receipt") from exc
+        if (not isinstance(receipt, dict) or type(receipt.get("applied")) is not bool
+                or receipt.get("before") is not None and not isinstance(receipt.get("before"), dict)
+                or receipt.get("after") is not None and not isinstance(receipt.get("after"), dict)):
+            raise RuntimeError("progress board returned an invalid task receipt")
+        return receipt.get("before") or {}
 
 
 def run_job(root, config, card, executor, minutes, argv):
@@ -591,6 +603,12 @@ def reconcile(root, config, found, effects, now, complete=True, *, clear_kinds=N
                 row.update(effects.report(row) or {})
                 row["reported"] = True
                 append(findings_path, row)
+                error_key = "record_error:" + key
+                report_error = previous.get(error_key)
+                if report_error and not report_error.get("cleared_at"):
+                    report_error = {**report_error, "cleared_at": stamp(now)}
+                    append(findings_path, report_error)
+                    previous[error_key] = report_error
             except Exception as exc:
                 extras.append(finding("record_error", key, str(exc), config))
         action = config["actions"].get(f["kind"], config["actions"]["default"])
@@ -656,9 +674,12 @@ def reconcile(root, config, found, effects, now, complete=True, *, clear_kinds=N
                         current[key] = {**row, "reason": "Vendor fetch recovered; recovery reporting failed: " + str(exc),
                                         "next_action": "Retry watchdog recovery reporting; inspect the board or record-layer error."}
                         continue  # Keep recovery pending until every visible effect succeeds.
-                if prior.get("board_recovery"):
+                if prior.get("board_recovery") or (not prior.get("card") and hasattr(effects, "clear_unrecovered")):
                     try:
-                        effects.clear(prior, list(current.values()))
+                        if prior.get("board_recovery"):
+                            effects.clear(prior, list(current.values()))
+                        else:
+                            effects.clear_unrecovered(prior)
                     except Exception as exc:
                         error = finding("board_error", key, str(exc), config)
                         current[error["key"]] = error
@@ -1085,6 +1106,17 @@ class Effects:
                    needs_joe=before.get("lane") == self.config["needs_joe_lane"],
                    health=before.get("health", "healthy"), expected_task=owned,
                    reason=before.get("blocked_reason"), next_action=before.get("next_action"))
+
+    def clear_unrecovered(self, f):
+        """Retire a generated card left by a task subprocess that timed out
+        after its local write but before returning the recovery receipt."""
+        card = self.card(f)
+        note = f["reason"] + "\nNext action: " + f["next_action"]
+        owned = {"status": "blocked", "health": "blocked", "note": note,
+                 "lane": self.config["needs_joe_lane"] if f.get("needs_joe") else None}
+        board_task(self.root, self.config, card, "orchestrator", "done",
+                   "Watchdog finding recovered; evidence source is healthy.",
+                   expected_task=owned)
 
     def launch(self, f, argv, cwd, *, job_id, restart_count=0, root_id=None):
         c = self.config

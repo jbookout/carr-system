@@ -12,6 +12,7 @@ all-repos board is built here from gh data on every publish.
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import fcntl
 import functools
@@ -1849,10 +1850,10 @@ def local_only() -> bool:
 def refresh_and_publish(project: str) -> None:
     """Every mutation reaches the app board, the only board UI. A failed
     publication is loud: the local state is kept and the retry is named."""
-    render(project)
     if local_only():
         log(f"{project}: saved locally; not published to the app board (PROGRESS_BOARD_LOCAL_ONLY is set)")
         return
+    render(project)
     try:
         publish_board(project)
     except RuntimeError as exc:
@@ -1860,16 +1861,17 @@ def refresh_and_publish(project: str) -> None:
                          f"Retry: tools/progress_board.py render {project} --publish")
 
 
-def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> None:
+def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> bool:
     """Read, change and write one board as a single locked transaction, then
     refresh and publish it."""
     with board_lock(project):
         state = read_state(project)
         if change(state) is False:
-            return
+            return False
         state["updated_at"] = stamp()
         write_json(state)
     refresh_and_publish(project)
+    return True
 
 
 def call_verb(verb: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -2259,13 +2261,21 @@ def command_task(args: argparse.Namespace) -> None:
     expected = json.loads(args.expected_task) if args.expected_task is not None else None
     if args.expected_task is not None and not isinstance(expected, dict):
         raise SystemExit("--expected-task must be a task object")
+    receipt = {"applied": False, "before": None, "after": None}
     def change(state):
+        before = copy.deepcopy(state.get("tasks", {}).get(args.task_id))
+        receipt["before"] = before
         if expected is not None and any(
                 state.get("tasks", {}).get(args.task_id, {}).get(key) != value
                 for key, value in expected.items()):
+            receipt["after"] = before
             return False
         update_task(state, args)
+        receipt["applied"] = True
+        receipt["after"] = copy.deepcopy(state["tasks"][args.task_id])
     mutate(args.project, change)
+    if args.receipt:
+        print(json.dumps(receipt, separators=(",", ":")))
 
 
 def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
@@ -2331,6 +2341,7 @@ def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
             task["blocked_reason"] = args.reason.strip()
     if args.next_action is not None:
         task["next_action"] = args.next_action.strip()
+    settle_done_without_pr(task)
     normalize_task(task)
     finished = task.get("status") == "done" or task_stage(task) == "live"
     if not finished and (task.get("status") == "blocked" or task.get("health") == "blocked"):
@@ -2446,6 +2457,7 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--next-action", dest="next_action", help="what unblocks it (required with blocked)")
     task.add_argument("--lane", choices=("status", "needs-joe"))
     task.add_argument("--expected-task", help="update only if these task fields still match this JSON object")
+    task.add_argument("--receipt", action="store_true", help="print the locked before/after task mutation receipt")
     task.add_argument("--note")
     task.add_argument("--evidence")
     task.add_argument("--delivery-target", choices=("worker", "app", "workstation", "database", "manual"),
