@@ -353,6 +353,110 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertTrue(any('page=2' in c for c in calls))
         self.assertTrue(any(f['kind'] == 'timeout' for f in report['workflows'][0]['flags']))
 
+    def active_run_reader(self, outcome='failure', read_error=False, inactive=False):
+        data = self.data()['workflows'][0]
+        run = copy.deepcopy(data['runs'][0])
+        run.update(workflow_id=data['id'], head_branch='previously-active',
+                   created_at='2026-10-05T15:59:00Z', run_started_at='2026-10-05T15:59:00Z',
+                   updated_at='2026-10-05T16:04:00Z', conclusion=outcome,
+                   status='in_progress' if outcome is None else 'completed')
+        job = data['jobs'][str(run['id'])][0]
+        job.update(started_at=run['run_started_at'], completed_at=run['updated_at'],
+                   conclusion=outcome, status=run['status'])
+        job['steps'][0].update(started_at=job['started_at'], completed_at=job['completed_at'],
+                              conclusion=outcome, status=run['status'])
+        data['definitions'][run['head_sha']]['jobs']['canary']['steps'] = [
+            {'name': job['steps'][0]['name'], 'timeout-minutes': 5}]
+        definition = {k: data[k] for k in ('id', 'name', 'path')}
+        calls = []
+
+        class Reader(checker.GitHub):
+            def api(self, endpoint):
+                calls.append(endpoint)
+                if '/contents/' in endpoint:
+                    return {'content': base64.b64encode(json.dumps(data['definitions'][run['head_sha']]).encode()).decode()}
+                if '/jobs?' in endpoint:
+                    return {'jobs': [job]}
+                if endpoint.endswith('/actions/runs/105'):
+                    if read_error:
+                        raise RuntimeError('tracked run read failed')
+                    return copy.deepcopy(run)
+                if 'status=success' in endpoint:
+                    return {'workflow_runs': data['successes']}
+                if 'branch=main' in endpoint or 'status=in_progress' in endpoint:
+                    return {'workflow_runs': []}
+                if '/runs?' in endpoint:
+                    if '&page=3' in endpoint:
+                        return {'workflow_runs': [run]}
+                    page = 2 if '&page=2' in endpoint else 1
+                    start = '2026-10-05T15:59:30Z' if page == 2 else '2026-10-05T16:05:00Z'
+                    return {'workflow_runs': [{**run, 'id': 200 + page * 30 + i,
+                        'head_branch': 'busy', 'status': 'completed', 'conclusion': 'success',
+                        'created_at': start, 'run_started_at': start, 'updated_at': start}
+                        for i in range(30)]}
+                return {'workflows': [] if inactive or not endpoint.startswith('repos/' + data['repo'] + '/')
+                        else [{**definition, 'state': 'active'}]}
+
+        previous = {'status': 'OK', 'observed_at': '2026-10-05T16:00:00Z',
+                    'scan_cursor': '2026-10-05T16:00:00Z', 'errors': [],
+                    'workflows': [{**definition, 'repo': data['repo'], 'flags': [],
+                        'active_runs': [{'branch': run['head_branch'], 'run_id': run['id']}]}]}
+        return Reader, previous, calls
+
+    def scheduled_scan(self, path, reader, now='2026-10-05T16:10:00Z'):
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        from io import StringIO
+        store = LoopStore()
+        with patch.object(checker, 'GitHub', reader), patch.object(checker, 'record_verb',
+                lambda verb, args, **kwargs: store(verb, args)), patch.object(sys, 'argv',
+                [str(CHECK), '--record-loops', '--state-file', str(path), '--now', now]), redirect_stdout(StringIO()):
+            rc = checker.main()
+        return rc, json.loads(path.read_text()), store
+
+    def test_10_scheduled_scan_accounts_for_active_runs_beyond_creation_cutoff(self):
+        for outcome, expected in (('failure', 'WARN'), (None, 'OK'), ('success', 'OK')):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as raw:
+                reader, previous, calls = self.active_run_reader(outcome)
+                path = Path(raw) / 'receipt.json'
+                path.write_text(json.dumps(previous))
+                rc, report, store = self.scheduled_scan(path, reader)
+                self.assertEqual(report['status'], expected, report)
+                self.assertEqual(rc, int(expected == 'WARN'))
+                self.assertEqual(report['scan_cursor'], '2026-10-05T16:10:00Z')
+                row = report['workflows'][0]
+                if outcome == 'failure':
+                    flag = next(f for f in row['flags'] if f['kind'] == 'timeout')
+                    self.assertEqual((flag['run_id'], flag['timeout_seconds']), (105, 300))
+                    self.assertEqual(store.loops[0]['status'], 'open')
+                elif outcome == 'success':
+                    self.assertEqual(row['recoveries']['previously-active'][0]['run_id'], 105)
+                self.assertEqual(row['active_runs'], previous['workflows'][0]['active_runs'] if outcome is None else [])
+                self.assertIn('repos/jbookout/carr-system/actions/runs/105', calls)
+
+    def test_10_failed_tracked_read_preserves_inventory_for_next_scan(self):
+        with tempfile.TemporaryDirectory() as raw:
+            reader, previous, _ = self.active_run_reader(read_error=True)
+            path = Path(raw) / 'receipt.json'
+            path.write_text(json.dumps(previous))
+            rc, report, _ = self.scheduled_scan(path, reader)
+            self.assertEqual((rc, report['status']), (1, 'UNAVAILABLE'))
+            self.assertEqual(report['scan_cursor'], previous['scan_cursor'])
+            self.assertEqual(report['workflows'][0]['active_runs'], previous['workflows'][0]['active_runs'])
+            reader, _, _ = self.active_run_reader()
+            rc, report, _ = self.scheduled_scan(path, reader, '2026-10-05T16:20:00Z')
+            self.assertEqual((rc, report['status']), (1, 'WARN'))
+            self.assertEqual(next(f for f in report['workflows'][0]['flags'] if f['kind'] == 'timeout')['run_id'], 105)
+
+    def test_10_disabled_workflow_still_accounts_for_prior_active_run(self):
+        with tempfile.TemporaryDirectory() as raw:
+            reader, previous, _ = self.active_run_reader(inactive=True)
+            path = Path(raw) / 'receipt.json'
+            path.write_text(json.dumps(previous))
+            rc, report, _ = self.scheduled_scan(path, reader)
+            self.assertEqual((rc, report['status']), (1, 'WARN'))
+            self.assertEqual(next(f for f in report['workflows'][0]['flags'] if f['kind'] == 'timeout')['run_id'], 105)
+
 
 class BuildDurationTests(unittest.TestCase):
     def check_fixture(self, fixture=FIXTURE):

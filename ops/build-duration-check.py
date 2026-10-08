@@ -258,9 +258,36 @@ def run_command(argv, timeout=30, **kwargs):
     return result.stdout
 
 
+def active_workflows(workflows):
+    """Read the receipt's durable inventory of runs whose outcomes are still owed."""
+    if not isinstance(workflows, list):
+        raise ValueError('invalid previous workflow inventory')
+    pending = {}
+    for row in workflows:
+        if not isinstance(row, dict) or not isinstance(row.get('active_runs', []), list):
+            raise ValueError('invalid previous active-run inventory')
+        if not row.get('active_runs'):
+            continue
+        if (row.get('repo') not in REPOS or type(row.get('id')) is not int or row['id'] <= 0
+                or any(not isinstance(row.get(k), str) or not row[k] for k in ('name', 'path'))):
+            raise ValueError('invalid previous active workflow')
+        runs = {}
+        for run in row['active_runs']:
+            if (not isinstance(run, dict) or type(run.get('run_id')) is not int or run['run_id'] <= 0
+                    or not isinstance(run.get('branch'), str) or not run['branch']):
+                raise ValueError('invalid previous active run')
+            runs[run['run_id']] = run
+        key = (row['repo'], row['id'])
+        if key in pending:
+            raise ValueError('duplicate previous active workflow')
+        pending[key] = {**row, 'active_runs': list(runs.values())}
+    return pending
+
+
 class GitHub:
-    def __init__(self, since=None):
+    def __init__(self, since=None, pending_workflows=None):
         self.since = since or (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        self.pending_workflows = pending_workflows or {}
         self.deadline = time.monotonic() + 300
 
     def api(self, endpoint):
@@ -297,7 +324,14 @@ class GitHub:
         recent = self.recent_runs(prefix)
         main_runs = self.api(prefix + '?branch=main&per_page=30')['workflow_runs']
         active = self.pages(prefix + '?status=in_progress', 'workflow_runs')
-        runs = list({r['id']: r for r in recent + main_runs + active}.values())
+        tracked = []
+        for prior in self.pending_workflows.get((repo, definition['id']), {}).get('active_runs', []):
+            run = self.api(f'repos/{repo}/actions/runs/{prior["run_id"]}')
+            if (run['id'] != prior['run_id'] or run['workflow_id'] != definition['id']
+                    or run['head_branch'] != prior['branch']):
+                raise ValueError('tracked run identity differs from receipt')
+            tracked.append(run)
+        runs = list({r['id']: r for r in recent + main_runs + active + tracked}.values())
         successes = self.api(prefix + '?status=success&per_page=100')['workflow_runs']
         row = {**definition, 'repo': repo, 'runs': runs, 'successes': successes, 'jobs': {}, 'definitions': {}}
         branches = set()
@@ -337,6 +371,11 @@ class GitHub:
                                    if w['state'] == 'active')
             except (RuntimeError, KeyError, ValueError, TypeError) as exc:
                 result['errors'].append(f'{repo}: {exc}')
+        found = {(repo, w['id']) for repo, w in definitions}
+        for (repo, ident), prior in self.pending_workflows.items():
+            if (repo, ident) not in found:
+                # Disabling a workflow does not settle its previously observed runs.
+                definitions.append((repo, {key: prior[key] for key in ('id', 'name', 'path')}))
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             pending = {pool.submit(self.workflow, repo, w): (repo, w) for repo, w in definitions}
             for future in concurrent.futures.as_completed(pending):
@@ -570,6 +609,7 @@ def main():
             return 0
     since = None
     cursor_error = None
+    pending_workflows = {}
     if args.record_loops and args.state_file.exists():
         try:
             previous = json.loads(args.state_file.read_text())
@@ -578,6 +618,7 @@ def main():
             since = previous.get('scan_cursor')
             if since is not None and timestamp(since) > timestamp(now):
                 raise ValueError('previous scan cursor is in the future')
+            pending_workflows = active_workflows(previous.get('workflows', []))
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             since = None
             cursor_error = f'previous scan coverage unavailable: {exc}'
@@ -591,7 +632,8 @@ def main():
     else:
         scan_started = now
         try:
-            snapshot = json.loads(args.fixture.read_text()) if args.fixture else GitHub(since=since).collect()
+            snapshot = (json.loads(args.fixture.read_text()) if args.fixture
+                        else GitHub(since=since, pending_workflows=pending_workflows).collect())
             now = args.now or datetime.now(timezone.utc).isoformat()
             report = evaluate(snapshot, now)
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -613,6 +655,16 @@ def main():
             except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
                 report['errors'].append(f'loop reconciliation: {exc}')
                 report['status'] = 'UNAVAILABLE'
+            if report['status'] == 'UNAVAILABLE':
+                # An incomplete scan cannot retire any run from the durable inventory.
+                rows = {(w['repo'], w['id']): w for w in report['workflows']}
+                for key, prior in pending_workflows.items():
+                    if key not in rows:
+                        rows[key] = {**prior, 'flags': [], 'recoveries': {}}
+                        report['workflows'].append(rows[key])
+                    row = rows[key]
+                    row['active_runs'] = list({r['run_id']: r for r in
+                        prior['active_runs'] + row.get('active_runs', [])}.values())
             report['source_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
             report['scan_cursor'] = scan_started if report['status'] != 'UNAVAILABLE' else since
             args.state_file.parent.mkdir(parents=True, exist_ok=True)
