@@ -409,6 +409,8 @@ def _model_router():
 
 def _flash_is_up() -> bool:
     import flash_wire
+    if flash_wire.flashlib.is_switched_off():
+        return False
     # A disabled demand-startable server is an available route, not an outage.
     return flash_wire.is_up() or (Path.home() / "Library/LaunchAgents/local.ds4-flash-next.plist").is_file()
 
