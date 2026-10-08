@@ -2049,6 +2049,14 @@ class ReviewRound1420(BoardCase):
         result = self.run_board("note", "demo", "--text", "x")
         self.assertIn("not published", result.stderr)
 
+    def test_11_b_local_only_mutation_does_not_refresh_or_publish(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        with self.in_process(PROGRESS_BOARD_LOCAL_ONLY="1"), \
+             patch.object(BOARD, "render", side_effect=AssertionError("local mutation refreshed the whole board")), \
+             patch.object(BOARD, "publish_board", side_effect=AssertionError("local mutation published")):
+            BOARD.main(["task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex"])
+        self.assertEqual(self.read_state("demo")["tasks"]["a"]["status"], "running")
+
 
 def merged_view(oid):
     """A complete merged PR as gh reports it, merged at `oid`."""
