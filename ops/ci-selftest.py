@@ -1359,7 +1359,7 @@ def test_hosted_ci_runs_classes_in_parallel_behind_one_required_context():
     """
     wf = _hosted_workflow()
     jobs = wf.get("jobs") or {}
-    gates = [k for k, v in jobs.items() if v.get("name") == "ops/ci.sh --strict"]
+    gates = [k for k, v in jobs.items() if v.get("name") == "ops/ci.sh --strict" or str(v.get("name", "")).endswith("|| 'ops/ci.sh --strict' }}")]
     check("exactly one job carries the required context name", len(gates) == 1, gates)
     if len(gates) != 1:
         return
@@ -1476,16 +1476,39 @@ def test_hosted_zsh_setup_does_not_refresh_working_indexes():
 
     Execute the workflow's setup with a synthetic apt, not a second installer.
     A working install must never refresh; stale indexes must still be repaired;
-    a flaky mirror gets bounded retries on the download only (runs 37826917141,
-    37820191123, 37803579466, 37793286211, 37781682483, 37762481248 and
-    37683204623 failed this step on a mirror hiccup); an unavailable mirror
-    must fail setup rather than green-light missing zsh.
+    runs 37826917141, 37820191123, 37803579466, 37793286211, 37781682483,
+    37762481248 and 37683204623 had Install-zsh timeouts. Run 37762481248
+    confirms a mid-dpkg timeout (Reading database at 85%); the other logs do
+    not establish a network cause. Synthetic download failures exercise the
+    bounded fallback; an unavailable package must fail setup.
     """
     wf = _hosted_workflow()
     setup = next(st for st in wf["jobs"]["classes"]["steps"]
                  if st.get("name") == "Install zsh")
-    check("zsh setup has a bounded step deadline of at most eight minutes",
-          0 < setup.get("timeout-minutes", 0) <= 8)
+    # Three download attempts, one refresh, one unpack; each timeout also
+    # permits five seconds to kill its process group. Reserve one minute for
+    # shell/setup overhead. Backoff occurs after attempts one and two only.
+    check("hosted zsh setup uses the shared installer", setup["run"] == "ops/ci-install-zsh.sh")
+    installer_source = (REPO / "ops/ci-install-zsh.sh").read_text()
+    backoff = int(setup["env"]["ZSH_RETRY_BACKOFF"])
+    attempts = len(re.search(r"for attempt in ([0-9 ]+); do", installer_source).group(1).split())
+    download, refresh, unpack = [int(grace) + int(limit) for grace, limit in
+                                re.findall(r"timeout --kill-after=(\d+)s (\d+)s", installer_source)]
+    budget_seconds = attempts * download + refresh + unpack + sum(range(1, attempts)) * backoff + 60
+    deadline_minutes = (budget_seconds + 59) // 60
+    check("zsh setup deadline equals its retry budget plus bounded overhead",
+          setup.get("timeout-minutes") == deadline_minutes,
+          {"expected": deadline_minutes, "actual": setup.get("timeout-minutes")})
+    cache = next(st for st in wf["jobs"]["classes"]["steps"]
+                 if st.get("name") == "Restore zsh package archives")
+    check("zsh archives use a pinned cache action and the install directory",
+          cache["uses"] == "actions/cache@5a3ec84eff668545956fd18022155c47e93e2684"
+          and cache["with"]["path"] == setup["env"]["ZSH_ARCHIVE_DIR"] + "/*.deb"
+          and wf["jobs"]["classes"]["runs-on"] == "ubuntu-24.04")
+    canary = _hosted_workflow("main-canary.yml")["jobs"]["classes"]["steps"]
+    canary_setup = next(st for st in canary if st.get("name") == "Install zsh")
+    check("PR and canary execute the same bounded zsh installer",
+          all(canary_setup[k] == setup[k] for k in ("run", "env", "timeout-minutes")))
     with tempfile.TemporaryDirectory(prefix="ci-zsh-setup-") as tmp:
         fixture = pathlib.Path(tmp)
         sudo = fixture / "sudo"
@@ -1546,9 +1569,10 @@ except subprocess.TimeoutExpired:
             env = scrubbed_env()
             env.update(PATH=str(fixture) + os.pathsep + os.environ["PATH"],
                        CI_SETUP_CALLS=str(log), CI_SETUP_FIXTURE=mode,
-                       CI_SETUP_DEADLINES=str(deadlines_log), ZSH_RETRY_BACKOFF="0")
+                       CI_SETUP_DEADLINES=str(deadlines_log), ZSH_RETRY_BACKOFF="0",
+                       ZSH_ARCHIVE_DIR=str(fixture / "archives"))
             try:
-                process = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", setup["run"]],
+                process = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", installer_source],
                                            cwd=fixture, env=env, stdout=subprocess.PIPE,
                                            stderr=subprocess.PIPE, text=True, start_new_session=True)
                 stdout, stderr = process.communicate(timeout=8)
@@ -1579,6 +1603,10 @@ except subprocess.TimeoutExpired:
                           "Acquire::http::Timeout=15", "Acquire::https::Timeout=15",
                           "DPkg::Lock::Timeout=30"))
                       for args in calls), calls)
+            check(f"zsh setup {mode} uses cached archives without recommends",
+                  all("Dir::Cache::archives=" + str(fixture / "archives") in args
+                      and "--no-install-recommends" in args
+                      for args in calls if "update" not in args), calls)
             check(f"zsh setup {mode} requires the zsh package when installing",
                   all("zsh" in args for args in calls if "update" not in args), calls)
             check(f"zsh setup {mode} never unpacks without a completed download",
