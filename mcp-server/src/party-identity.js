@@ -9,10 +9,18 @@
 //     prior value, so any correction can be reversed from the record;
 //   - base_version guards the party exactly as update-party-contact does;
 //   - an org change follows rule 8cddc6ad. A shared org row is never renamed,
-//     because renaming it would move every other person on it to a firm they
-//     may not work for. Only the target is re-pointed, and the others are read
-//     back afterwards; if any moved, the call refuses and the transaction rolls
-//     back.
+//     because renaming it would re-label every other record on it. "Shared" is
+//     counted by the database across EVERY foreign key into party
+//     (party_reference_counts, migration 0851), not only party.org_id: a deal
+//     participant, a client or vendor row, or a party link on the org row makes
+//     it shared too. Only the target is re-pointed, and the other people on the
+//     old org are read back afterwards; if any moved, the call refuses and the
+//     transaction rolls back.
+//
+// Organisation identity is the database's org_identity_key(), the same key the
+// unique index party_org_identity_uniq enforces; minting goes through
+// org_party_id(), the shared find-or-create (rule a8c55a47: one job, one code
+// path). Neither is re-implemented here.
 import { ToolError } from "./tool-error.js";
 
 export const PARTY_IDENTITY_FIELDS = Object.freeze(["name", "org", "state"]);
@@ -49,28 +57,46 @@ export function normalizeIdentityFields(fields) {
   return clean;
 }
 
-const same = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
-
-// Rule 8cddc6ad as a pure decision. Order matters:
-//   1. the firm is already right            -> unchanged
-//   2. a live org already carries the name  -> re-point to it (never mint a twin)
-//   3. only the target rides the old row    -> rename the row in place
-//   4. the row is shared, or there is none  -> mint a new org, re-point the target
-export function planOrgCorrection({ currentOrg, newName, othersOnOrg, existing }) {
+// Rule 8cddc6ad as a pure decision. Inputs are already resolved by the database:
+// `existing` is every OTHER live org whose org_identity_key equals the new
+// name's, `sameIdentity` says the new name is only a re-spelling of the current
+// org (same key), and `shared` says something other than the target refers to
+// the current org row. Order matters:
+//   1. the firm is already spelled right     -> unchanged
+//   2. a live org already is that firm       -> re-point to it (never mint a twin)
+//   3. a re-spelling of the same firm        -> rename in place when unshared;
+//                                               refuse when shared (a twin cannot
+//                                               be minted under the identity index,
+//                                               and a rename would re-label others)
+//   4. nothing else refers to the old row    -> rename the row in place
+//   5. the row is shared, or there is none   -> mint the org, re-point the target
+export function planOrgCorrection({ currentOrg, newName, existing, sameIdentity, shared }) {
   if (currentOrg && currentOrg.name === newName) return { mode: "unchanged", org_id: currentOrg.id };
-  const matches = existing.filter(o => same(o.name, newName) && o.id !== currentOrg?.id);
-  if (matches.length > 1) throw new ToolError({ error: "org_ambiguous", candidates: matches,
-    hint: "several live orgs carry that name; merge them first, then correct this party" });
-  if (matches.length === 1) return { mode: "repoint_existing", org_id: matches[0].id };
-  if (currentOrg && othersOnOrg.length === 0) return { mode: "rename_in_place", org_id: currentOrg.id };
+  if (existing.length > 1) throw new ToolError({ error: "org_ambiguous", candidates: existing,
+    hint: "several live orgs carry that identity; merge them first, then correct this party" });
+  if (existing.length === 1) return { mode: "repoint_existing", org_id: existing[0].id };
+  if (currentOrg && sameIdentity) {
+    if (shared) throw new ToolError({ error: "shared_org_respelling", org: currentOrg, wanted: newName,
+      hint: "the new name is a re-spelling of a shared org row; renaming it re-labels every record on it (rule 8cddc6ad) and a second row with the same identity cannot exist. Correct the org row itself only after confirming the spelling holds for all of them." });
+    return { mode: "rename_in_place", org_id: currentOrg.id };
+  }
+  if (currentOrg && !shared) return { mode: "rename_in_place", org_id: currentOrg.id };
   return { mode: "mint_and_repoint" };
 }
+
+const peopleOnOrg = async (c, orgId, exceptId) => (await c.query(
+  `select id, name from party where org_id=$1 and id is distinct from $2
+      and merged_into is null and deleted_at is null order by name`, [orgId, exceptId])).rows;
+
+const referenceCounts = async (c, partyId, exceptId) => (await c.query(
+  "select source, n from party_reference_counts($1,$2)", [partyId, exceptId]))
+  .rows.map(r => ({ source: r.source, n: Number(r.n) }));
 
 export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, resolvePartyForWrite }) {
   return {
     "correct-party-identity": {
       write: true,
-      description: "Correct a party's IDENTITY from a verified finding: name spelling, firm (org) and state. The companion to update-party-contact, which handles contact facts only. Per rule 578fdd91 enrichment applies its corrections rather than parking them as proposals, but only when identity is confirmed (high or medium confidence with a second corroborating field) and the value is one clean value from a re-verifiable source. source is REQUIRED, and every changed field writes an event with its prior value, so each correction can be undone. base_version is the PARTY's version from a fresh read. ORG CHANGES FOLLOW RULE 8cddc6ad: a shared org row is never renamed. If a live org already carries the corrected name the party is re-pointed to it; if only this party rides the current org row, that row is renamed in place; otherwise a new org is minted and only this party is re-pointed. The other parties on the old org are read back and returned as `untouched`. Placeholder guard: a CARR agent's own number or a carr.us address is refused.",
+      description: "Correct a party's IDENTITY from a verified finding: name spelling, firm (org) and state. The companion to update-party-contact, which handles contact facts only. Per rule 578fdd91 enrichment applies its corrections rather than parking them as proposals, but only when identity is confirmed (high or medium confidence with a second corroborating field) and the value is one clean value from a re-verifiable source. source is REQUIRED, and every changed field writes an event with its prior value, so each correction can be undone (v_party_identity_correction lists them). base_version is the PARTY's version from a fresh read. ORG CHANGES FOLLOW RULE 8cddc6ad: a shared org row is never renamed. Sharing is counted across every foreign key into the org row, not only other people on it. If a live org already has the corrected identity the party is re-pointed to it; if nothing but this party refers to the current org row, that row is renamed in place; otherwise a new org is minted and only this party is re-pointed. The other people on the old org are read back and returned as `untouched`, and an old org left with no references is reported as `old_org_left_empty`. An ORG party's own name (fields.name) is refused while people are attached to it, naming them. Placeholder guard: a CARR agent's own number or a carr.us address is refused.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
         party: { type: "string", description: "P-#### ref, a role ref (V-/C-/L-/T-), or a name" },
@@ -97,11 +123,35 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
             throw new ToolError({ error: "org_on_org_party",
               hint: "an org party has no firm; correct its own name with fields.name" });
 
-          const event = (subjectId, field, oldValue, newValue, extra = {}) =>
+          // old/new carry the field's value plus any context keys; the view reads
+          // old_value->field and new_value->field, and new_value->>'mode'.
+          const event = (subjectId, field, oldValue, newValue, { oldExtra = {}, newExtra = {} } = {}) =>
             writeEvent(c, actor, "correct-party-identity", "party", subjectId, {
-              field, old: { [field]: oldValue }, new: { [field]: newValue, ...extra },
+              field, old: { [field]: oldValue, ...oldExtra }, new: { [field]: newValue, ...newExtra },
               agent_rationale: `source: ${source}`, idempotency_key: args.idempotency_key });
+          const lockIdentity = key => c.query("select pg_advisory_xact_lock(hashtext($1))", [`org_identity:${key}`]);
           const updated = [];
+
+          // An org party's own name: the rename IS the correction, so the only
+          // question is who else it would re-label. People employed there would
+          // silently move to the new name with it.
+          if (before.kind === "org" && fields.name !== undefined && fields.name !== before.name) {
+            await c.query("select id from party where id=$1 for update", [partyId]);
+            const people = await peopleOnOrg(c, partyId, partyId);
+            if (people.length) throw new ToolError({ error: "shared_org_rename", attached: people,
+              hint: "renaming this org re-labels every person on it (rule 8cddc6ad); correct each person's org instead" });
+            const k = (await c.query("select org_identity_key($1) as new_key, org_identity_key($2) as cur_key",
+              [fields.name, before.name])).rows[0];
+            if (k.new_key && k.new_key !== k.cur_key) {
+              await lockIdentity(k.new_key);
+              const taken = (await c.query(
+                `select id, name from party where kind='org' and merged_into is null and deleted_at is null
+                    and org_identity_key(name)=$1 and id<>$2`, [k.new_key, partyId])).rows;
+              if (taken.length) throw new ToolError({ error: "org_name_taken", existing: taken,
+                hint: "another live org already has this identity; this is a duplicate to merge, not a rename" });
+            }
+          }
+
           for (const k of ["name", "state"]) {
             if (fields[k] === undefined || fields[k] === before[k]) continue;
             await c.query(`update party set ${k}=$1, updated_by=$2 where id=$3`, [fields[k], actor.id, partyId]);
@@ -112,49 +162,63 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
           let org;
           if (fields.org !== undefined) {
             const currentOrg = before.org_id ? { id: before.org_id, name: before.org_name } : null;
-            // Lock the org row BEFORE counting: attaching a party to it takes a
-            // FOR KEY SHARE lock on this row, so no one can join between the
-            // count and a rename in place.
+            // Lock the org row BEFORE counting: attaching anything to it by
+            // foreign key takes a FOR KEY SHARE lock on this row, so nothing can
+            // join between the count and a rename in place.
             if (currentOrg) await c.query("select id from party where id=$1 for update", [currentOrg.id]);
-            const othersOnOrg = currentOrg ? (await c.query(
-              `select id, name from party where org_id=$1 and id<>$2
-                  and merged_into is null and deleted_at is null order by name`,
-              [currentOrg.id, partyId])).rows : [];
-            const existing = (await c.query(
-              `select id, name from party where kind='org' and merged_into is null
-                  and deleted_at is null and lower(name)=lower($1)`, [fields.org])).rows;
-            const plan = planOrgCorrection({ currentOrg, newName: fields.org, othersOnOrg, existing });
-            org = { mode: plan.mode, from: currentOrg, attached_before: othersOnOrg.length + 1 };
+            const k = (await c.query("select org_identity_key($1) as new_key, org_identity_key($2) as cur_key",
+              [fields.org, currentOrg?.name ?? null])).rows[0];
+            if (!k.new_key) throw new ToolError({ error: "invalid_org", got: fields.org,
+              hint: "that string names no organisation (a placeholder such as TBD or unknown)" });
+            const sameIdentity = Boolean(currentOrg) && k.new_key === k.cur_key;
+            // Serialise concurrent corrections toward the same firm, so two calls
+            // cannot both decide to mint it.
+            await lockIdentity(k.new_key);
+            const existing = sameIdentity ? [] : (await c.query(
+              `select id, name from party where kind='org' and merged_into is null and deleted_at is null
+                  and org_identity_key(name)=$1 and id is distinct from $2 for update`,
+              [k.new_key, currentOrg?.id ?? null])).rows;
+            const references = currentOrg ? await referenceCounts(c, currentOrg.id, partyId) : [];
+            const others = currentOrg ? await peopleOnOrg(c, currentOrg.id, partyId) : [];
+            const plan = planOrgCorrection({ currentOrg, newName: fields.org, existing, sameIdentity,
+              shared: references.length > 0 });
+            org = { mode: plan.mode, from: currentOrg, references_before: references };
+
             if (plan.mode === "rename_in_place") {
               await c.query("update party set name=$1, updated_by=$2 where id=$3",
                 [fields.org, actor.id, plan.org_id]);
-              await event(plan.org_id, "name", currentOrg.name, fields.org, { renamed_for: partyId });
+              await event(plan.org_id, "name", currentOrg.name, fields.org,
+                { newExtra: { mode: plan.mode, renamed_for: partyId } });
               org.org_id = plan.org_id;
             } else if (plan.mode === "repoint_existing" || plan.mode === "mint_and_repoint") {
-              const orgId = plan.org_id ?? (await c.query(
-                "insert into party (kind,name,created_by,updated_by) values ('org',$1,$2,$2) returning id",
-                [fields.org, actor.id])).rows[0].id;
-              if (!plan.org_id) await event(orgId, "name", null, fields.org, { minted_for: partyId });
+              let orgId = plan.org_id;
+              if (!orgId) {
+                orgId = (await c.query("select org_party_id($1,$2) as id", [fields.org, actor.id])).rows[0].id;
+                await event(orgId, "name", null, fields.org, { newExtra: { mode: plan.mode, minted_for: partyId } });
+              }
               await c.query("update party set org_id=$1, updated_by=$2 where id=$3", [orgId, actor.id, partyId]);
-              await event(partyId, "org_id", currentOrg ? `${currentOrg.id} (${currentOrg.name})` : null,
-                `${orgId} (${fields.org})`, { mode: plan.mode });
+              await event(partyId, "org_id", currentOrg?.id ?? null, orgId, {
+                oldExtra: { org_name: currentOrg?.name ?? null },
+                newExtra: { org_name: fields.org, mode: plan.mode } });
               org.org_id = orgId;
+              // Rule 8cddc6ad step 4: name the untouched people and prove they
+              // still read what they read before.
+              if (others.length) {
+                const after = new Map((await c.query(
+                  "select id, org_id from party where id = any($1::uuid[])",
+                  [others.map(p => p.id)])).rows.map(r => [r.id, r.org_id]));
+                const orgName = (await c.query("select name from party where id=$1", [currentOrg.id])).rows[0]?.name;
+                const moved = others.filter(p => after.get(p.id) !== currentOrg.id);
+                if (moved.length || orgName !== currentOrg.name)
+                  throw new ToolError({ error: "untouched_party_moved", moved, org_name_now: orgName ?? null });
+                org.untouched = others.map(p => ({ id: p.id, name: p.name, org_id: currentOrg.id }));
+              }
+              if (currentOrg && !(await referenceCounts(c, currentOrg.id, null)).length)
+                org.old_org_left_empty = currentOrg;
             } else {
               org.org_id = plan.org_id;
             }
             if (plan.mode !== "unchanged") updated.push("org");
-            // Rule 8cddc6ad step 4: name the untouched parties and prove they
-            // still read what they read before.
-            if (othersOnOrg.length) {
-              const after = new Map((await c.query(
-                "select id, org_id from party where id = any($1::uuid[])",
-                [othersOnOrg.map(p => p.id)])).rows.map(r => [r.id, r.org_id]));
-              const orgName = (await c.query("select name from party where id=$1", [currentOrg.id])).rows[0]?.name;
-              const moved = othersOnOrg.filter(p => after.get(p.id) !== currentOrg.id);
-              if (moved.length || orgName !== currentOrg.name)
-                throw new ToolError({ error: "untouched_party_moved", moved, org_name_now: orgName ?? null });
-              org.untouched = othersOnOrg.map(p => ({ id: p.id, name: p.name, org_id: currentOrg.id }));
-            }
           }
           return { ok: true, party_id: partyId, updated, ...(org ? { org } : {}),
             hopped_to_survivor: hopped || undefined };
