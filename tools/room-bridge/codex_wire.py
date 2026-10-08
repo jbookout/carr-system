@@ -46,6 +46,9 @@ class Wire:
         # An optional whole-call deadline (time.monotonic()). Each read waits
         # at most what is left of it, so many short reads cannot add up past it.
         self.deadline: float | None = None
+        # The thread this call opened or resumed, kept so a timeout can still
+        # report it and the desk does not open a second thread on retry.
+        self.thread_id: str | None = None
         self.sock.settimeout(timeout)
         self.sock.connect(path)
         self.buf = bytearray()
@@ -192,7 +195,7 @@ def run_turn(
         return _run_turn(wire, task, thread_id=thread_id, cwd=cwd, model=model,
                          sandbox=sandbox, approval_policy=approval_policy, timeout=timeout)
     except TimeoutError:
-        return {"status": "timed_out", "thread_id": thread_id,
+        return {"status": "timed_out", "thread_id": getattr(wire, "thread_id", None) or thread_id,
                 "detail": f"no answer within {deadline_s if deadline_s is not None else timeout:.0f}s"}
 
 
@@ -227,6 +230,7 @@ def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
         wire.send_json({"id": "thread-open", "method": "thread/start", "params": params})
     opened = wait_response(wire, "thread-open", transcript)
     tid = (opened.get("thread") or {}).get("id") or thread_id
+    wire.thread_id = tid
 
     turn_params = {"threadId": tid, "input": [{"type": "text", "text": task}],
                    "approvalPolicy": "never"}

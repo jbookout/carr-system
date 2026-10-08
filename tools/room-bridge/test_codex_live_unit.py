@@ -53,9 +53,11 @@ def check(label: str, fn) -> None:
 class FakeAppServer:
     """Speaks the server half: upgrade, then answer the four messages."""
 
-    def __init__(self, path: str, answer: str = "the live seat answered"):
+    def __init__(self, path: str, answer: str = "the live seat answered",
+                 silent_turn: bool = False):
         self.path = path
         self.answer = answer
+        self.silent_turn = silent_turn
         self.seen: list[dict] = []
         try:
             os.unlink(path)
@@ -157,6 +159,8 @@ class FakeAppServer:
                     self._send(conn, {"id": msg["id"], "result": {"thread": {"id": tid}}})
                 elif method == "turn/start":
                     self._send(conn, {"id": msg["id"], "result": {"turn": {"id": "turn-1"}}})
+                    if self.silent_turn:
+                        continue
                     self._send(conn, {"method": "item/completed", "params": {
                         "item": {"type": "agentMessage", "text": self.answer}}})
 
@@ -299,6 +303,25 @@ def main() -> int:
 
     check("a silent live Codex seat stops at the caller's whole-call limit",
           a_silent_seat_stops_at_the_callers_limit)
+
+    def a_turn_that_times_out_keeps_its_new_thread():
+        """PR 1660 re-review: a timeout after thread/start returned the input
+        thread id (None for a fresh desk), so a retry opened a second thread."""
+        stalled = str(root / "stalled.sock")
+        srv = FakeAppServer(stalled, silent_turn=True)
+        try:
+            reg.register("cx-stall", "codex-live", socket=stalled, cwd=str(root),
+                         model="gpt-5.1-codex-mini", effort="medium")
+            row = dispatch.dispatch("cx-stall", "do the thing", registry=reg,
+                                    results_path=results, codex_timeout_s=1)
+            assert row["status"] == "timed_out", row
+            assert row["thread_id"] == "thread-live-0001", row
+            assert reg.entries()["cx-stall"].get("thread_id") == "thread-live-0001", reg.entries()["cx-stall"]
+        finally:
+            srv.close()
+
+    check("a live Codex turn that times out keeps the thread it started",
+          a_turn_that_times_out_keeps_its_new_thread)
 
     tmp.cleanup()
     print()
