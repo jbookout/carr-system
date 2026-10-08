@@ -31,4 +31,3 @@ left join lateral (
   select * from v_lead_stage_transition where lead_id=b.id order by mutation_order desc limit 100
  ) e
 ) h on true;
-
