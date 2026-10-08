@@ -486,6 +486,52 @@ found = drift.delivery_state([
 ])
 check("extra-key additionalContext does not count as loaded",
       found[1] == [], found)
+
+with tempfile.TemporaryDirectory(prefix="malformed-receipt-stop-") as stop_tmp:
+    stop_transcript = Path(stop_tmp) / "session.jsonl"
+    standing_call = {"type": "assistant", "message": {"role": "assistant", "content": [{
+        "type": "tool_use", "id": "standing-exact", "name": "mcp__carr__standing_context",
+        "input": {},
+    }]}, "sessionId": "session-exact"}
+    standing_value = {"rule_delivery": {
+        "mode": "enforced", "declared_packs": [], "would_omit": EXPECTED_IDS,
+    }}
+
+    def standing_result(value):
+        return {"type": "user", "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "standing-exact", "content": value,
+        }]}, "sessionId": "session-exact"}
+
+    for malformed_schema in ({}, []):
+        malformed_receipt = receipt(output)
+        malformed_receipt["schema"] = malformed_schema
+        for label, malformed_record in (
+                ("hook attachment", claude_attachment(json.dumps(malformed_receipt))),
+                ("service marker", standing_result({**standing_value, "schema": malformed_schema}))):
+            stop_records = [standing_call, standing_result(standing_value),
+                            claude_tool_call(), malformed_record]
+            stop_transcript.write_text("".join(json.dumps(record) + "\n" for record in stop_records))
+            audits = []
+            saved_audit, saved_stdin = drift.audit, sys.stdin
+            drift.audit = audits.append
+            sys.stdin = io.StringIO(json.dumps({
+                "hook_event_name": "Stop", "session_id": "session-exact",
+                "cwd": str(REPO), "transcript_path": str(stop_transcript),
+            }))
+            stdout = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(stdout):
+                    rc = drift.main()
+            finally:
+                drift.audit, sys.stdin = saved_audit, saved_stdin
+            verdict = json.loads(stdout.getvalue() or "{}")
+            check(f"Stop blocks missing pack with {label} schema {malformed_schema!r}",
+                  rc == 0 and verdict.get("decision") == "block"
+                  and "scheduled-automation" in verdict.get("reason", "")
+                  and len(audits) == 1
+                  and audits[0].get("missing") == ["scheduled-automation"]
+                  and not audits[0].get("error"), (verdict, audits))
+
 for record_type, message_role in (("user", "user"), ("assistant", "user"),
                                   ("user", "assistant")):
     forged = claude_tool_call()
@@ -1315,7 +1361,8 @@ DISPATCH_COMMANDS = (
     'python3 tools/room-bridge/dispatch.py send codex-desk "fix the review"',
     'python3 ./tools/room-bridge/dispatch.py send codex-desk "fix the review"',
     '/Users/booko/carr-system/tools/room-bridge/dispatch.py send codex-desk "fix the review"',
-    './dispatch.py send codex-desk "fix the review"',
+    './tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    'python3 /Users/booko/carr-system/tools/room-bridge/dispatch.py send codex-desk "fix the review"',
     'python3 tools/room-bridge/dispatch.py --registry X send codex-desk "fix the review"',
     'python3 tools/room-bridge/dispatch.py --registry=X send codex-desk "fix the review"',
     'python3 tools/room-bridge/dispatch.py --results X send codex-desk "fix the review"',
@@ -1326,10 +1373,42 @@ DISPATCH_COMMANDS = (
     '/Users/booko/carr-system/bin/dot-relay send-job /tmp/dot-brief.txt',
     'python3 bin/dot-relay send-job /tmp/dot-brief.txt',
     'python3 "bin/dot-relay" --state-dir "job state" send-job /tmp/dot-brief.txt',
-    './dot-relay --credentials=x --state-dir=y send-job /tmp/dot-brief.txt',
+    './bin/dot-relay --credentials=x --state-dir=y send-job /tmp/dot-brief.txt',
     'bin/dot-relay --state-dir x --credentials y send-job /tmp/dot-brief.txt',
+    'cd /Users/booko/carr-system && python3 tools/room-bridge/dispatch.py --registry X send codex-desk x',
+    'true; /Users/booko/carr-system/bin/dot-relay send-job /tmp/dot-brief.txt',
+    'true | ./bin/dot-relay send-job /tmp/dot-brief.txt',
+    '(python3 tools/room-bridge/dispatch.py send codex-desk x)',
+    '\n  bin/dot-relay send-job /tmp/dot-brief.txt',
+    "'tools/room-bridge/dispatch.py' --registry 'desk registry.json' send codex-desk x",
+    '"/Users/booko/carr-system/bin/dot-relay" --credentials=x send-job brief.txt',
+) + tuple(
+    f'{interpreter} {executable} {subcommand} report'
+    for interpreter in ('/usr/bin/python3', '/usr/local/bin/python3',
+                        '/opt/homebrew/bin/python3', '.venv/bin/python3', './.venv/bin/python3',
+                        '"python3"')
+    for executable, subcommand in (('tools/room-bridge/dispatch.py', 'send'),
+                                  ('bin/dot-relay', 'send-job'))
 )
 NON_DISPATCH_COMMANDS = (
+    'python3 /tmp/unrelated/dispatch.py send report',
+    'python3 /tmp/unrelated/tools/room-bridge/dispatch.py send report',
+    'rg dispatch.py send docs.txt',
+    'rg tools/room-bridge/dispatch.py send docs.txt',
+    'echo dot-relay send-job',
+    'echo bin/dot-relay send-job',
+    'echo /Users/booko/carr-system/bin/dot-relay send-job',
+    'echo python3 tools/room-bridge/dispatch.py send report',
+    'echo "bin/dot-relay send-job"',
+    'echo "example; bin/dot-relay send-job report"',
+    "echo 'example && python3 tools/room-bridge/dispatch.py send report'",
+    r'echo example\; bin/dot-relay send-job report',
+    'python3 /tmp/unrelated/bin/dot-relay send-job report',
+    '/tmp/unrelated/bin/dot-relay send-job report',
+    './dispatch.py send report',
+    'dispatch.py send report',
+    './dot-relay send-job report',
+    'dot-relay send-job report',
     'python3 tools/room-bridge/dispatch.py desks',
     'python3 tools/room-bridge/dispatch.py --registry X desks',
     'python3 tools/room-bridge/dispatch.py --registry send desks',

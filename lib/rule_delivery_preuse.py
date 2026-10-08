@@ -484,6 +484,7 @@ def receipt_from_envelope(record: object) -> dict | None:
             and len(attachment["content"]) == 1):
         row = _json_text(attachment["content"][0])
         if (row and row.get("client") == "claude"
+                and isinstance(row.get("schema"), str)
                 and row.get("schema") in {RECEIPT_SCHEMA, ROUTE_RECEIPT_SCHEMA}
                 and attachment.get("hookEvent") == "PreToolUse"
                 and attachment.get("hookName") == f"PreToolUse:{row.get('tool_name')}"
@@ -649,7 +650,8 @@ def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
 
 def contains_receipt_marker(value: object) -> bool:
     if isinstance(value, dict):
-        return (value.get("schema") in {RECEIPT_SCHEMA, ROUTE_RECEIPT_SCHEMA}
+        return (isinstance(value.get("schema"), str)
+                and value.get("schema") in {RECEIPT_SCHEMA, ROUTE_RECEIPT_SCHEMA}
                 or value.get("schema") == SEMANTIC_RECEIPT_SCHEMA
                 or value.get("schema") == POSTWRITE_RECEIPT_SCHEMA
                 or any(contains_receipt_marker(item) for item in value.values()))
