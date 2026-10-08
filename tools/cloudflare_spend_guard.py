@@ -563,7 +563,7 @@ def _subdomain(http, cfg, token, script, body=None):
 
 
 def _disable(http, cfg, token, scripts, receipt, save, now) -> list:
-    """Write-ahead: the prior state is fsynced as pending before each POST, then confirmed by read-back."""
+    """Persist the original prior state before the first POST and confirm each disable by read-back."""
     errors = []
     for script in scripts:
         try:
@@ -687,7 +687,7 @@ def run(cfg: dict, *, http, token, now: datetime, state_dir=None, spawn_reporter
 
 
 def restore(cfg: dict, *, http, token, now: datetime, state_dir=None, ack_quarantine=None) -> dict:
-    """Run by a human: re-enable what the guard disabled, lift the hold, and leave E2E held until a fresh run."""
+    """Re-enable what the guard disabled, lift the hold, and leave E2E held until a fresh run."""
     state = _state_dir(cfg, state_dir)
     token = clean_token(token)
     result: dict = {'restored': False, 'errors': [], 'notes': [], 'quarantined_file': None, 'message': ''}
@@ -959,7 +959,7 @@ def _fast_period(cfg, receipt, token, http, now) -> datetime:
 
 
 def fast(cfg: dict, *, http, token, now: datetime, state_dir=None, spawn_reporter=None) -> dict:
-    """The 15-minute poll: one GraphQL request; writes only when the verdict, hold or action changes."""
+    """Run the 15-minute GraphQL poll, update the receipt, and report new holds or runaways."""
     state = _state_dir(cfg, state_dir)
     raw, token = token, clean_token(token)
     spawn = _spawner(spawn_reporter)
@@ -1052,7 +1052,7 @@ def map_services(cfg: dict, *, http, token, now: datetime) -> list:
 
 
 def e2e_gate(cfg: dict, *, now: datetime, state_dir=None):
-    """(allowed, reason). Every E2E dispatch calls this first; anything but a fresh, data-backed CLEAR holds."""
+    """Return (allowed, reason); anything but a fresh, data-backed CLEAR holds."""
     try:
         receipt = read_receipt(_state_dir(cfg, state_dir))
     except (ValueError, OSError) as exc:

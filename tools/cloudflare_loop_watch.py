@@ -20,7 +20,7 @@ whatever happens):
        over-budget  its RunBudget ledger is exhausted while it is alive
        deadline     its ledger deadline passed (plus a short grace)
        respawn      the same runner started more than N times in M minutes
-       time-bound   alive longer than its profile's bound plus grace
+       time-bound   alive longer than its matching watch rule's bound plus grace
      at most 3 kills per run and 10 per hour; past a cap it alerts once and
      leaves the rest for a human;
   5. marks a killed run KILLED in its ledger (state.json plus the ledger's
