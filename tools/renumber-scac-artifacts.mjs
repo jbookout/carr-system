@@ -4,7 +4,8 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
-const [repo, base, mapping] = process.argv.slice(2);
+const [repo, base, mapping, mode] = process.argv.slice(2);
+const preview = mode === '--preflight' ? JSON.parse(readFileSync(0, 'utf8')) : null;
 const renames = JSON.parse(mapping);
 process.chdir(repo);
 const load = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -14,16 +15,24 @@ const chainPath = 'ops/config/scac-registry-chain.json';
 const fixturePath = 'ops/config/scac-registry-source-inventory-fixtures.v1.json';
 const sealPath = 'ops/config/scac-registry-full-entry-set-seals.json';
 let chain = main(chainPath);
-const branch = load(chainPath);
-if (JSON.stringify(branch.versions.slice(0, chain.versions.length)) !== JSON.stringify(chain.versions))
+const branch = preview?.chain ?? load(chainPath);
+const moduleAt = path => import(pathToFileURL(resolve(repo, path)).href);
+const {appendSuccessor, preservesRegistryChainHistory} = await moduleAt('ops/registry-chain.mjs');
+if (!preservesRegistryChainHistory(chain, branch))
   throw new Error('applied registry history differs from main; rebase its successor first');
 const pending = branch.versions.slice(chain.versions.length);
 if (!pending.length) throw new Error('no pending registry successor owns these generated outputs');
-const moduleAt = path => import(pathToFileURL(resolve(repo, path)).href);
 const {historicalRows} = await moduleAt('ops/registry-history.mjs');
-const {appendSuccessor} = await moduleAt('ops/registry-chain.mjs');
+const rows = pending.map(row => preview ? historicalRows(row.number, preview.fixture) : historicalRows(row.number));
+if (preview) {
+  for (const contracts of rows) for (const row of contracts) {
+    const proposed = preview.source_digests[row.source_locator];
+    if (Object.hasOwn(preview.source_digests, row.source_locator) && proposed !== row.source_digest)
+      throw new Error(`renumbering changes source contract ${row.source_locator}; refresh it and its dependent seals through the owning generation path first`);
+  }
+  process.exit(0);
+}
 const {writeIntegratedArtifact} = await moduleAt('ops/integration-generation.mjs');
-const rows = pending.map(row => historicalRows(row.number));
 const allocated = name => renames[name] || name;
 const originalFixture = readFileSync(fixturePath);
 const originalChain = readFileSync(chainPath);

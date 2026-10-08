@@ -12,7 +12,7 @@ The serialized merge queue runs these commands on its owned PR branch:
   gh pr checks <PR> --watch
 Skip add/commit when the summary's changed_paths is empty. CI remains the gate.
 
---dry-run prints the plan without writes or generators. --branch REF is a
+--dry-run prints the validated plan without writes or artifact generation. --branch REF is a
 read-only preview of that branch's delta over current main, even before rebase;
 requires_rebase records that limitation. It never checks out or pushes the REF.
 
@@ -36,9 +36,12 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import difflib
+import hashlib
 import importlib.util
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -95,7 +98,7 @@ def applied_names(snapshot: bytes | None) -> set[str]:
     return set(ledger)
 
 
-def rewrite(content: bytes, before: bytes | None, renames: dict[str, str], main_names: set[str]) -> bytes:
+def rewrite(content: bytes, before: bytes | None, renames: dict[str, str], main_names: set[str], pending_identity: str | None = None) -> bytes:
     try:
         text = content.decode("utf-8")
         old_text = (before or b"").decode("utf-8")
@@ -105,10 +108,12 @@ def rewrite(content: bytes, before: bytes | None, renames: dict[str, str], main_
     for old, new in renames.items():
         slots.setdefault(old[:4], set()).add(new[:4])
     identities = set(renames) | main_names
+    filenames = re.compile(r"(?<![\w.-])(?:" + "|".join(re.escape(n) for n in sorted(identities, key=len, reverse=True)) + r")(?![\w-]|\.\w)")
     label_pattern = r"(?i:\bmigration(?:[ _-]?(?:number|slot|no|id))?[ \t:=\'\"#]+)(?:" + "|".join("0*" + str(int(n)) for n in slots) + r")(?![A-Za-z0-9_])"
-    pattern = re.compile("|".join(re.escape(n) for n in sorted(identities, key=len, reverse=True)) + "|" + label_pattern)
+    pattern = re.compile(filenames.pattern + "|" + label_pattern)
+    main_slots = {name[:4] for name in main_names}
 
-    def replace(match, *, labels):
+    def replace(match, *, labels, line_names):
         value = match[0]
         if value in renames:
             return renames[value]
@@ -116,6 +121,13 @@ def rewrite(content: bytes, before: bytes | None, renames: dict[str, str], main_
             return value
         label = re.fullmatch(r"(.*?)(\d+)", value)
         slot = f"{int(label[2]):04d}" if label else value
+        bound = {name for name in line_names if name[:4] == slot}
+        if pending_identity and pending_identity[:4] == slot:
+            bound.add(pending_identity)
+        if bound and bound <= main_names:
+            return value
+        if len(bound) > 1 or (not bound and slot in main_slots):
+            raise MigrationNumberError(f"ambiguous migration label {value}; use the full migration filename")
         choices = slots[slot]
         if len(choices) != 1:
             raise MigrationNumberError(f"ambiguous migration label {value}; use the full migration filename")
@@ -125,8 +137,9 @@ def rewrite(content: bytes, before: bytes | None, renames: dict[str, str], main_
     original, current = old_text.splitlines(keepends=True), text.splitlines(keepends=True)
     result: list[str] = []
     for tag, _, _, start, end in difflib.SequenceMatcher(None, original, current, autojunk=False).get_opcodes():
-        result.extend(pattern.sub(lambda m: replace(m, labels=tag != "equal"), line)
-                      for line in current[start:end])
+        for line in current[start:end]:
+            line_names = {m[0] for m in filenames.finditer(line)}
+            result.append(pattern.sub(lambda m: replace(m, labels=tag != "equal", line_names=line_names), line))
     return "".join(result).encode()
 
 
@@ -205,16 +218,20 @@ def plan(repo: Path, branch: str | None, generators: dict[str, list[str]]) -> Pl
             candidate = contents.get(path) or (blob(repo, head, path) if branch else read_file(repo, path))
             if candidate != before and not is_owned_file(path, before, candidate):
                 raise MigrationNumberError(f"applied registry history cannot be rewritten: {path}")
-        result.commands.append(["node", str(ROOT / "tools/renumber-scac-artifacts.mjs"), str(repo), base, json.dumps(result.renames)])
+        scac_command = ["node", str(ROOT / "tools/renumber-scac-artifacts.mjs"), str(repo), base, json.dumps(result.renames)]
+        result.commands.append(scac_command)
+        registry_inputs: dict[str, bytes] = {}
         for path in [*JSON_ARTIFACTS, "mcp-server/src/scac-mutation-registry.current.generated.js"]:
             content = contents.get(path) or (blob(repo, head, path) if branch else read_file(repo, path))
             if content is None:
                 raise MigrationNumberError(f"generated registry input is missing: {path}")
+            registry_inputs[path] = content
             result.generated[path] = rewrite(content, blob(repo, comparison, path), result.renames, set(main))
     for path, content in contents.items():
         if content is None:
             continue
-        transformed = rewrite(content, blob(repo, comparison, path), result.renames, set(main))
+        identity = Path(path).name if path.startswith("migrations/") and Path(path).name in pending else None
+        transformed = rewrite(content, blob(repo, comparison, path), result.renames, set(main), identity)
         output = f"migrations/{result.renames[Path(path).name]}" if path.startswith("migrations/") and Path(path).name in result.renames else path
         if scac and (path in JSON_ARTIFACTS or GENERATED_SQL.fullmatch(path) or RUNTIME.fullmatch(path)):
             if Path(path).name in pending or path in JSON_ARTIFACTS or RUNTIME.fullmatch(path):
@@ -249,6 +266,14 @@ def plan(repo: Path, branch: str | None, generators: dict[str, list[str]]) -> Pl
         result.generated[SNAPSHOT] = b""
         result.commands.append([sys.executable, "ops/migration-shadow.py", "--base", base, "--write"])
     result.commands.sort(key=lambda command: len(command) > 1 and command[1] == "ops/migration-shadow.py")
+    if scac:
+        proposed: dict[str, str | None] = {path: hashlib.sha256(content).hexdigest() for path, content in result.writes.items()}
+        proposed.update({path: None for path in result.generated})
+        proposed.update({f"migrations/{old}": None for old in result.renames})
+        inputs = {"chain": json.loads(registry_inputs[chain_path]),
+                  "fixture": json.loads(registry_inputs["ops/config/scac-registry-source-inventory-fixtures.v1.json"]),
+                  "source_digests": proposed}
+        run_generator(repo, [*scac_command, "--preflight"], json.dumps(inputs).encode())
     validate_integration_union(main, main | {allocated[name]: result.writes.get(f"migrations/{allocated[name]}", pending[name]) for name in pending})
     return result
 
@@ -265,10 +290,26 @@ await writeIntegratedArtifact(path,renderRuntimeProjection(frozenInventory(row.v
     return ["node", "--input-type=module", "-e", code, path]
 
 
+def run_generator(repo: Path, command: list[str], inputs: bytes | None = None) -> None:
+    with subprocess.Popen(command, cwd=repo, env=scrubbed_env(), stdin=subprocess.PIPE if inputs is not None else subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True) as process:
+        try:
+            _, stderr = process.communicate(input=inputs, timeout=1200)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        if process.returncode:
+            raise MigrationNumberError(f"generator failed ({command[0:2]}): {stderr.decode(errors='replace').strip()}")
+
+
 def apply(repo: Path, result: Plan) -> None:
     targets = set(result.writes) | set(result.generated) | {f"migrations/{old}" for old in result.renames} | set(result.immutable)
     validate_outputs(repo, targets)
     backup = {p: read_file(repo, p) if (repo / p).exists() else None for p in targets}
+    complete = False
     try:
         for path, content in result.writes.items():
             target = repo / path
@@ -280,9 +321,7 @@ def apply(repo: Path, result: Plan) -> None:
             if path.startswith("migrations/") and (repo / path).exists():
                 (repo / path).unlink()
         for command in result.commands:
-            generated = subprocess.run(command, cwd=repo, env=scrubbed_env(), capture_output=True, timeout=1200)
-            if generated.returncode:
-                raise MigrationNumberError(f"generator failed ({command[0:2]}): {generated.stderr.decode(errors='replace').strip()}")
+            run_generator(repo, command)
         for path, content in result.immutable.items():
             if not (repo / path).is_file() or read_file(repo, path) != content:
                 raise MigrationNumberError(f"generator changed an applied main migration: {path}")
@@ -299,15 +338,16 @@ def apply(repo: Path, result: Plan) -> None:
                     raise MigrationNumberError(f"generator did not emit the allocated references: {path}")
         if git(repo, "rev-parse", "origin/main").decode().strip() != result.base:
             raise MigrationNumberError("origin/main advanced during renumbering; fetch and rebase again")
-    except (OSError, subprocess.SubprocessError, MigrationNumberError):
-        for path, previous in backup.items():
-            target = repo / path
-            if previous is None:
-                if target.exists():
-                    target.unlink()
-            else:
-                target.write_bytes(previous)
-        raise
+        complete = True
+    finally:
+        if not complete:
+            for path, previous in backup.items():
+                target = repo / path
+                if previous is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    target.write_bytes(previous)
 
 
 def main() -> int:
@@ -317,6 +357,10 @@ def main() -> int:
     parser.add_argument("--branch", help="revision to preview without checkout; requires --dry-run")
     parser.add_argument("--generator", nargs=2, action="append", default=[], metavar=("PATH", "JSON_ARGV"))
     args = parser.parse_args()
+    def interrupted(signum, _frame):
+        raise KeyboardInterrupt(f"renumbering cancelled by signal {signum}")
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, interrupted)
     try:
         if args.branch and not args.dry_run:
             raise MigrationNumberError("--branch requires --dry-run")
@@ -331,9 +375,9 @@ def main() -> int:
             apply(args.repo.resolve(), result)
         print(json.dumps(result.summary(args.dry_run), indent=2, sort_keys=True))
         return 0
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        print(json.dumps(dict(schema="migration-renumber/v1", error=str(exc), renames={}), sort_keys=True))
-        return 1
+    except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
+        print(json.dumps(dict(schema="migration-renumber/v1", error=str(exc) or "renumbering cancelled", renames={}), sort_keys=True))
+        return 130 if isinstance(exc, KeyboardInterrupt) else 1
 
 
 if __name__ == "__main__":
