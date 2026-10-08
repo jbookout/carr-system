@@ -88,6 +88,27 @@ else:
                 self.assertEqual(proc.returncode, 3, proc.stderr)
                 self.assertFalse(self.trace.exists())
 
+    def test_inherited_effort_override_refused_before_cli(self):
+        self.configure()
+        for effort in ("low", "medium", "high", "max", "invalid"):
+            with self.subTest(effort=effort):
+                proc = self.run_receiver(CLAUDE_CODE_EFFORT_LEVEL=effort)
+                self.assertEqual(proc.returncode, 3, proc.stderr)
+                outcome = json.loads(proc.stdout)
+                self.assertEqual(outcome["status"], "failed")
+                self.assertEqual(outcome["detail"], "remote_effort_override_refused")
+                self.assertNotIn("effort", outcome)
+                self.assertFalse(self.trace.exists(), "effort override reached the CLI")
+
+    def test_empty_effort_override_uses_desk_effort(self):
+        self.configure()
+        proc = self.run_receiver(CLAUDE_CODE_EFFORT_LEVEL="")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["effort"], "high")
+        calls = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual(calls[1]["args"], ["-p", "--model", MODEL, "--effort", "high",
+                                           "--permission-mode", "dontAsk", "--output-format", "json"])
+
     def test_auth_status_refuses_other_credentials(self):
         self.configure()
         for method in ("api_key", "api_key_helper", "third_party", "claude.ai", "none"):

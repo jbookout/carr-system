@@ -69,6 +69,8 @@ def receive(request: dict, *, run=subprocess.run) -> dict:
         raise DeskError("invalid_remote_request", "remote request requires a dispatch UUID") from None
     binding = {"desk": request["desk"], "msg_id": request["msg_id"]}
     env, warning = credential_env.claude_child_env()
+    if env.get("CLAUDE_CODE_EFFORT_LEVEL"):
+        return {**binding, "status": "failed", "detail": "remote_effort_override_refused", "exit_code": 3}
     conflicts = _conflicts(env)
     if warning or conflicts or not valid_claude_token(env.get(credential_env.CLAUDE_OAUTH_TOKEN_NAME, "")):
         return {**binding, "status": "failed", "detail": "subscription_auth_refused", "exit_code": 3}
