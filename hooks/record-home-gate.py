@@ -481,13 +481,18 @@ def check_apply_patch(ti, cwd):
     return None
 
 
-def main():
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    log(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+@decision(failure="raise")
+def decide(payload):
     tool = ""
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:                          # fail OPEN
-        log(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
 
     try:
         tool = payload.get("tool_name") or payload.get("toolName") or ""
@@ -531,5 +536,9 @@ def main():
         sys.exit(0)
 
 
+def main():
+    sys.exit(run(decide, parse_error=_parse_error))
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
