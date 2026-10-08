@@ -835,11 +835,12 @@ HOOK_ERROR_CONTEXT = (
 )
 
 
-def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+@decision(failure="raise")
+def decide(payload):
     if not isinstance(payload, dict):
         return 0
     try:
@@ -853,6 +854,10 @@ def main() -> int:
     if output is not None:
         print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return 0
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":

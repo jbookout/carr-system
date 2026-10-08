@@ -34,7 +34,7 @@ def git(*args):
 
 def main():
     meter = load("r06_hook_meter", os.path.join(HOOKS, "hook_meter.py"))
-    runner = load("r06_hook_meter_run", os.path.join(HOOKS, "hook-meter-run.py"))
+    runner = load("r06_hook_meter_run", os.path.join(REPO, "lib", "hook_execution.py"))
     common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
     canonical = os.path.dirname(common)
 

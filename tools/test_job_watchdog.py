@@ -15,16 +15,19 @@ FIXTURES = ROOT / "tools/fixtures/job-watchdog"
 
 def setUpModule():
     from unittest.mock import patch
-    global board_publication, scheduled_machine
+    global board_publication, scheduled_machine, vendor_sources
     board_publication = patch.dict(os.environ, {"PROGRESS_BOARD_LOCAL_ONLY": "1"})
     board_publication.start()
     scheduled_machine = patch("scheduled_jobs.check", return_value=[])
     scheduled_machine.start()
+    vendor_sources = patch("job_watchdog.vendor_release_findings", return_value=[])
+    vendor_sources.start()
 
 
 def tearDownModule():
     board_publication.stop()
     scheduled_machine.stop()
+    vendor_sources.stop()
 
 
 class ReplayTests(unittest.TestCase):
@@ -146,6 +149,7 @@ class ReplayTests(unittest.TestCase):
             "parse error: synthetic queue", "synthetic fixture",
             "SUCCESS", "COMPLETED", "FAILURE", "MERGEABLE", "CONFLICTING",
             "UNKNOWN", "DIRTY", "CLEAN", "APPROVED", "CHANGES_REQUESTED",
+            "Service Unavailable", "Responses", "Decisions", "Synthetic",
         }
         allowed = set(re.findall(r"[A-Z][a-z]+", " ".join(synthetic_set)))
 
@@ -749,15 +753,17 @@ class RunnerTests(unittest.TestCase):
             root = Path(directory)
             executable = root / "bin/gh"
             executable.parent.mkdir()
-            executable.write_text("#!/bin/sh\nprintf '[[]]\\n'\n")
+            executable.write_text("#!/bin/sh\nprintf 'HTTP/2.0 200\\nX-RateLimit-Remaining: 20\\n\\n[]\\n'\n")
             executable.chmod(0o755)
             config = json.loads((ROOT / "ops/config/job-watchdog.json").read_text())
+            config["vendor_release_watches"] = []  # Offline clean-scan fixture.
             config["paths"]["merge_queue"] = "queue.txt"
             config["paths"]["queue_logs"] = []
             config["actions"]["file_defects"] = False
             cp = root / "config.json"
             cp.write_text(json.dumps(config))
-            env = dict(os.environ, PATH=str(executable.parent) + os.pathsep + os.environ["PATH"])
+            env = dict(os.environ, PATH=str(executable.parent) + os.pathsep + os.environ["PATH"],
+                       CARR_GITHUB_READ_BUDGET=str(root / "budget.json"))
             script = ("import sys, runpy; sys.path.insert(0, " + repr(str(ROOT / "lib")) + "); "
                       "import scheduled_jobs; scheduled_jobs.check = lambda **kwargs: []; "
                       "sys.argv = " + repr([str(ROOT / "tools/job-watchdog.py"), "--root", directory, "--config", str(cp), "scan"]) + "; "
