@@ -42,24 +42,47 @@ APPROVAL_CASES = [
      "Restore the source-study rule?", ["Approve", "Don't approve"], False),
     ("approval-labelled-build", "work the queue",
      "Build all 16 retro fixes?", ["Approve", "Do not approve"], False),
-    # "rule: <what it says>" — the form a session uses for a rule that has no
-    # short name yet. The first one was refused live on 2026-10-08.
+    # "rule: <what it says>" names a rule that has no short name yet. It must
+    # cite the stored rule's id and carry no choice wording anywhere, so an
+    # approach choice cannot borrow the form. The first was refused live 2026-10-08.
     ("approve-described-rule", "approve the rule and fix the gate",
      "Approve the new rule: research uses the whole internet, and the "
      "research-site index is a memory, not a fence (check it first, also "
      "search the open web, add useful new sites yourself, never involve you)?",
-     ["Approve", "Don't approve"], False),
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], False),
     ("labelled-described-rule", "work the queue",
      "The proposed rule — sessions add useful research sites to the index themselves?",
-     ["Approve", "Do not approve"], False),
+     [("Approve", "Rule a9fc3f0e goes live."), "Do not approve"], False),
+    ("described-rule-without-id", "work the queue",
+     "Approve the new rule: research uses the whole internet?",
+     ["Approve", "Don't approve"], True),
     ("described-rule-hides-choice", "work the queue",
      "Approve the new rule: use nullable columns or a sentinel date?",
-     ["Approve", "Don't approve"], True),
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], True),
     ("described-rule-hides-which", "work the queue",
      "Approve the rule: which folder structure should exports use?",
-     ["Approve", "Don't approve"], True),
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], True),
     ("described-rule-unlabelled", "work the queue",
-     "The new rule: research uses the whole internet?", ["Yes", "No"], True),
+     "The new rule: research uses the whole internet (a9fc3f0e)?", ["Yes", "No"], True),
+    # Bypasses found reviewing PR 1645; each reached Joe before the second fix.
+    ("described-rule-vs", "work the queue",
+     "Approve the rule (a9fc3f0e): use nullable columns vs a sentinel date for the deleted_at schema?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-rather-than", "work the queue",
+     "Approve the rule: run the nightly job at 2am rather than 4am (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-flat-folder-no-id", "work the queue",
+     "Approve the rule: use a flat folder layout for the exports directory?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-between", "work the queue",
+     "Approve the rule: pick between a flat and a nested folder layout for exports (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-should", "work the queue",
+     "Approve the new rule: should the sweep run nightly (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-choice-in-description", "work the queue",
+     "Approve the rule: loops sort by created date (a9fc3f0e)?",
+     [("Approve", "Alt: sort by severity instead"), "Don't approve"], True),
     ("internal-approach", "work the queue",
      "Which approach should I take for the exporter refactor?", ["Rewrite", "Patch"], True),
     ("approve-internal-approach", "work the queue",
@@ -212,7 +235,8 @@ def run_case(human, question, options, description=""):
         "session_id":"selftest",
         "tool_input":{"questions":[{"question":question,"header":"Q",
             "multiSelect":False,
-            "options":[{"label":o,"description":description} for o in options]}]}})
+            "options":[{"label":o[0],"description":o[1]} if isinstance(o, tuple)
+                         else {"label":o,"description":description} for o in options]}]}})
 
 
 def run_loop_case(human, tool_name, tool_input):

@@ -176,10 +176,17 @@ APPROVAL_ARTIFACT = re.compile(
     r"(?:\s+for\s+(?:the\s+)?" + ARTIFACT_NAME + r")?"
     r"(?:\s+as written)?", re.I)
 # A rule with no short name yet is named by what it says: "the new rule: X".
-# Its text may contain when/how/should, so only option-picking words refuse it.
+# That form would let any approach choice through, so it must also cite the
+# stored rule's 8-hex id somewhere in the item, and neither the stem nor any
+# option description may carry choice wording.
 DESCRIBED_RULE = re.compile(
-    r"(?:the\s+)?(?:new\s+|proposed\s+)?rule\s*(?::|—|–|\s-)\s*\S.*", re.I | re.S)
-DESCRIBED_CHOICE = re.compile(r"\b(which|whether|or|instead|versus)\b", re.I)
+    r"(?:the\s+)?(?:new\s+|proposed\s+)?rule(?:\s*\([0-9a-f]{8}\))?"
+    r"\s*(?::|—|–|\s-)\s*\S.*", re.I | re.S)
+DESCRIBED_CHOICE = re.compile(
+    r"\b(which|what|when|where|why|how|should|could|would|can|may|must|"
+    r"whether|or|instead|versus|vs|rather than|than|between|either|"
+    r"pick|choose|alt|alternative)\b", re.I)
+RULE_ID = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{8}\b", re.I)
 
 
 def direct_approval(question):
@@ -195,7 +202,12 @@ def direct_approval(question):
         if "approve" not in labels or not labels.intersection({"don't approve", "do not approve"}):
             return False
     if DESCRIBED_RULE.fullmatch(stem):
-        return not DESCRIBED_CHOICE.search(stem)
+        options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
+        descriptions = " ".join(str(o.get("description", "")) for o in options)
+        cited = " ".join([str(question.get("question", "")),
+                          str(question.get("header", "")), descriptions])
+        return (RULE_ID.search(cited) is not None
+                and not DESCRIBED_CHOICE.search(stem + " " + descriptions))
     return (not APPROVAL_CHOICE.search(stem)
             and APPROVAL_ARTIFACT.fullmatch(stem) is not None)
 
