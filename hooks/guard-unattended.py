@@ -960,10 +960,19 @@ def command_invocations(words, depth=0):
     if exe in COMMAND_WRAPPERS:
         # A word with spaces is a quoted command string (`su -c '...'`,
         # `sudo sh -c '...'`, `watch '...'`), so it is read as a command.
+        # Wrapper option grammars differ (`sudo -u joe`, `timeout 30`), so every
+        # bare word is a candidate program, until the first word given as a path
+        # (`./run.sh`, `/usr/bin/curl`): that IS the program, and the words after
+        # it are its arguments, even when one is spelled like a network client.
         for k, w in enumerate(rest):
             if any(c.isspace() for c in w):
                 found += invocations_in(w, depth + 1) if depth < 4 else []
-            elif "://" not in w:
+            elif "://" in w:
+                continue
+            elif "/" in w:
+                found += command_invocations(rest[k:], depth + 1) if depth < 4 else []
+                break
+            else:
                 found.append((_exe_name(w), rest[k + 1:]))
         return found
     script = " ".join(rest) if exe == "eval" else (

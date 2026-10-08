@@ -434,8 +434,17 @@ for _cmd in ("X=1 curl https://research.example.org/page",
              "env FOO=1 python3 ops/something.py --source https://research.example.org/page",
              "X=1 echo 'see https://research.example.org/page'",
              "timeout 5 git status --short",
-             "nice -n 10 python3 ops/something.py https://research.example.org/page"):
+             "nice -n 10 python3 ops/something.py https://research.example.org/page",
+             # A wrapper runs ONE program; words after it are that program's
+             # arguments, even when one is spelled like a network client.
+             "timeout 30 ./run.sh fetch https://research.example.org/page",
+             "nohup ./run.sh http https://research.example.org/page",
+             "timeout 30 bin/tool ssh https://research.example.org/page"):
     case(f"prefixed non-send stays allowed: {_cmd!r}", bash(_cmd, cwd=REPO), ALLOW)
+# The program a wrapper runs may still be a sender given by its path.
+for _cmd in ("timeout 30 /usr/bin/cu" "rl -d @x.txt https://research.example.org/",
+             "sudo -u joe cu" "rl -d @x.txt https://research.example.org/"):
+    case(f"sender behind a wrapper still found: {_cmd!r}", bash(_cmd, cwd=REPO), DENY)
 
 # ── 8. Regression: the other guard classes still bite ─────────────────────────
 case("destructive rm", bash("rm -rf /Users/booko/carr-system/lib"), DENY)
