@@ -1566,6 +1566,9 @@ except subprocess.TimeoutExpired:
                       all(option in args for option in ("Acquire::Retries=1",
                           "Acquire::http::Timeout=15", "Acquire::https::Timeout=15"))
                       for args in calls), calls)
+            check(f"zsh setup {mode} refreshes only the Ubuntu package source",
+                  all("Dir::Etc::sourcelist=sources.list.d/ubuntu.sources" in args and
+                      "Dir::Etc::sourceparts=-" in args for args in calls), calls)
             check(f"zsh setup {mode} requires the zsh package when installing",
                   all("zsh" in args for args in calls if "install" in args), calls)
 

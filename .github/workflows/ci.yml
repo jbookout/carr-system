@@ -218,7 +218,10 @@ jobs:
           if zsh --version >/dev/null 2>&1; then
             exit 0
           fi
-          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          # zsh is in Ubuntu's archive. Refreshing every vendor index can
+          # exhaust the setup deadline before migration checks ever start.
+          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15
+                       -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
           if ! timeout --kill-after=5s 45s sudo apt-get "${apt_options[@]}" install -y -qq zsh; then
             timeout --kill-after=5s 60s sudo apt-get "${apt_options[@]}" update -qq
             timeout --kill-after=5s 45s sudo apt-get "${apt_options[@]}" install -y -qq zsh

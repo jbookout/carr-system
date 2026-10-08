@@ -49,9 +49,19 @@ STAGING = ['doctorcre-app-staging', 'carr-mcp-staging']
 PRODUCTION = ['carr-mcp', 'doctorcre-app']
 
 
+_inventory_tmp = tempfile.TemporaryDirectory()
+INVENTORY = {}
+for script in STAGING + PRODUCTION:
+    path = Path(_inventory_tmp.name) / (script + '.json')
+    path.write_text(json.dumps({'env': {'staging': {'name': script, 'workers_dev': False, 'routes': []}}}))
+    INVENTORY[script] = str(path)
+
+
 def config(**overrides):
     base = {
         'schema_version': 1,
+        'price_model': {'version': '2026-10-08-workers-logs-events-v1',
+                        'valid_from': '2026-01-01', 'valid_until': '2026-12-01'},
         'account_id': ACCOUNT,
         'token_name': 'CLOUDFLARE_SPEND_GUARD_TOKEN',
         'state_dir': '~/.local/state/carr/cloudflare-spend-guard',
@@ -61,6 +71,7 @@ def config(**overrides):
         'thresholds': {'warn_allowance_fraction': 0.5, 'stop_allowance_fraction': 0.8,
                        'stop_metered_usd_above': 0},
         'staging_workers': list(STAGING),
+        'staging_configs': dict(INVENTORY),
         'production_workers': list(PRODUCTION),
         'stop_production_workers': False,
         'allowances': [
@@ -70,7 +81,6 @@ def config(**overrides):
              'included_per_period': 1_000_000, 'source': 'https://developers.cloudflare.com/r2/pricing/'},
         ],
         'fast_path': {
-            'cpu_time_unit': 'microseconds',
             'max_query_span_days': 7,
             'query_limit': 10000,
             'burst_window_minutes': 15,
@@ -80,7 +90,6 @@ def config(**overrides):
             'r2_free_actions': ['DeleteObject', 'DeleteBucket', 'AbortMultipartUpload'],
             'allowances': [
                 {'key': 'workers-requests', 'metric': 'workers.requests', 'included_per_period': 10_000_000},
-                {'key': 'workers-cpu-ms', 'metric': 'workers.cpu_ms_upper_bound', 'included_per_period': 30_000_000},
                 {'key': 'kv-reads', 'metric': 'kv.read', 'included_per_period': 10_000_000},
                 {'key': 'kv-writes', 'metric': 'kv.write', 'included_per_period': 1_000_000},
                 {'key': 'kv-deletes', 'metric': 'kv.delete', 'included_per_period': 1_000_000},
@@ -121,6 +130,7 @@ class FakeCloudflare:
                       'result': rows if rows is not None else [row()]}
         self.subdomains = subdomains or {name: {'enabled': True, 'previews_enabled': True}
                                          for name in STAGING + PRODUCTION}
+        self.schedules = {name: [] for name in STAGING + PRODUCTION}
         self.calls = []
         self.fail = {}  # (method, path-suffix) -> exception instance or (status, payload)
         self.ignore_posts = False  # a POST that reports success but changes nothing
@@ -145,6 +155,16 @@ class FakeCloudflare:
             return 200, copy.deepcopy(self.info)
         if method == 'GET' and path == '/billable-usage':
             return 200, copy.deepcopy(self.usage)
+        if method == 'PATCH' and path.startswith('/workers/workers/'):
+            script = {'worker-id-0': STAGING[0], 'worker-id-1': STAGING[1]}[path.split('/')[-1]]
+            self.subdomains[script] = dict(body['subdomain'])
+            return 200, {'success': True, 'result': {'id': path.split('/')[-1],
+                                                  'subdomain': dict(self.subdomains[script])}}
+        if path.startswith('/workers/scripts/') and path.endswith('/schedules'):
+            script = path.split('/')[3]
+            if method == 'PUT':
+                self.schedules[script] = copy.deepcopy(body)
+            return 200, {'success': True, 'result': {'schedules': copy.deepcopy(self.schedules[script])}}
         if path.startswith('/workers/scripts/') and path.endswith('/subdomain'):
             script = path.split('/')[3]
             if method == 'POST':
@@ -167,7 +187,12 @@ class FakeCloudflare:
             return self.gql_fail
         account = {}
         for alias, node in re.findall(r'(\w+)\s*:\s*(\w+)\s*\(', body['query']):
-            account[alias] = copy.deepcopy(self.gql.get(alias, []))
+            default = []
+            if alias.startswith('w'):
+                default = [mtd('carr-mcp', 1)]
+            elif alias == 'cur':
+                default = [window(s, 1) for s in STAGING + PRODUCTION]
+            account[alias] = copy.deepcopy(self.gql.get(alias, default))
         return 200, {'data': {'viewer': {'accounts': [account]}}, 'errors': None}
 
     def graphql_calls(self):
@@ -201,6 +226,168 @@ class GuardCase(unittest.TestCase):
         return guard.e2e_gate(cfg or config(), now=now, state_dir=self.state)
 
 
+class PreRunGate(GuardCase):
+    def test_pre_run_refuses_each_allowance_at_fifty_percent_without_writes(self):
+        for service, included in (('Workers Standard', 10_000_000), ('R2 Class A Operations', 1_000_000)):
+            with self.subTest(service=service):
+                for consumed, expected in ((included / 2 - 1, 0), (included / 2, 1), (included, 1)):
+                    fake = FakeCloudflare([row(service=service, consumed=consumed)])
+                    code, out, err = call_main(['check-e2e'], self.state, http=fake)
+                    self.assertEqual(code, expected, out + err)
+                    self.assertTrue(all(m == 'GET' and p.startswith('/billable-usage') for m, p, b in fake.calls))
+                    self.assertFalse(self.state.exists(), 'pre-run must not write receipt, lock or outbox')
+
+    def test_existing_stop_or_unknown_analytics_cannot_be_cleared_by_pre_run(self):
+        self.run_guard(FakeCloudflare([row(cost=0.01)]))
+        before = files_text(self.state)
+        fake = FakeCloudflare()
+        self.assertEqual(call_main(['check-e2e'], self.state, http=fake)[0], 1)
+        self.assertEqual(files_text(self.state), before)
+        self.assertEqual(fake.calls, [])
+
+
+class PatchReplacement(GuardCase):
+    def test_opt_in_patch_uses_worker_id_and_nested_subdomain_and_default_stays_post(self):
+        cfg = config(use_worker_patch=True, worker_ids={s: f'worker-id-{i}' for i, s in enumerate(STAGING)})
+        fake = FakeCloudflare([row(cost=0.01)])
+        self.assertEqual(self.run_guard(fake, cfg)['verdict'], 'STOP')
+        patches = [(p, b) for m, p, b in fake.calls if m == 'PATCH']
+        self.assertEqual(patches, [(f'/workers/workers/worker-id-{i}', {'subdomain': OFF}) for i in range(2)])
+        self.assertFalse(fake.posts())
+        self.assertTrue(guard.restore(cfg, http=fake, token='synthetic-token', now=NOW, state_dir=self.state)['restored'])
+        self.assertTrue(all(fake.subdomains[s] == ON for s in STAGING))
+        self.tearDown(); self.setUp()
+        fake = FakeCloudflare([row(cost=0.01)])
+        self.run_guard(fake)
+        self.assertEqual(len(fake.posts()), 2)
+        self.assertFalse(any(m == 'PATCH' for m, p, b in fake.calls))
+
+    def test_patch_failure_is_action_failed_four(self):
+        cfg = config(use_worker_patch=True, worker_ids={s: f'worker-id-{i}' for i, s in enumerate(STAGING)})
+        fake = FakeCloudflare([row(cost=0.01)])
+        fake.fail[('PATCH', 'worker-id-0')] = (403, {'success': False})
+        result = self.run_guard(fake, cfg)
+        self.assertEqual(guard._exit_for(result['verdict'], result['action_errors']), 4)
+
+
+class PriceModel(GuardCase):
+    def test_workers_logs_cutover_fails_closed_before_any_api_call(self):
+        cfg = config()
+        for operation in (guard.run, guard.fast):
+            with self.subTest(operation=operation.__name__):
+                fake = FakeCloudflare()
+                result = operation(cfg, http=fake, token='synthetic-token',
+                                   now=datetime(2026, 12, 1, tzinfo=timezone.utc), state_dir=self.state,
+                                   spawn_reporter=lambda: None)
+                self.assertEqual(result['verdict'], 'UNKNOWN')
+                self.assertIn('price model', ' '.join(result['reasons']))
+                self.assertEqual(fake.calls, [])
+                self.assertFalse(guard.e2e_gate(cfg, now=NOW, state_dir=self.state)[0])
+
+
+class DeployDrift(GuardCase):
+    def test_hold_requires_workers_dev_false_and_check_is_read_only(self):
+        self.run_guard(FakeCloudflare([row(cost=0.01)]))
+        before = guard.receipt_path(self.state).read_bytes()
+        path = Path(self._tmp.name) / 'wrangler.json'
+        path.write_text(json.dumps({'env': {'staging': {'name': STAGING[0], 'workers_dev': True}}}))
+        cfg = config(staging_configs={**INVENTORY, STAGING[0]: str(path)})
+        self.assertFalse(guard.deploy_gate(cfg, state_dir=self.state)[0])
+        self.assertIn('workers_dev=false', guard.deploy_gate(cfg, state_dir=self.state)[1])
+        path.write_text(json.dumps({'env': {'staging': {'name': STAGING[0], 'workers_dev': False}}}))
+        self.assertTrue(guard.deploy_gate(cfg, state_dir=self.state)[0])
+        self.assertEqual(guard.receipt_path(self.state).read_bytes(), before)
+        with mock.patch.object(guard, 'read_token', side_effect=AssertionError('read-only check read token')):
+            code = guard.main(['check-deploy'], cfg=cfg, state_dir=self.state, now=NOW)
+        self.assertEqual(code, 0)
+
+
+class InventoryGate(GuardCase):
+    def test_unsupported_staging_triggers_refuse_stop_without_cloudflare_writes(self):
+        for field, value in (('queues', {'consumers': [{'queue': 'q'}]}),
+                             ('durable_objects', {'bindings': [{'name': 'ALARM', 'class_name': 'Alarm'}]}),
+                             ('workflows', [{'binding': 'FLOW', 'class_name': 'Flow'}])):
+            with self.subTest(field=field):
+                path = Path(self._tmp.name) / 'wrangler.json'
+                path.write_text(json.dumps({'env': {'staging': {'name': STAGING[0], 'workers_dev': False,
+                                                               field: value}}}))
+                cfg = config(staging_configs={**INVENTORY, STAGING[0]: str(path)})
+                fake = FakeCloudflare([row(cost=0.01)])
+                result = self.run_guard(fake, cfg)
+                self.assertEqual(result['verdict'], 'UNKNOWN')
+                self.assertIn(field, ' '.join(result['reasons']))
+                self.assertFalse(any(m != 'GET' for m, p, b in fake.calls))
+                self.assertFalse(self.gate(cfg)[0])
+
+    def test_runaway_with_alarm_binding_reports_unknown_without_claiming_a_disable(self):
+        cfg = config(staging_workers=['carr-mcp-staging'], staging_configs={
+            'carr-mcp-staging': str(Path(__file__).resolve().parents[1] / 'mcp-server/wrangler.toml')})
+        fake = FakeCloudflare()
+        fake.gql = {'cur': [window('carr-mcp-staging', 600, errors=400)]}
+        with redirect_stderr(io.StringIO()) as err:
+            result = guard.fast(cfg, http=fake, token='synthetic-token', now=NOW, state_dir=self.state,
+                                spawn_reporter=lambda: None)
+        self.assertEqual(result['verdict'], 'UNKNOWN')
+        self.assertEqual(fake.worker_calls(), [])
+        self.assertIn('no stop attempted', err.getvalue())
+        self.assertFalse(any('workers.dev disabled on' in x['args']['actual'] for x in self.outbox()))
+
+    def test_repository_staging_has_alarm_capable_binding(self):
+        cfg = config(staging_workers=['carr-mcp-staging'], staging_configs={
+            'carr-mcp-staging': str(Path(__file__).resolve().parents[1] / 'mcp-server/wrangler.toml')})
+        result = self.run_guard(FakeCloudflare([row(cost=0.01)]), cfg)
+        self.assertEqual(result['verdict'], 'UNKNOWN')
+        self.assertIn('durable_objects', ' '.join(result['reasons']))
+
+
+class CronStop(GuardCase):
+    def test_cron_write_failure_keeps_snapshot_and_exit_four_then_retry_restores(self):
+        fake = FakeCloudflare([row(cost=0.01)])
+        prior = [{'cron': '*/5 * * * *'}]
+        fake.schedules[STAGING[0]] = copy.deepcopy(prior)
+        fake.fail[('PUT', '/schedules')] = TimeoutError('response lost')
+        result = self.run_guard(fake)
+        self.assertEqual(guard._exit_for(result['verdict'], result['action_errors']), 4)
+        receipt = guard.read_receipt(self.state)
+        self.assertEqual(receipt['disabled_schedules'][0]['prior'], prior)
+        self.assertEqual(receipt['disabled_schedules'][0]['status'], 'pending')
+        # The request may have succeeded remotely even though its response was lost.
+        fake.schedules[STAGING[0]] = []
+        fake.fail.clear()
+        restored = guard.restore(config(), http=fake, token='synthetic-token', now=NOW, state_dir=self.state)
+        self.assertTrue(restored['restored'])
+        self.assertEqual(fake.schedules[STAGING[0]], prior)
+
+    def test_missing_inventory_fails_closed_with_no_disable(self):
+        fake = FakeCloudflare([row(cost=0.01)])
+        cfg = config(staging_configs={})
+        result = self.run_guard(fake, cfg)
+        self.assertEqual(result['verdict'], 'UNKNOWN')
+        self.assertEqual(fake.worker_calls(), [])
+
+    def test_stop_snapshots_cron_even_when_public_entry_already_off_and_restores(self):
+        fake = FakeCloudflare([row(cost=0.01)], subdomains={s: dict(OFF) for s in STAGING + PRODUCTION})
+        prior = [{'cron': '*/5 * * * *', 'created_on': '2026-10-01T00:00:00Z'}]
+        fake.schedules[STAGING[0]] = copy.deepcopy(prior)
+        original = guard._write_receipt
+        def write_before_put(state, receipt, event):
+            if event['event'] == 'cron-disable-pending':
+                self.assertEqual(fake.schedules[STAGING[0]], prior)
+                self.assertEqual(receipt['disabled_schedules'][0]['prior'], prior)
+            original(state, receipt, event)
+        with mock.patch.object(guard, '_write_receipt', side_effect=write_before_put):
+            result = self.run_guard(fake)
+        self.assertEqual(result['verdict'], 'STOP')
+        self.assertEqual(fake.schedules[STAGING[0]], [])
+        receipt = guard.read_receipt(self.state)
+        self.assertEqual(receipt['disabled_schedules'][0]['prior'], prior)
+        self.assertEqual(receipt['stop_propagation']['not_before'], '2026-10-08T12:15:00Z')
+        self.assertIn('15 minutes', receipt['stop_propagation']['note'])
+        result = guard.restore(config(), http=fake, token='synthetic-token', now=NOW, state_dir=self.state)
+        self.assertTrue(result['restored'])
+        self.assertEqual(fake.schedules[STAGING[0]], prior)
+
+
 class Thresholds(GuardCase):
     def test_under_threshold_is_ok_and_touches_no_worker(self):
         fake = FakeCloudflare([row(consumed=4_000_000)])
@@ -216,7 +403,7 @@ class Thresholds(GuardCase):
         self.assertEqual(result['verdict'], 'WARN')
         self.assertIn('workers-requests', ' '.join(result['reasons']))
         self.assertEqual(fake.worker_calls(), [])
-        self.assertTrue(self.gate()[0])
+        self.assertFalse(self.gate()[0])
 
     def test_eighty_percent_of_an_allowance_stops(self):
         fake = FakeCloudflare([row(service='R2 Class A Operations', consumed=800_000)])
@@ -825,7 +1012,7 @@ class Activation(GuardCase):
         self.assertEqual(code, 1)
         self.assertIn('CLOUDFLARE_SPEND_GUARD_TOKEN not configured', out)
 
-    def test_check_e2e_with_a_token_runs_the_guard_first(self):
+    def test_check_e2e_with_a_token_reads_fresh_billable_usage(self):
         fake = FakeCloudflare([row()])
         code, out, _ = call_main(['check-e2e'], self.state, http=fake)
         self.assertEqual(code, 0)
@@ -854,7 +1041,13 @@ def ops(action, n):
 
 
 def window(script, requests, errors=0, status='success'):
-    return {'sum': {'requests': requests, 'errors': errors}, 'dimensions': {'scriptName': script, 'status': status}}
+    return {'sum': {'requests': requests, 'errors': errors},
+            'dimensions': {'scriptName': script, 'status': status, 'datetime': '2026-10-08T12:00:00Z'}}
+
+
+def observed(*rows):
+    scripts = {r['dimensions']['scriptName'] for r in rows}
+    return list(rows) + [window(s, 1) for s in STAGING if s not in scripts]
 
 
 def history(script, requests):
@@ -877,6 +1070,46 @@ class FastCase(GuardCase):
 
 
 class FastPath(FastCase):
+    def test_missing_workers_bucket_keeps_runaway_hold_and_restore_snapshot(self):
+        fake = FakeCloudflare()
+        fake.gql = {'cur': observed(window('carr-mcp-staging', 600, errors=400))}
+        self.assertEqual(self.fast(fake)['verdict'], 'RUNAWAY')
+        before = guard.read_receipt(self.state)['disabled_workers']
+        fake.gql = {'cur': []}
+        fake.calls.clear()
+        self.assertEqual(self.fast(fake)['verdict'], 'UNKNOWN')
+        receipt = guard.read_receipt(self.state)
+        self.assertEqual(receipt['hold'], 'runaway')
+        self.assertEqual(receipt['disabled_workers'], before)
+        self.assertEqual(fake.worker_calls(), [])
+
+    def test_cpu_quantiles_cannot_decide_cost_and_billing_reads_no_analytics(self):
+        fake = FakeCloudflare()
+        fake.gql = {'w0': [mtd('carr-mcp', 1000, cpu_p99_us=1_000_000_000)]}
+        self.assertEqual(self.fast(fake)['verdict'], 'OK')
+        self.assertNotIn('cpuTimeP99', fake.queries[0]['query'])
+        bill = FakeCloudflare([row(cost=0.01)])
+        self.assertEqual(self.run_guard(bill)['verdict'], 'STOP')
+        self.assertEqual(bill.graphql_calls(), [])
+        self.assertEqual([p for m, p, _ in bill.calls if p.startswith('/billable')],
+                         ['/billable-usage/info', '/billable-usage'])
+
+    def test_missing_or_late_buckets_are_unknown_and_preserve_a_stop(self):
+        self.run_guard(FakeCloudflare([row(cost=1)]))
+        before = guard.read_receipt(self.state)['disabled_workers']
+        late = window('carr-mcp-staging', 10)
+        late['dimensions']['datetime'] = '2026-10-08T11:00:00Z'
+        for nodes in ({'cur': []}, {'w0': []}, {'cur': [late]}):
+            with self.subTest(nodes=nodes):
+                fake = FakeCloudflare()
+                fake.gql = nodes
+                self.assertEqual(self.fast(fake)['verdict'], 'UNKNOWN')
+                receipt = guard.read_receipt(self.state)
+                self.assertEqual(receipt['hold'], 'spend')
+                self.assertEqual(receipt['disabled_workers'], before)
+                self.assertFalse(self.gate()[0])
+                self.assertEqual(fake.worker_calls(), [])
+
     def test_quiet_month_is_ok_in_one_graphql_call_with_no_worker_calls(self):
         fake = FakeCloudflare()
         fake.gql = {'w0': [mtd('carr-mcp', 1000)], 'kv0': [ops('read', 10)]}
@@ -889,7 +1122,7 @@ class FastPath(FastCase):
         fake = FakeCloudflare()
         self.fast(fake)
         query = fake.queries[0]['query']
-        for part in ('workersInvocationsAdaptive', 'cpuTimeP99', 'subrequests', 'kvOperationsAdaptiveGroups',
+        for part in ('workersInvocationsAdaptive', 'subrequests', 'kvOperationsAdaptiveGroups',
                      'r2OperationsAdaptiveGroups', 'durableObjectsInvocationsAdaptiveGroups', ACCOUNT):
             self.assertIn(part, query)
         self.assertEqual(query.count('accounts('), 1)
@@ -908,17 +1141,6 @@ class FastPath(FastCase):
         self.assertEqual(result['verdict'], 'STOP')
         self.assertEqual(sorted(s for s, _ in fake.posts()), sorted(STAGING))
         self.assertEqual(guard.read_receipt(self.state)['hold'], 'spend')
-
-    def test_cpu_upper_bound_is_requests_times_p99(self):
-        fake = FakeCloudflare()
-        fake.gql = {'w0': [mtd('carr-mcp', 1_000_000, cpu_p99_us=25_000)]}  # 25,000,000 ms of 30M
-        self.assertEqual(self.fast(fake)['verdict'], 'STOP')
-        self.tearDown(); self.setUp()
-        fake = FakeCloudflare()
-        fake.gql = {'w0': [mtd('carr-mcp', 1_000_000, cpu_p99_us=20_000)]}  # 20,000,000 ms
-        result = self.fast(fake)
-        self.assertEqual(result['verdict'], 'WARN')
-        self.assertIn('upper bound', ' '.join(result['reasons']))
 
     def test_kv_r2_and_durable_object_counts(self):
         for alias, rows, key in (('kv0', [ops('write', 800_000)], 'kv-writes'),
@@ -945,7 +1167,7 @@ class FastPath(FastCase):
 
     def test_production_traffic_does_not_count_toward_the_staging_burst(self):
         fake = FakeCloudflare()
-        fake.gql = {'cur': [window('carr-mcp', 30_000)]}
+        fake.gql = {'cur': observed(window('carr-mcp', 30_000))}
         for k in range(1, 8):
             fake.gql[f'h{k}'] = [history('carr-mcp', 30_000)]
         self.assertEqual(self.fast(fake)['verdict'], 'OK')
@@ -1002,7 +1224,7 @@ class FastPath(FastCase):
 class Runaway(FastCase):
     def run_window(self, script, now_requests, history_requests, errors=0, days=7):
         fake = FakeCloudflare()
-        fake.gql = {'cur': [window(script, now_requests, errors=errors)]}
+        fake.gql = {'cur': observed(window(script, now_requests, errors=errors))}
         for k in range(1, days + 1):
             fake.gql[f'h{k}'] = [history(script, history_requests)]
         return fake, self.fast(fake)
@@ -1049,7 +1271,7 @@ class Runaway(FastCase):
 
     def test_runaway_receipt_and_alert_are_written_before_the_disable(self):
         fake = FakeCloudflare()
-        fake.gql = {'cur': [window('carr-mcp-staging', 6_000)]}
+        fake.gql = {'cur': observed(window('carr-mcp-staging', 6_000))}
         for k in range(1, 8):
             fake.gql[f'h{k}'] = [history('carr-mcp-staging', 1_000)]
         seen = []
@@ -1069,7 +1291,7 @@ class FindingsReachTheRecord(FastCase):
 
     def test_a_runaway_alert_reaches_the_record_even_for_production(self):
         fake = FakeCloudflare()
-        fake.gql = {'cur': [window('carr-mcp', 6_000)]}
+        fake.gql = {'cur': observed(window('carr-mcp', 6_000))}
         for k in range(1, 8):
             fake.gql[f'h{k}'] = [history('carr-mcp', 1_000)]
         self.fast(fake)

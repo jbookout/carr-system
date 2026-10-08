@@ -106,8 +106,7 @@
     }
   ],
   "fast_path": {
-    "_note": "The 15-minute fast path (`fast`): ONE POST to the GraphQL endpoint per run, one account scope, every node capped at query_limit rows and at most max_query_span_days per node. Docs: https://developers.cloudflare.com/analytics/graphql-api/limits/ (1 account per account-scoped query; 300 GraphQL queries per 5-minute window per user), https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-workers-metrics/ (workersInvocationsAdaptive; 'up to one month of data'), https://developers.cloudflare.com/workers/observability/metrics-and-analytics/ ('maximum increments of one week'; 'a slight delay in aggregation and metrics delivery' in the last few minutes), https://github.com/cloudflare/cloudflare-prometheus-exporter/blob/b61aa67c8661b165ba9d8f508789b504333d3259/src/cloudflare/client.ts#L633-L636 (cpuTimeP99 is in microseconds and is divided by 1,000,000 to produce seconds). The CPU figure is requests x cpuTimeP99 per hour bucket: conservative, but NOT a strict upper bound, because the slowest 1% of requests run above P99 by definition.",
-    "cpu_time_unit": "microseconds",
+    "_note": "Sampled, delayed operational analytics are not a billing ledger. Missing or late Workers buckets are UNKNOWN, never zero. CPU quantiles cannot determine billed CPU or dollars; metered-cost verdicts use billable-usage only. Queries are one account, max seven days per node, below documented limits.",
     "max_query_span_days": 7,
     "query_limit": 10000,
     "burst_window_minutes": 15,
@@ -133,11 +132,6 @@
         "key": "workers-requests",
         "metric": "workers.requests",
         "included_per_period": 10000000
-      },
-      {
-        "key": "workers-cpu-ms",
-        "metric": "workers.cpu_ms_upper_bound",
-        "included_per_period": 30000000
       },
       {
         "key": "kv-reads",
@@ -228,8 +222,22 @@
   },
   "sources": {
     "billable_usage": "GET /accounts/{account_id}/billable-usage and /billable-usage/info (Version 1, Alpha), https://github.com/cloudflare/api-schemas/blob/main/openapi.json",
-    "workers_subdomain": "GET/POST /accounts/{account_id}/workers/scripts/{script_name}/subdomain, same schema; token group Workers Scripts Write. The schema marks it x-fern-availability: deprecated (sdk group workers.legacy.scripts.subdomain) and names no successor; the GA PATCH /accounts/{account_id}/workers/workers/{worker_id} carries a subdomain {enabled, previews_enabled} field and is a candidate only.",
+    "workers_subdomain": "GET/POST /accounts/{account_id}/workers/scripts/{script_name}/subdomain, same schema; token group Workers Scripts Write. Deprecated default retained; optional PATCH /accounts/{account_id}/workers/workers/{worker_id} uses subdomain {enabled, previews_enabled} behind use_worker_patch=false. Mock-verified only.",
     "billing_cycle": "Monthly included limits reset on the subscription renewal date, https://developers.cloudflare.com/workers/platform/pricing/",
     "fast_path": "POST /client/v4/graphql; token permission Account > Account Analytics > Read (https://developers.cloudflare.com/analytics/graphql-api/getting-started/authentication/api-token-auth/)"
-  }
+  },
+  "staging_configs": {
+    "carr-mcp-staging": "mcp-server/wrangler.toml",
+    "doctorcre-app-staging": "~/doctorcre-app/wrangler.jsonc"
+  },
+  "price_model": {
+    "version": "2026-10-08-workers-logs-events-v1",
+    "valid_from": "2026-01-01",
+    "valid_until": "2026-12-01",
+    "source": "https://developers.cloudflare.com/observability/pricing/",
+    "_note": "Valid until the 2026-12-01 Workers Logs ingestion/storage pricing cutover (exclusive, UTC). All usage checks fail UNKNOWN outside this window until an updated, reviewed model is committed."
+  },
+  "use_worker_patch": false,
+  "worker_ids": {},
+  "_patch_note": "Deprecated subdomain GET/POST remains default. Opt-in PATCH /workers/workers/{worker_id} requires explicit Worker ID mappings and uses nested subdomain state; failures retain exit 4. Mock-verified only, not activated."
 }

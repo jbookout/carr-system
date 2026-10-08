@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cloudflare spend guard: a deterministic kill switch, because Cloudflare has none.
+"""Cloudflare spend guard: a deterministic spend hold and bounded staging stop.
 
 WHY. Budget alerts "are informational only. They do not pause or cap usage"
 (https://developers.cloudflare.com/billing/manage/budget-alerts/). This job
@@ -9,9 +9,9 @@ and acts. Two readers feed one receipt:
   run   (daily dollar backstop) the Billable Usage API: the invoice's own
         numbers, one to two days behind.
   fast  (every 15 minutes, by design) one GraphQL Analytics request with
-        month-to-date Workers requests, a CPU upper bound, KV, R2 and
+        month-to-date Workers requests, KV, R2 and
         Durable Object operation counts, the last 15 minutes per Worker and
-        the same 15 minutes on each of the previous 7 days. Minutes behind.
+        the same 15 minutes on each of the previous 7 days. Sampled and delayed; no freshness SLA.
 
 Verdicts, lowest to highest:
   OK       nothing to do.
@@ -20,10 +20,12 @@ Verdicts, lowest to highest:
   RUNAWAY  (fast) one Worker's 15-minute traffic is 5x its own trailing
            median and over a floor, or more than half of it errors. Writes the
            receipt and alert first, then disables workers.dev on that Worker
-           only if it is a STAGING Worker; any other Worker is alert-only.
+           only if it is a STAGING Worker with a supported trigger inventory; any other Worker is alert-only.
   STOP     any metered amount, an allowance at 80%, a service with usage the
            config cannot map, or a staging burst. Disables workers.dev on the
            STAGING Workers and writes the STOPPED receipt E2E must pass.
+           Cron schedules are snapshotted and removed too; propagation may take 15 minutes.
+           Unsupported staging queues, workflows or alarm-capable bindings refuse action as UNKNOWN.
            Production is report-only unless stop_production_workers is true.
   UNKNOWN  usage could not be read. Holds E2E; changes no Worker.
 
@@ -43,8 +45,8 @@ SOURCES (read raw, 2026-10-08):
            /kv/observability/metrics-analytics/, /r2/platform/metrics-analytics/,
            /durable-objects/observability/metrics-and-analytics/
   action   GET/POST /accounts/{id}/workers/scripts/{script}/subdomain. The
-           schema marks it x-fern-availability: deprecated and names no
-           successor; a failed action says so loudly.
+           deprecated endpoint remains the default; optional PATCH /workers/workers/{worker_id}
+           uses explicit Worker ID mappings. GET/PUT schedules handles cron; action failure exits 4.
 
 No model is called. Thresholds and targets come only from the config file;
 there are no environment or command-line overrides. The token is read from
@@ -67,6 +69,7 @@ import secrets
 import statistics
 import sys
 import tempfile
+import tomllib
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -86,8 +89,8 @@ TOKEN_CHARS = {chr(c) for c in range(0x21, 0x7f)}
 COST_FIELDS = ('BilledCost', 'ContractedCost', 'EffectiveCost', 'ListCost')
 OFF = {'enabled': False, 'previews_enabled': False}
 CLOCK_SKEW = timedelta(minutes=5)
-DEPRECATED_NOTE = ('the workers.dev subdomain endpoint is marked deprecated in Cloudflare\'s API schema with no named '
-                   'successor; check the schema before trusting this action')
+DEPRECATED_NOTE = ('the default workers.dev subdomain endpoint is deprecated; the optional Worker-ID PATCH '
+                   'replacement is mock-verified only and defaults off')
 _BEARER = re.compile(r'Bearer\s+\S+')
 
 
@@ -168,6 +171,12 @@ def validate_config(cfg: dict) -> dict:
     need(bool(staging), 'staging_workers must name at least one Worker')
     need(not set(staging) & set(production), 'a Worker cannot be both staging and production')
     need(cfg.get('stop_production_workers') in (True, False), 'stop_production_workers must be true or false')
+    need(isinstance(cfg.get('use_worker_patch', False), bool), 'use_worker_patch must be boolean')
+    if cfg.get('use_worker_patch'):
+        ids = cfg.get('worker_ids') or {}
+        for script in _stop_targets(cfg):
+            need(isinstance(ids.get(script), str) and bool(ids[script]) and set(ids[script]) <= SCRIPT_CHARS,
+                 f'worker_ids must map {script} before opting in to PATCH')
     keys: set[str] = set()
     names: set[str] = set()
     for entry in cfg.get('allowances') or []:
@@ -181,6 +190,14 @@ def validate_config(cfg: dict) -> dict:
              f"allowance {entry['key']} service_names must be a list of strings")
         need(not names & set(services), f"allowance {entry['key']} repeats a service name")
         names |= set(services)
+    model = cfg.get('price_model') or {}
+    need(isinstance(model.get('version'), str) and re.match(r'^\d{4}-\d{2}-\d{2}-.+', model['version']),
+         'price_model.version must be dated')
+    for field in ('valid_from', 'valid_until'):
+        need(isinstance(model.get(field), str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}', model[field]),
+             f'price_model.{field} must be a date')
+        datetime.strptime(model[field], '%Y-%m-%d')
+    need(model['valid_from'] < model['valid_until'], 'price_model validity window must be ordered')
     _validate_fast(cfg)
     if 'loop_watch' in cfg:
         _loop_watch().validate_settings(cfg['loop_watch'])
@@ -191,15 +208,13 @@ def _validate_fast(cfg: dict) -> None:
     need = _need
     fp: dict = cfg['fast_path'] if isinstance(cfg.get('fast_path'), dict) else {}
     need(bool(fp), 'fast_path required')
-    need(fp.get('cpu_time_unit') in ('microseconds', 'milliseconds'), 'fast_path.cpu_time_unit must be microseconds '
-                                                                      'or milliseconds')
     for key in ('max_query_span_days', 'query_limit', 'burst_window_minutes', 'burst_requests_staging'):
         need(isinstance(fp.get(key), int) and fp[key] > 0, f'fast_path.{key} must be a positive integer')
     need(fp['query_limit'] <= 10000, 'fast_path.query_limit must not exceed 10000')
     need(fp['max_query_span_days'] <= 7, 'fast_path.max_query_span_days must not exceed 7')
     for key in ('r2_class_b_actions', 'r2_free_actions'):
         need(isinstance(fp.get(key), list) and all(isinstance(a, str) and a for a in fp[key]), f'fast_path.{key}')
-    metrics = {'workers.requests', 'workers.cpu_ms_upper_bound', 'kv.read', 'kv.write', 'kv.delete', 'kv.list',
+    metrics = {'workers.requests', 'kv.read', 'kv.write', 'kv.delete', 'kv.list',
                'r2.class_a', 'r2.class_b', 'do.requests'}
     seen = set()
     for entry in fp.get('allowances') or []:
@@ -214,6 +229,13 @@ def _validate_fast(cfg: dict) -> None:
         need(isinstance(r.get(key), int) and r[key] > 0, f'runaway.{key} must be a positive integer')
     need(r['min_history_days'] <= r['history_days'] <= 28, 'runaway needs min_history_days <= history_days <= 28')
     need(_number(r.get('error_ratio_above')) and 0 < r['error_ratio_above'] < 1, 'runaway.error_ratio_above in (0,1)')
+
+
+def check_price_model(cfg, now):
+    model = cfg['price_model']
+    if not model['valid_from'] <= now.astimezone(timezone.utc).date().isoformat() < model['valid_until']:
+        raise UsageUnavailable(f"price model {model['version']} is outside its validity window; "
+                               f"Workers Logs pricing changes {model['valid_until']}; update the model before running")
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
@@ -454,7 +476,7 @@ def evaluate(cfg: dict, usage: dict) -> dict:
             raise_to('STOP')
     peak = max(fractions.items(), key=lambda kv: kv[1]) if fractions else None
     return {'verdict': level, 'reasons': reasons, 'metered_usd': round(metered, 6),
-            'peak_allowance': {'key': peak[0], 'fraction': round(peak[1], 6)} if peak else None}
+            'peak_allowance': {'key': peak[0], 'fraction': peak[1]} if peak else None}
 
 
 # ── receipt ──────────────────────────────────────────────────────────────────
@@ -512,7 +534,7 @@ def _saver(state_dir: Path, receipt: dict, token):
 
 def _blank_receipt() -> dict:
     return {'schema': RECEIPT_SCHEMA, 'state': 'CLEAR', 'hold': None, 'hold_since': None,
-            'disabled_workers': [], 'last_evaluation': None, 'last_fast': None}
+            'disabled_workers': [], 'disabled_schedules': [], 'last_evaluation': None, 'last_fast': None}
 
 
 def _iso(moment: datetime) -> str:
@@ -556,15 +578,67 @@ def _load_for_update(state: Path, now: datetime) -> dict:
 
 def _subdomain(http, cfg, token, script, body=None):
     path = f'/workers/scripts/{script}/subdomain'
-    result = _api(http, cfg, token, 'POST' if body else 'GET', path, body)
+    if body is not None and cfg.get('use_worker_patch', False):
+        worker_id = cfg['worker_ids'][script]
+        path = f'/workers/workers/{worker_id}'
+        result = _api(http, cfg, token, 'PATCH', path, {'subdomain': body})
+        result = result.get('subdomain') if isinstance(result, dict) else None
+    else:
+        result = _api(http, cfg, token, 'POST' if body is not None else 'GET', path, body)
     if not isinstance(result, dict) or not all(isinstance(result.get(k), bool) for k in ('enabled', 'previews_enabled')):
         raise ApiError(f'{path} returned no enabled/previews_enabled state')
     return {'enabled': result['enabled'], 'previews_enabled': result['previews_enabled']}
 
 
+def _schedules(http, cfg, token, script, body=None):
+    path = f'/workers/scripts/{script}/schedules'
+    result = _api(http, cfg, token, 'GET' if body is None else 'PUT', path, body)
+    schedules = result.get('schedules') if isinstance(result, dict) else None
+    if not isinstance(schedules, list) or any(not isinstance(x, dict) or not isinstance(x.get('cron'), str)
+                                               for x in schedules):
+        raise ApiError(f'{path} returned no schedules list')
+    return schedules
+
+
+def _disable_cron(http, cfg, token, scripts, receipt, save, now):
+    errors = []
+    entries = receipt.setdefault('disabled_schedules', [])
+    for script in scripts:
+        try:
+            prior = _schedules(http, cfg, token, script)
+            if not prior:
+                continue
+            entry = next((e for e in entries if e['script'] == script), None)
+            if entry is None:
+                entry = {'script': script, 'prior': prior, 'status': 'pending'}
+                entries.append(entry)
+                try:
+                    save({'at': _iso(now), 'event': 'cron-disable-pending', 'script': script})
+                except Exception:
+                    entries.remove(entry)
+                    raise
+            entry['status'] = 'pending'
+            _schedules(http, cfg, token, script, [])
+            receipt['stop_propagation'] = {
+                'not_before': _iso(now + timedelta(minutes=15)),
+                'note': 'Cron changes can take up to 15 minutes to propagate; in-flight executions may continue. '
+                        'API readback is not proof of an instant stop.'}
+            if _schedules(http, cfg, token, script):
+                entry['status'] = 'unverified'
+                raise ApiError('cron schedules still present after removal')
+            entry['status'] = 'confirmed'
+        except Exception as exc:  # one target failure must not hide the others
+            errors.append(f'{script}: cron disable failed ({describe(exc)})')
+    return errors
+
+
 def _disable(http, cfg, token, scripts, receipt, save, now) -> list:
     """Persist the original prior state before the first POST and confirm each disable by read-back."""
-    errors = []
+    receipt.setdefault('stop_propagation', {
+        'not_before': _iso(now + timedelta(minutes=15)),
+        'note': 'Cron removal can take up to 15 minutes to propagate; entry-point readback does not stop '
+                'in-flight or service-binding executions. This is a bounded stop, not an account spending cap.'})
+    errors = _disable_cron(http, cfg, token, scripts, receipt, save, now)
     for script in scripts:
         try:
             prior = _subdomain(http, cfg, token, script)
@@ -628,8 +702,53 @@ def _report_new_hold(cfg, state, receipt, hold_before, reasons, now, spawn) -> N
                         'Cloudflare usage stays inside the included allowances in '
                         'ops/config/cloudflare-spend-guard.v1.json',
                         f"spend guard hold {hold} at {receipt['hold_since']}: {'; '.join(reasons)}; workers.dev "
-                        f"disabled: {', '.join(w['script'] for w in receipt['disabled_workers']) or 'none'}; E2E held "
+                        f"stop receipts: {', '.join(w['script'] + ' (' + w['status'] + ')' for w in receipt['disabled_workers']) or 'none'}; E2E held "
                         'until ./run.sh cloudflare-spend-guard restore', now, spawn)
+
+
+def staging_inventory(cfg, *, require_disabled=False):
+    """Bound the stop claim to checked-in staging configs, never pretend these are live account discovery.
+
+    Any Durable Object binding is alarm-capable. Absence of a configured alarm is not proof that no persisted
+    alarm exists, so these bindings require an explicit, separately implemented stop contract.
+    """
+    inventories = {}
+    for script in cfg['staging_workers']:
+        source = (cfg.get('staging_configs') or {}).get(script)
+        if not isinstance(source, str):
+            raise UsageUnavailable(f'{script}: staging config missing; trigger inventory unknown')
+        path = Path(source).expanduser()
+        if not path.is_absolute():
+            path = ROOT / path
+        raw = path.read_text()
+        if path.suffix == '.toml':
+            document = tomllib.loads(raw)
+        else:
+            # Preserve strings (including URLs) while removing JSONC comments.
+            raw = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/',
+                         lambda m: m.group() if m.group().startswith('"') else '', raw, flags=re.S)
+            document = json.loads(raw)
+        staging = (document.get('env') or {}).get('staging')
+        if not isinstance(staging, dict) or staging.get('name') != script:
+            raise UsageUnavailable(f'{script}: staging config identity mismatch in {path}')
+        if require_disabled and staging.get('workers_dev') is not False:
+            raise UsageUnavailable(f'{script}: active hold requires explicit workers_dev=false before wrangler deploy')
+        unsupported = [name for name in ('queues', 'durable_objects', 'workflows') if staging.get(name)]
+        if unsupported:
+            raise UsageUnavailable(f"{script}: unsupported staging triggers {', '.join(unsupported)}; "
+                                   'Durable Objects may have persisted alarms; full stop unknown')
+        inventories[script] = staging
+    return inventories
+
+
+def _stop_inventory(cfg, decision):
+    if decision['verdict'] in ('STOP', 'RUNAWAY'):
+        try:
+            staging_inventory(cfg)
+        except Exception as exc:
+            decision = dict(decision, verdict='UNKNOWN', reasons=decision['reasons'] + [
+                f'stop inventory unreadable: {describe(exc)}'])
+    return decision
 
 
 def _stop_targets(cfg) -> list:
@@ -650,12 +769,13 @@ def run(cfg: dict, *, http, token, now: datetime, state_dir=None, spawn_reporter
         save = _saver(state, receipt, token)
         usage, action_errors = None, []
         try:
+            check_price_model(cfg, now)
             if raw is None:
                 raise UsageUnavailable(f"API token {cfg['token_name']} is not configured in tokens.env")
             if token is None:
                 raise UsageUnavailable(f"API token {cfg['token_name']} is not printable ASCII")
             usage = read_usage(cfg, token, http, now)
-            decision = evaluate(cfg, usage)
+            decision = _stop_inventory(cfg, evaluate(cfg, usage))
         except Exception as exc:  # noqa: BLE001 — any unreadable answer is UNKNOWN, never a crash
             decision = {'verdict': 'UNKNOWN', 'reasons': [f'usage unreadable: {describe(exc)}'], 'metered_usd': None,
                         'peak_allowance': None}
@@ -697,7 +817,8 @@ def restore(cfg: dict, *, http, token, now: datetime, state_dir=None, ack_quaran
         except ValueError:
             result.update(message='receipt unreadable', errors=['run the guard once so it quarantines the receipt'])
             return result
-        if receipt is None or (receipt['hold'] is None and not receipt['disabled_workers']):
+        if receipt is None or (receipt['hold'] is None and not receipt['disabled_workers']
+                               and not receipt.get('disabled_schedules')):
             result.update(restored=True, message='nothing to restore')
             return result
         quarantined = receipt.get('quarantined_file')
@@ -707,7 +828,7 @@ def restore(cfg: dict, *, http, token, now: datetime, state_dir=None, ack_quaran
                 f'hold is receipt-corrupt: inspect {state / str(quarantined)} (it may list Workers to re-enable by '
                 f'hand), then rerun with --ack-quarantine {quarantined}'])
             return result
-        if receipt['disabled_workers'] and not token:
+        if (receipt['disabled_workers'] or receipt.get('disabled_schedules')) and not token:
             result.update(message='receipt unchanged', errors=[f"API token {cfg['token_name']} is not configured"])
             return result
         remaining = []
@@ -728,6 +849,22 @@ def restore(cfg: dict, *, http, token, now: datetime, state_dir=None, ack_quaran
                 result['errors'].append(f'{script}: {describe(exc)}')
                 remaining.append(entry)
         receipt['disabled_workers'] = remaining
+        remaining_schedules = []
+        for entry in receipt.get('disabled_schedules', []):
+            try:
+                current = _schedules(http, cfg, token, entry['script'])
+                if current and sorted(x['cron'] for x in current) != sorted(x['cron'] for x in entry['prior']):
+                    raise ApiError('cron schedules drifted; refusing to overwrite them')
+                if not current:
+                    _schedules(http, cfg, token, entry['script'], entry['prior'])
+                restored = _schedules(http, cfg, token, entry['script'])
+                if sorted(x['cron'] for x in restored) != sorted(x['cron'] for x in entry['prior']):
+                    raise ApiError('cron restore readback differs from snapshot')
+            except Exception as exc:
+                result['errors'].append(f"{entry['script']}: cron restore failed ({describe(exc)})")
+                remaining_schedules.append(entry)
+        receipt['disabled_schedules'] = remaining_schedules
+        remaining = remaining + remaining_schedules
         if not remaining:
             receipt.update(hold=None, hold_since=None, state='CLEAR', restored_at=_iso(now), last_evaluation=None,
                            last_fast=None, quarantined_file=None)
@@ -777,7 +914,7 @@ def build_fast_query(cfg: dict, period_start: datetime, now: datetime) -> tuple[
     spans = _spans(period_start, now, fp['max_query_span_days'])
     for i, (a, b) in enumerate(spans):
         node(f'w{i}', 'mtd', 'workersInvocationsAdaptive', dt(a, b),
-             'sum { requests subrequests errors } quantiles { cpuTimeP99 } dimensions { scriptName datetimeHour }')
+             'sum { requests subrequests errors } dimensions { scriptName datetimeHour }')
         node(f'r2{i}', 'r2', 'r2OperationsAdaptiveGroups', dt(a, b), 'sum { requests } dimensions { actionType }')
     for i, (a, b) in enumerate(_date_spans(period_start, now, fp['max_query_span_days'])):
         date = f'date_geq: "{a}", date_leq: "{b}"'
@@ -785,7 +922,7 @@ def build_fast_query(cfg: dict, period_start: datetime, now: datetime) -> tuple[
         node(f'do{i}', 'do', 'durableObjectsInvocationsAdaptiveGroups', date, 'sum { requests }')
     window = timedelta(minutes=fp['burst_window_minutes'])
     node('cur', 'cur', 'workersInvocationsAdaptive', dt(now - window, now),
-         'sum { requests errors } dimensions { scriptName status }')
+         'sum { requests errors } dimensions { scriptName status datetime }')
     for k in range(1, cfg['runaway']['history_days'] + 1):
         then = now - timedelta(days=k)
         node(f'h{k}', f'h{k}', 'workersInvocationsAdaptive', dt(then - window, then),
@@ -823,10 +960,10 @@ def read_fast(cfg: dict, token: str, http, now: datetime, period_start: datetime
         raise UsageUnavailable('GraphQL answer has no single account')
     data = accounts[0]
     fp = cfg['fast_path']
-    cpu_factor = 0.001 if fp['cpu_time_unit'] == 'microseconds' else 1.0
-    metrics = dict.fromkeys(('workers.requests', 'workers.subrequests', 'workers.cpu_ms_upper_bound', 'kv.read',
+    metrics = dict.fromkeys(('workers.requests', 'workers.subrequests', 'kv.read',
                              'kv.write', 'kv.delete', 'kv.list', 'r2.class_a', 'r2.class_b', 'do.requests'), 0.0)
     current: dict[str, dict] = {}
+    latest: dict[str, datetime] = {}
     history: list[dict] = [{} for _ in range(cfg['runaway']['history_days'])]
     for alias, kind in plan:
         rows = data.get(alias)
@@ -834,18 +971,16 @@ def read_fast(cfg: dict, token: str, http, now: datetime, period_start: datetime
             raise UsageUnavailable(f'GraphQL node {alias} missing')
         if len(rows) >= fp['query_limit']:
             raise UsageUnavailable(f'GraphQL node {alias} hit its row limit; counts would be incomplete')
+        if kind == 'mtd' and not rows:
+            raise UsageUnavailable(f'GraphQL node {alias} has no Workers bucket; missing sampled data is not zero')
         for row in rows:
             if not isinstance(row, dict):
                 raise UsageUnavailable(f'GraphQL node {alias} row is not an object')
             requests = _count(row, 'sum', 'requests')
             dims = row.get('dimensions') or {}
             if kind == 'mtd':
-                p99 = _count(row, 'quantiles', 'cpuTimeP99')
-                if p99 is None and requests > 0:
-                    raise UsageUnavailable('cpuTimeP99 missing for a bucket with requests')
                 metrics['workers.requests'] += requests
                 metrics['workers.subrequests'] += _count(row, 'sum', 'subrequests')
-                metrics['workers.cpu_ms_upper_bound'] += requests * (p99 or 0.0) * cpu_factor
             elif kind == 'kv':
                 action = str(dims.get('actionType') or '').lower()
                 # An operation type this code does not know counts against the smallest allowance.
@@ -862,6 +997,10 @@ def read_fast(cfg: dict, token: str, http, now: datetime, period_start: datetime
                 if not isinstance(script, str) or not script:
                     raise UsageUnavailable(f'GraphQL node {alias} row has no scriptName')
                 if kind == 'cur':
+                    stamp = _time(dims.get('datetime'), f'{alias}.datetime')
+                    if not now - timedelta(minutes=fp['burst_window_minutes']) <= stamp <= now + CLOCK_SKEW:
+                        raise UsageUnavailable(f'GraphQL node {alias} has a late or future bucket')
+                    latest[script] = max(latest.get(script, stamp), stamp)
                     entry = current.setdefault(script, {'requests': 0.0, 'errors': 0.0})
                     entry['requests'] += requests
                     failed = requests if dims.get('status') not in (None, 'success', 'clientDisconnected') else 0.0
@@ -869,6 +1008,9 @@ def read_fast(cfg: dict, token: str, http, now: datetime, period_start: datetime
                 else:
                     day = history[int(kind[1:]) - 1]
                     day[script] = day.get(script, 0.0) + requests
+    missing = set(cfg['staging_workers']) - latest.keys()
+    if missing:
+        raise UsageUnavailable(f"recent Workers buckets missing for {', '.join(sorted(missing))}; usage is unknown")
     return {'metrics': metrics, 'current': current, 'history': history,
             'period_start': _gql_time(period_start), 'queries': 1}
 
@@ -879,7 +1021,7 @@ def detect_runaways(cfg: dict, current: dict, history: list) -> tuple[list, list
     runaways, floor_only = [], []
     for script, now in sorted(current.items()):
         requests, errors = now['requests'], now['errors']
-        days = [day.get(script, 0.0) for day in history]
+        days = [day[script] for day in history if script in day]
         seen = sum(1 for d in days if d > 0)
         reasons = []
         if seen < r['min_history_days']:
@@ -912,10 +1054,7 @@ def evaluate_fast(cfg: dict, data: dict) -> dict:
 
     metrics = data['metrics']
     for entry in cfg['fast_path']['allowances']:
-        suffix = (' (upper bound: requests x cpuTimeP99 per hour bucket)'
-                  if entry['metric'] == 'workers.cpu_ms_upper_bound' else '')
-        _fraction_check(cfg, entry['key'], metrics[entry['metric']], entry['included_per_period'], reasons, raise_to,
-                        suffix)
+        _fraction_check(cfg, entry['key'], metrics[entry['metric']], entry['included_per_period'], reasons, raise_to)
     window = cfg['fast_path']['burst_window_minutes']
     burst = sum(data['current'].get(s, {}).get('requests', 0.0) for s in cfg['staging_workers'])
     if burst > cfg['fast_path']['burst_requests_staging']:
@@ -972,12 +1111,13 @@ def fast(cfg: dict, *, http, token, now: datetime, state_dir=None, spawn_reporte
         save = _saver(state, receipt, token)
         action_errors: list = []
         try:
+            check_price_model(cfg, now)
             if raw is None:
                 raise UsageUnavailable(f"API token {cfg['token_name']} is not configured in tokens.env")
             if token is None:
                 raise UsageUnavailable(f"API token {cfg['token_name']} is not printable ASCII")
             data = read_fast(cfg, token, http, now, _fast_period(cfg, receipt, token, http, now))
-            decision = evaluate_fast(cfg, data)
+            decision = _stop_inventory(cfg, evaluate_fast(cfg, data))
         except Exception as exc:  # noqa: BLE001
             decision = {'verdict': 'UNKNOWN', 'reasons': [f'analytics unreadable: {describe(exc)}'], 'runaways': [],
                         'floor_only': []}
@@ -990,7 +1130,8 @@ def fast(cfg: dict, *, http, token, now: datetime, state_dir=None, spawn_reporte
         staging_runaways = [r['script'] for r in runaways if r['script'] in cfg['staging_workers']]
         if runaways:
             # Receipt and alert first, then the action.
-            alert = '; '.join(f"RUNAWAY {r['script']} ({'disable workers.dev' if r['script'] in staging_runaways else 'alert only'})"
+            intent = 'no stop attempted: UNKNOWN' if verdict == 'UNKNOWN' else 'stop requested'
+            alert = '; '.join(f"RUNAWAY {r['script']} ({intent if r['script'] in staging_runaways else 'alert only'})"
                               for r in runaways)
             print(f'ALERT cloudflare runaway: {alert}', file=sys.stderr)
             save({'at': _iso(now), 'event': 'runaway-alert', 'runaways': runaways})
@@ -1000,6 +1141,11 @@ def fast(cfg: dict, *, http, token, now: datetime, state_dir=None, spawn_reporte
         elif staging_runaways and verdict == 'RUNAWAY':
             _hold(receipt, 'runaway', now)
             action_errors = _disable(http, cfg, token, staging_runaways, receipt, save, now)
+        if verdict == 'UNKNOWN' and receipt['hold'] is None:
+            _hold(receipt, 'unknown', now)
+        elif (verdict == 'OK' and receipt['hold'] == 'unknown'
+              and (receipt.get('last_evaluation') or {}).get('verdict') == 'OK'):
+            receipt['hold'], receipt['hold_since'] = None, None
         receipt['state'] = 'STOPPED' if receipt['hold'] else 'CLEAR'
         signature = [verdict, receipt['hold'], sorted((w['script'], w['status']) for w in receipt['disabled_workers']),
                      sorted(r['script'] for r in runaways), receipt.get('period_start'), bool(action_errors)]
@@ -1012,11 +1158,19 @@ def fast(cfg: dict, *, http, token, now: datetime, state_dir=None, spawn_reporte
             save({'at': _iso(now), 'event': 'fast', 'verdict': verdict, 'state': receipt['state'],
                   'reasons': decision['reasons'], 'action_errors': action_errors})
         if runaways and changed:
+            action = 'alert only'
+            if staging_runaways:
+                if verdict == 'UNKNOWN':
+                    action = 'no stop attempted: UNKNOWN inventory'
+                elif action_errors:
+                    action = 'stop incomplete: ' + '; '.join(action_errors)
+                else:
+                    action = 'workers.dev and cron removal confirmed; propagation pending on ' + ', '.join(staging_runaways)
             _report_finding(state, f"spend-guard:runaway:{','.join(r['script'] for r in runaways)}:{_iso(now)}",
                             'cloudflare-runaway-worker',
                             'each Worker\'s 15-minute traffic stays near its own trailing median',
                             redact(f"{'; '.join(decision['reasons'])}; action: "
-                                   f"{'workers.dev disabled on ' + ', '.join(staging_runaways) if staging_runaways else 'alert only'}",
+                                   f"{action}",
                                    token), now, spawn)
         if receipt['hold'] != 'runaway':
             _report_new_hold(cfg, state, redact(receipt, token), hold_before, redact(decision['reasons'], token), now,
@@ -1051,6 +1205,41 @@ def map_services(cfg: dict, *, http, token, now: datetime) -> list:
             f"{owner.get(name, 'UNMAPPED')}" for name, s in sorted(seen.items())]
 
 
+def pre_run_gate(cfg, *, http, token, now, state_dir=None):
+    """Fresh billable usage preflight: read-only, including local state, refuses any included allowance >=50%."""
+    try:
+        check_price_model(cfg, now)
+        receipt = read_receipt(_state_dir(cfg, state_dir))
+        if receipt:
+            if receipt.get('hold') or receipt.get('state') != 'CLEAR':
+                return False, f"HOLD: existing spend guard hold {receipt.get('hold')}"
+            fast_verdict = (receipt.get('last_fast') or {}).get('verdict')
+            if fast_verdict and fast_verdict != 'OK':
+                return False, f'HOLD: last analytics verdict {fast_verdict}'
+        token = clean_token(token)
+        if not token:
+            raise UsageUnavailable(f"{cfg['token_name']} not configured; cannot evaluate spend")
+        decision = evaluate(cfg, read_usage(cfg, token, http, now))
+        peak = decision.get('peak_allowance') or {}
+        if decision['verdict'] != 'OK' or peak.get('fraction', 0) >= 0.5:
+            return False, f"HOLD: pre-run allowance limit 50%; {decision['verdict']}: " + '; '.join(decision['reasons'])
+        return True, 'CLEAR: billable usage below every mapped 50% allowance; no guard hold'
+    except Exception as exc:
+        return False, f'HOLD: pre-run UNKNOWN ({describe(exc)})'
+
+
+def deploy_gate(cfg, *, state_dir=None):
+    """Read-only staging deploy check. No active hold means this constraint does not apply."""
+    try:
+        receipt = read_receipt(_state_dir(cfg, state_dir))
+        if not receipt or not receipt.get('hold'):
+            return True, 'CLEAR: no active spend guard hold; workers_dev constraint does not apply'
+        staging_inventory(cfg, require_disabled=True)
+    except Exception as exc:
+        return False, f'HOLD: staging deploy refused ({describe(exc)})'
+    return True, 'CLEAR: held staging configs explicitly keep workers_dev=false'
+
+
 def e2e_gate(cfg: dict, *, now: datetime, state_dir=None):
     """Return (allowed, reason); anything but a fresh, data-backed CLEAR holds."""
     try:
@@ -1066,7 +1255,7 @@ def e2e_gate(cfg: dict, *, now: datetime, state_dir=None):
                        f"last verdict {evaluation.get('verdict')}: {'; '.join(evaluation.get('reasons') or [])}")
     if not evaluation:
         return False, 'HOLD: no spend evaluation since the last restore (or ever); run the guard'
-    if evaluation.get('verdict') not in ('OK', 'WARN'):
+    if evaluation.get('verdict') != 'OK':
         return False, f"HOLD: last verdict {evaluation.get('verdict')}: {'; '.join(evaluation.get('reasons') or [])}"
     try:
         age = now - _time(evaluation.get('at'), 'last_evaluation.at')
@@ -1081,18 +1270,19 @@ def e2e_gate(cfg: dict, *, now: datetime, state_dir=None):
         return False, (f"HOLD: the usage data behind the last CLEAR ends {evaluation.get('data_basis_at')}, older than "
                        f"{cfg['max_usage_age_hours']}h")
     last_fast = receipt.get('last_fast') or {}
-    if last_fast and last_fast.get('verdict') not in ('OK', 'WARN'):
+    if last_fast and last_fast.get('verdict') != 'OK':
         return False, f"HOLD: fast poll verdict {last_fast.get('verdict')}: {'; '.join(last_fast.get('reasons') or [])}"
     return True, f"CLEAR: last verdict {evaluation.get('verdict')} at {evaluation.get('at')}"
 
 
 def bound_action(cfg: dict) -> str:
     production = 'also stopped' if cfg['stop_production_workers'] else 'report-only'
-    return (f"on breach: STOP disables workers.dev on {', '.join(cfg['staging_workers'])} and writes the STOPPED "
-            "receipt E2E dispatch must pass; RUNAWAY disables only the runaway staging Worker; UNKNOWN writes the "
-            f"receipt only; production {production} · owner joe · remediation open Cloudflare Billing > Billable "
+    return (f"on breach: STOP snapshots/removes cron and disables workers.dev on {', '.join(cfg['staging_workers'])} and writes the STOPPED "
+            "receipt E2E dispatch must pass; cron propagation up to 15 minutes; unsupported triggers are UNKNOWN; "
+            "RUNAWAY stops only the runaway staging Worker; UNKNOWN writes the "
+            f"receipt only; check-e2e is read-only and holds at 50%; check-deploy requires workers_dev=false during a hold; production {production} · owner joe · remediation open Cloudflare Billing > Billable "
             "Usage or Workers analytics, cut the named driver, then run ./run.sh cloudflare-spend-guard restore at a "
-            "terminal · verify the next guard run prints OK or WARN and ./run.sh cloudflare-spend-guard check-e2e "
+            "terminal · verify the next guard run prints OK and ./run.sh cloudflare-spend-guard check-e2e "
             "exits 0 · auto-clear UNKNOWN on the next readable run; STOP and RUNAWAY only by restore")
 
 
@@ -1144,7 +1334,8 @@ def parse_args(argv):
     restore_parser = sub.add_parser('restore', help='at a terminal: re-enable what the guard disabled, lift the hold')
     restore_parser.add_argument('--ack-quarantine', metavar='FILE',
                                 help='the quarantined receipt you inspected (needed for a receipt-corrupt hold)')
-    sub.add_parser('check-e2e', help='run the guard (when a token exists), then exit 0 only if E2E may proceed')
+    sub.add_parser('check-e2e', help='read-only pre-run: billable usage must be below 50% and no hold active')
+    sub.add_parser('check-deploy', help='read-only: held staging must keep workers_dev=false in wrangler configs')
     sub.add_parser('health', help='print the last evaluation as a health row (no network)')
     sub.add_parser('map-services', help='dry run: list Billable Usage service names and their mapping; writes nothing')
     sub.add_parser('loop-watch', help='one local dead-loop scan (tools/cloudflare_loop_watch.py); no network')
@@ -1181,6 +1372,10 @@ def _main(argv, *, http, token_reader, now, state_dir, cfg, isatty, prompt, spaw
         return _loop_watch().main(['scan'])
     cfg = cfg or load_config()
     state = _state_dir(cfg, state_dir)
+    if args.command == 'check-deploy':
+        allowed, reason = deploy_gate(cfg, state_dir=state)
+        print(reason)
+        return 0 if allowed else EXIT_CODES['UNKNOWN']
     if args.command == 'run':
         result = run(cfg, http=http, token=token_reader(cfg), now=now, state_dir=state, spawn_reporter=spawn_reporter)
         print(health_line(read_receipt(state), cfg))
@@ -1219,12 +1414,7 @@ def _main(argv, *, http, token_reader, now, state_dir, cfg, isatty, prompt, spaw
             print(f'error: {error}', file=sys.stderr)
         return 0 if result['restored'] else 1
     if args.command == 'check-e2e':
-        token = token_reader(cfg)
-        if not clean_token(token):
-            print(f"HOLD: {cfg['token_name']} not configured; cannot evaluate spend")
-            return 1
-        run(cfg, http=http, token=token, now=now, state_dir=state, spawn_reporter=spawn_reporter)
-        allowed, reason = e2e_gate(cfg, now=now, state_dir=state)
+        allowed, reason = pre_run_gate(cfg, http=http, token=token_reader(cfg), now=now, state_dir=state)
         print(reason)
         return 0 if allowed else 1
     if args.command == 'map-services':
