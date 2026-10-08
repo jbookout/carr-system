@@ -34,7 +34,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 
-STATUSES = ("queued", "running", "review", "blocked", "done", "failed", "superseded")
+STATUSES = ("queued", "running", "review", "blocked", "question-for-orchestrator", "done", "failed", "superseded")
 # Failed and superseded cards leave the pipeline: they show only in History,
 # each with its reason.
 RETIRED_STATUSES = ("failed", "superseded")
@@ -54,6 +54,7 @@ STATUS_TO_STAGE = {
     "running": "build",
     "review": "review",
     "blocked": "review",
+    "question-for-orchestrator": "review",
     "failed": "ci",
     "superseded": "ci",
 }

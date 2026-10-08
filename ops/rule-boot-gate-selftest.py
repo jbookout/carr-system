@@ -1514,6 +1514,16 @@ def case_tx_missing_transcript_holds(c):
     stale(c.call(*READ), "not in the host transcript")
 
 
+
+def case_unreadable_input_holds_effects(c):
+    """Input the adapter could not parse cannot establish delivery."""
+    for raw in ("not json", "[1]"):
+        out = subprocess.run([sys.executable, os.path.join(c.tree, "hooks", "rule-boot-gate.py")],
+                             input=raw, capture_output=True, text=True, env=c.env, timeout=30)
+        verdict = json.loads(out.stdout or "null")
+        assert denied((verdict or {}).get("hookSpecificOutput")), f"{raw!r} -> {out.stdout}{out.stderr}"
+
+
 CASES = [case_tx_normal_boot_allows, case_tx_compaction_after_boot_holds, case_tx_old_marker_stale_chain_holds,
          case_tx_unwritable_transcript_holds, case_tx_dropped_boundary_holds, case_tx_partial_last_line_holds,
          case_tx_stale_digest_pages_hold, case_tx_child_contexts, case_tx_retry_cannot_reuse_precompaction_pages,
@@ -1530,7 +1540,7 @@ CASES = [case_tx_normal_boot_allows, case_tx_compaction_after_boot_holds, case_t
          case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
          case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
          case_confirm_needs_the_real_page,
-         case_same_checkout_worktree]
+         case_same_checkout_worktree, case_unreadable_input_holds_effects]
 
 
 def run_all(tree):
@@ -1680,6 +1690,8 @@ def mutant_tree(root, replacements):
     tree = os.path.join(root, "tree")
     os.makedirs(os.path.join(tree, "hooks"))
     os.makedirs(os.path.join(tree, "lib"))
+    os.makedirs(os.path.join(tree, "lib"), exist_ok=True)
+    shutil.copyfile(os.path.join(REPO, "lib", "hook_runtime.py"), os.path.join(tree, "lib", "hook_runtime.py"))
     shutil.copy2(os.path.join(REPO, "hooks", "rule-boot-gate.py"), os.path.join(tree, "hooks"))
     shutil.copy2(os.path.join(REPO, "lib", "rule_recall.py"), os.path.join(tree, "lib"))
     with open(os.path.join(REPO, "lib", "rule_boot_gate.py"), encoding="utf-8") as fh:

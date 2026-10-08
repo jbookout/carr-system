@@ -266,60 +266,69 @@ def search_decisions(tokens):
     return [(m, line) for _, _, m, line in scored[:MAX_HITS]]
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    log(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    log(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    if not re.search(r"(record-defect|add-loop)$", tool):
+        sys.exit(0)
+
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    if not isinstance(ti, dict):
+        sys.exit(0)
+
+    text = claim_text(ti)
+    if len(text) < 60 or not DRIFT.search(text):
+        sys.exit(0)
+
+    hits = search_decisions(salient_tokens(text))
+    if not hits:
+        # A drift claim with no matching ruling is probably a real finding.
+        # Silence is the correct output here.
+        sys.exit(0)
+
+    body = "\n".join(f"  · [{t}] {line[:300]}" for t, line in hits)
+    log(f"CONTEXT tool={tool} hits={len(hits)}")
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "additionalContext": (
+                "DRIFT CLAIM — THE DECISION LOG HAS SOMETHING ON THIS SUBJECT. Read it before "
+                "this write lands.\n\n"
+                "You are asserting that a present state is wrong rather than chosen. That is the "
+                "most common way this system has been wrong, running since 2026-08-04, most of "
+                "them caught by a human — `standing-context` returns the live count if you want "
+                "it. The pattern is always a CURRENT artifact read accurately and a DECISION "
+                "behind it left unread. On 2026-08-13 a session read a status banner as evidence of "
+                "regression and asked Joe to redo something he had deliberately reversed three days "
+                "earlier.\n\nMatching rulings, newest first:\n\n" + body +
+                "\n\nIf one of these explains the state you are calling drift, this write is wrong: "
+                "the state was chosen, and the finding is either nothing or a stale prompt that "
+                "should be corrected instead. If none of them apply, proceed — a drift claim with no "
+                "governing decision is usually real."
+            ),
+        }
+    }))
+    sys.exit(0)
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        log(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
-
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        if not re.search(r"(record-defect|add-loop)$", tool):
-            sys.exit(0)
-
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        if not isinstance(ti, dict):
-            sys.exit(0)
-
-        text = claim_text(ti)
-        if len(text) < 60 or not DRIFT.search(text):
-            sys.exit(0)
-
-        hits = search_decisions(salient_tokens(text))
-        if not hits:
-            # A drift claim with no matching ruling is probably a real finding.
-            # Silence is the correct output here.
-            sys.exit(0)
-
-        body = "\n".join(f"  · [{t}] {line[:300]}" for t, line in hits)
-        log(f"CONTEXT tool={tool} hits={len(hits)}")
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "additionalContext": (
-                    "DRIFT CLAIM — THE DECISION LOG HAS SOMETHING ON THIS SUBJECT. Read it before "
-                    "this write lands.\n\n"
-                    "You are asserting that a present state is wrong rather than chosen. That is the "
-                    "most common way this system has been wrong, running since 2026-08-04, most of "
-                    "them caught by a human — `standing-context` returns the live count if you want "
-                    "it. The pattern is always a CURRENT artifact read accurately and a DECISION "
-                    "behind it left unread. On 2026-08-13 a session read a status banner as evidence of "
-                    "regression and asked Joe to redo something he had deliberately reversed three days "
-                    "earlier.\n\nMatching rulings, newest first:\n\n" + body +
-                    "\n\nIf one of these explains the state you are calling drift, this write is wrong: "
-                    "the state was chosen, and the finding is either nothing or a stale prompt that "
-                    "should be corrected instead. If none of them apply, proceed — a drift claim with no "
-                    "governing decision is usually real."
-                ),
-            }
-        }))
-        sys.exit(0)
-    except Exception as exc:
-        log(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
