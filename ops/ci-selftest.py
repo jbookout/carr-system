@@ -1476,13 +1476,16 @@ def test_hosted_zsh_setup_does_not_refresh_working_indexes():
 
     Execute the workflow's setup with a synthetic apt, not a second installer.
     A working install must never refresh; stale indexes must still be repaired;
-    an unavailable mirror must fail setup rather than green-light missing zsh.
+    a flaky mirror gets bounded retries on the download only (runs 37826917141,
+    37820191123, 37803579466, 37793286211, 37781682483, 37762481248 and
+    37683204623 failed this step on a mirror hiccup); an unavailable mirror
+    must fail setup rather than green-light missing zsh.
     """
     wf = _hosted_workflow()
     setup = next(st for st in wf["jobs"]["classes"]["steps"]
                  if st.get("name") == "Install zsh")
-    check("zsh setup has a three-minute step deadline",
-          0 < setup.get("timeout-minutes", 0) <= 3)
+    check("zsh setup has a bounded step deadline of at most eight minutes",
+          0 < setup.get("timeout-minutes", 0) <= 8)
     with tempfile.TemporaryDirectory(prefix="ci-zsh-setup-") as tmp:
         fixture = pathlib.Path(tmp)
         sudo = fixture / "sudo"
@@ -1494,15 +1497,20 @@ calls.append(sys.argv[1:])
 log.write_text(json.dumps(calls))
 args = sys.argv[1:]
 mode = os.environ["CI_SETUP_FIXTURE"]
-if mode == "hung-install" and "install" in args:
-    time.sleep(30)
-if mode == "working" and "update" in args:
+kind = ("download" if "--download-only" in args else
+        "install" if "--no-download" in args else
+        "update" if "update" in args else "unknown")
+if mode == "working" and kind == "update":
     sys.exit(91)
-if mode not in ("working", "hung-install") and len(calls) == 1:
+if mode == "stale" and len(calls) == 1:
     sys.exit(100)
-if mode == "unavailable" and "update" in args:
+if mode == "mirror-flaky" and len(calls) in (1, 3):
     sys.exit(100)
-if mode == "retry-failed" and len(calls) == 3:
+if mode == "unavailable" and kind in ("download", "update"):
+    sys.exit(100)
+if mode == "hung-download" and kind == "download":
+    time.sleep(30)
+if mode == "install-failed" and kind == "install":
     sys.exit(100)
 ''')
         sudo.chmod(0o755)
@@ -1517,7 +1525,7 @@ calls = json.loads(log.read_text()) if log.exists() else []
 calls.append(sys.argv[1:3])
 log.write_text(json.dumps(calls))
 assert sys.argv[1] == "--kill-after=5s"
-assert 0 < int(sys.argv[2].removesuffix("s")) <= 60
+assert 0 < int(sys.argv[2].removesuffix("s")) <= 120
 try:
     result = subprocess.run(sys.argv[3:], timeout=1)
     sys.exit(result.returncode)
@@ -1525,18 +1533,20 @@ except subprocess.TimeoutExpired:
     sys.exit(124)
 ''')
         timeout.chmod(0o755)
+        failing = ("unavailable", "hung-download", "install-failed")
         for mode, expected in (("preinstalled", []),
-                               ("working", ["install"]),
-                               ("stale", ["install", "update", "install"]),
-                               ("unavailable", ["install", "update"]),
-                               ("retry-failed", ["install", "update", "install"]),
-                               ("hung-install", ["install", "update", "install"])):
+                               ("working", ["download", "install"]),
+                               ("stale", ["download", "update", "download", "install"]),
+                               ("mirror-flaky", ["download", "update", "download", "download", "install"]),
+                               ("unavailable", ["download", "update", "download", "download"]),
+                               ("hung-download", ["download", "update", "download", "download"]),
+                               ("install-failed", ["download", "install"])):
             log = fixture / (mode + ".json")
             deadlines_log = fixture / (mode + "-deadlines.json")
             env = scrubbed_env()
             env.update(PATH=str(fixture) + os.pathsep + os.environ["PATH"],
                        CI_SETUP_CALLS=str(log), CI_SETUP_FIXTURE=mode,
-                       CI_SETUP_DEADLINES=str(deadlines_log))
+                       CI_SETUP_DEADLINES=str(deadlines_log), ZSH_RETRY_BACKOFF="0")
             try:
                 process = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", setup["run"]],
                                            cwd=fixture, env=env, stdout=subprocess.PIPE,
@@ -1550,24 +1560,31 @@ except subprocess.TimeoutExpired:
                 continue
             calls = json.loads(log.read_text()) if log.exists() else []
             deadlines = json.loads(deadlines_log.read_text()) if deadlines_log.exists() else []
-            actions = [next((arg for arg in args if arg in ("install", "update")), "unknown")
+            actions = [("download" if "--download-only" in args else
+                        "install" if "--no-download" in args else
+                        "update" if "update" in args else "unknown")
                        for args in calls]
             check(f"zsh setup {mode} uses the required install/refresh path",
                   actions == expected, actions)
             check(f"zsh setup {mode} propagates its outcome",
-                  (ran.returncode != 0) == (mode in ("unavailable", "retry-failed", "hung-install")),
+                  (ran.returncode != 0) == (mode in failing),
                   ran.returncode)
             check(f"zsh setup {mode} bounds every apt process",
                   len(deadlines) == len(calls) and
-                  sum(int(args[1].removesuffix("s")) + 5 for args in deadlines) < 180,
+                  sum(int(args[1].removesuffix("s")) + 5 for args in deadlines) < 480,
                   deadlines)
             check(f"zsh setup {mode} bounds every apt network request",
                   all(args[0] == "apt-get" and
-                      all(option in args for option in ("Acquire::Retries=1",
-                          "Acquire::http::Timeout=15", "Acquire::https::Timeout=15"))
+                      all(option in args for option in ("Acquire::Retries=2",
+                          "Acquire::http::Timeout=15", "Acquire::https::Timeout=15",
+                          "DPkg::Lock::Timeout=30"))
                       for args in calls), calls)
             check(f"zsh setup {mode} requires the zsh package when installing",
-                  all("zsh" in args for args in calls if "install" in args), calls)
+                  all("zsh" in args for args in calls if "update" not in args), calls)
+            check(f"zsh setup {mode} never unpacks without a completed download",
+                  all(calls.index(args) > 0 and
+                      any("--download-only" in prior for prior in calls[:calls.index(args)])
+                      for args in calls if "--no-download" in args), calls)
 
 
 def main(argv=None):
