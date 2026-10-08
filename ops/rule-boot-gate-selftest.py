@@ -54,6 +54,10 @@ class Host:
         self.main = os.path.join(self.dir, SESSION + ".jsonl")
         self.last, self.uses, self.queue, self.drop, self.serial = {}, {}, None, False, 0
         self.misroute = set()
+        # One assistant message's tool calls, then their results: a result is
+        # written once, and only while its call is in the open batch (a hook
+        # replaying an old answer is not a host event).
+        self.batch, self.answered = {}, set()
 
     def path(self, agent):
         if not agent or agent in self.misroute:
@@ -86,21 +90,36 @@ class Host:
     def tool_use(self, agent, call, tool, tool_input, cwd=REPO):
         if not call or call in self.uses:
             return
+        batch = self.batch.setdefault(agent, {"calls": [], "answering": False})
+        if batch["answering"]:
+            batch.update(calls=[], answering=False)
         uid = self.entry(agent, "assistant", cwd=cwd, message={
             "role": "assistant", "content": [{"type": "tool_use", "id": call, "name": tool, "input": tool_input}]})
         self.uses[call] = (agent, uid)
+        batch["calls"].append(call)
 
-    def tool_result(self, call, content, is_error=False):
-        if call not in self.uses:
+    def tool_result(self, call, content, is_error=False, advance=True, link=True):
+        if call not in self.uses or (advance and call in self.answered):
             return
         agent, uid = self.uses[call]
-        self.entry(agent, "user", parentUuid=uid, sourceToolAssistantUUID=uid, message={
+        batch = self.batch.get(agent, {"calls": []})
+        if advance and call not in batch["calls"]:
+            return
+        tail = self.last.get(agent)
+        link_to = uid if link else tail
+        self.entry(agent, "user", parentUuid=link_to, sourceToolAssistantUUID=link_to, message={
             "role": "user", "content": [{"type": "tool_result", "tool_use_id": call,
                                          "content": content, "is_error": is_error}]})
+        if advance:
+            self.answered.add(call)
+            batch["answering"] = True
+        else:
+            self.last[agent] = tail  # an extra line off the chain
 
     def compact(self, agent=None):
         tail = self.last.get(agent)
         self.last[agent] = None
+        self.batch[agent] = {"calls": [], "answering": False}
         self.entry(agent, "system", subtype="compact_boundary", content="Conversation compacted",
                    logicalParentUuid=tail, compactMetadata={"trigger": "auto"})
         self.entry(agent, "user", isCompactSummary=True,
@@ -1302,6 +1321,7 @@ def host_only_fetch(c, page, boot, agent=None):
     tool, args = mcp_fetch(page)
     c.host.tool_use(agent, call, tool, args)
     c.host.tool_result(call, [{"type": "text", "text": json.dumps({"ok": True, "rule_boot": boot})}])
+    return call
 
 
 def case_tx_normal_boot_allows(c):
@@ -1317,6 +1337,15 @@ def case_tx_compaction_after_boot_holds(c):
     stale(c.call(*READ), "1 of 2")
     c.fetch(2)
     assert c.call(*READ) is None, "every page re-read after the boundary: allowed"
+    # A boundary that keeps a parent link, written with spacing the byte scan
+    # does not match, still ends the chain (microcompaction's shape is unread).
+    c.host.serial += 1
+    uid = f"u-micro-{c.host.serial}"
+    c.host.write(None, json.dumps({"parentUuid": c.host.last.get(None), "isSidechain": False,
+                                   "type": "system", "subtype": "microcompact_boundary",
+                                   "uuid": uid, "sessionId": SESSION}) + "\n")
+    c.host.last[None] = uid
+    stale(c.call(*READ), "compaction")
 
 
 def case_tx_old_marker_stale_chain_holds(c):
@@ -1375,6 +1404,12 @@ def case_tx_partial_last_line_holds(c):
         stale(c.call(*READ), "not in the host transcript")
     finally:
         c.host.write = real
+    # A whole entry whose newline has not landed is still being written.
+    c1 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    booted(c1)
+    unterminated = c1.host.write
+    c1.host.write = lambda agent, line: unterminated(agent, line.rstrip("\n"))
+    stale(c1.call(*READ), "not in the host transcript")
     # A page whose result entry was torn mid-line (and later sealed) does not count.
     c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
     c2.stub_sized("a", 2); c2.arm(); c2.fetch(1)
@@ -1390,7 +1425,8 @@ def case_tx_partial_last_line_holds(c):
     c2.host.write = tear
     torn["next_result"] = True
     c2.fetch(2)
-    stale(c2.call(*READ), "1 of 2")
+    # The torn entry is also the next entry's parent: the chain stops there.
+    stale(c2.call(*READ), "0 of 2")
 
 
 def case_tx_stale_digest_pages_hold(c):
@@ -1444,11 +1480,18 @@ def case_tx_parallel_results_count_once(c):
     assert c.call(*READ) is None, "sibling results of a parallel batch count"
     # A second result for the same call makes that page ambiguous.
     c.host.compact()
-    calls = []
+    calls = [host_only_fetch(c, p, c.boot(p)) for p in (1, 2, 3)]
+    c.host.tool_result(calls[0], "a second result line for page 1", advance=False)
+    stale(c.call(*READ), "2 of 3")
+    # A result line not linked to its call (no parentUuid/sourceToolAssistantUUID
+    # naming the tool_use entry) is not that call's answer.
+    c.host.compact()
     for p in (1, 2, 3):
-        host_only_fetch(c, p, c.boot(p))
-        calls.append(f"host-only-{c.host.serial - 1}")
-    c.host.tool_result(calls[0], "forged duplicate")
+        tool, args = mcp_fetch(p)
+        c.host.tool_use(None, f"unlinked-{p}", tool, args)
+    for p in (1, 2, 3):
+        c.host.tool_result(f"unlinked-{p}", [{"type": "text", "text": json.dumps(
+            {"ok": True, "rule_boot": c.boot(p)})}], link=(p != 2))
     stale(c.call(*READ), "2 of 3")
 
 
@@ -1576,8 +1619,8 @@ MUTANTS = {
     "escape-after-cap": [('\n        return "deny", reason\n', '\n        return "allow", reason\n')],
     "escape-after-unwritten-state": [('        return "deny", reason + "\\n"', '        return "allow", reason + "\\n"')],
     "out-of-range-read-as-outage": [('        if _OUT_OF_RANGE in text:', '        if False:')],
-    "failed-sticky": [('        if not _short_text(folder, arm):\n            return "allow", None',
-                       '        if not _short_text(folder, arm) and "failed" not in names:\n            return "allow", None'),
+    "failed-sticky": [('        if not _short_text(folder, arm):\n            return "complete", arm',
+                       '        if not _short_text(folder, arm) and "failed" not in names:\n            return "complete", arm'),
                       ('        for stale in ("failed", "unsupported", f"u{page}"):', '        for stale in ():')],
     "escape-after-outage": [('\n        return _hold(folder, len(confirmed), UNAVAILABLE_NOTICE',
                              '\n        return "allow", UNAVAILABLE_NOTICE #')],
@@ -1590,9 +1633,15 @@ MUTANTS = {
     # Fetch recognition (2026-09-27).
     "pipe-failure-read-as-outage": [('    if not direct and answer != "boot":\n        answer = "inconclusive"',
                                      '    if False:\n        answer = "inconclusive"')],
+    # These two remove the property from both layers that check it: the
+    # PostToolUse markers and the transcript proof.
     "any-answer-confirms-the-page": [('    if answer == "boot" and not _is_page(boot, page):',
-                                      '    if False:')],
-    "no-length-check": [('    if want < 1:\n        return True', '    if True:\n        return False')],
+                                      '    if False:'),
+                                     ('        if answer == "boot" and _is_page(boot, page) and (',
+                                      '        if answer == "boot" and (')],
+    "no-length-check": [('    if want < 1:\n        return True', '    if True:\n        return False'),
+                        ('    if sum(_utf16_len(pages[p]["text"]) for p in have) != want[2]:',
+                         '    if False:')],
     "any-filter-harmless": [('def _harmless_filter(stage):\n', 'def _harmless_filter(stage):\n    return True\n')],
     "any-python-code": [('            return args[1] == _PY_JSON_PRETTY', '            return True')],
     "any-jq-filter": [('    if flt is None:\n        return True\n    pos = 0', '    if True:\n        return True\n    pos = 0')],
@@ -1605,6 +1654,25 @@ MUTANTS = {
     "compaction-hold-silent": [('    if not agent_id and not confirmed and source in ("compact", "resume", "clear"):',
                                 '    if False:')],
     "python-any-cwd": [('    if uses_python and not _is_checkout_root(base):', '    if False:')],
+    # Host transcript freshness (2026-10-08).
+    "transcript-proof-skipped": [('        why = transcript_freshness(payload, detail)\n', '        why = None\n')],
+    "compaction-boundary-ignored": [
+        ('        if record.get("type") == "system" and record.get("subtype") in _DISCONTINUITIES:\n            break',
+         '        if False:\n            break')],
+    "codex-trusted": [('    if "turn_id" in payload or "turnId" in payload:', '    if False:')],
+    "any-digest-counts": [('                boot.get("digest"), int(boot.get("pages_total") or 0), int(boot.get("total_chars") or 0)) == want:',
+                           '                True):')],
+    "duplicate-results-count": [('if len(found) == 1 and found[0][0]]', 'if found and found[-1][0]]')],
+    "unlinked-results-count": [('            linked = use[0] in (record.get("sourceToolAssistantUUID"), record.get("parentUuid"))',
+                                '            linked = True')],
+    "unterminated-line-read": [('    raw = raw[:raw.rfind(b"\\n") + 1]\n', '\n')],
+    "subagent-falls-back-to-session-file": [
+        ('        return None, "this subagent\'s own transcript was not found exactly once."',
+         '        return main, None')],
+    "latest-entry-stands-in-for-this-call": [
+        ('    if len({r.get("uuid") for r in current}) != 1:\n        return None',
+         '    current = current or [r for r in records if r.get("type") == "assistant"][-1:]\n'
+         '    if len({r.get("uuid") for r in current}) != 1:\n        return None')],
 }
 
 
