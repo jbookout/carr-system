@@ -72,7 +72,7 @@ DEFAULT_RESULTS = Path(
     )
 )
 
-CODEX_TIMEOUT_S = float(os.environ.get("CARR_HERMES_CODEX_TIMEOUT", "900"))
+CODEX_TIMEOUT_S = float(os.environ.get("CARR_HERMES_CODEX_TIMEOUT", "5400"))
 
 # Codex prints this on STDOUT and still exits 0, so the exit code lies.
 QUOTA_HINT = re.compile(r"hit your usage limit", re.I)

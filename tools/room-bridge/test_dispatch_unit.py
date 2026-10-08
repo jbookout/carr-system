@@ -596,6 +596,18 @@ def main() -> int:
     check("an acknowledgement with no dispatch_ref is refused before it is sent",
           an_acknowledgement_names_the_dispatch_it_acknowledges)
 
+    def a_codex_job_gets_ninety_minutes_by_default():
+        # 2026-10-08: the old 900 s default killed four real build and review
+        # jobs mid-run; the Codex run dies when the dispatcher stops waiting.
+        env = {k: v for k, v in os.environ.items() if k != "CARR_HERMES_CODEX_TIMEOUT"}
+        out = subprocess.run(
+            [sys.executable, "-c", "import dispatch; print(dispatch.CODEX_TIMEOUT_S)"],
+            cwd=HERE, env=env, capture_output=True, text=True, check=True)
+        assert float(out.stdout.strip()) == 5400.0, out.stdout
+
+    check("a Codex job waits 90 minutes by default, not 15",
+          a_codex_job_gets_ninety_minutes_by_default)
+
     tmp.cleanup()
     print()
     if FAILURES:
