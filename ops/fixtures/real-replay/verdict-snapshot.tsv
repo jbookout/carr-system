@@ -87,90 +87,50 @@ chat-lint-carryover.py	UserPromptSubmit	scenarios:b2d3e4f5a6b7	announce	Keep rep
 chat-lint-gate.py	Stop	(all)	counts	allow=87
 close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	(all)	counts	allow=72 deny=1
 close-before-open-gate.py	PreToolUse[Write|Edit|MultiEdit]	scenarios:b2e5c3d4e5fa	deny	BLOCKED by the CARR close-before-open gate: CLOSE-BEFORE-OPEN: # open work request(s) block a new front: WR-AI-#, WR-AI-#, WR-AI-#, WR-AI-#,
-completion-evidence-gate.py	Stop	(all)	counts	announce=40 reopen=47
-completion-evidence-gate.py	Stop	advisories:0521ac6e0340/asks-permission	announce	Semantic requirement acceptance needs review.
+completion-evidence-gate.py	Stop	(all)	counts	allow=40 reopen=47
 completion-evidence-gate.py	Stop	advisories:0b5544d0632d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:1131c706f9fd/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:12d66561f2be/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:13676fdf59f5/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:157aa0d9648b/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:15eddbb266ab/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:18cbf8fa1991/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:1e19cb9c48ee/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:1f526bf12615/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:20c87e695c7e/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:231db862260e/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:2668b0e59663/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:28aadf3ae8c4/asks-permission	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:2b1cc460a5da/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:2d809405bd14/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:2db5b2a34d05/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:2fd983d21c1e/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:30318cbeebae/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:305e6bc66e9d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:322a8b231016/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:32f6412768c3/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:330ce8d71385/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:37e4fc352099/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:384e0e166e77/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:385e89e8bbc3/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:3b5d6e7b6490/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:3f2424e26ae7/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:3f71a896fe50/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:44ddad936537/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:450a809b75ef/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:4fb2c03b427a/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:530699f5fcce/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:55b1f4e13560/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:6252526ed7ad/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:62654edb6456/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:62cb86d9f335/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:6c49f1bc4da1/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:6dd7a872272e/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:6f61bce71693/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:74bf32980ec8/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:75dbf53df7d7/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:7a998cdf893d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:9041b395ce99/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:9139143ededa/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:91a6d1a612eb/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:93e9000d9186/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:94a5d5c0235b/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:95c7408fcc82/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:98869106008f/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:ab119b74cec7/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:ab93044a82d9/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:ac850a637052/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:aea07fc2bb4f/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:af3d957cb388/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:b20628fa6f81/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:b3f78091d839/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:b9c6c42ae722/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:bc247231850e/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:bf272acb7394/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:bf85b55a384d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:c04be8393118/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:c1d1b5dc18d5/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c238afd6be73/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:c3e21c9390ba/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:c53aa60b5c3d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:c8ee324eb8ef/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:cb3ea36af558/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:cc8e35a9c2c1/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:cc9fe9df7afc/asks-permission	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:d154f81f90ca/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:d2d70bafa6c9/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:d7d1d8d033cf/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:da580b4a1adf/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:dc778b698052/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:e107b3ec595c/asks-permission	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:e13f7d6a3526/plans-only	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:e1f51dde3b65/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
-completion-evidence-gate.py	Stop	advisories:e66e6a9d3866/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:e79083884848/asks-permission	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:e9f80b77d08a/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:f063a6d896e6/plans-only	announce	Semantic requirement acceptance needs review.
-completion-evidence-gate.py	Stop	advisories:f274bfc032e8/asks-permission	announce	Semantic requirement acceptance needs review.
 completion-evidence-gate.py	Stop	advisories:f510bb7f7997/reports-evidence	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:f9556cac264d/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
 completion-evidence-gate.py	Stop	advisories:fb34ec1f1d75/claims-done	reopen	COMPLETION EVIDENCE GATE — unaccounted clause [repo]: "Make the scoped change described in the work request, run its selftest," — no receipt
@@ -743,6 +703,13 @@ gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdbcf60040f0	announce	G
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:cdd65a0f0747	announce	GATE CHANGE ANNOUNCED — peer-broadcast-gate.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:d9316125677c	announce	GATE CHANGE ANNOUNCED — guard-unattended.py is enforcement, and edit just changed it.
 gate-edit-gate.py	PreToolUse[Write|Edit|MultiEdit]	edits:fa39d0ae0973	announce	GATE CHANGE ANNOUNCED — executor-tier-gate.py is enforcement, and edit just changed it.
+github-burst-guard.py	PostToolUseFailure[Bash]	(all)	counts	allow=320
+github-burst-guard.py	PostToolUse[Bash]	(all)	counts	allow=320
+github-burst-guard.py	PreToolUse[Bash]	(all)	counts	allow=320 deny=4
+github-burst-guard.py	PreToolUse[Bash]	scenarios:a10000000b01	deny	GITHUB BURST GUARD: this command is `xargs` fanning gh out over a list with no `sleep #`+ between calls. A burst like that trips GitHub's sh
+github-burst-guard.py	PreToolUse[Bash]	scenarios:a10000000b02	deny	GITHUB BURST GUARD: this command is a `for` loop that runs gh on every pass with no `sleep #`+ inside it. A burst like that trips GitHub's s
+github-burst-guard.py	PreToolUse[Bash]	scenarios:a10000000b03	deny	GITHUB BURST GUARD: GitHub answered with a rate-limit error # minute(s) ago, and every session, CI watcher and the release pipeline share th
+github-burst-guard.py	PreToolUse[Bash]	scenarios:a10000000b04	deny	GITHUB BURST GUARD: a release-pipeline tick or shepherd run started #s ago. Each tick makes many GitHub calls, and hand-run ticks stacked on
 guard-unattended.py	PreToolUse[Bash|WebFetch]	(all)	counts	allow=312 deny=10
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:2f83845bddfc	deny	recursive/forced delete — blocked by the CARR unattended guard
 guard-unattended.py	PreToolUse[Bash|WebFetch]	bash:33015ce0899d	deny	recursive/forced delete — blocked by the CARR unattended guard
@@ -773,54 +740,8 @@ jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f5c0deb10c61	announce	[jev test_quality] needs_review: Test behavioral coverage needs review.
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:f66adb22dbc7	announce	[jev test_quality] needs_review: Test behavioral coverage needs review.
 jev-supervisor.py	PostToolUse[Bash|Read|Write|Edit|MultiEdit|WebFetch|WebSearch|Grep]	edits:fd26ca56df4b	announce	[jev test_quality] needs_review: Test behavioral coverage needs review.
-jev-supervisor.py	Stop	(all)	counts	allow=40 announce=47
-jev-supervisor.py	Stop	advisories:0b5544d0632d/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:1131c706f9fd/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:13676fdf59f5/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:157aa0d9648b/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:15eddbb266ab/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:18cbf8fa1991/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:1f526bf12615/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:2668b0e59663/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:2db5b2a34d05/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:305e6bc66e9d/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:32f6412768c3/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:330ce8d71385/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:37e4fc352099/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:384e0e166e77/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:385e89e8bbc3/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:3f2424e26ae7/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:44ddad936537/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:450a809b75ef/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:6252526ed7ad/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:62cb86d9f335/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:6c49f1bc4da1/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:6f61bce71693/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:75dbf53df7d7/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:7a998cdf893d/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:9041b395ce99/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:91a6d1a612eb/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:94a5d5c0235b/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:98869106008f/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:ab119b74cec7/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:ab93044a82d9/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:aea07fc2bb4f/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:b20628fa6f81/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:b3f78091d839/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:bf85b55a384d/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:c1d1b5dc18d5/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:c238afd6be73/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:c53aa60b5c3d/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:c8ee324eb8ef/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:cc8e35a9c2c1/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:d2d70bafa6c9/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:d7d1d8d033cf/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:da580b4a1adf/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:e1f51dde3b65/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:f510bb7f7997/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:f9556cac264d/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:fb34ec1f1d75/claims-done	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
-jev-supervisor.py	Stop	advisories:fc80d2b5ad77/reports-evidence	announce	[jev done_claim] needs_review: Bind the completion claim to explicit criteria and current evidence; needs review.
+jev-supervisor.py	Stop	(all)	counts	allow=87 announce=1
+jev-supervisor.py	Stop	scenarios:e1a5c0de0001	announce	[jev done_claim] unsupported: Completion criteria are not met.
 job-watchdog-digest.py	UserPromptSubmit	(all)	counts	allow=6
 ledger-sweep.py	Stop	(all)	counts	allow=87 announce=1
 ledger-sweep.py	Stop	scenarios:c3f6a7b8c9d0	announce	LEDGER SWEEP — the partner's last turn matched triggers # · OVERRULED A RECOMMENDATION; # · RULED ON HOW SOMETHING IS STRUCTURED from rule <
