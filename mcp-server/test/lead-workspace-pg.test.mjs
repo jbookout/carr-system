@@ -631,7 +631,7 @@ run("legacy stage history exposes missing proof without inferring it from owner 
   const f = await fixture(c);
   const key = randomUUID();
   await c.query(
-    "insert into event(actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,idempotency_key) values($1,'update-lead','lead',$2,'stage',$3,$4,'automation_job',$5)",
+    "insert into event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,idempotency_key) values(now(),$1,'update-lead','lead',$2,'stage',$3,$4,'automation_job',$5)",
     [f.ordinary.id, f.lead, { stage: "new" }, { stage: "qualified" }, key],
   );
   await command(c, f, "update-lead", { fields: { owner: "joe" } });
