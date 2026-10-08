@@ -183,10 +183,16 @@ DESCRIBED_RULE = re.compile(
     r"(?:the\s+)?(?:new\s+|proposed\s+)?rule(?:\s*\([0-9a-f]{8}\))?"
     r"\s*(?::|—|–|\s-)\s*\S.*", re.I | re.S)
 DESCRIBED_CHOICE = re.compile(
-    r"\b(which|what|when|where|why|how|should|could|would|can|may|must|"
-    r"whether|or|instead|versus|vs|rather than|than|between|either|"
-    r"pick|choose|alt|alternative)\b", re.I)
-RULE_ID = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{8}\b", re.I)
+    r"\b(which|whichever|what|when|where|why|how|should|could|would|can|may|"
+    r"must|whether|or|else|otherwise|instead|versus|vs|rather than|than|"
+    r"between|either|pick|choose|go with|prefer\w*|default\w*|alt|"
+    r"alternatives?|alternatively|options?|if|unless)\b", re.I)
+# A stored rule id has a hex letter and a digit, so a date or loop number
+# ("20261008", "12345678") is not one.
+RULE_ID = re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{8}\b", re.I)
+DESCRIBED_LABELS = ({"approve"}, {"don't approve", "do not approve"})
+# Alternatives laid side by side: "env/file", "(1) … (2) …", "a) … b)".
+ENUMERATED_CHOICE = re.compile(r"[A-Za-z]/[A-Za-z]|\(\s*(?:2|ii|b)\s*\)|\b(?:2|b)\)", re.I)
 
 
 def direct_approval(question):
@@ -202,12 +208,19 @@ def direct_approval(question):
         if "approve" not in labels or not labels.intersection({"don't approve", "do not approve"}):
             return False
     if DESCRIBED_RULE.fullmatch(stem):
+        # Exactly Approve / Don't approve, so no label can carry an alternative.
         options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
+        labels = [re.sub(r"\s*\(recommended\)$", "", str(o.get("label", "")),
+                         flags=re.I).strip().lower() for o in options]
+        if (len(labels) != 2 or labels[0] not in DESCRIBED_LABELS[0]
+                or labels[1] not in DESCRIBED_LABELS[1]):
+            return False
         descriptions = " ".join(str(o.get("description", "")) for o in options)
-        cited = " ".join([str(question.get("question", "")),
-                          str(question.get("header", "")), descriptions])
-        return (RULE_ID.search(cited) is not None
-                and not DESCRIBED_CHOICE.search(stem + " " + descriptions))
+        header = str(question.get("header", ""))
+        scanned = " ".join([stem, header, descriptions])
+        return (RULE_ID.search(" ".join([str(question.get("question", "")), scanned]))
+                is not None and not DESCRIBED_CHOICE.search(scanned)
+                and not ENUMERATED_CHOICE.search(scanned))
     return (not APPROVAL_CHOICE.search(stem)
             and APPROVAL_ARTIFACT.fullmatch(stem) is not None)
 
