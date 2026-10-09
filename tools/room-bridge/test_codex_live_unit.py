@@ -26,6 +26,7 @@ import struct
 import sys
 import tempfile
 import threading
+from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -54,10 +55,14 @@ class FakeAppServer:
     """Speaks the server half: upgrade, then answer the four messages."""
 
     def __init__(self, path: str, answer: str = "the live seat answered",
-                 silent_turn: bool = False):
+                 silent_turn: bool = False, finish_on_interrupt: bool = False,
+                 message_only: bool = False, terminal_before_response: bool = False):
         self.path = path
         self.answer = answer
         self.silent_turn = silent_turn
+        self.finish_on_interrupt = finish_on_interrupt
+        self.message_only = message_only
+        self.terminal_before_response = terminal_before_response
         self.seen: list[dict] = []
         try:
             os.unlink(path)
@@ -158,11 +163,31 @@ class FakeAppServer:
                     tid = (msg.get("params") or {}).get("threadId") or "thread-live-0001"
                     self._send(conn, {"id": msg["id"], "result": {"thread": {"id": tid}}})
                 elif method == "turn/start":
+                    if self.terminal_before_response:
+                        self._send(conn, {'method': 'turn/completed', 'params': {
+                            'threadId': msg['params']['threadId'],
+                            'turn': {'id': 'turn-1', 'status': 'completed'}}})
                     self._send(conn, {"id": msg["id"], "result": {"turn": {"id": "turn-1"}}})
                     if self.silent_turn:
                         continue
                     self._send(conn, {"method": "item/completed", "params": {
+                        "threadId": msg["params"]["threadId"], "turnId": "turn-1",
                         "item": {"type": "agentMessage", "text": self.answer}}})
+                    if self.message_only:
+                        continue
+                    self._send(conn, {'method': 'turn/completed', 'params': {
+                        'threadId': 'thread-live-0001', 'turn': {'id': 'turn-1', 'status': 'completed'}}})
+                elif method == 'turn/interrupt':
+                    self._send(conn, {'id': msg['id'], 'result': {}})
+                    if self.finish_on_interrupt:
+                        self.silent_turn = False
+                        self._send(conn, {'method': 'turn/completed', 'params': {
+                            'threadId': msg['params']['threadId'],
+                            'turn': {'id': msg['params']['turnId'], 'status': 'interrupted'}}})
+                elif method == 'thread/read':
+                    self._send(conn, {'id': msg['id'], 'result': {'thread': {
+                        'id': msg['params']['threadId'], 'turns': [
+                            {'id': 'turn-1', 'status': 'inProgress' if self.silent_turn else 'completed'}]}}})
 
     def methods(self) -> list[str]:
         # str(...): the JSON-RPC `method` field is always a string when
@@ -178,6 +203,10 @@ class FakeAppServer:
             pass
 
 
+from test_codex_models_unit import catalog_fixture
+
+
+@catalog_fixture()
 def main() -> int:
     tmp = tempfile.TemporaryDirectory(prefix="codex-live-test-")
     root = Path(tmp.name)
@@ -197,6 +226,9 @@ def main() -> int:
             assert row["result"] == "the live seat answered", row
             assert row["resumed"] is False, row
             assert row["thread_id"] == "thread-live-0001", row
+            turn = next(m for m in srv.seen if m.get("method") == "turn/start")
+            assert turn["params"]["model"] == "gpt-6.1-sol", turn
+            assert turn["params"]["effort"] == "medium", turn
         finally:
             srv.close()
 
@@ -322,6 +354,106 @@ def main() -> int:
 
     check("a live Codex turn that times out keeps the thread it started",
           a_turn_that_times_out_keeps_its_new_thread)
+
+    def timeout_requires_terminal_confirmation():
+        for confirms in (False, True):
+            path = str(root / f'cancel-{confirms}.sock')
+            srv = FakeAppServer(path, silent_turn=True, finish_on_interrupt=confirms)
+            try:
+                with patch.object(dispatch.codex_wire, 'CANCEL_TIMEOUT_S', 0.1):
+                    row = dispatch.codex_wire.run_turn(path, 'build', deadline_s=0.1)
+                assert row['status'] == 'timed_out', row
+                assert row['termination_confirmed'] is confirms, row
+                request = next(m for m in srv.seen if m.get('method') == 'turn/interrupt')
+                assert request['params'] == {'threadId': 'thread-live-0001', 'turnId': 'turn-1'}, request
+            finally:
+                srv.close()
+
+    check('timeout interrupts the exact turn; acknowledgement alone is not termination',
+          timeout_requires_terminal_confirmation)
+
+    def agent_message_does_not_release_a_running_turn():
+        path = str(root / 'message.sock')
+        srv = FakeAppServer(path, message_only=True)
+        try:
+            with patch.object(dispatch.codex_wire, 'CANCEL_TIMEOUT_S', 0.1):
+                row = dispatch.codex_wire.run_turn(path, 'build', deadline_s=0.1)
+            assert row['status'] == 'timed_out', row
+            assert not row['termination_confirmed'], row
+        finally:
+            srv.close()
+
+    check('an agent message is not proof that its turn has stopped',
+          agent_message_does_not_release_a_running_turn)
+
+    def terminal_read_requires_the_exact_turn():
+        path = str(root / 'read.sock')
+        srv = FakeAppServer(path)
+        try:
+            assert dispatch.codex_wire.turn_terminated(path, 'thread-live-0001', 'turn-1')
+            assert not dispatch.codex_wire.turn_terminated(path, 'thread-live-0001', 'old-turn')
+            srv.silent_turn = True
+            assert not dispatch.codex_wire.turn_terminated(path, 'thread-live-0001', 'turn-1')
+        finally:
+            srv.close()
+
+    check('thread read reconciles a terminal turn and refuses active or absent turns',
+          terminal_read_requires_the_exact_turn)
+
+    def terminal_notification_can_precede_start_response():
+        path = str(root / 'early-terminal.sock')
+        srv = FakeAppServer(path, silent_turn=True, terminal_before_response=True)
+        try:
+            with patch.object(dispatch.codex_wire, 'CANCEL_TIMEOUT_S', 0.1):
+                row = dispatch.codex_wire.run_turn(path, 'build', deadline_s=0.1)
+            assert row['status'] == 'completed', row
+            assert row['termination_confirmed'], row
+        finally:
+            srv.close()
+
+    check('terminal notification queued before the start response still confirms termination',
+          terminal_notification_can_precede_start_response)
+
+    def desktop_recovery_reads_only_the_marked_terminal_turn():
+        binary = root / 'bin'
+        binary.mkdir()
+        codex = binary / 'codex'
+        trace = root / 'stdio-requests.json'
+        marker = 'Room write owner: unique-job'
+        user_item = {'type': 'userMessage', 'content': [{'type': 'text', 'text': marker}]}
+        cases = [
+            ('desktop-thread', 'completed', user_item, True),
+            ('desktop-thread', 'inProgress', user_item, False),
+            ('desktop-thread', 'completed', {'type': 'userMessage', 'content': [
+                {'type': 'text', 'text': 'Room write owner: different-job'}]}, False),
+            ('desktop-thread', 'completed', {'type': 'agentMessage', 'content': [
+                {'type': 'text', 'text': marker}]}, False),
+            ('other-thread', 'completed', user_item, False),
+        ]
+        for tid, status, item, expected in cases:
+            reply = {'thread': {'id': tid, 'turns': [
+                {'id': 'desktop-turn', 'status': status, 'items': [item]}]}}
+            codex.write_text(f'''#!{sys.executable}
+import json, sys
+from pathlib import Path
+methods = []
+for line in sys.stdin:
+ msg = json.loads(line)
+ methods.append(msg['method'])
+ if msg['method'] == 'initialize':
+  print(json.dumps({{'id':msg['id'], 'result':{{}}}}), flush=True)
+ elif msg['method'] == 'thread/read':
+  print(json.dumps({{'id':msg['id'], 'result':{reply!r}}}), flush=True)
+Path({str(trace)!r}).write_text(json.dumps(methods))
+''')
+            codex.chmod(0o755)
+            with patch.dict(os.environ, {'PATH': str(binary)}):
+                got = dispatch.codex_wire.desktop_turn_terminated('desktop-thread', marker)
+            assert got is expected, (tid, status, item, got)
+            assert json.loads(trace.read_text()) == ['initialize', 'initialized', 'thread/read']
+
+    check('Desktop reconciliation reads marked terminal history without starting or resuming a turn',
+          desktop_recovery_reads_only_the_marked_terminal_turn)
 
     tmp.cleanup()
     print()
