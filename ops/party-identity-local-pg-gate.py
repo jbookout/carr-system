@@ -95,6 +95,8 @@ def main() -> int:
         assertions += 1
 
         cur.execute("set local role carr_writer")
+        cur.execute("lock table party in exclusive mode")
+        assertions += 1
         key = one(cur, "select org_identity_key(%s)", (f"  Gate  Harbor Legal {tag} ",))[0]
         if key != f"gate harbor legal {tag}":
             raise RuntimeError(f"org_identity_key changed shape: {key}")

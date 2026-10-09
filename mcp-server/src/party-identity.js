@@ -113,6 +113,12 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
           hint: "an identity correction without provenance cannot be checked or undone; say where it came from" });
         const fields = normalizeIdentityFields(args.fields);
         return withEnvelope(c, actor, "correct-party-identity", args, async () => {
+          // org_party_id returns only an ID, including on concurrent reuse.
+          // Stabilise the lookup against every party writer. EXCLUSIVE also
+          // waits for version guards' ROW SHARE locks, so a row-locked writer
+          // cannot wait for our table lock while we wait for its row. Plain
+          // reads continue; advisory locks do not cover other creation paths.
+          if (fields.org !== undefined) await c.query("lock table party in exclusive mode");
           const { partyId, hopped } = await resolvePartyForWrite(c, args.party);
           await versionGuard(c, "party", partyId, args.base_version);
           const before = (await c.query(
@@ -197,6 +203,7 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
               org.org_id = plan.org_id;
             } else if (plan.mode === "repoint_existing" || plan.mode === "mint_and_repoint") {
               let orgId = plan.org_id;
+              const orgName = plan.mode === "repoint_existing" ? existing[0].name : fields.org;
               if (!orgId) {
                 orgId = (await c.query("select org_party_id($1,$2) as id", [fields.org, actor.id])).rows[0].id;
                 await event(orgId, "name", null, fields.org, { newExtra: { mode: plan.mode, minted_for: partyId } });
@@ -204,7 +211,7 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
               await c.query("update party set org_id=$1, updated_by=$2 where id=$3", [orgId, actor.id, partyId]);
               await event(partyId, "org_id", currentOrg?.id ?? null, orgId, {
                 oldExtra: { org_name: currentOrg?.name ?? null },
-                newExtra: { org_name: fields.org, mode: plan.mode } });
+                newExtra: { org_name: orgName, mode: plan.mode } });
               org.org_id = orgId;
               // Rule 8cddc6ad step 4: name the untouched people and prove they
               // still read what they read before.

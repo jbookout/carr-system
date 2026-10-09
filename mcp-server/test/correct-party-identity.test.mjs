@@ -357,12 +357,12 @@ test("a concurrent org creator wins without a false name creation event", async 
   const plan = basePlan({ org: null });
   plan["select org_party_id($1,$2) as id"] = [{ id: EXISTING_ORG }];
   plan["and org_identity_key(name)=$1"] = (_, db) =>
-    db.writes("lock table party in share row exclusive mode").length
+    db.writes("lock table party in exclusive mode").length
       ? [{ id: EXISTING_ORG, name: "HARBOR Point Legal LLC" }] : [];
   const fake = new Fake(plan);
   const out = await call(fake, { fields: { org: "Harbor Point Legal LLC" } });
   assert.equal(out.org.mode, "repoint_existing");
-  const lock = fake.calls.findIndex(([sql]) => sql === "lock table party in share row exclusive mode");
+  const lock = fake.calls.findIndex(([sql]) => sql === "lock table party in exclusive mode");
   const rowLock = fake.calls.findIndex(([sql]) => sql === "select version from party where id=$1 for update");
   assert.ok(lock >= 0 && lock < rowLock, "take the table lock before a party row lock to avoid lock upgrades");
   assert.equal(fake.writes("org_party_id").length, 0);
