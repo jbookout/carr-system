@@ -319,6 +319,25 @@
       ]
     },
     {
+      "key": "storage-hygiene",
+      "name": "Studio storage hygiene",
+      "purpose": "Daily bounded cleanup of known stale Chrome code-sign clones. Allowlisted CARR scratch and unlocked gate-replay residue require explicit command-line opt-in. Reports unknown paths without deleting them and opens a record-layer investigation on findings or a Data-volume threshold breach.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "orchestrator",
+      "repo_path": "tools/storage_hygiene.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.storage-hygiene.plist",
+          "expected_cadence_seconds": 86400,
+          "cadence_grace_seconds": 172800,
+          "notes": "Daily at 04:10 local after nightly record-layer work. Source ships uninstalled; activation and first watched run are separate machine effects."
+        }
+      ]
+    },
+    {
       "key": "timebomb-audit",
       "name": "Weekly time-bomb audit",
       "purpose": "Scans tracked source for time-bomb signatures (code that breaks, or silently changes behaviour, purely because time passes or history/data/counters grow), computes deterministic headroom for repo-history windows and literal dates, asks Jev to rank the rest, and files new findings to the record layer and the partner-room queue. Monday 03:30. See ops/timebomb-audit.py.",

@@ -77,6 +77,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import concurrent.futures
+import fcntl
 import json
 import os
 import queue
@@ -979,6 +980,8 @@ def replay(manifest: Dict[str, Any], fixtures: Dict[str, List[Dict[str, Any]]], 
     base_dir = replay_workdir()
     base_dir.mkdir(parents=True, exist_ok=True)
     run_root = Path(tempfile.mkdtemp(prefix="run-", dir=str(base_dir))).resolve()
+    active_lock = (run_root / ".active.lock").open("w")
+    fcntl.flock(active_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     started = time.monotonic()
     try:
         pinned = epoch_of(manifest["pinned_utc"])
@@ -1015,7 +1018,9 @@ def replay(manifest: Dict[str, Any], fixtures: Dict[str, List[Dict[str, Any]]], 
     finally:
         if keep:
             print(f"gate-replay: sandbox kept at {run_root}", file=sys.stderr)
-        else:
+        fcntl.flock(active_lock, fcntl.LOCK_UN)
+        active_lock.close()
+        if not keep:
             shutil.rmtree(run_root, ignore_errors=True)
 
 
