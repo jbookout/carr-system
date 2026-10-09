@@ -4,7 +4,7 @@
     "adapter_version": "1",
     "configuration_fingerprint": "sha256:ded2bf954007b4ca007310fe490dc01ce3cc1b1fec3d6d8dce45136c3a8c3fc1",
     "harness_id": "evals/context-hooks/conduct_eval.py",
-    "harness_version": "615592059fc7f03ee734f05311b3f53a06a29065ef17bbeef2ad968df9182399",
+    "harness_version": "5045fd80b547fd86232cb4e52233d9b68ef097d4ab80fa7f8e0a78e73a8b9306",
     "model_id": "deterministic-no-model",
     "native_session_ref": "01a11e0b-405f-7bb3-bfa3-89befc1735ce",
     "provider_id": "none",
@@ -18,7 +18,7 @@
     "sources": [
       "production_trace",
       "human_judged_hard_case",
-      "synthetic"
+      "synthesized"
     ]
   },
   "change": "Distinguish reader retry and terminal instructions from first-person plans and app descriptions.",
@@ -84,7 +84,7 @@
       "function": "score"
     },
     "source": {
-      "evals/context-hooks/conduct_eval.py": "615592059fc7f03ee734f05311b3f53a06a29065ef17bbeef2ad968df9182399"
+      "evals/context-hooks/conduct_eval.py": "5045fd80b547fd86232cb4e52233d9b68ef097d4ab80fa7f8e0a78e73a8b9306"
     },
     "dependencies": {
       "hooks/conduct_patterns.py": "68a876727e3ca02d20df490cebe54ebba156225c87a5d1bafcc29e5a9d3b8c21",

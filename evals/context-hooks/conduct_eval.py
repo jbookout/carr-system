@@ -124,7 +124,7 @@ def make_report():
         cases={'total': len(cases), 'train': sum(c['split']=='train' for c in cases.values()),
                'test': sum(c['split']=='test' for c in cases.values()),
                'should_not_fire': sum(c['should_not_fire'] for c in cases.values()),
-               'sources': ['production_trace', 'human_judged_hard_case', 'synthetic']},
+               'sources': ['production_trace', 'human_judged_hard_case', 'synthesized']},
         split={'method': 'Known real excerpts and review regressions train; sealed generated grammar combinations test, first scored after implementation. Exact finite-corpus scores without generalization.',
                'seed': 0, 'sealed_test': True},
         repeats=2, noise_floor=0, min_useful_gain=0.01,
