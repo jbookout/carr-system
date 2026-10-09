@@ -258,6 +258,9 @@ def _to_codex(
             status = "delivered_live" if live.get("status") == "delivered" else live.get("status")
             return {"resumed": True, **live, "status": status, "thread_id": thread,
                     "termination_confirmed": False}
+        if on_executor:
+            on_executor({'kind': 'no_launch', 'thread_id': thread, 'marker': marker,
+                         'reason': 'desktop_not_live'})
     with tempfile.TemporaryDirectory(prefix="hermes-codex-") as tmp:
         last = Path(tmp) / "last-message.txt"
         argv = ["codex", "exec"]
@@ -401,7 +404,7 @@ def _execute(request: dict, *, on_executor=None) -> dict:
     stream_options: dict = {'stream_output': True} if request.get('stream_output') else {}
     def executor_started(identity):
         on_executor({**identity, **({'socket': entry['socket']}
-                                    if identity.get('kind') == 'codex_turn' else {})})
+                                    if identity.get('kind') in ('codex_turn', 'no_launch') and entry.get('socket') else {})})
     executor_options: dict = {'on_executor': executor_started} if on_executor else {}
     codex_options: dict = {**executor_options, 'claim_id': request.get('claim_id')} if on_executor else {}
     if entry["kind"] == "claude-session":
@@ -521,6 +524,9 @@ def dispatch(
                                  Path(str(write_ownership.LEDGER) + '.lock').resolve()):
         raise DeskError('bad_results_path', 'results cannot overwrite the ownership authority')
     if declared_writes:
+        if entry['kind'] not in codex_models.CODEX_KINDS:
+            raise DeskError('unsupported_owned_adapter',
+                            'owned dispatch requires a Codex adapter with verifiable termination recovery')
         ownership = write_ownership.reserve(base,
                                              cwd or entry.get("cwd") or str(Path.cwd()), declared_writes)
         _record(results_path, ownership)

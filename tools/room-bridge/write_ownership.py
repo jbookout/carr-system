@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from lib.github_reader import GitHubReader
+from ops.git_env import scrubbed_env
 
 LEDGER = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.config' / 'carr' / 'hermes-write-ownership.jsonl'
 
@@ -92,6 +93,8 @@ def termination_evidence(row: dict) -> str | None:
             return 'dispatcher terminated; no executor launch recorded'
         return None
     kind = executor.get('kind')
+    if kind == 'no_launch' and executor.get('reason') in ('setup_pending', 'desktop_not_live', 'start_rejected'):
+        return 'executor did not launch: ' + executor['reason']
     if row.get('gated_launch') and process_terminated(row.get('owner_process') or {}):
         if executor == {'kind': 'unconfirmed'}:
             return 'dispatcher terminated; no executor identity recorded behind launch gate'
@@ -125,8 +128,11 @@ def declaration(task: str, explicit: list[str] | None) -> list[str]:
                 raise DeskError('bad_write_set', 'Writes: has invalid quoting') from exc
     result = []
     for pattern in patterns:
+        if not isinstance(pattern, str):
+            raise DeskError('bad_write_set', 'write globs must be strings')
         pattern = pattern.removeprefix('./')
         if (not pattern or pattern.startswith('/') or '..' in pattern.split('/')
+                or any(part in ('', '.') for part in pattern.split('/'))
                 or '\n' in pattern or '\r' in pattern):
             raise DeskError('bad_write_set', 'write globs must be nonempty repository-relative paths')
         if pattern not in result:
@@ -152,7 +158,9 @@ def own_pr(task: str, repo: str) -> int | None:
 
 
 def open_prs(cwd: str) -> tuple[str, list[dict]]:
-    reader = GitHubReader(cwd=cwd)
+    env = scrubbed_env()
+    env.pop('GH_REPO', None)
+    reader = GitHubReader(cwd=cwd, env=env)
     try:
         repo = reader.json(['repo', 'view', '--json', 'nameWithOwner'])['nameWithOwner']
         if not isinstance(repo, str) or not re.fullmatch(r'[\w.-]+/[\w.-]+', repo):
@@ -298,9 +306,10 @@ def _claim(msg_id: str) -> dict:
 
 
 def reserve(row: dict, cwd: str, writes: list[str]) -> dict:
-    repo, prs = open_prs(cwd)
-    mine = own_pr(row['task'], repo)
+    writes = declaration('', writes)
     with _locked(LEDGER):
+        repo, prs = open_prs(cwd)
+        mine = own_pr(row['task'], repo)
         claims = _claims()
         if row['msg_id'] in claims:
             raise DeskError('claim_exists', 'a job cannot reserve twice')
@@ -415,7 +424,14 @@ def bind_executor(msg_id: str, identity: dict) -> dict:
             raise DeskError('claim_launch_conflict', 'executor needs a held launch claim')
         old = row['executor']
         gate_handoff = (old.get('kind') == 'launch_gate' and identity == {**old, 'kind': 'unconfirmed'})
-        if not gate_handoff and old.get('kind') != 'unconfirmed' and any(v is not None and identity.get(k) != v for k, v in old.items()):
+        no_launch_transition = (identity.get('kind') == 'no_launch' and (
+            (old.get('kind') == 'codex_desktop'
+             and identity == {**old, 'kind': 'no_launch', 'reason': 'desktop_not_live'})
+            or (old.get('kind') == 'codex_turn' and old.get('turn_id') is None
+                and identity == {**old, 'kind': 'no_launch', 'reason': 'start_rejected'})))
+        if (not gate_handoff and not no_launch_transition
+                and old.get('kind') not in ('unconfirmed', 'no_launch')
+                and any(v is not None and identity.get(k) != v for k, v in old.items())):
             raise DeskError('claim_identity_conflict', 'cannot replace an executor identity')
         return _persist({**row, 'executor': dict(identity)})
 

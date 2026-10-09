@@ -171,6 +171,7 @@ class FakeAppServer:
                     if self.silent_turn:
                         continue
                     self._send(conn, {"method": "item/completed", "params": {
+                        "threadId": msg["params"]["threadId"], "turnId": "turn-1",
                         "item": {"type": "agentMessage", "text": self.answer}}})
                     if self.message_only:
                         continue

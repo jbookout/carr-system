@@ -41,6 +41,8 @@ per task, and needs no process sitting idle between turns.
 from __future__ import annotations
 
 import json
+import fcntl
+from contextlib import contextmanager
 import os
 import re
 import socket
@@ -169,7 +171,21 @@ class Registry:
     def __init__(self, path: str | Path = DEFAULT_REGISTRY):
         self.path = Path(path)
 
+    @contextmanager
+    def _locked(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with Path(str(self.path) + '.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
     def _load(self) -> dict:
+        with self._locked():
+            return self._load_locked()
+
+    def _load_locked(self) -> dict:
         try:
             data = json.loads(self.path.read_text())
             changed = False
@@ -286,15 +302,17 @@ class Registry:
                 entry["add_dirs"] = [str(x) for x in add_dirs]
 
         entry["registered_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        data = self._load()
-        data.setdefault("desks", {})[name] = entry
-        self._save(data)
+        with self._locked():
+            data = self._load_locked()
+            data.setdefault("desks", {})[name] = entry
+            self._save(data)
         return entry
 
     def forget(self, name: str) -> None:
-        data = self._load()
-        if data.get("desks", {}).pop(name, None) is not None:
-            self._save(data)
+        with self._locked():
+            data = self._load_locked()
+            if data.get("desks", {}).pop(name, None) is not None:
+                self._save(data)
 
     def remember_thread(self, name: str, thread_id: str) -> None:
         """Pin a Codex desk to the thread it just spoke in.
@@ -303,12 +321,13 @@ class Registry:
         behaviour Joe rejected: it has its own context and is used as an equal
         seat, not as a shot.
         """
-        data = self._load()
-        entry = data.get("desks", {}).get(name)
-        if entry is None or entry.get("thread_id") == thread_id:
-            return
-        entry["thread_id"] = thread_id
-        self._save(data)
+        with self._locked():
+            data = self._load_locked()
+            entry = data.get("desks", {}).get(name)
+            if entry is None or entry.get("thread_id") == thread_id:
+                return
+            entry["thread_id"] = thread_id
+            self._save(data)
 
     def resolve(self, name: str) -> dict:
         entry = self.entries().get(name or "")

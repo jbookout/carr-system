@@ -200,13 +200,21 @@ class _StdioWire:
             self.proc.wait(timeout=2)
 
 
+class RequestRejected(RuntimeError):
+    """A correlated JSON-RPC error proves that this request was rejected."""
+
+
 def wait_response(wire: Wire | _StdioWire, request_id: str, transcript: list[dict]) -> dict:
     while True:
         message = wire.receive_json()
         transcript.append(message)
         if message.get("id") == request_id:
             if "error" in message:
-                raise RuntimeError(f"request {request_id} failed: {message['error']}")
+                error = message['error']
+                if (isinstance(error, dict) and type(error.get('code')) is int
+                        and isinstance(error.get('message'), str) and 'result' not in message):
+                    raise RequestRejected(f"request {request_id} failed: {error}")
+                raise RuntimeError(f"request {request_id} has an invalid error response")
             return message["result"]
 
 
@@ -325,6 +333,8 @@ def run_turn(
                         "dispatched Codex desks require never; permission needs go to the orchestrator")
     task = desk_prompt(task)
     started = time.monotonic()
+    if on_executor:
+        on_executor({'kind': 'no_launch', 'reason': 'setup_pending'})
     wire = Wire(sock_path, timeout=timeout)
     if deadline_s is not None:
         # The caller's limit covers setup and the turn together.
@@ -375,7 +385,13 @@ def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
         turn_params["effort"] = effort
     wire.turn_requested = True
     wire.send_json({"id": "turn-start", "method": "turn/start", "params": turn_params})
-    started_turn = wait_response(wire, "turn-start", transcript)
+    try:
+        started_turn = wait_response(wire, "turn-start", transcript)
+    except RequestRejected:
+        if on_executor:
+            on_executor({'kind': 'no_launch', 'thread_id': tid, 'turn_id': None,
+                         'reason': 'start_rejected'})
+        raise
     wire.turn_id = (started_turn.get('turn') or {}).get('id')
     if on_executor:
         on_executor({'kind': 'codex_turn', 'thread_id': tid, 'turn_id': wire.turn_id})
@@ -390,8 +406,10 @@ def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
         msg = next(queued, None)
         if msg is None:
             msg = wire.receive_json()
-        if msg.get("method") == "item/completed":
-            item = (msg.get("params") or {}).get("item") or {}
+        params = msg.get('params') or {}
+        if (msg.get("method") == "item/completed" and params.get('threadId') == tid
+                and params.get('turnId') == wire.turn_id):
+            item = params.get("item") or {}
             if item.get("type") == "agentMessage":
                 answer = item.get("text") or item.get("message")
         if _terminal(msg, tid, wire.turn_id):

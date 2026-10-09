@@ -365,18 +365,18 @@ print(json.dumps({{'type': 'turn.completed'}}))
             self.assertEqual(run.call_count, 1)
         self.assertFalse((self.root / 'different.jsonl').exists())
 
-    def test_receipt_mismatch_and_all_remote_errors_keep_unknown_writer(self):
+    def test_remote_owned_work_refuses_without_launch_or_claim(self):
         self.reg.register('remote', 'claude-remote', host='host.test',
                           model='claude-opus-5-5', effort='max')
-        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch.claude_remote_wire, 'run_task', return_value={
-                 'status': 'failed', 'detail': 'remote_receipt_mismatch',
-                 'termination_confirmed': True, 'ownership_state': 'released'}):
-            row = dispatch.dispatch('remote', 'repair', registry=self.reg,
-                                    results_path=self.results, writes=['src/*'])
-        self.assertEqual(row['ownership_state'], 'held')
-        self.assertIn('stuck', row['ownership_detail'])
-        self.assertEqual(write_ownership.reconcile(row['msg_id'])[0]['ownership_state'], 'held')
+        with patch.object(write_ownership, 'reserve') as reserve, \
+             patch.object(dispatch.claude_remote_wire, 'run_task') as run:
+            with self.assertRaises(desks.DeskError) as refused:
+                dispatch.dispatch('remote', 'repair', registry=self.reg,
+                                  results_path=self.results, writes=['src/*'])
+            self.assertEqual(refused.exception.code, 'unsupported_owned_adapter')
+            reserve.assert_not_called()
+            run.assert_not_called()
+        self.assertFalse(self.ledger.exists())
 
     def test_crashed_unconfirmed_before_launch_reconciles_idempotently(self):
         code = """
