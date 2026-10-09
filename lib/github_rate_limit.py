@@ -172,10 +172,17 @@ class GitHubReadBudget:
                 yield mark_started
             finally:
                 if started:
-                    with self._state(cancel=lambda: None) as data:
-                        row = data.setdefault(self.shared, {})
-                        row["next_start"] = max(float(row.get("next_start", 0)),
-                                                self.clock() + self.spacing)
+                    end = time.monotonic() + self.spacing
+                    try:
+                        with self._state(cancel=lambda: None) as data:
+                            row = data.setdefault(self.shared, {})
+                            row["next_start"] = max(float(row.get("next_start", 0)),
+                                                    self.clock() + self.spacing)
+                    except Exception:
+                        # Cleanup must preserve the dispatched command's outcome.
+                        # With no durable deadline, keep peers behind the call lock.
+                        while time.monotonic() < end:
+                            time.sleep(min(.2, max(0, end - time.monotonic())))
 
     def _check(self, data, resource):
         now = self.clock()
