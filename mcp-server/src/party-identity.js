@@ -11,7 +11,7 @@
 //   - an org change follows rule 8cddc6ad. A shared org row is never renamed,
 //     because renaming it would re-label every other record on it. "Shared" is
 //     counted by the database across EVERY foreign key into party
-//     (party_reference_counts, migration 0851), not only party.org_id: a deal
+//     (party_reference_counts, migration 0852), not only party.org_id: a deal
 //     participant, a client or vendor row, or a party link on the org row makes
 //     it shared too. Only the target is re-pointed, and the other people on the
 //     old org are read back afterwards; if any moved, the call refuses and the

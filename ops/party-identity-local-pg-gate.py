@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ci: db-gate
 # doctrine: runbook
-"""Rollback-only proof for migration 0851 (correct-party-identity, rule 8cddc6ad).
+"""Rollback-only proof for migration 0852 (correct-party-identity, rule 8cddc6ad).
 
 party_reference_counts decides whether an org row is shared before the verb
 renames it, so a wrong count renames a row other records ride. This proves, as
