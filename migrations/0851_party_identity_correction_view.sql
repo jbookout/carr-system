@@ -44,7 +44,7 @@ grant select on public.v_party_identity_correction to carr_reader, carr_writer;
 -- Read-only; returns one row per referencing column with a non-zero count.
 create function public.party_reference_counts(p_party uuid, p_exclude uuid)
 returns table(source text, n bigint)
-language plpgsql stable security definer set search_path = pg_catalog, public as $fn$
+language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $fn$
 declare r record; cnt bigint;
 begin
   for r in

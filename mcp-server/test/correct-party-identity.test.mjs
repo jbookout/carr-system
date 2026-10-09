@@ -289,8 +289,18 @@ test("an org party's own name is refused while people are attached, naming them"
   assert.equal(fake.writes("update party set").length, 0);
 });
 
+test("an org party referenced by more than its own role row (deal participants) is refused", async () => {
+  const plan = basePlan({ kind: "org", name: "Harbr Point Legal", org: null,
+    refs: [{ source: "vendor.party_id", n: "1" }, { source: "deal_participant.party_id", n: "2" }] });
+  const fake = new Fake(plan);
+  await assert.rejects(call(fake, { fields: { name: "Harbor Point Legal LLC" } }),
+    e => e.payload.error === "shared_org_rename" && e.payload.references.length === 2);
+  assert.equal(fake.writes("update party set").length, 0);
+});
+
 test("an org party with nobody attached is renamed, unless another org already has that identity", async () => {
-  const ok = new Fake(basePlan({ kind: "org", name: "Harbr Point Legal", org: null }));
+  const ok = new Fake(basePlan({ kind: "org", name: "Harbr Point Legal", org: null,
+    refs: [{ source: "vendor.party_id", n: "1" }] }));
   const out = await call(ok, { fields: { name: "Harbor Point Legal LLC" } });
   assert.deepEqual(out.updated, ["name"]);
   const taken = new Fake(basePlan({ kind: "org", name: "Harbr Point Legal", org: null,

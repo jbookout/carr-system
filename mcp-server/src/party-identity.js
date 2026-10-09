@@ -96,7 +96,7 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
   return {
     "correct-party-identity": {
       write: true,
-      description: "Correct a party's IDENTITY from a verified finding: name spelling, firm (org) and state. The companion to update-party-contact, which handles contact facts only. Per rule 578fdd91 enrichment applies its corrections rather than parking them as proposals, but only when identity is confirmed (high or medium confidence with a second corroborating field) and the value is one clean value from a re-verifiable source. source is REQUIRED, and every changed field writes an event with its prior value, so each correction can be undone (v_party_identity_correction lists them). base_version is the PARTY's version from a fresh read. ORG CHANGES FOLLOW RULE 8cddc6ad: a shared org row is never renamed. Sharing is counted across every foreign key into the org row, not only other people on it. If a live org already has the corrected identity the party is re-pointed to it; if nothing but this party refers to the current org row, that row is renamed in place; otherwise a new org is minted and only this party is re-pointed. The other people on the old org are read back and returned as `untouched`, and an old org left with no references is reported as `old_org_left_empty`. An ORG party's own name (fields.name) is refused while people are attached to it, naming them. Placeholder guard: a CARR agent's own number or a carr.us address is refused.",
+      description: "Correct a party's IDENTITY from a verified finding: name spelling, firm (org) and state. The companion to update-party-contact, which handles contact facts only. Per rule 578fdd91 enrichment applies its corrections rather than parking them as proposals, but only when identity is confirmed (high or medium confidence with a second corroborating field) and the value is one clean value from a re-verifiable source. source is REQUIRED, and every changed field writes an event with its prior value, so each correction can be undone (v_party_identity_correction lists them). base_version is the PARTY's version from a fresh read. ORG CHANGES FOLLOW RULE 8cddc6ad: a shared org row is never renamed. Sharing is counted across every foreign key into the org row, not only other people on it. If a live org already has the corrected identity the party is re-pointed to it; if nothing but this party refers to the current org row, that row is renamed in place; otherwise a new org is minted and only this party is re-pointed. The other people on the old org are read back and returned as `untouched`, and an old org left with no references is reported as `old_org_left_empty`. An ORG party's own name (fields.name) is renamed only when at most one record refers to it (its own role row); people on it, or more references of any kind, refuse and are named. Placeholder guard: a CARR agent's own number or a carr.us address is refused.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
         party: { type: "string", description: "P-#### ref, a role ref (V-/C-/L-/T-), or a name" },
@@ -133,13 +133,18 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
           const updated = [];
 
           // An org party's own name: the rename IS the correction, so the only
-          // question is who else it would re-label. People employed there would
-          // silently move to the new name with it.
+          // question is what else it would re-label. Rule 8cddc6ad read
+          // literally: one reference (the role record the correction is about,
+          // such as its own vendor row) renames in place; people on it, or more
+          // than one reference of any kind, refuses and names them.
           if (before.kind === "org" && fields.name !== undefined && fields.name !== before.name) {
             await c.query("select id from party where id=$1 for update", [partyId]);
             const people = await peopleOnOrg(c, partyId, partyId);
-            if (people.length) throw new ToolError({ error: "shared_org_rename", attached: people,
-              hint: "renaming this org re-labels every person on it (rule 8cddc6ad); correct each person's org instead" });
+            const references = await referenceCounts(c, partyId, partyId);
+            const total = references.reduce((sum, r) => sum + r.n, 0);
+            if (people.length || total > 1) throw new ToolError({ error: "shared_org_rename",
+              attached: people, references,
+              hint: "renaming this org re-labels every record on it (rule 8cddc6ad); correct each person's org instead, or merge duplicates first" });
             const k = (await c.query("select org_identity_key($1) as new_key, org_identity_key($2) as cur_key",
               [fields.name, before.name])).rows[0];
             if (k.new_key && k.new_key !== k.cur_key) {
