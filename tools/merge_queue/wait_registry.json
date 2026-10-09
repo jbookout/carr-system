@@ -80,6 +80,10 @@
     "service": {
       "until": "cancelled",
       "scenario": "cancel_service"
+    },
+    "installer": {
+      "seconds": 15,
+      "scenario": "installer_timeout"
     }
   },
   "sites": {
@@ -677,6 +681,26 @@
       "bound": "snapshot",
       "shape": "bounded_items('snapshot', q.db.execute('SELECT * FROM entries ORDER BY id'))",
       "scenario": "snapshot_cap"
+    },
+    "main.py:Queue.install_agent:call:4": {
+      "bound": "installer",
+      "shape": "config['install_launchd_plist']",
+      "scenario": "installer_timeout"
+    },
+    "ops/config-as-code.py:launchd_registration:call:1": {
+      "bound": "installer",
+      "shape": "subprocess.run",
+      "scenario": "installer_timeout"
+    },
+    "ops/config-as-code.py:install_launchd_plist:call:1": {
+      "bound": "installer",
+      "shape": "subprocess.run",
+      "scenario": "installer_timeout"
+    },
+    "lib/launchd_hold.py:activate:call:1": {
+      "bound": "installer",
+      "shape": "subprocess.run",
+      "scenario": "installer_timeout"
     }
   }
 }

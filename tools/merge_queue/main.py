@@ -1260,7 +1260,8 @@ class Queue:
             raise RuntimeError('agent activation requires current main after review')
         config = runpy.run_path(str(self.root / 'ops/config-as-code.py'))
         matches = target.exists() and target.read_text() == body
-        outcome = config['install_launchd_plist'](target.name, str(target), body, matches)
+        outcome = config['install_launchd_plist'](target.name, str(target), body, matches,
+                                               timeout=BOUNDS['installer']['seconds'])
         if outcome not in ('loaded', 'kept'):
             raise RuntimeError(f'agent installation {outcome}; reconcile launchd before retry')
 

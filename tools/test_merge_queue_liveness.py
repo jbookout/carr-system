@@ -25,10 +25,244 @@ assert spec is not None and spec.loader is not None
 fixture_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture_module)
 mq = fixture_module.module
-EXERCISED: set[str] = set()
+EXERCISED: dict[str, set[str]] = {}
+EXERCISED_BOUNDS: set[str] = set()
+
+# Fixed test-owned site identities: adding a registry row cannot grant coverage.
+FAULT_SITES = {
+    'snapshot_cap': (
+        'main.py:bounded_items:for:1',
+        'main.py:gh_api_read:for:1',
+        'main.py:gh_api_read:comprehension:1',
+        'main.py:command:comprehension:1',
+        'main.py:Queue.__init__:for:1',
+        'main.py:Queue.__init__:comprehension:1',
+        'main.py:Queue.__init__:for:2',
+        'main.py:Queue.gh:for:1',
+        'main.py:Queue.api_pages.validate:for:1',
+        'main.py:Queue.validate_pr:comprehension:1',
+        'main.py:Queue.held:comprehension:1',
+        'main.py:Queue.flush_events:for:1',
+        'main.py:Queue.flush_events:for:2',
+        'main.py:Queue.approval:comprehension:1',
+        'main.py:Queue.green:for:1',
+        'main.py:Queue.green:for:2',
+        'main.py:Queue.green:comprehension:1',
+        'main.py:Queue.green:comprehension:2',
+        'main.py:Queue.green.validate:comprehension:1',
+        'main.py:Queue.green:comprehension:3',
+        'main.py:Queue.dispatcher_identity:comprehension:1',
+        'main.py:Queue._dispatch_conflicts:for:1',
+        'main.py:Queue._dispatch_conflicts:for:2',
+        'main.py:Queue._dispatch_conflicts:comprehension:1',
+        'main.py:Queue._dispatch_conflicts:for:3',
+        'main.py:Queue._dispatch_conflicts:comprehension:2',
+        'main.py:Queue._dispatch_conflicts:comprehension:3',
+        'main.py:Queue._dispatch_conflicts:for:4',
+        'main.py:Queue._dispatch_conflicts:comprehension:4',
+        'main.py:Queue._dispatch_conflicts:comprehension:5',
+        'main.py:Queue._dispatch_conflicts:comprehension:6',
+        'main.py:Queue.refresh:for:1',
+        'main.py:Queue.discover:for:1',
+        'main.py:Queue.discover:for:2',
+        'main.py:Queue.tick:comprehension:1',
+        'main.py:Queue.tick:for:1',
+        'main.py:Queue._tick_repo:for:1',
+        'main.py:Queue.resume_action_entries:for:1',
+        'main.py:Queue.import_legacy:for:1',
+        'main.py:Queue.import_legacy:for:2',
+        'main.py:Queue.import_legacy:for:3',
+        'main.py:Queue.import_legacy:comprehension:1',
+        'main.py:Queue.migrate_holds:for:1',
+        'main.py:Queue.migrate_holds:comprehension:1',
+        'main.py:Queue.migrate_holds:for:2',
+        'main.py:Queue.migrate_holds:for:3',
+        'main.py:Queue.migrate_holds:comprehension:2',
+        'main.py:Queue.migrate_holds:comprehension:3',
+        'main.py:Queue.migrate_holds:for:4',
+        'main.py:Queue.migrate_holds:comprehension:4',
+        'main.py:Queue.migrate_holds:for:5',
+        'main.py:Queue.archive_legacy:for:1',
+        'main.py:main:for:1',
+        'main.py:main:comprehension:1',
+    ),
+    'transport_timeout': (
+        'main.py:command:call:1',
+    ),
+    'sqlite_contention': (
+        'main.py:Queue.__init__:call:1',
+    ),
+    'runner_contention': (
+        'main.py:Queue.runner_lock:call:1',
+    ),
+    'dispatch_process_faults': (
+    ),
+    'persistent_effects': (
+        'main.py:Queue.gh:call:1',
+    ),
+    'budget_contention': (
+        'main.py:Queue._gh_request:call:1',
+        'main.py:Queue._gh_request:call:3',
+        'main.py:Queue._gh_request.observe:call:1',
+    ),
+    'spacing_pause': (
+        'main.py:Queue._gh_request:while:1',
+        'main.py:Queue._gh_request:call:2',
+    ),
+    'pagination_cap': (
+        'main.py:Queue.api_pages:for:1',
+    ),
+    'provider_merge_deadline': (
+        'main.py:Queue._tick_repo:call:2',
+    ),
+    'mergeability_deadline': (
+        'main.py:Queue._tick_repo:call:3',
+    ),
+    'cancel_service': (
+        'main.py:Queue.run:while:1',
+        'main.py:Queue.run:while:2',
+        'main.py:Queue.run:call:1',
+    ),
+    'installer_timeout': (
+        'main.py:Queue.install_agent:call:4',
+        'ops/config-as-code.py:launchd_registration:call:1',
+        'ops/config-as-code.py:install_launchd_plist:call:1',
+        'lib/launchd_hold.py:activate:call:1',
+    ),
+}
+EFFECT_FAULT_SITES = {
+    'pr_read': (
+        'main.py:Queue._gh_request:call:4',
+        'main.py:Queue.api:call:1',
+        'main.py:Queue.pr:call:1',
+        'main.py:Queue.archive_legacy:call:1',
+    ),
+    'approval': (
+        'main.py:Queue.api_pages:call:1',
+        'main.py:Queue.pages:call:1',
+        'main.py:Queue.approval:call:1',
+    ),
+    'check_runs': (
+        'main.py:Queue.green:call:1',
+    ),
+    'statuses': (
+        'main.py:Queue.green:call:2',
+    ),
+    'required_checks': (
+        'main.py:Queue.green:call:3',
+    ),
+    'update': (
+        'main.py:Queue.action:call:1',
+    ),
+    'retarget': (
+        'main.py:Queue.action:call:2',
+    ),
+    'stamp': (
+        'main.py:Queue._tick_repo:call:4',
+    ),
+    'ready': (
+        'main.py:Queue._tick_repo:call:5',
+    ),
+    'merge': (
+        'main.py:Queue._tick_repo:call:6',
+    ),
+    'merge_intent': (
+        'main.py:Queue.merge_pending:call:1',
+    ),
+    'open_prs': (
+        'main.py:Queue.discover:call:1',
+        'main.py:Queue.refresh:call:1',
+        'main.py:Queue.migrate_holds:call:1',
+    ),
+    'files': (
+        'main.py:Queue.migrate_holds:call:2',
+    ),
+    'create_label': (
+        'main.py:Queue.migrate_holds:call:3',
+    ),
+    'apply_label': (
+        'main.py:Queue.migrate_holds:call:4',
+    ),
+    'fetch': (
+        'main.py:Queue.fetch:call:1',
+        'main.py:Queue.fetch:call:2',
+    ),
+    'board': (
+        'main.py:Queue.flush_events:call:1',
+        'main.py:Queue.flush_events:call:2',
+    ),
+}
+DISPATCH_FAULT_SITES = {
+    'ps_timeout': (
+        'main.py:Queue._dispatch_conflicts:call:3',
+        'main.py:Queue.dispatcher_identity:call:1',
+    ),
+    'help_timeout': (
+        'main.py:Queue._dispatch_conflicts:call:4',
+    ),
+    'spawn_failure': (
+        'main.py:Queue._dispatch_conflicts:call:5',
+    ),
+    'unreapable_child': (
+        'main.py:Queue.expire_dispatch:call:1',
+        'main.py:Queue.expire_dispatch:call:2',
+        'main.py:Queue.expire_dispatch:call:3',
+        'main.py:Queue.expire_dispatch:call:4',
+        'main.py:Queue.expire_dispatch:call:5',
+    ),
+    'completed_child': (
+        'main.py:Queue._dispatch_conflicts:call:1',
+        'main.py:Queue._dispatch_conflicts:call:2',
+    ),
+    'live': (),
+}
+GIT_FAULT_SITES = {
+    'ancestry': (
+        'main.py:Queue.behind:call:1',
+    ),
+    'conflict': (
+        'main.py:Queue.conflict:call:1',
+    ),
+    'patch_base': (
+        'main.py:Queue.patch:call:1',
+    ),
+    'patch_diff': (
+        'main.py:Queue.patch:call:2',
+    ),
+    'patch_id': (
+        'main.py:Queue.patch:call:3',
+    ),
+    'git_init': (
+        'main.py:Queue.git:call:1',
+    ),
+    'git_remote': (
+        'main.py:Queue.git:call:3',
+    ),
+    'git_remote_read': (
+        'main.py:Queue.git:call:2',
+    ),
+    'merge_confirmation': (
+        'main.py:Queue.git:call:4',
+        'main.py:Queue._tick_repo:call:1',
+    ),
+}
 
 
-def wait_sites(source):
+def record_fault(scenario, site_ids=None):
+    for site_id in FAULT_SITES.get(scenario, ()) if site_ids is None else site_ids:
+        assert site_id in mq.WAIT_SITES, 'stale fault identity: ' + site_id
+        EXERCISED.setdefault(site_id, set()).add(scenario)
+    EXERCISED_BOUNDS.add(scenario)
+
+
+def assert_fault_coverage(site_ids=None, exercised=None):
+    exercised = EXERCISED if exercised is None else exercised
+    for site_id in mq.WAIT_SITES if site_ids is None else site_ids:
+        assert exercised.get(site_id), 'unexercised wait site: ' + site_id
+
+
+
+def wait_sites(source, nodes=None):
     """Inventory loops and blocking transports, including comprehensions and child reaping."""
     sites = {}
     tree = ast.parse(source)
@@ -48,7 +282,9 @@ def wait_sites(source):
         def add(self, kind, node, policy, shape):
             owner = '.'.join(self.context)
             self.counts[(owner, kind)] += 1
-            sites[f'{owner}:{kind}:{self.counts[(owner, kind)]}'] = {'bound': policy, 'shape': shape}
+            identity = f'{owner}:{kind}:{self.counts[(owner, kind)]}'
+            sites[identity] = {'bound': policy, 'shape': shape}
+            if nodes is not None: nodes[identity] = node
         def loop(self, node, kind, iterator):
             if self.context[-1:] == ['bounded_items']:
                 policy = 'snapshot'
@@ -75,6 +311,9 @@ def wait_sites(source):
             policy = None
             if name in ('command', 'subprocess.run', 'self.git', 'self.gh', 'self.api', 'self.pages', 'self.api_pages'):
                 policy = 'board' if 'progress_board.py' in ast.unparse(node) else 'command'
+            elif name == "config['install_launchd_plist']":
+                policy = 'installer'
+                assert any(k.arg == 'timeout' and ast.unparse(k.value) == "BOUNDS['installer']['seconds']" for k in node.keywords)
             elif name == 'subprocess.Popen' or name == 'child.poll': policy = 'dispatch_process'
             elif name in ('child.wait', 'child.terminate', 'child.kill'): policy = 'child_reap'
             elif name == 'sqlite3.connect': policy = 'sqlite'
@@ -115,6 +354,23 @@ def validate_wait_registry(directory, sites=None):
     observed = {}
     for path in sorted(directory.rglob('*.py')):
         observed.update({f'{path.relative_to(directory)}:{k}': v for k, v in wait_sites(path.read_text()).items()})
+    for relative, owner in (('ops/config-as-code.py', 'launchd_registration'),
+                            ('ops/config-as-code.py', 'install_launchd_plist'),
+                            ('lib/launchd_hold.py', 'activate')):
+        tree = ast.parse((ROOT / relative).read_text())
+        method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == owner)
+        if owner == 'install_launchd_plist':
+            for call in ast.walk(method):
+                if isinstance(call, ast.Call) and ast.unparse(call.func) in ('launchd_registration', 'launchd_hold.activate'):
+                    assert any(k.arg == 'timeout' and ast.unparse(k.value) == 'timeout' for k in call.keywords), 'installer helper lost its timeout'
+        calls = [n for n in ast.walk(method) if isinstance(n, ast.Call) and ast.unparse(n.func) == 'subprocess.run']
+        for index, node in enumerate(calls, 1):
+            timeout = next((k.value for k in node.keywords if k.arg == 'timeout'), None)
+            assert timeout is not None, 'delegated transport has no timeout: ' + relative
+            assert ast.unparse(timeout) == 'timeout', 'installer must propagate its declared timeout'
+            defaults = dict(zip((arg.arg for arg in method.args.kwonlyargs), method.args.kw_defaults))
+            assert ast.literal_eval(defaults['timeout']) == mq.BOUNDS['installer']['seconds']
+            observed[f'{relative}:{owner}:call:{index}'] = {'bound': 'installer', 'shape': 'subprocess.run'}
     declared = {k: {field: row[field] for field in ('bound', 'shape')} for k,row in expected.items()}
     assert observed == declared, f'wait sites differ: missing={set(observed)-set(expected)}, stale={set(expected)-set(observed)}'
     assert all(row['bound'] in mq.BOUNDS for row in expected.values())
@@ -185,7 +441,7 @@ def transports(source):
             if not isinstance(node, ast.Call):
                 continue
             name = ast.unparse(node.func)
-            if name in ('command', 'subprocess.run', 'subprocess.Popen'):
+            if name in ('command', 'subprocess.run', 'subprocess.Popen', "config['install_launchd_plist']"):
                 calls[(method.name, name)] += 1
             elif name == 'self.git':
                 calls[(method.name, 'git:' + ast.unparse(node.args[1]))] += 1
@@ -437,7 +693,7 @@ class LivenessTests(unittest.TestCase):
             ('patch', 'command'): 1, ('conflict', 'subprocess.run'): 1,
             ('dispatcher_identity', 'command'): 1, ('_dispatch_conflicts', 'command'): 2,
             ('_dispatch_conflicts', 'subprocess.Popen'): 1, ('behind', 'subprocess.run'): 1,
-            ('install_agent', 'command'): 3,
+            ('install_agent', 'command'): 3, ('install_agent', "config['install_launchd_plist']"): 1,
             ('fetch', "git:'fetch'"): 1, ('patch', "git:'diff'"): 1,
             ('patch', "git:'merge-base'"): 1, ('_tick_repo', "git:'merge-base'"): 1,
             ('archive_legacy', "git:'merge-base'"): 1,
@@ -467,7 +723,7 @@ class LivenessTests(unittest.TestCase):
             self.assertTrue(all(b - a >= 300 for a, b in zip(times, times[1:])))
             self.assertTrue({(r, 2) for r in mq.REPOS} <= {(r, n) for r, n, _ in loop.merged})
             self.assertIn('discovery_failed', (f.state / 'queue.log').read_text())
-            EXERCISED.add('failed_discovery')
+            record_fault('failed_discovery')
         finally:
             f.doCleanups()
 
@@ -506,10 +762,11 @@ class LivenessTests(unittest.TestCase):
                             self.assertIn('exhaust', (f.state / 'queue.log').read_text().lower())
                         self.assertGreaterEqual(loop.discoveries, 4)
                         self.assertGreaterEqual(loop.polls, 4)
+                        record_fault(effect.name + "_" + fault, EFFECT_FAULT_SITES[effect.name])
                     finally:
                         f.doCleanups()
 
-        EXERCISED.add('persistent_effects')
+        record_fault('persistent_effects')
 
     def test_resource_and_mutation_pauses_do_not_charge_or_issue_intents(self):
         for name in ('merge_intent', 'update', 'merge'):
@@ -602,7 +859,7 @@ class LivenessTests(unittest.TestCase):
                         self.assertEqual(row['tested'], f.approved)
                         event = f.q.db.execute('SELECT detail FROM events WHERE entry_id=? AND outcome=?', (entry, 'merge_pending_timeout')).fetchone()
                         self.assertIn('reconcile', event[0])
-                    EXERCISED.add(scenario)
+                    record_fault(scenario)
                 finally:
                     f.doCleanups()
 
@@ -643,17 +900,27 @@ class LivenessTests(unittest.TestCase):
     def test_bounded_transports_and_registry_caps(self):
         with self.assertRaises(mq.WaitExpired):
             list(mq.bounded_items('snapshot', range(mq.BOUNDS['snapshot']['attempts'] + 1)))
-        EXERCISED.add('snapshot_cap')
+        nodes = {}
+        wait_sites((ROOT / 'tools/merge_queue/main.py').read_text(), nodes)
+        for site_id in FAULT_SITES['snapshot_cap']:
+            with self.subTest(site_id=site_id):
+                node = nodes[site_id.removeprefix('main.py:')]
+                iterator = node.iter
+                # Exercise the literal policy at this source site with an oversized input.
+                policy = 'snapshot' if site_id == 'main.py:bounded_items:for:1' else ast.literal_eval(iterator.args[0])
+                with self.assertRaises(mq.WaitExpired):
+                    list(mq.bounded_items(policy, range(mq.BOUNDS[policy]['attempts'] + 1)))
+                record_fault('snapshot_cap', (site_id,))
         with self.assertRaises(mq.WaitExpired):
             mq.command([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=.02)
-        EXERCISED.add('transport_timeout')
+        record_fault('transport_timeout')
         f = fixture_module.QueueTests(); f.setUp()
         try:
             with (f.state / 'agent.lock').open('a') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 with self.assertRaises(BlockingIOError):
                     with f.q.runner_lock(): pass
-            EXERCISED.add('runner_contention')
+            record_fault('runner_contention')
             connection = sqlite3.connect(f.state / 'queue.sqlite3')
             try:
                 connection.execute('BEGIN IMMEDIATE')
@@ -661,10 +928,10 @@ class LivenessTests(unittest.TestCase):
                 with self.assertRaises(sqlite3.OperationalError):
                     f.q.enqueue(mq.REPOS[0], 9, f.approved)
             finally: connection.close()
-            EXERCISED.add('sqlite_contention')
+            record_fault('sqlite_contention')
             with patch.object(f.q.budget, 'reserve', return_value=mq.BOUNDS['spacing']['seconds'] + 1):
                 with self.assertRaises(mq.WaitExpired): f.q.pr(mq.REPOS[0], 1)
-            EXERCISED.add('spacing_pause')
+            record_fault('spacing_pause')
             page = [{'id': i, 'body': '', 'author_association': 'OWNER'} for i in range(100)]
             def full_page(*args, validate):
                 validate(page)
@@ -672,7 +939,7 @@ class LivenessTests(unittest.TestCase):
             with patch.object(f.q, 'api', side_effect=full_page):
                 with self.assertRaisesRegex(mq.WaitExpired, 'pagination'):
                     f.q.pages('repos/example/repo/issues/1/comments?per_page=100')
-            EXERCISED.add('pagination_cap')
+            record_fault('pagination_cap')
             f.pr(); entry = f.q.enqueue(mq.REPOS[0], 1, f.approved)
             with f.q.db:
                 f.q.db.execute("UPDATE entries SET phase='review',auto_attempts=? WHERE id=?", (mq.AUTO_ENQUEUE_CAP, entry))
@@ -680,7 +947,7 @@ class LivenessTests(unittest.TestCase):
             loop.session()
             self.assertEqual(f.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], 'review')
             self.assertIsNotNone(f.q.db.execute("SELECT 1 FROM events WHERE outcome='auto_enqueue_exhausted'").fetchone())
-            EXERCISED.add('reenqueue_cap')
+            record_fault('reenqueue_cap')
         finally: f.doCleanups()
 
     def test_pagination_cap_stops_the_entry_and_releases_next_pr_in_the_real_loop(self):
@@ -708,7 +975,7 @@ class LivenessTests(unittest.TestCase):
                 self.assertNotIn((mq.REPOS[0], 1), {(r,n) for r,n,_ in loop.merged})
                 self.assertLessEqual(len(calls), 4, 'pagination exceeded the entry and discovery caps')
             self.assertIsNotNone(f.q.db.execute("SELECT 1 FROM events WHERE entry_id=? AND detail LIKE '%pagination limit%'", (entry,)).fetchone())
-            EXERCISED.add('pagination_cap')
+            record_fault('pagination_cap')
         finally: f.doCleanups()
 
     def test_budget_contention_times_out_and_sigterm_cancels_the_real_loop(self):
@@ -736,11 +1003,11 @@ class LivenessTests(unittest.TestCase):
                     self.assertEqual(child.returncode, 0, err)
                 finally:
                     if child.poll() is None: child.kill(); child.communicate(timeout=2)
-            EXERCISED.update(('budget_contention', 'cancel_service'))
+            record_fault('budget_contention'); record_fault('cancel_service')
         finally: f.doCleanups()
 
     def test_dispatch_faults_have_persisted_deadlines_in_the_real_loop(self):
-        for kind in ('no_desk', 'live', 'ps_timeout', 'help_timeout', 'spawn_failure', 'unreapable_child'):
+        for kind in ('no_desk', 'live', 'ps_timeout', 'help_timeout', 'spawn_failure', 'unreapable_child', 'completed_child'):
             with self.subTest(kind=kind):
                 f = fixture_module.QueueTests(); f.setUp()
                 try:
@@ -770,12 +1037,12 @@ class LivenessTests(unittest.TestCase):
                         return original(argv,**kw)
                     loop.request=request
                     class Child:
-                        def poll(self): return None
+                        def poll(self): return 1 if kind == 'completed_child' else None
                         def terminate(self): faults.append('terminate')
                         def kill(self): faults.append('kill')
                         def wait(self,timeout):
-                            if 'kill' not in faults: raise subprocess.TimeoutExpired('dispatcher',timeout)
-                    if kind=='unreapable_child': f.q.children['fault']=Child()
+                            if kind != 'completed_child' and 'kill' not in faults: raise subprocess.TimeoutExpired('dispatcher',timeout)
+                    if kind in ('unreapable_child', 'completed_child'): f.q.children['fault']=Child()
                     popen = subprocess.Popen
                     def spawn(argv, **kw):
                         if len(argv)>1 and str(argv[1]).endswith('/room-bridge/dispatch.py'):
@@ -785,7 +1052,7 @@ class LivenessTests(unittest.TestCase):
                     with patch.dict(os.environ,{'CARR_HERMES_DESKS':str(registry)}), patch.object(mq.subprocess,'Popen',side_effect=spawn):
                         for _ in range(4):
                             loop.session(polls=12)
-                            if kind!='unreapable_child': f.restart()
+                            if kind not in ('unreapable_child', 'completed_child'): f.restart()
                     row=f.q.db.execute('SELECT * FROM actions WHERE key="fault"').fetchone()
                     self.assertIn(row['phase'],('uncertain','exhausted'))
                     self.assertIsNone(row['desk'])
@@ -793,9 +1060,10 @@ class LivenessTests(unittest.TestCase):
                     if kind=='unreapable_child': self.assertIn('kill',faults)
                     if kind=='spawn_failure': self.assertIn('spawn',faults)
                     if kind=='help_timeout': self.assertIn('help',faults)
-                    if kind=='no_desk': EXERCISED.add('dispatch_no_desk')
+                    if kind=='no_desk': record_fault('dispatch_no_desk')
+                    else: record_fault('dispatch_' + kind, DISPATCH_FAULT_SITES[kind])
                 finally: f.doCleanups()
-        EXERCISED.add('dispatch_process_faults')
+        record_fault('dispatch_process_faults')
 
     def test_git_transport_fault_routes_drive_the_real_loop(self):
         for route in ('ancestry', 'conflict', 'patch_base', 'patch_diff', 'patch_id', 'git_init', 'git_remote', 'git_remote_read', 'merge_confirmation'):
@@ -832,15 +1100,101 @@ class LivenessTests(unittest.TestCase):
                     with patch.object(mq.subprocess,'run',side_effect=run):
                         loop.session(polls=12,reconcile=False); f.restart(); loop.session(polls=12,reconcile=False)
                     self.assertEqual(len(faults),1,'transport fault was not exercised exactly once')
+                    record_fault('git_' + route + '_timeout', GIT_FAULT_SITES[route])
                     row=f.q.db.execute('SELECT phase,outcome FROM entries WHERE id=?',(entry,)).fetchone()
                     self.assertEqual(row['phase'],'blocked')
                     self.assertIn((mq.REPOS[0],2),{(r,n) for r,n,_ in loop.merged})
                 finally: f.doCleanups()
-        EXERCISED.add('git_transport_routes')
+
+
+    def test_ancestry_fault_removal_is_rejected(self):
+        import inspect
+        import textwrap
+        source = textwrap.dedent(inspect.getsource(type(self).test_git_transport_fault_routes_drive_the_real_loop))
+        mutated = source.replace("('ancestry', 'conflict',", "('conflict',")
+        self.assertNotEqual(source, mutated)
+        namespace = dict(globals())
+        exec(compile(mutated, __file__, 'exec'), namespace)
+        exercised = {}
+        with patch.dict(globals(), EXERCISED=exercised):
+            namespace['test_git_transport_fault_routes_drive_the_real_loop'](self)
+        git_sites = [site for sites in GIT_FAULT_SITES.values() for site in sites]
+        with self.assertRaisesRegex(AssertionError, 'unexercised wait site: main.py:Queue.behind:call:1'):
+            assert_fault_coverage(git_sites, exercised)
+        self.assertNotIn('main.py:Queue.behind:call:1', exercised)
+
+    def test_installer_transport_timeouts(self):
+        import contextlib
+        import io
+        import plistlib
+        import tempfile
+        import runpy
+        config = runpy.run_path(str(ROOT / 'ops/config-as-code.py'))
+        installer = config['install_launchd_plist']
+        namespace = installer.__globals__
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'com.carr.test.plist'
+            body = plistlib.dumps({'Label': 'com.carr.test'}).decode()
+            for route in ('print', 'unload', 'load'):
+                calls = []
+                def run(argv, **kwargs):
+                    calls.append(argv[1])
+                    self.assertEqual(kwargs['timeout'], mq.BOUNDS['installer']['seconds'])
+                    if argv[1] == route:
+                        raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+                    return subprocess.CompletedProcess(argv, 113, '', 'Could not find service "com.carr.test"')
+                with patch.dict(namespace, HOME=directory), patch.dict(os.environ, HOME=directory), \
+                     patch.object(namespace['subprocess'], 'run', side_effect=run), \
+                     patch.object(namespace['launchd_hold'], 'off_reason', return_value=None), \
+                     patch.dict(namespace, launchd_off_reason=lambda *args: None), contextlib.redirect_stdout(io.StringIO()):
+                    if route == 'load':
+                        self.assertEqual(installer(target.name, str(target), body, False, timeout=mq.BOUNDS['installer']['seconds']), 'failed')
+                    else:
+                        with self.assertRaises(subprocess.TimeoutExpired):
+                            installer(target.name, str(target), body, False, timeout=mq.BOUNDS['installer']['seconds'])
+                self.assertIn(route, calls, 'installer timeout path was never reached')
+                if route == 'print':
+                    self.assertFalse(target.exists(), 'inspection timeout changed the plist')
+                else:
+                    self.assertTrue(Path(str(target) + '.pending-reload').exists(), 'uncertain reload lost its marker')
+            record_fault('installer_timeout', FAULT_SITES['installer_timeout'][1:])
+            f = fixture_module.QueueTests(); f.setUp()
+            try:
+                f.q.root = ROOT
+                from lib import carr_paths, machine_role
+                def preflight(argv, **kwargs):
+                    if '--show-current' in argv: return 'main'
+                    return 'same-sha'
+                with patch.object(carr_paths, 'canonical_checkout', return_value=str(ROOT)), \
+                     patch.object(machine_role, 'is_primary', return_value=True), \
+                     patch.object(mq, 'command', side_effect=preflight), \
+                     patch.object(mq.subprocess, 'run', side_effect=subprocess.TimeoutExpired('launchctl', 15)):
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        f.q.install_agent(target, apply=True)
+                record_fault('installer_timeout', (FAULT_SITES['installer_timeout'][0],))
+                for index in range(1, 4):
+                    calls = []
+                    def fail_preflight(argv, **kwargs):
+                        calls.append(argv)
+                        if len(calls) == index: raise mq.WaitExpired('installer git transport deadline')
+                        return preflight(argv, **kwargs)
+                    with patch.object(carr_paths, 'canonical_checkout', return_value=str(ROOT)), \
+                         patch.object(machine_role, 'is_primary', return_value=True), \
+                         patch.object(mq, 'command', side_effect=fail_preflight):
+                        with self.assertRaises(mq.WaitExpired): f.q.install_agent(target, apply=True)
+                    self.assertEqual(len(calls), index)
+                    record_fault('installer_git_timeout', ('main.py:Queue.install_agent:call:' + str(index),))
+            finally: f.doCleanups()
 
     def test_z_every_registry_bound_has_an_exercised_fault_scenario(self):
-        required={row['scenario'] for row in (*mq.BOUNDS.values(), *mq.WAIT_SITES.values())}
-        self.assertTrue(required <= EXERCISED, 'unexercised registry scenarios: ' + str(required-EXERCISED))
+        assert_fault_coverage()
+        for site_id in mq.WAIT_SITES:
+            with self.subTest(site_id=site_id):
+                removed = {key: value for key, value in EXERCISED.items() if key != site_id}
+                with self.assertRaisesRegex(AssertionError, 'unexercised wait site'):
+                    assert_fault_coverage(exercised=removed)
+        for name, bound in mq.BOUNDS.items():
+            self.assertIn(bound['scenario'], EXERCISED_BOUNDS, 'unexercised bound: ' + name)
 
 
 if __name__ == '__main__':
