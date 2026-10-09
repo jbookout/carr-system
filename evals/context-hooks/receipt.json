@@ -2,26 +2,26 @@
   "adapter": {
     "adapter_id": "shared-conduct-classifier",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:ded2bf954007b4ca007310fe490dc01ce3cc1b1fec3d6d8dce45136c3a8c3fc1",
+    "configuration_fingerprint": "sha256:1b209f91643229536266a946c4cb6bcc471d843f2de77585ab0d0ed043e72628",
     "harness_id": "evals/context-hooks/conduct_eval.py",
-    "harness_version": "5045fd80b547fd86232cb4e52233d9b68ef097d4ab80fa7f8e0a78e73a8b9306",
+    "harness_version": "b342da3a721f6d64d8e9d4df4527257ef23629db2cb0c8cf9ca7a6e2f48f1216",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a11e0b-405f-7bb3-bfa3-89befc1735ce",
+    "native_session_ref": "01a11ec7-cb8a-7d50-8dee-5d2d31e73a7e",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
   "cases": {
-    "total": 363,
-    "train": 23,
-    "test": 340,
-    "should_not_fire": 61,
+    "total": 584,
+    "train": 28,
+    "test": 556,
+    "should_not_fire": 159,
     "sources": [
       "production_trace",
       "human_judged_hard_case",
       "synthesized"
     ]
   },
-  "change": "Distinguish reader retry and terminal instructions from first-person plans and app descriptions.",
+  "change": "Recognize reader instructions after introductory clauses while preserving first-person narration.",
   "cost": {
     "baseline_usd_per_case": 0.0,
     "candidate_usd_per_case": 0.0
@@ -37,9 +37,9 @@
         "evals/context-hooks/evidence/conduct-candidate.jsonl"
       ],
       "baseline": {
-        "score": 0.4583333333333333,
-        "ci_low": 0.4583333333333333,
-        "ci_high": 0.4583333333333333
+        "score": 0.7058823529411765,
+        "ci_low": 0.7058823529411765,
+        "ci_high": 0.7058823529411765
       },
       "candidate": {
         "score": 1.0,
@@ -47,24 +47,24 @@
         "ci_high": 1.0
       },
       "delta": {
-        "value": 0.5416666666666667,
-        "ci_low": 0.5416666666666667,
-        "ci_high": 0.5416666666666667
+        "value": 0.2941176470588235,
+        "ci_low": 0.2941176470588235,
+        "ci_high": 0.2941176470588235
       }
     },
     {
       "dimension_id": "narration-allowance",
       "critical": true,
       "status": "passed",
-      "direction_vs_baseline": "improved",
+      "direction_vs_baseline": "equivalent",
       "evidence_refs": [
         "evals/context-hooks/evidence/conduct-baseline.jsonl",
         "evals/context-hooks/evidence/conduct-candidate.jsonl"
       ],
       "baseline": {
-        "score": 0.038461538461538464,
-        "ci_low": 0.038461538461538464,
-        "ci_high": 0.038461538461538464
+        "score": 1.0,
+        "ci_low": 1.0,
+        "ci_high": 1.0
       },
       "candidate": {
         "score": 1.0,
@@ -72,9 +72,9 @@
         "ci_high": 1.0
       },
       "delta": {
-        "value": 0.9615384615384616,
-        "ci_low": 0.9615384615384616,
-        "ci_high": 0.9615384615384616
+        "value": 0.0,
+        "ci_low": 0.0,
+        "ci_high": 0.0
       }
     }
   ],
@@ -84,25 +84,25 @@
       "function": "score"
     },
     "source": {
-      "evals/context-hooks/conduct_eval.py": "5045fd80b547fd86232cb4e52233d9b68ef097d4ab80fa7f8e0a78e73a8b9306"
+      "evals/context-hooks/conduct_eval.py": "b342da3a721f6d64d8e9d4df4527257ef23629db2cb0c8cf9ca7a6e2f48f1216"
     },
     "dependencies": {
-      "hooks/conduct_patterns.py": "68a876727e3ca02d20df490cebe54ebba156225c87a5d1bafcc29e5a9d3b8c21",
-      "ops/conduct-gate-selftest.py": "dd7df274b33db34c8bd00808fa2b823ecc68e2e5e9c7cdb530931d911f250c95"
+      "hooks/conduct_patterns.py": "710fbb5d07729d545f308531ccb75fdecac7f5a61494289814de9817aea00307",
+      "ops/conduct-gate-selftest.py": "b52712f9522a014dd89a8d58333ffc468b87fc585cd14331b725eec16375806b"
     },
     "expectations": {
-      "path": "evals/context-hooks/conduct-expectations.v1.json",
-      "version": "conduct-handoff-expectations/v1",
-      "sha256": "408b04e55b8d0fb8dbef960810ad7afe17e189208dbcc442204a52a8606210dd"
+      "path": "evals/context-hooks/conduct-expectations.v2.json",
+      "version": "conduct-handoff-expectations/v2",
+      "sha256": "a933eeb93c8f173bfae619bef6d881a36990b5575fc8c89ef8325e8b9e5e29d1"
     },
     "cohorts": {
       "baseline": {
         "path": "evals/context-hooks/evidence/conduct-baseline.jsonl",
-        "sha256": "ab3fd4d95e91d34ec03e08a0151a63df233cbec884544ffd18df7772dc16b4a8"
+        "sha256": "b0ac09728f08f8ab92c92c53fe69574a6ffe159cde2937dbd188e993070ec1b3"
       },
       "candidate": {
         "path": "evals/context-hooks/evidence/conduct-candidate.jsonl",
-        "sha256": "b5b8815e0f112c47433c212f2f55ae8a7541eddb459f515b7c38e41c988f5c71"
+        "sha256": "bbf52d32a71cde5535e770e4fcca42a264fbb1e14113dd0e129b337d0519e932"
       }
     }
   },

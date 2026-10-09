@@ -39,6 +39,11 @@ CASES = [('fenced-bash', 'update the repo', "I've made the changes. Now run:\n\n
 
 
 CASES.extend([
+    ('intro-run-reader', 'fix the exporter', 'After the restart, run it again.', True),
+    ('intro-execute-reader', 'fix the exporter', 'To verify the fix, execute this once.', True),
+    ('intro-first-person', 'fix the exporter', "After the restart, I'll run it again.", False),
+    ('intro-terminal-reader', 'fix the exporter', 'After the restart, open your terminal.', True),
+    ('intro-terminal-first-person', 'fix the exporter', "To verify the fix, I'll run it in the terminal.", False),
     ('retry-run-reader', 'fix the exporter', 'Re-run it after the restart.', True),
     ('retry-execute-reader', 'fix the exporter', 'Re-execute this after the restart.', True),
     ('retry-first-person', 'fix the exporter', "I'll re-execute this after the restart.", False),
@@ -361,13 +366,13 @@ def main():
               f"want={'BLOCK' if expect else 'allow'} got={'BLOCK' if got else 'allow'}")
 
     try:
-        timely_block = run_case('fix the exporter', 'Fixed.' + '\n' * 24000 + 'Run this once.', timeout=15)
+        timely_block = run_case('fix the exporter', 'Fixed.' + '\n' * 24000 + 'Run this once.', timeout=2)
     except subprocess.TimeoutExpired:
         timely_block = False
     name = 'long-whitespace-stop-deadline'
     passed, failed = (passed+1, failed) if timely_block else (passed, failed+1)
     if not timely_block: bad.append(name)
-    print(f"  {'ok  ' if timely_block else 'FAIL'} {name} (BLOCK within 15 seconds)")
+    print(f"  {'ok  ' if timely_block else 'FAIL'} {name} (BLOCK within 2 seconds, below the configured 15-second deadline)")
 
     for name, ok in handoff_scan_cases():
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)

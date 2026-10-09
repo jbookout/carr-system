@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 PATTERNS = 'hooks/conduct_patterns.py'
-BASE = '372776374494ba3424862915ae48ee4d83666a86'
+BASE = 'a3e9544bf11f2f2f3ea6309e2a051b20fef9809f'
 
 
 def digest(data):
@@ -76,26 +76,27 @@ def make_report():
                       'dimension': 'reader-instruction' if required else 'narration-allowance'}
 
     for name, _, text, expected in tests.CASES:
-        if name.startswith(('fp-', 'fire-', 'retry-', 'open-', 'terminal-')):
+        if name.startswith(('fp-', 'fire-', 'retry-', 'open-', 'terminal-', 'intro-')):
             add(text, expected, 'train')
     for prefix, verb, article, app in itertools.product(
-            ['', 'Now ', 'You can ', '- ', '**', '1. Please '],
+            ['', 'Now ', 'You can ', '- ', '**', '1. Please ', 'Once the service is ready, ', 'For a final check, '],
             ['Open', 'Launch'], ['', 'your ', 'the '], ['Terminal', 'iTerm', 'shell', 'command line']):
         add(prefix + verb + ' ' + article + app + ' and check the result.', True, 'test')
     for prefix, verb, command, location in itertools.product(
-            ['', 'Next ', 'You should ', '- '], ['Run', 'Execute', 'Re-run', 'Re-execute'],
+            ['', 'Next ', 'You should ', '- ', 'Once the service is ready, ', 'For a final check, '], ['Run', 'Execute', 'Re-run', 'Re-execute'],
             ['it', './bin/verify.py --all', 'the verification command with its required flags and all normal arguments'],
             ['in the terminal', 'in your shell', 'at the command line']):
         add(prefix + verb + ' ' + command + ' ' + location + '.', True, 'test')
     for subject, verb, location in itertools.product(
             ["I'll", 'I will', 'We can', "We're going to"], ['run', 'execute', 're-run', 're-execute'],
             ['in the terminal', 'in your shell', 'at the command line']):
-        add(subject + ' ' + verb + ' it ' + location + '.', False, 'test')
+        for prefix in ['', 'Once the service is ready, ', 'For a final check, ']:
+            add(prefix + subject + ' ' + verb + ' it ' + location + '.', False, 'test')
     for label, action in itertools.product(['The button label is: ', 'The application offers to '],
                                           ['Open Terminal', 'Launch Terminal']):
         add(label + action + '.', False, 'test')
-    exp = {'version': 'conduct-handoff-expectations/v1', 'baseline_ref': BASE, 'cases': cases}
-    exp_path = HERE / 'conduct-expectations.v1.json'
+    exp = {'version': 'conduct-handoff-expectations/v2', 'baseline_ref': BASE, 'cases': cases}
+    exp_path = HERE / 'conduct-expectations.v2.json'
     exp_path.write_text(json.dumps(exp, indent=2) + '\n')
     arms = observe(exp)
     measured = score(exp, arms['baseline'], arms['candidate'])
@@ -119,7 +120,7 @@ def make_report():
         dims.append({'dimension_id': did, 'critical': True, 'status': 'passed',
                      'direction_vs_baseline': 'improved' if values['delta']['value'] > 0 else 'equivalent',
                      'evidence_refs': refs, **values})
-    receipt.update(change='Distinguish reader retry and terminal instructions from first-person plans and app descriptions.',
+    receipt.update(change='Recognize reader instructions after introductory clauses while preserving first-person narration.',
         measured_on=datetime.date.today().isoformat(),
         cases={'total': len(cases), 'train': sum(c['split']=='train' for c in cases.values()),
                'test': sum(c['split']=='test' for c in cases.values()),
@@ -140,7 +141,7 @@ def make_report():
                   'expectations': {'path': str(exp_path.relative_to(ROOT)), 'version': exp['version'], 'sha256': digest(exp_path.read_bytes())},
                   'cohorts': cohorts})
     receipt['adapter'].update(adapter_id='shared-conduct-classifier', harness_id=source_path,
-        harness_version=source_hash, native_session_ref='01a11e0b-405f-7bb3-bfa3-89befc1735ce',
+        harness_version=source_hash, native_session_ref='01a11ec7-cb8a-7d50-8dee-5d2d31e73a7e',
         configuration_fingerprint='sha256:' + digest(json.dumps(dependencies, sort_keys=True).encode()))
     (HERE / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({'cases': receipt['cases'], 'dimensions': measured['dimensions'], 'verdict': 'ship'}))

@@ -326,7 +326,7 @@ def strip_noise(text):
     a bash snippet the session legitimately shows inside a quoted rule, or a
     question inside a quoted email draft, does not trip the offload class."""
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
-    text = re.sub(r"^\s*>.*$", " ", text, flags=re.M)
+    text = re.sub(r"^[ \t]*>.*$", " ", text, flags=re.M)
     return text
 
 

@@ -521,7 +521,7 @@
       "record-dispatch-link"
      ],
      "bash_patterns": [
-      "\\bdispatch\\.py\\s+send\\b",
+      "\\A(?:(?:\\\\[^\\n]|\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\\\'\";&|()\\n])*[;&|()\\n])*[ \\t]*(?:['\"]?(?:/usr/bin/|/usr/local/bin/|/opt/homebrew/bin/|(?:\\./)?\\.venv/bin/)?python3['\"]?\\s+)?['\"]?(?:(?:/(?:[^\\s\\'\";&|()]+/)?carr-system/|(?:\\./)?)tools/room-bridge/|(?:\\./)?)dispatch\\.py['\"]?(?:\\s+--(?:registry|results)(?:=|\\s+)(?:\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\s'\";&|()]+))*\\s+send(?=[\\s;&|()<>]|$)",
       "\\bcodex\\s+exec\\b",
       "\\bgrok\\b",
       "\\brun-engineering-dispatch\\b",
@@ -1383,7 +1383,7 @@
       "record-workflow-caller"
      ],
      "bash_patterns": [
-      "\\bdispatch\\.py\\s+send\\b",
+      "\\A(?:(?:\\\\[^\\n]|\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\\\'\";&|()\\n])*[;&|()\\n])*[ \\t]*(?:['\"]?(?:/usr/bin/|/usr/local/bin/|/opt/homebrew/bin/|(?:\\./)?\\.venv/bin/)?python3['\"]?\\s+)?['\"]?(?:(?:/(?:[^\\s\\'\";&|()]+/)?carr-system/|(?:\\./)?)tools/room-bridge/|(?:\\./)?)dispatch\\.py['\"]?(?:\\s+--(?:registry|results)(?:=|\\s+)(?:\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\s'\";&|()]+))*\\s+send(?=[\\s;&|()<>]|$)",
       "\\bgrok\\b",
       "\\bcodex\\s+exec\\b",
       "\\blaunchctl\\b",
@@ -1599,7 +1599,7 @@
       "record-dispatch-link"
      ],
      "bash_patterns": [
-      "\\bdispatch\\.py\\s+send\\b",
+      "\\A(?:(?:\\\\[^\\n]|\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\\\'\";&|()\\n])*[;&|()\\n])*[ \\t]*(?:['\"]?(?:/usr/bin/|/usr/local/bin/|/opt/homebrew/bin/|(?:\\./)?\\.venv/bin/)?python3['\"]?\\s+)?['\"]?(?:(?:/(?:[^\\s\\'\";&|()]+/)?carr-system/|(?:\\./)?)tools/room-bridge/|(?:\\./)?)dispatch\\.py['\"]?(?:\\s+--(?:registry|results)(?:=|\\s+)(?:\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\s'\";&|()]+))*\\s+send(?=[\\s;&|()<>]|$)",
       "\\bcodex\\s+exec\\b",
       "\\bgrok\\b",
       "\\brun-engineering-dispatch\\b",
@@ -3126,7 +3126,7 @@
       "record-dispatch-link"
      ],
      "bash_patterns": [
-      "\\bdispatch\\.py\\s+send\\b",
+      "\\A(?:(?:\\\\[^\\n]|\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\\\'\";&|()\\n])*[;&|()\\n])*[ \\t]*(?:['\"]?(?:/usr/bin/|/usr/local/bin/|/opt/homebrew/bin/|(?:\\./)?\\.venv/bin/)?python3['\"]?\\s+)?['\"]?(?:(?:/(?:[^\\s\\'\";&|()]+/)?carr-system/|(?:\\./)?)tools/room-bridge/|(?:\\./)?)dispatch\\.py['\"]?(?:\\s+--(?:registry|results)(?:=|\\s+)(?:\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\s'\";&|()]+))*\\s+send(?=[\\s;&|()<>]|$)",
       "\\bcodex\\s+exec\\b",
       "\\bgrok\\b",
       "\\brun-engineering-dispatch\\b",
@@ -3656,7 +3656,7 @@
       "record-dispatch-link"
      ],
      "bash_patterns": [
-      "\\bdispatch\\.py\\s+send\\b",
+      "\\A(?:(?:\\\\[^\\n]|\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\\\'\";&|()\\n])*[;&|()\\n])*[ \\t]*(?:['\"]?(?:/usr/bin/|/usr/local/bin/|/opt/homebrew/bin/|(?:\\./)?\\.venv/bin/)?python3['\"]?\\s+)?['\"]?(?:(?:/(?:[^\\s\\'\";&|()]+/)?carr-system/|(?:\\./)?)tools/room-bridge/|(?:\\./)?)dispatch\\.py['\"]?(?:\\s+--(?:registry|results)(?:=|\\s+)(?:\"(?:\\\\.|[^\"\\\\])*\"|'[^']*'|[^\\s'\";&|()]+))*\\s+send(?=[\\s;&|()<>]|$)",
       "\\bcodex\\s+exec\\b",
       "\\bgrok\\b",
       "\\brun-engineering-dispatch\\b",

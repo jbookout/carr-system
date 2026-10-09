@@ -299,7 +299,7 @@ def _finding_payload(plan: CleanupPlan, *, episode_key: str,
         "idempotency_key": str(uuid.uuid5(
             uuid.NAMESPACE_URL, "carr-storage-hygiene:" + episode_key)),
         "kind": "open_loop",
-        "owner": "orchestrator",
+        "owner": "claude",  # add-loop owners are joe/dell/claude; the orchestrator is the Claude seat
         "domain": "system",
         "marker": "none",
         "blocker": "other_lane",
