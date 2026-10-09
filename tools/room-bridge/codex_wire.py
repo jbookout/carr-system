@@ -19,7 +19,7 @@ THE CALL ORDER MATTERS and is not guessable from the schema alone:
     initialized  (a notification, no id, no reply)
     thread/start -> returns thread.id       (thread/resume to carry context)
     turn/start   -> returns turn.id
-    then read until item/completed carries an item of type agentMessage
+    then read until turn/completed confirms that exact turn has terminated
 
 Codex proved the message shapes over stdio, where its sandbox let it reach the
 protocol but not the network. The unix-socket half was proven here, from a
@@ -38,6 +38,9 @@ import struct
 import time
 import uuid
 
+TERMINAL = {'completed', 'failed', 'interrupted'}
+CANCEL_TIMEOUT_S = 2.0
+
 
 class Wire:
     def __init__(self, path: str, timeout: float = 180.0):
@@ -49,6 +52,8 @@ class Wire:
         # The thread this call opened or resumed, kept so a timeout can still
         # report it and the desk does not open a second thread on retry.
         self.thread_id: str | None = None
+        self.turn_id: str | None = None
+        self.turn_requested = False
         self.sock.settimeout(timeout)
         self.sock.connect(path)
         self.buf = bytearray()
@@ -159,6 +164,61 @@ def wait_response(wire: Wire, request_id: str, transcript: list[dict]) -> dict:
             return message["result"]
 
 
+def _initialize(wire: Wire) -> None:
+    wire.upgrade()
+    wire.send_json({'id': 'initialize', 'method': 'initialize', 'params': {
+        'clientInfo': {'name': 'hermes-dispatch', 'version': '0.1.0'},
+        'capabilities': {'experimentalApi': False}}})
+    wait_response(wire, 'initialize', [])
+    wire.send_json({'method': 'initialized'})
+
+
+def _terminal(message: dict, thread_id: str, turn_id: str | None) -> bool:
+    params = message.get('params') or {}
+    turn = params.get('turn') or {}
+    return (bool(turn_id) and message.get('method') == 'turn/completed' and params.get('threadId') == thread_id
+            and turn.get('id') == turn_id and turn.get('status') in TERMINAL)
+
+
+def turn_terminated(sock_path: str, thread_id: str, turn_id: str,
+                    timeout: float = 2.0) -> bool:
+    """Read the exact turn from its owning server; absence is never completion."""
+    wire = None
+    try:
+        wire = Wire(sock_path, timeout=timeout)
+        wire.deadline = time.monotonic() + timeout
+        _initialize(wire)
+        wire.send_json({'id': 'thread-read', 'method': 'thread/read',
+                        'params': {'threadId': thread_id, 'includeTurns': True}})
+        thread = wait_response(wire, 'thread-read', []).get('thread') or {}
+        return thread.get('id') == thread_id and any(
+            turn.get('id') == turn_id and turn.get('status') in TERMINAL
+            for turn in thread.get('turns', []))
+    except (OSError, EOFError, RuntimeError, ValueError, KeyError, TypeError):
+        return False
+    finally:
+        if wire is not None:
+            wire.sock.close()
+
+
+def _interrupt(wire: Wire) -> bool:
+    if not wire.turn_requested:
+        return True
+    if not wire.thread_id or not wire.turn_id:
+        return False
+    # A successful interrupt response only acknowledges the request. Keep the
+    # claim until a terminal notification or an exact-turn read confirms exit.
+    wire.deadline = time.monotonic() + CANCEL_TIMEOUT_S
+    try:
+        wire.send_json({'id': 'turn-interrupt', 'method': 'turn/interrupt',
+                        'params': {'threadId': wire.thread_id, 'turnId': wire.turn_id}})
+        while True:
+            if _terminal(wire.receive_json(), wire.thread_id, wire.turn_id):
+                return True
+    except (OSError, EOFError, RuntimeError, ValueError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # one task, one live Codex thread
 # ---------------------------------------------------------------------------
@@ -175,12 +235,13 @@ def run_turn(
     timeout: float = 300.0,
     deadline_s: float | None = None,
     effort: str | None = None,
+    on_executor=None,
 ) -> dict:
     """Deliver one turn to a live Codex session and wait for its answer.
 
     Unlike the Claude desk, which accepts a turn and answers in its own window,
-    this returns the actual answer: the app-server hands back item/completed on
-    the same connection, so there is nothing asynchronous to reconcile.
+    this waits for turn/completed as well as the answer. A deadline interrupts
+    the turn; an unconfirmed interruption retains write ownership.
     """
     from desks import DeskError, desk_prompt
     if approval_policy != "never":
@@ -194,27 +255,22 @@ def run_turn(
         wire.deadline = started + deadline_s
     try:
         return _run_turn(wire, task, thread_id=thread_id, cwd=cwd, model=model,
-                         sandbox=sandbox, approval_policy=approval_policy, timeout=timeout, effort=effort)
+                         sandbox=sandbox, approval_policy=approval_policy, timeout=timeout, effort=effort,
+                         on_executor=on_executor)
     except TimeoutError:
+        confirmed = _interrupt(wire)
         return {"status": "timed_out", "thread_id": getattr(wire, "thread_id", None) or thread_id,
-                "detail": f"no answer within {deadline_s if deadline_s is not None else timeout:.0f}s"}
+                'turn_id': wire.turn_id, 'termination_confirmed': confirmed,
+                "detail": f"no answer within {deadline_s if deadline_s is not None else timeout:.0f}s"
+                          + ('; turn terminated' if confirmed else '; stuck: turn termination unconfirmed')}
+    finally:
+        wire.sock.close()
 
 
 def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
-              approval_policy, timeout, effort=None) -> dict:
+              approval_policy, timeout, effort=None, on_executor=None) -> dict:
     transcript: list[dict] = []
-    wire.upgrade()
-
-    wire.send_json({
-        "id": "initialize",
-        "method": "initialize",
-        "params": {
-            "clientInfo": {"name": "hermes-dispatch", "version": "0.1.0"},
-            "capabilities": {"experimentalApi": False},
-        },
-    })
-    wait_response(wire, "initialize", transcript)
-    wire.send_json({"method": "initialized"})
+    _initialize(wire)
 
     if thread_id:
         wire.send_json({
@@ -232,6 +288,8 @@ def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
     opened = wait_response(wire, "thread-open", transcript)
     tid = (opened.get("thread") or {}).get("id") or thread_id
     wire.thread_id = tid
+    if on_executor:
+        on_executor({'kind': 'codex_turn', 'thread_id': tid, 'turn_id': None})
 
     turn_params = {"threadId": tid, "input": [{"type": "text", "text": task}],
                    "approvalPolicy": "never"}
@@ -239,27 +297,30 @@ def _run_turn(wire: Wire, task: str, *, thread_id, cwd, model, sandbox,
         turn_params["model"] = model
     if effort:
         turn_params["effort"] = effort
+    wire.turn_requested = True
     wire.send_json({"id": "turn-start", "method": "turn/start", "params": turn_params})
-    wait_response(wire, "turn-start", transcript)
+    started_turn = wait_response(wire, "turn-start", transcript)
+    wire.turn_id = (started_turn.get('turn') or {}).get('id')
+    if on_executor:
+        on_executor({'kind': 'codex_turn', 'thread_id': tid, 'turn_id': wire.turn_id})
 
     deadline = time.monotonic() + timeout
     if getattr(wire, "deadline", None) is not None:
         deadline = min(deadline, wire.deadline)
+    wire.deadline = deadline
     answer = None
+    queued = iter(transcript)
     while time.monotonic() < deadline:
-        msg = wire.receive_json()
-        transcript.append(msg)
+        msg = next(queued, None)
+        if msg is None:
+            msg = wire.receive_json()
         if msg.get("method") == "item/completed":
             item = (msg.get("params") or {}).get("item") or {}
             if item.get("type") == "agentMessage":
                 answer = item.get("text") or item.get("message")
-                break
-        if msg.get("method") in ("turn/failed", "turn/aborted"):
-            return {"status": "failed", "thread_id": tid,
-                    "detail": json.dumps(msg.get("params") or {})[:500]}
-
-    if answer is None:
-        return {"status": "timed_out", "thread_id": tid,
-                "detail": f"no agentMessage within {timeout:.0f}s"}
-    return {"status": "completed", "thread_id": tid, "result": answer.strip(),
-            "resumed": bool(thread_id)}
+        if _terminal(msg, tid, wire.turn_id):
+            turn = msg['params']['turn']
+            return {'status': 'completed' if turn['status'] == 'completed' else 'failed',
+                    'thread_id': tid, 'turn_id': wire.turn_id, 'termination_confirmed': True,
+                    'result': (answer or '').strip(), 'resumed': bool(thread_id)}
+    raise TimeoutError('turn did not terminate before deadline')

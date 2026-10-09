@@ -3,8 +3,10 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -15,6 +17,7 @@ import desks
 import dispatch
 import write_ownership
 from test_codex_models_unit import catalog_fixture
+from test_codex_live_unit import FakeAppServer
 
 
 class OwnershipTests(unittest.TestCase):
@@ -59,7 +62,7 @@ class OwnershipTests(unittest.TestCase):
             rows = [json.loads(line) for line in self.results.read_text().splitlines()]
             self.assertEqual(rows[-1]['status'], 'running')
             self.assertEqual(rows[-1]['writes'], ['tools/*.py'])
-            return {'status': 'completed'}
+            return {'status': 'completed', 'termination_confirmed': True}
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [
                 {'number': 42, 'title': 'mine', 'files': ['tools/new.py']}])), \
              patch.object(dispatch, '_to_codex', side_effect=run):
@@ -71,7 +74,7 @@ class OwnershipTests(unittest.TestCase):
         warning = io.StringIO()
         with contextlib.redirect_stderr(warning), \
              patch('dispatch.write_ownership.open_prs') as prs, \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed'}):
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
             self.assertEqual(self.send()['status'], 'completed')
         prs.assert_not_called()
         self.assertIn('no write set', warning.getvalue())
@@ -80,7 +83,7 @@ class OwnershipTests(unittest.TestCase):
     def test_completed_claim_released_but_async_delivery_stays_owned(self):
         self.active(status='delivered_live')
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed'}):
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
             with self.assertRaises(desks.DeskError):
                 self.send(writes=['tools/a.py'])
             with self.results.open('a') as fh:
@@ -90,7 +93,7 @@ class OwnershipTests(unittest.TestCase):
 
     def test_cli_repeatable_writes_are_combined_with_brief(self):
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed'}), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(dispatch.main(['--registry', str(self.reg.path), '--results', str(self.results),
                 'send', 'sol', 'Writes: src/*.py', '--writes', 'tests/*', '--writes', 'docs/*']), 0)
@@ -107,7 +110,7 @@ class OwnershipTests(unittest.TestCase):
     def test_other_repo_claim_does_not_block_and_invalid_ledger_refuses(self):
         self.active(repo='different/repo')
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed'}) as run:
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}) as run:
             self.send(writes=['tools/a.py'])
             self.results.write_text('{broken\n')
             run.reset_mock()
@@ -122,7 +125,7 @@ class OwnershipTests(unittest.TestCase):
         def execute(*args, **kwargs):
             entered.set()
             release.wait(5)
-            return {'status': 'completed'}
+            return {'status': 'completed', 'termination_confirmed': True}
         def first():
             try:
                 self.send(writes=['new/*.py'])
@@ -153,14 +156,140 @@ class OwnershipTests(unittest.TestCase):
             with self.subTest(left=left, right=right):
                 self.assertEqual(write_ownership.overlaps(left, right), expected)
 
-    def test_executor_exception_releases_claim(self):
+    def test_executor_exception_without_termination_keeps_claim(self):
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
              patch.object(dispatch, '_to_codex', side_effect=RuntimeError('failed')):
             with self.assertRaises(RuntimeError):
                 self.send(writes=['src/*'])
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed'}):
-            self.send(writes=['src/*'])
+             patch.object(dispatch, '_to_codex') as run:
+            with self.assertRaisesRegex(desks.DeskError, 'stuck'):
+                self.send(writes=['src/*'])
+            run.assert_not_called()
+
+    def test_crash_after_reservation_recovers_without_a_timer(self):
+        code = '''
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import write_ownership
+write_ownership.open_prs = lambda cwd: ('owner/repo', [])
+write_ownership.reserve(Path(sys.argv[2]),
+    {'msg_id': 'crashed', 'desk': 'sol', 'task': 'build'}, sys.argv[3], ['src/*'])
+os._exit(17)
+'''
+        crashed = subprocess.run([sys.executable, '-c', code,
+            str(Path(dispatch.__file__).parent), str(self.results), str(self.root)],
+            capture_output=True, text=True)
+        self.assertEqual(crashed.returncode, 17, crashed.stderr)
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
+            self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
+        recovered = [json.loads(line) for line in self.results.read_text().splitlines()
+                     if json.loads(line).get('msg_id') == 'crashed'][-1]
+        self.assertEqual(recovered['ownership_state'], 'released')
+        self.assertIn('terminated', recovered['ownership_detail'])
+
+    def test_timeout_without_termination_keeps_claim_and_blocks_second_turn(self):
+        sock = str(self.root / 'live.sock')
+        server = FakeAppServer(sock, silent_turn=True)
+        self.addCleanup(server.close)
+        self.reg.register('live', 'codex-live', socket=sock, family='sol',
+                          effort='high', cwd=str(self.root))
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])):
+            row = dispatch.dispatch('live', 'Writes: src/*\nbuild', registry=self.reg,
+                results_path=self.results, codex_timeout_s=0.1)
+            self.assertEqual(row['status'], 'timed_out')
+            self.assertFalse(row.get('termination_confirmed', True))
+            self.assertEqual(row['ownership_state'], 'held')
+            self.assertIn('stuck', row['ownership_detail'])
+            self.assertIn('turn/interrupt', server.methods())
+            with self.assertRaisesRegex(desks.DeskError, 'stuck'):
+                dispatch.dispatch('live', 'Writes: src/*\nbuild again', registry=self.reg,
+                    results_path=self.results, codex_timeout_s=0.1)
+        self.assertEqual(server.methods().count('turn/start'), 1)
+
+    def test_a_live_reservation_is_not_recovered_even_if_old(self):
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])):
+            write_ownership.reserve(self.results, {'msg_id': 'alive', 'desk': 'sol',
+                'task': 'build', 'dispatched_at': '1999-01-01T00:00:00Z'}, str(self.root), ['src/*'])
+            with patch.object(dispatch, '_to_codex') as run:
+                with self.assertRaises(desks.DeskError):
+                    self.send(writes=['src/*'])
+                run.assert_not_called()
+
+    def test_process_group_recovery_waits_for_surviving_child(self):
+        proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                start_new_session=True)
+        def cleanup():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        self.addCleanup(cleanup)
+        identity = {**write_ownership.process_owner(), 'pid': proc.pid, 'pgid': proc.pid,
+                    'kind': 'process_group'}
+        self.active(writes=['src/*'], ownership_state='held', executor=identity)
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}) as run:
+            with self.assertRaises(desks.DeskError):
+                self.send(writes=['src/*'])
+            run.assert_not_called()
+            cleanup()
+            self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
+
+    def test_async_turn_reconciles_only_its_verified_terminal_status(self):
+        sock = str(self.root / 'async.sock')
+        server = FakeAppServer(sock, silent_turn=True)
+        self.addCleanup(server.close)
+        self.active(writes=['src/*'], status='delivered_live', ownership_state='held',
+                    executor={'kind': 'codex_turn', 'socket': sock,
+                              'thread_id': 'thread-live-0001', 'turn_id': 'turn-1'})
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}) as run:
+            with self.assertRaises(desks.DeskError):
+                self.send(writes=['src/*'])
+            run.assert_not_called()
+            server.silent_turn = False
+            self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
+        self.assertEqual(server.methods().count('thread/read'), 2)
+
+    def test_pid_probe_denied_or_from_another_host_keeps_claim(self):
+        identity = write_ownership.process_owner()
+        self.active(writes=['src/*'], ownership_state='held', owner_process=identity,
+                    executor={'kind': 'reservation'})
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch('write_ownership.os.kill', side_effect=PermissionError), \
+             patch.object(dispatch, '_to_codex') as run:
+            with self.assertRaises(desks.DeskError):
+                self.send(writes=['src/*'])
+            run.assert_not_called()
+        identity['host'] = 'somewhere-else'
+        self.assertFalse(write_ownership.process_terminated(identity))
+
+    def test_headless_codex_records_a_dedicated_group_and_releases_after_exit(self):
+        binary = self.root / 'bin'
+        binary.mkdir()
+        probe = self.root / 'process.json'
+        codex = binary / 'codex'
+        codex.write_text(f'''#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+Path({str(probe)!r}).write_text(json.dumps({{'pid': os.getpid(), 'pgid': os.getpgrp()}}))
+Path(sys.argv[sys.argv.index('-o') + 1]).write_text('built')
+print(json.dumps({{'type': 'thread.started', 'thread_id': 'fake-thread'}}))
+print(json.dumps({{'type': 'turn.completed'}}))
+''')
+        codex.chmod(0o755)
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])):
+            row = self.send(writes=['src/*'], env={**os.environ, 'PATH': str(binary)})
+            self.assertEqual(row['status'], 'completed', row)
+            self.assertTrue(row['termination_confirmed'], row)
+            self.assertEqual(row['ownership_state'], 'released')
+            process = json.loads(probe.read_text())
+            self.assertEqual(process['pid'], process['pgid'])
+            self.assertEqual(row['executor']['pgid'], process['pgid'])
+            self.assertEqual(row['executor']['kind'], 'process_group')
+            self.assertEqual(self.send(writes=['src/*'], env={**os.environ, 'PATH': str(binary)})['status'], 'completed')
 
     def test_pr_reader_pages_files_and_preserves_renamed_path(self):
         reader = unittest.mock.Mock()

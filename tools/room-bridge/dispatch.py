@@ -134,28 +134,56 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
-def _run_codex_streamed(argv, env, timeout, **options):
-    """Preserve result parsing while exposing actual executor output to its job log."""
+def _run_codex_process(argv, env, timeout, on_executor, stream_output, **options):
+    """Track a dedicated process group, including children surviving a CLI exit."""
     proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, **options,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                            start_new_session=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT if stream_output else subprocess.PIPE, text=True)
+    identity = {**write_ownership.process_owner(), 'kind': 'process_group',
+                'pid': proc.pid, 'pgid': proc.pid}
     chunks = []
-    def relay():
-        with proc.stdout:
-            for line in proc.stdout:
-                chunks.append(line)
-                print(line, end="", flush=True)
-    reader = threading.Thread(target=relay, daemon=True)
-    reader.start()
+    reader = None
     try:
-        code = proc.wait(timeout=timeout)
-    except BaseException:
-        proc.kill()
-        proc.wait()
+        if on_executor:
+            on_executor(identity)
+        if stream_output:
+            def relay():
+                with proc.stdout:
+                    for line in proc.stdout:
+                        chunks.append(line)
+                        print(line, end='', flush=True)
+            reader = threading.Thread(target=relay, daemon=True)
+            reader.start()
+            proc.wait(timeout=timeout)
+            reader.join(timeout=timeout)
+            if reader.is_alive():
+                raise subprocess.TimeoutExpired(argv, timeout)
+            stdout, stderr = ''.join(chunks), ''
+        else:
+            stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            # An unkillable group retains the claim; do not hang on its pipes.
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        if isinstance(exc, subprocess.TimeoutExpired):
+            exc.termination_confirmed = write_ownership.process_terminated(identity, group=True)
         raise
-    reader.join(timeout=timeout)
-    if reader.is_alive():
-        raise subprocess.TimeoutExpired(argv, timeout)
-    return subprocess.CompletedProcess(argv, code, "".join(chunks), "")
+    finally:
+        if reader is None or not reader.is_alive():
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+    result = subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    result.termination_confirmed = write_ownership.process_terminated(identity, group=True)
+    return result
 
 
 def _to_codex(
@@ -167,6 +195,7 @@ def _to_codex(
     live_desktop: bool = False,
     stream_output: bool = False,
     timeout_s: float | None = None,
+    on_executor=None,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -196,11 +225,14 @@ def _to_codex(
     # Desktop thread on every retry (PR #1345 review). "delivered_live" says the
     # answer arrives in the session's own window and nowhere a caller can wait on.
     if live_desktop and thread and codex_ipc.thread_owner(thread) is not None:
+        if on_executor:
+            on_executor({'kind': 'codex_desktop', 'thread_id': thread})
         live = codex_ipc.start_turn(thread, task, approval_policy="never",
                                     model=entry["model"], effort=entry["effort"])
         if live.get("status") != "not_live":
             status = "delivered_live" if live.get("status") == "delivered" else live.get("status")
-            return {"resumed": True, **live, "status": status, "thread_id": thread}
+            return {"resumed": True, **live, "status": status, "thread_id": thread,
+                    "termination_confirmed": False}
     with tempfile.TemporaryDirectory(prefix="hermes-codex-") as tmp:
         last = Path(tmp) / "last-message.txt"
         argv = ["codex", "exec"]
@@ -266,8 +298,9 @@ def _to_codex(
             # pipe makes the run hang or swallow whatever the caller was fed.
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
-            if stream_output:
-                proc = _run_codex_streamed(argv, env or os.environ.copy(), limit_s, **process_options)
+            if on_executor or stream_output:
+                proc = _run_codex_process(argv, env or os.environ.copy(), limit_s,
+                                          on_executor, stream_output, **process_options)
             else:
                 proc = subprocess.run(
                     argv, env=env or os.environ.copy(), capture_output=True,
@@ -275,9 +308,11 @@ def _to_codex(
                     **process_options,
                 )
         except FileNotFoundError:
-            return {"status": "failed", "detail": "codex is not on PATH"}
-        except subprocess.TimeoutExpired:
-            return {"status": "timed_out", "detail": f"no answer in {limit_s:.0f}s"}
+            return {"status": "failed", "detail": "codex is not on PATH", 'termination_confirmed': True}
+        except subprocess.TimeoutExpired as exc:
+            return {"status": "timed_out", "detail": f"no answer in {limit_s:.0f}s",
+                    **({'termination_confirmed': exc.termination_confirmed}
+                       if hasattr(exc, 'termination_confirmed') else {})}
 
         events = _codex_events(proc.stdout or "")
         started = next((e for e in events if e.get("type") == "thread.started"), None)
@@ -287,7 +322,9 @@ def _to_codex(
         )
         result = last.read_text(encoding="utf-8").strip() if last.exists() else ""
 
-        base = {"thread_id": thread_id, "resumed": bool(thread)}
+        base = {"thread_id": thread_id, "resumed": bool(thread),
+                **({'termination_confirmed': proc.termination_confirmed}
+                   if hasattr(proc, 'termination_confirmed') else {})}
 
         # A seat that is out of credit is not a broken seat, and a router needs
         # to tell those apart: the first means send this task somewhere else
@@ -412,6 +449,14 @@ def dispatch(
         print(f"executor: {entry['model']} / {entry['effort']} (family {entry['family']}, desk {name})",
               file=sys.stderr, flush=True)
 
+    def executor_started(identity):
+        if ownership:
+            ownership['executor'] = {**identity,
+                **({'socket': entry['socket']} if identity.get('kind') == 'codex_turn' else {})}
+            _record(results_path, {**base, **ownership, 'status': 'running'})
+
+    executor_options: dict = {'on_executor': executor_started} if ownership else {}
+
     try:
         if checkout is not None:
             prepared = codex_checkout.prepare(checkout, cwd or entry.get('cwd') or str(Path.cwd()), env)
@@ -422,6 +467,9 @@ def dispatch(
                 entry = {**entry, **prepared, 'cwd': prepared['checkout_workspace']}
                 if cwd:
                     cwd = prepared['checkout_workspace']
+        # A crash between handoff and identity readback is ambiguous, so it
+        # must never be recovered merely because the dispatcher PID is gone.
+        executor_started({'kind': 'unconfirmed'})
         if entry["kind"] == "claude-session":
             if name == "flash":
                 with flashlib.activity_scope():
@@ -442,6 +490,7 @@ def dispatch(
                 thread_id=None if fresh else entry.get("thread_id"),
                 cwd=entry.get("cwd"), model=entry.get("model"), effort=entry["effort"],
                 deadline_s=codex_timeout_s,
+                **executor_options,
             )
             if outcome.get("thread_id"):
                 registry.remember_thread(name, outcome["thread_id"])
@@ -449,20 +498,35 @@ def dispatch(
             outcome = _to_codex(
                 {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
                 timeout_s=codex_timeout_s, **stream_options,
+                **executor_options,
             )
         else:
             outcome = _to_codex(
                 entry, task, env, fresh=fresh, config_overrides=config_overrides,
                 live_desktop=live_desktop, timeout_s=codex_timeout_s,
                 **stream_options,
+                **executor_options,
             )
             # pin the desk to its thread so the next task lands in the same one
             if outcome.get("thread_id"):
                 registry.remember_thread(name, outcome["thread_id"])
     except BaseException:
         if ownership:
-            _record(results_path, {**base, **ownership, "status": "failed", "detail": "executor raised"})
+            evidence = write_ownership.termination_evidence(ownership)
+            reserved = ownership['executor']['kind'] == 'reservation'
+            _record(results_path, {**base, **ownership, 'status': 'failed', 'detail': 'executor raised',
+                'ownership_state': 'released' if evidence or reserved else 'held',
+                'ownership_detail': evidence or ('executor not launched' if reserved else
+                                                'stuck: executor termination unconfirmed')})
         raise
+
+    if ownership:
+        confirmed = outcome.get('termination_confirmed', entry['kind'] not in codex_models.CODEX_KINDS
+                                and outcome.get('status') in ('completed', 'failed', 'quota_exhausted'))
+        ownership.update(ownership_state='released' if confirmed else 'held',
+                         ownership_detail='executor terminated' if confirmed else
+                         'executor still owns the write set' if outcome.get('status') in write_ownership.ACTIVE
+                         and outcome.get('status') != 'timed_out' else 'stuck: executor termination unconfirmed')
 
     row = {
         **base,

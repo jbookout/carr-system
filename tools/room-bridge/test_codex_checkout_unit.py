@@ -129,16 +129,18 @@ class CheckoutDispatchTests(unittest.TestCase):
         self.assertNotIn('GIT_CONFIG_COUNT', executor_env)
 
     def test_failed_clone_releases_write_claim_before_refusing(self):
-        ownership = {'repo': 'jbookout/carr-system', 'writes': ['tools/*.py']}
-        with patch.object(dispatch.write_ownership, 'reserve', return_value=ownership) as reserve, \
+        with patch.object(dispatch.write_ownership, 'open_prs',
+                          return_value=('jbookout/carr-system', [])) as prs, \
              patch.object(dispatch.subprocess, 'run', side_effect=self.execute):
             with self.assertRaisesRegex(desks.DeskError, 'origin clone'):
                 dispatch.dispatch('cx', 'repair', registry=self.reg, results_path=self.results,
                                   env=self.env, writes=['tools/*.py'], checkout='missing-branch')
-        self.assertEqual(reserve.call_args.args[2], str(self.source))
+        self.assertEqual(prs.call_args.args[0], str(self.source))
         row = json.loads(self.results.read_text().splitlines()[-1])
         self.assertEqual(row['status'], 'failed')
         self.assertEqual(row['writes'], ['tools/*.py'])
+        self.assertEqual(row['ownership_state'], 'released')
+        self.assertEqual(row['ownership_detail'], 'executor not launched')
         self.assertEqual(self.codex_calls, [])
 
     def test_non_noreply_canonical_author_refuses(self):

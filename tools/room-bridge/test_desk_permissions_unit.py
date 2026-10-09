@@ -259,11 +259,16 @@ print(json.dumps({**result, "entries": reg.entries()}))
     def test_codex_live_resume_overrides_inherited_approval_policy(self):
         for thread in (None, "fixture-thread"):
             messages = []
+            replies = iter([
+                {"method": "item/completed", "params": {
+                    "item": {"type": "agentMessage", "text": "Synthetic result"}}},
+                {'method': 'turn/completed', 'params': {'threadId': 'fixture-thread',
+                    'turn': {'id': 'fixture-turn', 'status': 'completed'}}}])
             fake = SimpleNamespace(upgrade=lambda: None, send_json=messages.append,
-                receive_json=lambda: {"method": "item/completed", "params": {
-                    "item": {"type": "agentMessage", "text": "Synthetic result"}}})
+                receive_json=lambda: next(replies), sock=SimpleNamespace(close=lambda: None))
             with self.subTest(thread=thread), patch.object(dispatch.codex_wire, "Wire", return_value=fake), \
-                 patch.object(dispatch.codex_wire, "wait_response", return_value={"thread": {"id": "fixture-thread"}}):
+                 patch.object(dispatch.codex_wire, "wait_response", return_value={
+                     'thread': {'id': 'fixture-thread'}, 'turn': {'id': 'fixture-turn'}}):
                 dispatch.codex_wire.run_turn("/tmp/fixture.sock", "Synthetic task", thread_id=thread)
                 opened = next(m for m in messages if m.get("id") == "thread-open")
                 turn = next(m for m in messages if m.get("method") == "turn/start")

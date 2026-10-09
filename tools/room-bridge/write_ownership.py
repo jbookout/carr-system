@@ -5,10 +5,12 @@ from contextlib import contextmanager
 import fcntl
 from fnmatch import fnmatchcase
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import sys
+import socket
 
 from desks import DeskError
 
@@ -17,7 +19,39 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from lib.github_reader import GitHubReader
 
-ACTIVE = {'running', 'started', 'pending', 'delivered', 'delivered_live'}
+ACTIVE = {'running', 'started', 'pending', 'delivered', 'delivered_live', 'timed_out', 'stuck'}
+
+
+def process_owner() -> dict:
+    return {'host': socket.gethostname(), 'pid': os.getpid()}
+
+
+def process_terminated(identity: dict, *, group: bool = False) -> bool:
+    """Only ESRCH proves termination. Reused IDs or denied probes retain ownership."""
+    number = identity.get('pgid' if group else 'pid')
+    if identity.get('host') != socket.gethostname() or type(number) is not int or number <= 0:
+        return False
+    try:
+        (os.killpg if group else os.kill)(number, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def termination_evidence(row: dict) -> str | None:
+    executor = row.get('executor') or {}
+    kind = executor.get('kind')
+    if kind == 'reservation' and process_terminated(row.get('owner_process') or {}):
+        return 'reservation owner terminated before executor handoff'
+    if kind == 'process_group' and process_terminated(executor, group=True):
+        return 'executor process group terminated'
+    if kind == 'codex_turn' and executor.get('socket') and executor.get('turn_id'):
+        import codex_wire
+        if codex_wire.turn_terminated(executor['socket'], executor['thread_id'], executor['turn_id']):
+            return 'Codex turn terminated (thread/read)'
+    return None
 
 
 def declaration(task: str, explicit: list[str] | None) -> list[str]:
@@ -164,7 +198,9 @@ def record(path: Path, row: dict) -> None:
 def reserve(path: Path, row: dict, cwd: str, writes: list[str]) -> dict:
     repo, prs = open_prs(cwd)
     mine = own_pr(row['task'], repo)
-    metadata = {'repo': repo, 'writes': writes, 'own_pr': mine}
+    metadata = {'repo': repo, 'writes': writes, 'own_pr': mine,
+                'owner_process': process_owner(), 'executor': {'kind': 'reservation'},
+                'ownership_state': 'held'}
     with _locked(path):
         for pr in prs:
             if pr['number'] != mine and any(fnmatchcase(file, pattern)
@@ -186,15 +222,28 @@ def reserve(path: Path, row: dict, cwd: str, writes: list[str]) -> dict:
         except (OSError, ValueError, TypeError) as exc:
             raise DeskError('ownership_unreadable', 'cannot verify in-flight results ledger') from exc
         for previous in active.values():
-            if previous.get('repo', '').lower() != repo.lower() or previous.get('status') not in ACTIVE:
+            if previous.get('repo', '').lower() != repo.lower():
+                continue
+            held = previous.get('ownership_state') == 'held'
+            if previous.get('ownership_state') == 'released' or (not held and previous.get('status') not in ACTIVE):
                 continue
             claimed = previous.get('writes', [])
             if not isinstance(claimed, list) or any(not isinstance(p, str) for p in claimed):
                 raise DeskError('ownership_unreadable', 'invalid in-flight write set')
             if any(overlaps(a, b) for a in writes for b in claimed):
+                evidence = termination_evidence(previous)
+                if evidence:
+                    _append(path, {'msg_id': previous['msg_id'], 'status': 'recovered',
+                                   'ownership_state': 'released', 'ownership_detail': evidence})
+                    continue
                 owner_pr = previous.get('own_pr')
                 advice = f'build on top of PR {owner_pr}' if owner_pr else "build on top of the owner's PR once it is opened"
+                stuck = ('; stuck: termination unconfirmed' if previous.get('status') in ('timed_out', 'stuck')
+                         or not previous.get('executor')
+                         or previous.get('executor', {}).get('kind') == 'unconfirmed'
+                         or 'stuck' in previous.get('ownership_detail', '')
+                         or process_terminated(previous.get('owner_process') or {}) else '')
                 raise DeskError('write_set_overlap', f"write set owned by in-flight job "
-                    f"{previous['msg_id']} (desk {previous.get('desk', '?')}); {advice}")
+                    f"{previous['msg_id']} (desk {previous.get('desk', '?')}){stuck}; {advice}")
         _append(path, {**row, **metadata, 'status': 'running'})
     return metadata
