@@ -321,6 +321,22 @@ class QueueTests(unittest.TestCase):
         self.assertGreaterEqual(len(sleeps), 2)
         self.assertGreaterEqual(starts[1] - starts[0], 2.0)
 
+    def test_cancelled_mutation_retains_uncertainty_and_shared_cooldown(self):
+        q = module.Queue(self.state, self.root)
+        self.addCleanup(q.db.close)
+        q.budget.clock = lambda: 100.0
+        def command(*args, **kwargs):
+            q.stopped = True
+            raise module.Cancelled()
+        with patch.object(module, 'command', side_effect=command):
+            with self.assertRaises(module.ActionUncertain):
+                q._gh_request(('pr', 'merge', '1'), False, None)
+        data = json.loads(q.budget.path.read_text())
+        self.assertEqual(data[q.budget.shared]['next_start'], 102.0)
+        q.stopped = False
+        with q.budget.call_slot(timeout=.02):
+            pass
+
     def test_orphan_dispatch_on_restart_releases_desk_without_replay(self):
         registry = self.root / 'desks.json'; registry.write_text('{"desks":{}}')
         os.environ['CARR_HERMES_DESKS'] = str(registry)

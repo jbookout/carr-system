@@ -319,41 +319,43 @@ class Queue:
             raise exc
 
     def _gh_request(self, args, decode, validate):
-        read = gh_api_read(['gh', *args]) if args[0] == 'api' else args[:2] == ('pr', 'checks')
-        resource = resource_for(list(args))
-        delay = max(self.budget.reserve(resource), self.gap - (time.monotonic() - self.last_gh))
-        end = time.monotonic() + max(0, delay)
-        if delay > BOUNDS['spacing']['seconds']:
-            raise WaitExpired('Shared pacing reservation exceeds spacing deadline; entry stopped')
-        while time.monotonic() < end:
+        with self.budget.call_slot(timeout=BOUNDS['pacing_lock']['seconds']) as mark_started:
+            read = gh_api_read(['gh', *args]) if args[0] == 'api' else args[:2] == ('pr', 'checks')
+            resource = resource_for(list(args))
+            delay = max(self.budget.reserve(resource), self.gap - (time.monotonic() - self.last_gh))
+            end = time.monotonic() + max(0, delay)
+            if delay > BOUNDS['spacing']['seconds']:
+                raise WaitExpired('Shared pacing reservation exceeds spacing deadline; entry stopped')
+            while time.monotonic() < end:
+                self.check_cancelled()
+                time.sleep(min(.2, max(0, end - time.monotonic())))
+            self.budget.check(resource)
             self.check_cancelled()
-            time.sleep(min(.2, max(0, end - time.monotonic())))
-        self.budget.check(resource)
-        self.check_cancelled()
-        include = args[0] == 'api' and '--include' not in args
-        observed_at = time.time()
-        def observe(p):
-            headers, _ = split_response(p.stdout)
-            self.budget.observe(resource, headers, p.stderr, observed_at)
-        try:
+            include = args[0] == 'api' and '--include' not in args
+            observed_at = time.time()
+            def observe(p):
+                headers, _ = split_response(p.stdout)
+                self.budget.observe(resource, headers, p.stderr, observed_at)
             try:
-                out = command(['gh', *args, *(['--include'] if include else [])], cwd=self.root, observe=observe)
-            except Cancelled:
-                if read:
-                    raise
-                raise ActionUncertain('Cancellation during response observation; mutation intent retained') from None
-            headers, body = split_response(out)
-            self._next_page = bool(re.search(r';\s*rel="next"', headers.get('link', ''))) if out.startswith('HTTP/') else None
-            result = body if include else out
-            if decode:
-                result = json.loads(result)
-                if args[:2] == ('api', 'graphql') and (not isinstance(result, dict) or result.get('errors')):
-                    raise RuntimeError('GitHub GraphQL response contains errors')
-                if validate is not None:
-                    validate(result)
-            return result
-        finally:
-            self.last_gh = time.monotonic()
+                mark_started()
+                try:
+                    out = command(['gh', *args, *(['--include'] if include else [])], cwd=self.root, observe=observe)
+                except Cancelled:
+                    if read:
+                        raise
+                    raise ActionUncertain('Cancellation during response observation; mutation intent retained') from None
+                headers, body = split_response(out)
+                self._next_page = bool(re.search(r';\s*rel="next"', headers.get('link', ''))) if out.startswith('HTTP/') else None
+                result = body if include else out
+                if decode:
+                    result = json.loads(result)
+                    if args[:2] == ('api', 'graphql') and (not isinstance(result, dict) or result.get('errors')):
+                        raise RuntimeError('GitHub GraphQL response contains errors')
+                    if validate is not None:
+                        validate(result)
+                return result
+            finally:
+                self.last_gh = time.monotonic()
 
     def api(self, path, *args, validate=None):
         return self.gh('api', path, *args, decode=True, validate=validate)

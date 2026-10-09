@@ -84,6 +84,10 @@
     "installer": {
       "seconds": 15,
       "scenario": "installer_timeout"
+    },
+    "pacing_lock": {
+      "seconds": 155,
+      "scenario": "pacing_contention"
     }
   },
   "sites": {
@@ -173,6 +177,11 @@
       "scenario": "persistent_effects"
     },
     "main.py:Queue._gh_request:call:1": {
+      "bound": "pacing_lock",
+      "shape": "self.budget.call_slot",
+      "scenario": "pacing_contention"
+    },
+    "main.py:Queue._gh_request:call:2": {
       "bound": "budget_lock",
       "shape": "self.budget.reserve",
       "scenario": "budget_contention"
@@ -182,12 +191,12 @@
       "shape": "time.monotonic() < end",
       "scenario": "spacing_pause"
     },
-    "main.py:Queue._gh_request:call:2": {
+    "main.py:Queue._gh_request:call:3": {
       "bound": "spacing",
       "shape": "time.sleep",
       "scenario": "spacing_pause"
     },
-    "main.py:Queue._gh_request:call:3": {
+    "main.py:Queue._gh_request:call:4": {
       "bound": "budget_lock",
       "shape": "self.budget.check",
       "scenario": "budget_contention"
@@ -197,7 +206,7 @@
       "shape": "self.budget.observe",
       "scenario": "budget_contention"
     },
-    "main.py:Queue._gh_request:call:4": {
+    "main.py:Queue._gh_request:call:5": {
       "bound": "command",
       "shape": "command",
       "scenario": "transport_timeout"
