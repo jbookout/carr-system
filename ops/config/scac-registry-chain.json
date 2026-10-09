@@ -5688,62 +5688,6 @@
         "catalog_function": "ops.scac_mutation_catalog_v114_current()"
       },
       "migration_sha256": "6b97ab135d2a03f372a809269422ba49582e1432c8b285ea26dd86432e73b9e6"
-    },
-    {
-      "number": 115,
-      "version": "scac-mutation-registry.v115",
-      "predecessor": "scac-mutation-registry.v114",
-      "digest": "sha256:707f7293bf530dc7f6abb5d13f7a86d4d5b31b83f159ca136358daa7f2241f86",
-      "source_set_digest": "sha256:4c305a11ee3170f2854e6b488e08287fc340a378b5c05f480a7bbcdce2bb6a30",
-      "catalog_digest": "sha256:b51b056cff55af70aa43563a10554b3c5ae7a7eed08fc454dedc5e767e07c3a8",
-      "artifact_sha256": "0d78de527d898b43735f0cc8b2da5ce2ad7e0ce793d926a749012520da29a3f4",
-      "path": "mcp-server/src/scac-mutation-registry.current.generated.js",
-      "catalog": {
-        "column_dml": {
-          "count": 15,
-          "digest": "sha256:f7a33d14ce431ba588cc07dff07fc9fd91a0dcdb41112de6fecd390fb42dc098"
-        },
-        "relation_dml": {
-          "count": 320,
-          "digest": "sha256:3fefb729b3fdaf82f58fe9b9704db9fa02939002e1a2bae2bcaac63f45b2c3dc"
-        },
-        "role_authority": {
-          "count": 13,
-          "digest": "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"
-        },
-        "secdef_execute": {
-          "count": 1255,
-          "digest": "sha256:d7fbc2a3ff5724f1aeb8c4484f1f4462e93fad8c8db25452395bd89c2e940900"
-        },
-        "job_definitions": {
-          "count": 2,
-          "digest": "sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"
-        },
-        "projection_version": "scac-db-catalog-projection.v115",
-        "runtime_dml_grants": {
-          "count": 335,
-          "digest": "sha256:130b35b793b967487754bc90cc81b5e956aa7b7001a3e712cce711d8c1cf4d0e"
-        }
-      },
-      "commit": "bd534988256eb0c85467138240a16f1a92d3c35e",
-      "source_count": 1183,
-      "entry_count": 2773,
-      "migration": "migrations/0852_party_identity_scac_successor.sql",
-      "entry_set_digest": "sha256:3eefbc5ee3c96c0775a55e1edd550e9fe73137320b6452683ef87de6b01efe2b",
-      "atomic_pair": [
-        "0851_party_identity_correction_view.sql",
-        "0852_party_identity_scac_successor.sql"
-      ],
-      "strict_atomic": true,
-      "dependencies": [
-        "0850_research_site_scac_successor.sql",
-        "0851_party_identity_correction_view.sql"
-      ],
-      "snapshot": {
-        "include_current_entry_set": true,
-        "catalog_function": "ops.scac_mutation_catalog_v115_current()"
-      },
-      "migration_sha256": "d6469767b760e809cbacb04f14bb0840c98acdc4c390c9324803ed2d9161eb61"
     }
   ],
   "atomic_groups": [
@@ -5955,10 +5899,6 @@
     [
       "0849_research_site.sql",
       "0850_research_site_scac_successor.sql"
-    ],
-    [
-      "0851_party_identity_correction_view.sql",
-      "0852_party_identity_scac_successor.sql"
     ]
   ],
   "strict_atomic_groups": [
@@ -6121,10 +6061,6 @@
     [
       "0849_research_site.sql",
       "0850_research_site_scac_successor.sql"
-    ],
-    [
-      "0851_party_identity_correction_view.sql",
-      "0852_party_identity_scac_successor.sql"
     ]
   ],
   "inactive_atomic_groups": [
