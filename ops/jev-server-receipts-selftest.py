@@ -56,6 +56,12 @@ def _client():
             "value": "selftest", "sources": ["ops/typesafe_client.py"]}
     mod.load_call_sites = lambda path=None: {"hourly_paid_call_cap": 10**9, "sites": {"*": site}}
     mod.call_site = lambda caller, registry: site
+    # Hermetic credentials, as on a hosted runner: the Worker route signs with
+    # a fixture admission secret and no local vendor key exists to fall back on.
+    mod.read_admission_secret = lambda: "fixture-admission-secret"
+    def no_local_vendor_key(*_args):
+        raise mod.TypeSafeError("fixture holds no local vendor key")
+    mod.read_api_key = no_local_vendor_key
     return mod
 
 
@@ -91,7 +97,9 @@ def client_routes_through_the_worker():
     finally:
         os.unlink(log)
     ok = (seen.get("verb") == "ask-jev" and seen["args"]["purpose"] == "call"
-          and seen["args"]["facets"] == ["diagnosis"] and seen["args"]["idempotency_key"]
+          and seen["args"]["facets"] == ["diagnosis"]
+          and seen["args"]["idempotency_key"].startswith("jev1.")
+          and "fixture-admission-secret" not in json.dumps(seen)
           and result["server_receipt"]["receipt_id"] == "srv-1"
           and result["answers"]["diagnosis_q"]["noul"] == 0.7
           and result["usage"] == {"input_tokens": 3, "output_tokens": 1}
@@ -258,7 +266,7 @@ def in_hook_calls_skip_the_server_but_the_advisory_does_not():
           and advisory.get("server_receipt", {}).get("receipt_id") == "srv-h"
           and rows and rows[0]["server_error"] == "in_hook_direct")
     return report(ok, "a hook's own Jev call goes direct and is marked uncredited "
-                      "(in_hook_direct); the build advisory still takes the server path")
+                      "(in_hook_direct); other explicit callers still take the server path")
 
 
 class ReviewRegressions(unittest.TestCase):

@@ -120,6 +120,16 @@ def _task(transcript):
         return ""
 
 
+def _joe_facing(result):
+    """Whether a notable result belongs on the Stop line Joe reads.
+
+    A bare needs_review names nothing to do; Joe saw one after nearly every reply
+    (2026-10-05). This hides it from every Stop check (done_claim, stop_boundary,
+    inspect_stop_boundary); it stays in the receipt.
+    """
+    return _notable(result) and str(result.get("verdict", "")) != "needs_review"
+
+
 def _notable(result):
     """Whether a check's result is worth an advisory line in advise mode."""
     if not isinstance(result, dict):
@@ -206,9 +216,18 @@ def post_tool_use(payload, run):
                       root, transcript)
     if isinstance(findings, list):
         run.results.extend(row for row in findings if isinstance(row, dict))
-        # A second semantic request for one tool result would repeat evidence.
-        if not findings and transcript:
-            run.do(watch.watch_progress, transcript, task)
+
+
+def progress(payload, run):
+    """Local predicates run independently of paid-call admission."""
+    transcript = payload.get("transcript_path") or ""
+    if transcript:
+        watch = _lib("jev_session_watch")
+        run.do(watch.watch_progress, transcript, _task(transcript),
+               elapsed_seconds=payload.get("elapsed_seconds"),
+               budget_seconds=payload.get("budget_seconds"),
+               artifact_before=payload.get("artifact_before"),
+               artifact_after=payload.get("artifact_after"))
 
 
 NOTIFICATION_WRAPPER = re.compile(
@@ -304,6 +323,8 @@ def _last_test_evidence(transcript):
     command, output, code = tests[-1]
     evidence = {"test_command": command, "test_output": output,
                 "test_run_count": len(tests),
+                "test_runs": [{"command": cmd, "output": out, "exit_code": result}
+                              for cmd, out, result in tests],
                 "test_failure_count": sum(result != 0 for _, _, result in tests if result is not None)}
     if code is not None:
         evidence["test_exit_code"] = code
@@ -356,6 +377,11 @@ def stop(payload, run):
             final = ""
     done = _lib("jev_done_checks")
     evidence = _last_test_evidence(transcript) if transcript else {}
+    # The pre-launch contract's artifacts are read from disk by the predicate
+    # itself; the payload carries no evidence a session could author.
+    criteria = _lib_acceptance_contract(task).get("criteria")
+    if criteria:
+        evidence.update({"criteria": criteria, "claim_scope": "current_completion", "root": root or cwd})
     diff = ""
     if root:
         try:
@@ -369,6 +395,13 @@ def stop(payload, run):
                       payload.get("session_id") or "")
     if isinstance(findings, list):
         run.results.extend(row for row in findings if isinstance(row, dict))
+
+
+def _lib_acceptance_contract(task):
+    spec = importlib.util.spec_from_file_location("acceptance_checks", os.path.join(REPO, "lib", "acceptance_checks.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.contract(task)
 
 
 def fact_boundary(payload, run):
@@ -444,7 +477,7 @@ def judgment_point(event, payload):
 
 
 # The paid sites this hook dispatches, for a site-budget pause.
-SUPERVISOR_SITES = ("jev_session_watch", "jev_done_checks", "jev_fact_boundary")
+SUPERVISOR_SITES = ("jev_session_watch", "jev_fact_boundary")
 
 
 def _quiet_unavailable(results, session):
@@ -474,23 +507,23 @@ def _quiet_unavailable(results, session):
     return ([notice] if notice else []) + lines
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+@decision(failure="raise")
+def decide(payload):
     if not isinstance(payload, dict) or MODE == "off" or payload.get("session_id") == "selftest":
         return 0
     # The registry/client owns each site's policy, including mixed policies.
     enabled = {site for site in SUPERVISOR_SITES if POLICY.call_site_enabled(site)}
-    if not enabled:
-        return 0
     event = payload.get("hook_event_name") or payload.get("hookEventName") or ""
     if event == "Stop" and payload.get("stop_hook_active"):
         return 0
     run = Run()
     try:
         if event == "PostToolUse":
+            progress(payload, run)
             if "jev_session_watch" in enabled and judgment_point(event, payload):
                 post_tool_use(payload, run)
             # The optional fact library owns its record-write trigger, including
@@ -498,15 +531,16 @@ def main():
             if "jev_fact_boundary" in enabled:
                 fact_boundary(payload, run)
         elif event == "Stop" and judgment_point(event, payload):
-            if "jev_done_checks" in enabled:
-                stop(payload, run)
+            stop(payload, run)
             if "jev_fact_boundary" in enabled:
                 fact_boundary(payload, run)
     except Exception:
         return 0
     if MODE != "advise":
         return 0
-    lines = _quiet_unavailable([r for r in run.results if _notable(r)], payload.get("session_id"))
+    # Stop lines reach Joe's screen, so they keep only results that name something to do.
+    keep = _notable if event == "PostToolUse" else _joe_facing
+    lines = _quiet_unavailable([r for r in run.results if keep(r)], payload.get("session_id"))
     if not lines:
         return 0
     text = "\n".join(lines[:4])
@@ -516,6 +550,10 @@ def main():
     else:
         print(json.dumps({"systemMessage": text}))
     return 0
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":

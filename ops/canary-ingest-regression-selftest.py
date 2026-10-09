@@ -31,6 +31,7 @@ def load(name, path):
 
 sink = load('canary_sink_regression', 'tools/canary-ingest-sink.py')
 TOKEN = 'synthetic-token'
+HTTP_TIMEOUT = 10
 
 
 @contextlib.contextmanager
@@ -49,7 +50,7 @@ def serving(ledger, **kwargs):
 
 
 def post(server, body, token=TOKEN):
-    conn = http.client.HTTPConnection(*server.server_address, timeout=2)
+    conn = http.client.HTTPConnection(*server.server_address, timeout=HTTP_TIMEOUT)
     try:
         conn.request('POST', '/ingest', body, {
             'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
@@ -78,20 +79,46 @@ class Regressions(unittest.TestCase):
         self.ledger = sink.Ledger(str(self.directory / 'ledger'))
 
     def test_1_simultaneous_http_duplicates(self):
-        barrier = threading.Barrier(2)
-        if hasattr(self.ledger, 'has_seen'):
-            original = self.ledger.has_seen
-            def simultaneous(identifier):
-                result = original(identifier)
-                barrier.wait(2)
-                return result
-            self.ledger.has_seen = simultaneous
-        start = threading.Barrier(2)
-        def request(_):
-            start.wait(2)
-            return post(server, b'{"external_id":"race"}')
+        first_snapshot = threading.Event()
+        second_contender = threading.Event()
+        release_first = threading.Event()
+        original_lock = self.ledger.lock
+        original_read = self.ledger._read_receipts
+        coordination_timeout = 5
+
+        class ObservedLock:
+            def __enter__(self):
+                if not original_lock.acquire(blocking=False):
+                    second_contender.set()
+                    if not original_lock.acquire(timeout=coordination_timeout):
+                        raise TimeoutError('duplicate contender could not acquire ledger lock')
+                return self
+
+            def __exit__(self, *args):
+                original_lock.release()
+
+        def paused_snapshot():
+            receipts = original_read()
+            if not first_snapshot.is_set():
+                first_snapshot.set()
+                if not release_first.wait(coordination_timeout):
+                    raise TimeoutError('first receipt publication was not released')
+            return receipts
+
         with serving(self.ledger) as server, ThreadPoolExecutor(2) as pool:
-            results = list(pool.map(request, range(2)))
+            with patch.object(self.ledger, 'lock', ObservedLock()), \
+                    patch.object(self.ledger, '_read_receipts', paused_snapshot):
+                try:
+                    first = pool.submit(post, server, b'{"external_id":"race"}')
+                    self.assertTrue(first_snapshot.wait(coordination_timeout),
+                                    'first request must reach its prepublication snapshot')
+                    second = pool.submit(post, server, b'{"external_id":"race"}')
+                    self.assertTrue(second_contender.wait(coordination_timeout),
+                                    'second request must contend before the first publishes')
+                    self.assertFalse(self.ledger.path.exists())
+                finally:
+                    release_first.set()
+                results = [first.result(timeout=HTTP_TIMEOUT), second.result(timeout=HTTP_TIMEOUT)]
         self.assertEqual([r[0] for r in results], [200, 200])
         self.assertEqual(sorted(json.loads(r[1])['duplicate'] for r in results), [False, True])
         self.assertEqual(len(self.ledger.path.read_text().splitlines()), 1)
@@ -231,17 +258,31 @@ class Regressions(unittest.TestCase):
             stalled = []
             occupied = threading.Event()
             release = threading.Event()
+            cleanup_allowed = threading.Event()
+            workers_finished = threading.Event()
+            stalled_ports = set()
+            shutdown = server.shutdown_request
+            def delay_worker_cleanup(request):
+                stalled_request = request.getpeername()[1] in stalled_ports
+                shutdown(request)
+                if stalled_request:
+                    cleanup_allowed.wait(10)
             lock = threading.Lock()
             started = 0
+            finished = 0
             handle = server.process_request_thread
             def hold_worker(*args):
-                nonlocal started
+                nonlocal started, finished
                 with lock:
                     started += 1
                     if started == 2:
                         occupied.set()
                 release.wait(10)
                 handle(*args)
+                with lock:
+                    finished += 1
+                    if finished == 2:
+                        workers_finished.set()
             def assert_closed(sock):
                 try:
                     while sock.recv(4096):
@@ -249,10 +290,12 @@ class Regressions(unittest.TestCase):
                 except ConnectionResetError:
                     pass
             try:
-                with patch.object(server, 'process_request_thread', hold_worker):
+                with patch.object(server, 'process_request_thread', hold_worker), \
+                        patch.object(server, 'shutdown_request', delay_worker_cleanup):
                     for i in range(2):
                         sock = socket.create_connection(server.server_address, timeout=2)
                         stalled.append(sock)
+                        stalled_ports.add(sock.getsockname()[1])
                         sock.sendall(b'POST /ingest HTTP/1.0\r\n' if i == 0 else
                                      b'POST /ingest HTTP/1.0\r\nAuthorization: Bearer synthetic-token\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{')
                     self.assertTrue(occupied.wait(2), 'both workers must be occupied before overload')
@@ -267,11 +310,16 @@ class Regressions(unittest.TestCase):
                         except (ConnectionResetError, BrokenPipeError):
                             pass
                     release.set()
-                for sock in stalled:
-                    assert_closed(sock)
-                self.assertEqual(post(server, b'{"external_id":"recovered"}')[0], 200)
+                    for sock in stalled:
+                        assert_closed(sock)
+                    # Socket closure precedes the server's semaphore release.
+                    # Observe worker completion before asking for recovery.
+                    cleanup_allowed.set()
+                    self.assertTrue(workers_finished.wait(2), 'both worker slots must be released')
+                    self.assertEqual(post(server, b'{"external_id":"recovered"}')[0], 200)
             finally:
                 release.set()
+                cleanup_allowed.set()
                 for sock in stalled:
                     sock.close()
 

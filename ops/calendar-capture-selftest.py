@@ -225,9 +225,9 @@ check("failed exact write takes precedence without leaking call output",
           "new@example.test", "known@example.test", "C-TEST", "Synthetic meeting")))
 
 # Multiple synthetic meetings must each reach client, lead and vendor records.
-# Use the real matcher and workbook reader, rather than precomputed proposals.
+# Use the real matcher and its record-view reader, rather than precomputed
+# proposals. The stub exporters.common.connect serves the three export views.
 import datetime
-import openpyxl
 root, stub = fixture(appends="events scanned: 9; carrying attendees: 9\nexit=0",
                      dump_json=json.dumps({"schema": "calendar-events/v2", "events": [
                          {"event_id": f"synthetic-{i}", "start_at": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1, hours=i)).isoformat(),
@@ -244,23 +244,31 @@ shutil.copy2(REPO / "tools/calendar-intake-gate.py", root / "tools/calendar-inta
 (root / ".venv").symlink_to(sys.prefix, target_is_directory=True)
 (root / "exporters").mkdir()
 (root / "exporters/__init__.py").write_text("")
-(root / "exporters/common.py").write_text(f"EXPORT_HOME = {str(root / 'exports')!r}\n")
-for rel, sheet, headers, row in [
-    ("DNA/Clients/client-roster.xlsx", "Clients", ["Client ID", "Name", "Practice / Entity", "Email"],
-     ["C-TEST", "Synthetic Client", "Synthetic Clinic", "client@clinic.example.test"]),
-    ("DNA/Leads/lead-registry.xlsx", "Registry", ["Lead ID", "Contact Name", "Practice", "Email"],
-     ["L-TEST", "Synthetic Lead", "Synthetic Practice", "lead@practice.example.test"]),
-    ("DNA/Network/vendors.xlsx", "Vendors", ["ID", "Name", "Company", "Email"],
-     ["V-TEST", "Synthetic Vendor", "Synthetic Service", "vendor@service.example.test"]),
-]:
-    path = root / "exports" / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = sheet
-    ws.append(headers)
-    ws.append(row)
-    wb.save(path)
+VIEW_ROWS = {
+    "v_export_clients": [{"Client ID": "C-TEST", "Name": "Synthetic Client",
+                          "Practice / Entity": "Synthetic Clinic", "Email": "client@clinic.example.test"}],
+    "v_export_leads": [{"Lead ID": "L-TEST", "Contact Name": "Synthetic Lead",
+                        "Practice": "Synthetic Practice", "Email": "lead@practice.example.test"}],
+    "v_export_vendors": [{"ID": "V-TEST", "Name": "Synthetic Vendor",
+                          "Company": "Synthetic Service", "Email": "vendor@service.example.test"}],
+}
+(root / "exporters/common.py").write_text(
+    "import contextlib\n"
+    f"ROWS = {VIEW_ROWS!r}\n"
+    "class _Cursor:\n"
+    "    def execute(self, sql):\n"
+    "        rows = ROWS[sql.rsplit(' ', 1)[1]]\n"
+    "        self.description = [(c,) for c in rows[0]]\n"
+    "        self._rows = [tuple(r.values()) for r in rows]\n"
+    "    def fetchall(self):\n"
+    "        return self._rows\n"
+    "class _Conn:\n"
+    "    @contextlib.contextmanager\n"
+    "    def cursor(self):\n"
+    "        yield _Cursor()\n"
+    "@contextlib.contextmanager\n"
+    "def connect():\n"
+    "    yield _Conn()\n")
 (root / "run.sh").write_text(
     "#!/usr/bin/env python3\nimport json,sys\n"
     "with open('out/activity-args.jsonl','a') as f: f.write(sys.argv[3]+'\\n')\n"

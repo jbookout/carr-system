@@ -212,7 +212,8 @@
       "204391be",
       "a2e78f48",
       "b7ec8f3b",
-      "ede4b241"
+      "ede4b241",
+      "8400cd3d"
     ]
   },
   "categories": {
@@ -875,15 +876,6 @@
       ],
       "test": [
         "ops/gate-baseline-cochange-selftest.py"
-      ]
-    },
-    "stale_claim": {
-      "failure_mode": "Stop block; names the recent commit that already fixed what the reply calls broken",
-      "implementation": [
-        "hooks/stale-claim-gate.py"
-      ],
-      "test": [
-        "ops/stale-claim-gate-selftest.py"
       ]
     },
     "stale_count": {
@@ -1629,7 +1621,7 @@
       "category": "session_task_rail",
       "control": "session_boot",
       "enforcement_class": "surfacing",
-      "exceptions": "none — create and register the missing verb in the same work"
+      "exceptions": "none \u2014 create and register the missing verb in the same work"
     },
     "7105955b": {
       "binding_moment": "close-loop for a renumbered, superseded, merged or split row",
@@ -1710,6 +1702,11 @@
       "category": "judgment_advisory",
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Panel-composition and seat-diversity judgment."
+    },
+    "8400cd3d": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The planning moment is detectable and receives this rule through pack_delivery. Choosing tiny, medium-large, or beyond-one-session still requires judgment about the work's shape."
     },
     "83b9a362": {
       "category": "judgment_advisory",
@@ -2089,8 +2086,7 @@
       "category": "session_task_rail",
       "control": "drift_claim",
       "enforcement_class": "surfacing",
-      "exceptions": "a drift claim with no matching ruling is usually a real finding, and passes",
-      "second_control": "stale_claim"
+      "exceptions": "a drift claim with no matching ruling is usually a real finding, and passes"
     },
     "d7c69aa6": {
       "binding_moment": "live calendar capture completion for an unmatched attendee",
@@ -2987,6 +2983,13 @@
       "packs": [
         "delegation-council"
       ]
+    },
+    "8400cd3d": {
+      "load_layer": "pack",
+      "packs": [
+        "governance-rules"
+      ],
+      "why": "Sizing happens when a session starts planning new work. The governance-rules pack delivers this rule on native plan tools, governed heavy-build planning, propose-ready-plan, and Codex or Dot briefs."
     },
     "83b9a362": {
       "load_layer": "pack",

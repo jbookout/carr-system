@@ -151,6 +151,66 @@ class CostTests(unittest.TestCase):
 
 
 class ValueTests(unittest.TestCase):
+    def test_temporal_marker_in_another_clause_does_not_erase_current_denial(self):
+        for statement in (
+                "Earlier suspicion was incorrect: this investigation did not find a bug.",
+                "Previously we suspected a bug, but this investigation did not identify any bug.",
+                "Earlier tests passed and this investigation did not confirm a bug.",
+                "This investigation did not find a bug, though earlier tests failed.",
+                "Before this review we suspected a bug; this investigation did not find a bug.",
+                "Contrary to the suspicion raised previously, the investigation did not find a bug.",
+                "Despite the suspicion raised earlier, our tests did not confirm a bug."):
+            with self.subTest(statement=statement):
+                commit = {"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                          "subject": "Fix suspected bug Jev flagged", "body": statement}
+                self.assertIsNone(jvr.positive_attribution(commit))
+                report = jvr.build_report(sources(commits=[commit]), START, END)
+                self.assertEqual(report["totals"]["outcomes_verified"], 0)
+                self.assertFalse(any(s["evidence"] for s in report["sites"].values()))
+
+    def test_earlier_non_detection_preserves_explicit_positive_attribution(self):
+        for statement in ("Our tests did not find any bug before this review.",
+                          "Earlier tests did not identify a bug.",
+                          "Investigation previously did not confirm any bug."):
+            with self.subTest(statement=statement):
+                commit = {"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                          "subject": "Fix bug Jev found", "body": statement}
+                self.assertIsNotNone(jvr.positive_attribution(commit))
+                report = jvr.build_report(sources(commits=[commit]), START, END)
+                self.assertEqual(report["totals"]["outcomes_verified"], 1)
+
+    def test_historical_adverb_before_test_subject_preserves_positive_attribution(self):
+        for statement in ("Earlier, our tests did not find any bug.",
+                          "Previously, our tests did not identify a bug."):
+            with self.subTest(statement=statement):
+                commit = {"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                          "subject": "Fix bug Jev found", "body": statement}
+                report = jvr.build_report(sources(commits=[commit]), START, END)
+                self.assertEqual((jvr.positive_attribution(commit) is not None,
+                                  report["totals"]["outcomes_verified"]), (True, 1))
+
+    def test_negative_investigation_and_coincident_verdict_do_not_earn_credit(self):
+        for denial in ("No bug found", "Investigation did not find a bug",
+                       "Investigation did not identify any bug",
+                       "Before merging, investigation did not confirm any bug.",
+                       "Our earlier tests did not find any bug. Investigation did not confirm a bug."):
+            with self.subTest(denial=denial):
+                report = jvr.build_report(sources(
+                    judge=[judge("build_advisory", receipt_id="coincident")],
+                    commits=[{"sha": "synthetic", "date": "2026-10-01T00:00:00Z",
+                              "subject": "Fix suspected bug Jev flagged", "body": denial}]), START, END)
+                self.assertEqual(report["totals"]["outcomes_verified"], 0)
+                self.assertIsNone(report["totals"]["minutes_saved"])
+                self.assertFalse(any(s["evidence"] for s in report["sites"].values()))
+
+    def test_matching_times_without_causal_link_remain_unproven(self):
+        report = jvr.build_report(sources(judge=[judge("build_advisory")], commits=[{
+            "sha": "coincident", "date": "2026-10-01T00:00:00Z", "body": "Fix from local tests",
+        }]), START, END)
+        self.assertEqual(report["totals"]["outcomes_verified"], 0)
+        self.assertIsNone(report["totals"]["minutes_saved"])
+        self.assertIn("insufficient evidence", jvr.render(report))
+
     def test_commit_naming_jev_as_finder_is_a_verified_outcome(self):
         commits = [{"sha": "965c6991", "date": "2026-10-01T00:00:00Z",
                     "body": "Jev flagged a real bug in the re-raise condition"},
@@ -307,7 +367,7 @@ class BlockingReviewTests(unittest.TestCase):
     def test_unknown_error_text_cannot_turn_measured_usage_into_free_usage(self):
         for error in ("holdout_disabled", "post_holdout_timeout", "network_timeout"):
             with self.subTest(error=error):
-                self.assertEqual(jvr._call_fields(call("review", error=error))["billing"], "measured")
+                self.assertEqual(jvr._fields(call("review", error=error))["billing"], "measured")
 
     def test_cache_receipts_and_observations_do_not_double_count_cost_cache_hits(self):
         report = jvr.build_report(sources(calls=[call("jev_judge", cache_hit=True)],
@@ -370,8 +430,8 @@ class BlockingReviewTests(unittest.TestCase):
         for row in cases:
             with self.subTest(row=row):
                 self.assertEqual(jvr._judge_fields(row)["billing"], "not_billed")
-                self.assertEqual(jvr._call_fields(row)["billing"], "not_billed")
-        self.assertEqual(jvr._call_fields(call("x", error="holdout", holdout=True))["billing"], "not_billed")
+                self.assertEqual(jvr._fields(row)["billing"], "not_billed")
+        self.assertEqual(jvr._fields(call("x", error="holdout", holdout=True))["billing"], "not_billed")
         report = jvr.build_report(sources(calls=[call("x", input_tokens=None,
                                  output_tokens=None, error="timeout", usage=None)]), START, END)
         self.assertEqual(report["totals"]["billing_unknown"], 1)
