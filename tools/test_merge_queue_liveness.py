@@ -9,15 +9,122 @@ import json
 from pathlib import Path
 import signal
 import subprocess
+import os
+import fcntl
+import sqlite3
+import sys
+import time
+import shutil
 import types
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('queue_fixture', ROOT / 'tools/test_merge_queue.py')
+assert spec is not None and spec.loader is not None
 fixture_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture_module)
 mq = fixture_module.module
+EXERCISED: set[str] = set()
+
+
+def wait_sites(source):
+    """Inventory loops and blocking transports, including comprehensions and child reaping."""
+    sites = {}
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ('subprocess', 'time', 'fcntl', 'sqlite3'):
+            raise AssertionError('blocking imports must retain their module name for the wait census')
+        if isinstance(node, ast.Import) and any(a.asname and a.name in ('subprocess', 'time', 'fcntl', 'sqlite3') for a in node.names):
+            raise AssertionError('blocking module aliases bypass the wait census')
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.context = []
+            self.counts = Counter()
+        def visit_ClassDef(self, node):
+            self.context.append(node.name); self.generic_visit(node); self.context.pop()
+        def visit_FunctionDef(self, node):
+            self.context.append(node.name); self.generic_visit(node); self.context.pop()
+        def add(self, kind, node, policy, shape):
+            owner = '.'.join(self.context)
+            self.counts[(owner, kind)] += 1
+            sites[f'{owner}:{kind}:{self.counts[(owner, kind)]}'] = {'bound': policy, 'shape': shape}
+        def loop(self, node, kind, iterator):
+            if self.context[-1:] == ['bounded_items']:
+                policy = 'snapshot'
+            else:
+                assert isinstance(iterator, ast.Call) and ast.unparse(iterator.func) == 'bounded_items', 'unbounded source loop'
+                policy = ast.literal_eval(iterator.args[0])
+            self.add(kind, node, policy, ast.unparse(iterator))
+        def visit_For(self, node):
+            self.loop(node, 'for', node.iter); self.generic_visit(node)
+        def visit_comprehension(self, node):
+            self.loop(node, 'comprehension', node.iter); self.generic_visit(node)
+        def visit_While(self, node):
+            owner = '.'.join(self.context)
+            if owner == 'Queue._gh_request':
+                assert ast.unparse(node.test) == 'time.monotonic() < end', 'spacing loop lost its deadline'
+                policy = 'spacing'
+            elif owner == 'Queue.run':
+                assert ast.unparse(node.test) in ('not self.stopped', 'not self.stopped and time.monotonic() < end'), 'poll loop lost its deadline'
+                policy = 'service' if ast.unparse(node.test) == 'not self.stopped' else 'poll'
+            else: raise AssertionError('unbounded source while loop: ' + owner)
+            self.add('while', node, policy, ast.unparse(node.test)); self.generic_visit(node)
+        def visit_Call(self, node):
+            name = ast.unparse(node.func)
+            policy = None
+            if name in ('command', 'subprocess.run', 'self.git', 'self.gh', 'self.api', 'self.pages', 'self.api_pages'):
+                policy = 'board' if 'progress_board.py' in ast.unparse(node) else 'command'
+            elif name == 'subprocess.Popen' or name == 'child.poll': policy = 'dispatch_process'
+            elif name in ('child.wait', 'child.terminate', 'child.kill'): policy = 'child_reap'
+            elif name == 'sqlite3.connect': policy = 'sqlite'
+            elif name == 'fcntl.flock': policy = 'runner_lock'
+            elif name.startswith('self.budget.'): policy = 'budget_lock'
+            elif name == 'self.wait': policy = ast.literal_eval(node.args[1])
+            elif name == 'self.bounded_operation': policy = 'retry'
+            elif name == 'time.sleep':
+                assert '.'.join(self.context) in ('Queue._gh_request','Queue.run'), 'sleep has no deadline owner'
+                assert ast.unparse(node.args[0]) == 'min(0.2, max(0, end - time.monotonic()))', 'sleep can exceed its deadline'
+                policy = 'spacing' if self.context[-1] == '_gh_request' else 'poll'
+            elif name in ('os.system', 'os.popen', 'subprocess.call', 'subprocess.check_call', 'subprocess.check_output') or name.endswith(('.wait', '.join', '.acquire', '.sleep', '.flock', '.communicate', '.recv', '.sendall', '.urlopen')):
+                # str.join is a pure collection operation, not a thread wait.
+                if name == 'shlex.join' or name.endswith('.join') and isinstance(node.func.value, ast.Constant):
+                    pass
+                else:
+                    raise AssertionError('unregistered blocking transport: ' + name)
+            if policy:
+                self.add('call', node, policy, name)
+                if name in ('subprocess.run', 'child.wait'):
+                    timeout = next((k.value for k in node.keywords if k.arg == 'timeout'), None)
+                    assert timeout is not None, 'transport has no timeout: ' + name
+                    expression = ast.unparse(timeout)
+                    if '.'.join(self.context) == 'command':
+                        assert expression == 'timeout'
+                    else:
+                        bound = 'child_reap' if name == 'child.wait' else 'command'
+                        assert expression == f"BOUNDS['{bound}']['seconds']", 'transport timeout bypasses registry'
+                if name == 'fcntl.flock':
+                    assert 'LOCK_NB' in ast.unparse(node), 'blocking runner lock'
+            self.generic_visit(node)
+    Visitor().visit(tree)
+    return sites
+
+
+def validate_wait_registry(directory, sites=None):
+    expected = mq.WAIT_SITES if sites is None else sites
+    observed = {}
+    for path in sorted(directory.rglob('*.py')):
+        observed.update({f'{path.relative_to(directory)}:{k}': v for k, v in wait_sites(path.read_text()).items()})
+    declared = {k: {field: row[field] for field in ('bound', 'shape')} for k,row in expected.items()}
+    assert observed == declared, f'wait sites differ: missing={set(observed)-set(expected)}, stale={set(expected)-set(observed)}'
+    assert all(row['bound'] in mq.BOUNDS for row in expected.values())
+    assert all(row.get('scenario') for row in expected.values()), 'wait site has no fault scenario'
+    for name,bound in mq.BOUNDS.items():
+        if name == 'service':
+            assert bound.get('until') == 'cancelled'
+        else:
+            values = [bound[k] for k in ('attempts','seconds') if k in bound]
+            assert len(values) == 1 and type(values[0]) in (int,float) and 0 < values[0] < float('inf'), 'invalid wait bound: ' + name
 
 
 @dataclass(frozen=True)
@@ -140,14 +247,15 @@ class RunLoop:
         return owner in (None, 1)
 
     def request(self, argv, **kwargs):
+        assert all(isinstance(arg, str) for arg in argv), 'external transport received an invalid argument'
         op = operation(argv)
         if op is None:
             return self.commands(argv, **kwargs)
         self.seen[op[0]] += 1
-        if self.active and self.fault != 'pause' and self.target(op, argv):
+        if self.active and self.fault not in ('pause', 'after_timeout') and self.target(op, argv):
             self.failures += 1
             if self.fault == 'timeout':
-                raise subprocess.TimeoutExpired(argv, kwargs.get('timeout', 120))
+                raise mq.WaitExpired('injected external transport deadline expired')
             if argv[0] == 'gh':
                 read = mq.gh_api_read(argv) if argv[1] == 'api' else argv[1:3] == ['pr', 'checks']
                 raise (mq.ReadRejected if read else mq.ActionRejected)('injected persistent external rejection')
@@ -210,6 +318,9 @@ class RunLoop:
         else:
             raise AssertionError(f'unregistered effect: {op}')
         self.f.save()
+        if self.active and self.fault == 'after_timeout' and self.target(op, argv):
+            self.failures += 1
+            raise mq.WaitExpired('injected mutation response deadline expired')
         out = json.dumps(result)
         return 'HTTP/2.0 200 OK\n\n' + out if '--include' in a else out
 
@@ -243,7 +354,7 @@ class RunLoop:
             f.q.enqueue(repo, 2, f.approved)
         return entry
 
-    def session(self, polls=8):
+    def session(self, polls=8, reconcile=True):
         q = self.f.q
         deadline = self.now + polls * 30
         saved_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
@@ -283,13 +394,13 @@ class RunLoop:
                     pass
             q.run(poll=30)
             q.stopped = False
-            for e in q.db.execute("SELECT id FROM entries WHERE tested IS NOT NULL AND phase IN ('merging','merge_rejected','exhausted','blocked')").fetchall():
+            for e in (q.db.execute("SELECT id FROM entries WHERE tested IS NOT NULL AND phase IN ('merging','merge_rejected','exhausted','blocked')").fetchall() if reconcile else []):
                 self.reconciliations += 1
                 try:
                     q.reconcile(e['id'], retry=not self.active)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired):
                     pass
-            for a in q.db.execute("SELECT key FROM actions WHERE kind IN ('update','retarget') AND phase='issued'").fetchall():
+            for a in (q.db.execute("SELECT key FROM actions WHERE kind IN ('update','retarget') AND phase='issued'").fetchall() if reconcile else []):
                 self.reconciliations += 1
                 try:
                     q.reconcile_action(a['key'], retry=not self.active)
@@ -300,6 +411,19 @@ class RunLoop:
 
 
 class LivenessTests(unittest.TestCase):
+    def test_wait_registry_is_complete_and_rejects_a_missing_site(self):
+        validate_wait_registry(ROOT / 'tools/merge_queue')
+        sites = dict(mq.WAIT_SITES)
+        sites.pop(next(iter(sites)))
+        with self.assertRaisesRegex(AssertionError, 'wait sites'):
+            validate_wait_registry(ROOT / 'tools/merge_queue', sites=sites)
+        for source in ('def wait():\n    while True: pass\n',
+                       'import time\ndef wait():\n    time.sleep(999999)\n',
+                       'from time import sleep\ndef wait():\n    sleep(999999)\n',
+                       'def wait():\n    subprocess.run(["slow"])\n'):
+            with self.assertRaises(AssertionError):
+                wait_sites(source)
+
     def test_fault_table_covers_external_call_sites(self):
         source = '\n'.join(p.read_text() for p in sorted((ROOT / 'tools/merge_queue').rglob('*.py')))
         expected = Counter(site for effect in EFFECTS for site in effect.sites)
@@ -309,7 +433,7 @@ class LivenessTests(unittest.TestCase):
         self.assertNotEqual(census(added), expected)
         known_transports = Counter({
             ('command', 'subprocess.run'): 1, ('_gh_request', 'command'): 1,
-            ('flush_events', 'command'): 1, ('git', 'command'): 3,
+            ('flush_events', 'command'): 1, ('git', 'command'): 3, ('git', 'subprocess.run'): 1,
             ('patch', 'command'): 1, ('conflict', 'subprocess.run'): 1,
             ('dispatcher_identity', 'command'): 1, ('_dispatch_conflicts', 'command'): 2,
             ('_dispatch_conflicts', 'subprocess.Popen'): 1, ('behind', 'subprocess.run'): 1,
@@ -343,6 +467,7 @@ class LivenessTests(unittest.TestCase):
             self.assertTrue(all(b - a >= 300 for a, b in zip(times, times[1:])))
             self.assertTrue({(r, 2) for r in mq.REPOS} <= {(r, n) for r, n, _ in loop.merged})
             self.assertIn('discovery_failed', (f.state / 'queue.log').read_text())
+            EXERCISED.add('failed_discovery')
         finally:
             f.doCleanups()
 
@@ -373,7 +498,7 @@ class LivenessTests(unittest.TestCase):
                         f.restart()
                         loop.session()
                         row = f.q.db.execute('SELECT * FROM entries WHERE id=?', (entry,)).fetchone()
-                        events = f.q.db.execute('SELECT outcome,detail FROM events WHERE repo=? AND pr IN (0,1)', (mq.REPOS[0],)).fetchall()
+                        events = f.q.db.execute('SELECT outcome,detail FROM events WHERE repo=? AND pr IN (0,1,90)', (mq.REPOS[0],)).fetchall()
                         recovered = (mq.REPOS[0], 1) in {(repo, n) for repo, n, _ in loop.merged}
                         visible = any(e['detail'] and any(word in (e['outcome'] + e['detail']).lower() for word in ('exhaust', 'blocked', 'held')) for e in events)
                         self.assertTrue(recovered or visible, f'Entry silently stuck: {dict(row)}')
@@ -383,6 +508,8 @@ class LivenessTests(unittest.TestCase):
                         self.assertGreaterEqual(loop.polls, 4)
                     finally:
                         f.doCleanups()
+
+        EXERCISED.add('persistent_effects')
 
     def test_resource_and_mutation_pauses_do_not_charge_or_issue_intents(self):
         for name in ('merge_intent', 'update', 'merge'):
@@ -436,6 +563,256 @@ class LivenessTests(unittest.TestCase):
             self.assertIn((mq.REPOS[0], 1), {(repo, n) for repo, n, _ in loop.merged})
         finally:
             f.doCleanups()
+
+    def test_persisted_wait_deadlines_release_the_next_pr(self):
+        for scenario in ('mergeability_deadline', 'provider_merge_deadline', 'red_ci_deadline', 'rate_pause_deadline'):
+            with self.subTest(scenario=scenario):
+                f = fixture_module.QueueTests(); f.setUp()
+                try:
+                    loop = RunLoop(f, EFFECTS[0], 'error'); loop.active = False
+                    entry = loop.seed()
+                    if scenario == 'mergeability_deadline':
+                        f.data['prs'][mq.REPOS[0]+'#1']['mergeable_state'] = 'unknown'
+                    if scenario == 'provider_merge_deadline':
+                        with f.q.db:
+                            f.q.db.execute("UPDATE entries SET phase='merge_rejected',tested=?,merge_attempts=1 WHERE id=?", (f.approved, entry))
+                    original = loop.request
+                    injected = []
+                    def request(argv, **kw):
+                        op = operation(argv)
+                        if op and op[0] == 'merge_intent' and scenario == 'provider_merge_deadline':
+                            injected.append(op)
+                            return json.dumps({'data': {'repository': {'pullRequest': {
+                                'headRefOid': f.approved, 'state': 'OPEN', 'autoMergeRequest': {'enabledAt': 'now'}, 'mergeQueueEntry': None}}}})
+                        if op and op[:3] == ('required_checks', mq.REPOS[0], 1) and scenario == 'red_ci_deadline':
+                            injected.append(op); return '[{"bucket":"fail"}]'
+                        if op and op[:3] == ('pr_read', mq.REPOS[0], 1) and scenario == 'rate_pause_deadline':
+                            injected.append(op); raise mq.GitHubReadPaused(loop.now + 900)
+                        if op and op[:3] == ('pr_read', mq.REPOS[0], 1): injected.append(op)
+                        return original(argv, **kw)
+                    loop.request = request
+                    for _ in range(4):
+                        loop.session(polls=40); f.restart()
+                    row = f.q.db.execute('SELECT * FROM entries WHERE id=?', (entry,)).fetchone()
+                    self.assertIn(row['phase'], ('blocked', 'exhausted'))
+                    self.assertTrue(injected, 'fault was never exercised')
+                    self.assertIn((mq.REPOS[0], 2), {(r,n) for r,n,_ in loop.merged})
+                    self.assertNotIn((mq.REPOS[0], 1), {(r,n) for r,n,_ in loop.merged})
+                    if scenario == 'provider_merge_deadline':
+                        self.assertEqual(row['tested'], f.approved)
+                        event = f.q.db.execute('SELECT detail FROM events WHERE entry_id=? AND outcome=?', (entry, 'merge_pending_timeout')).fetchone()
+                        self.assertIn('reconcile', event[0])
+                    EXERCISED.add(scenario)
+                finally:
+                    f.doCleanups()
+
+    def test_successful_mutation_with_lost_response_is_not_repeated(self):
+        for name in ('merge', 'update', 'retarget'):
+            with self.subTest(effect=name):
+                f = fixture_module.QueueTests(); f.setUp()
+                try:
+                    effect = next(e for e in EFFECTS if e.name == name)
+                    loop = RunLoop(f, effect, 'after_timeout'); loop.seed()
+                    loop.session(reconcile=False); f.restart()
+                    loop.active = False
+                    for _ in range(2): loop.session(); f.restart()
+                    self.assertEqual(loop.failures, 1)
+                    self.assertEqual(sum(r == mq.REPOS[0] and n == 1 for r,n,_ in loop.merged), 1)
+                    self.assertIn((mq.REPOS[0], 2), {(r,n) for r,n,_ in loop.merged})
+                finally: f.doCleanups()
+
+    def test_legacy_import_bound_stops_that_component_and_keeps_the_loop_live(self):
+        f=fixture_module.QueueTests(); f.setUp()
+        try:
+            loop=RunLoop(f,EFFECTS[0],'error'); loop.active=False; loop.seed()
+            (f.state/'hold-migration.json').write_text(json.dumps({'legacy':str(loop.legacy.resolve())}))
+            original_run=f.q.run; calls=[]
+            def run(*args,**kw): return original_run(*args,**kw,legacy=loop.legacy)
+            def expired(legacy): calls.append(legacy); raise mq.WaitExpired('legacy input snapshot cap reached')
+            with patch.object(f.q,'run',run),patch.object(f.q,'import_legacy',expired):
+                loop.session()
+            f.restart()
+            original_run=f.q.run
+            with patch.object(f.q,'run',run),patch.object(f.q,'import_legacy',expired):
+                loop.session()
+            self.assertEqual(len(calls),1,'restart retried a stopped legacy importer')
+            self.assertIn('snapshot cap',f.q.db.execute("SELECT reason FROM service_stops WHERE key='legacy_import'").fetchone()[0])
+            self.assertTrue({(r,2) for r in mq.REPOS} <= {(r,n) for r,n,_ in loop.merged})
+        finally: f.doCleanups()
+
+    def test_bounded_transports_and_registry_caps(self):
+        with self.assertRaises(mq.WaitExpired):
+            list(mq.bounded_items('snapshot', range(mq.BOUNDS['snapshot']['attempts'] + 1)))
+        EXERCISED.add('snapshot_cap')
+        with self.assertRaises(mq.WaitExpired):
+            mq.command([sys.executable, '-c', 'import time; time.sleep(20)'], timeout=.02)
+        EXERCISED.add('transport_timeout')
+        f = fixture_module.QueueTests(); f.setUp()
+        try:
+            with (f.state / 'agent.lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(BlockingIOError):
+                    with f.q.runner_lock(): pass
+            EXERCISED.add('runner_contention')
+            connection = sqlite3.connect(f.state / 'queue.sqlite3')
+            try:
+                connection.execute('BEGIN IMMEDIATE')
+                f.q.db.execute('PRAGMA busy_timeout=10')
+                with self.assertRaises(sqlite3.OperationalError):
+                    f.q.enqueue(mq.REPOS[0], 9, f.approved)
+            finally: connection.close()
+            EXERCISED.add('sqlite_contention')
+            with patch.object(f.q.budget, 'reserve', return_value=mq.BOUNDS['spacing']['seconds'] + 1):
+                with self.assertRaises(mq.WaitExpired): f.q.pr(mq.REPOS[0], 1)
+            EXERCISED.add('spacing_pause')
+            page = [{'id': i, 'body': '', 'author_association': 'OWNER'} for i in range(100)]
+            def full_page(*args, validate):
+                validate(page)
+                return page
+            with patch.object(f.q, 'api', side_effect=full_page):
+                with self.assertRaisesRegex(RuntimeError, 'pagination'):
+                    f.q.pages('repos/example/repo/issues/1/comments?per_page=100')
+            EXERCISED.add('pagination_cap')
+            f.pr(); entry = f.q.enqueue(mq.REPOS[0], 1, f.approved)
+            with f.q.db:
+                f.q.db.execute("UPDATE entries SET phase='review',auto_attempts=? WHERE id=?", (mq.AUTO_ENQUEUE_CAP, entry))
+            loop = RunLoop(f, EFFECTS[0], 'error'); loop.active = False
+            loop.session()
+            self.assertEqual(f.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], 'review')
+            self.assertIsNotNone(f.q.db.execute("SELECT 1 FROM events WHERE outcome='auto_enqueue_exhausted'").fetchone())
+            EXERCISED.add('reenqueue_cap')
+        finally: f.doCleanups()
+
+    def test_budget_contention_times_out_and_sigterm_cancels_the_real_loop(self):
+        f = fixture_module.QueueTests(); f.setUp()
+        try:
+            f.pr(); f.q.enqueue(mq.REPOS[0], 1, f.approved)
+            with open(f.env['CARR_GITHUB_READ_BUDGET'] + '.lock', 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                f.q.budget.lock_timeout = .02
+                start = time.monotonic()
+                for _ in range(mq.MAX_ATTEMPTS): f.q.tick()
+                self.assertLess(time.monotonic() - start, 1)
+                self.assertEqual(f.q.db.execute('SELECT phase FROM entries').fetchone()[0], 'blocked')
+                code = ('import importlib.util,sys; from pathlib import Path; '
+                        's=importlib.util.spec_from_file_location("queue",sys.argv[1]); '
+                        'm=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
+                        'q=m.Queue(Path(sys.argv[2]),Path(sys.argv[3]),gap=0); '
+                        'q.enqueue(m.REPOS[0],2,"' + f.approved + '"); '
+                        'print("ready",flush=True); q.run(discover=False)')
+                child = subprocess.Popen([sys.executable, '-c', code, str(ROOT/'tools/merge_queue/main.py'), str(f.state), str(f.root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    time.sleep(.1); child.terminate()
+                    out, err = child.communicate(timeout=2)
+                    self.assertEqual(child.returncode, 0, err)
+                finally:
+                    if child.poll() is None: child.kill(); child.communicate(timeout=2)
+            EXERCISED.update(('budget_contention', 'cancel_service'))
+        finally: f.doCleanups()
+
+    def test_dispatch_faults_have_persisted_deadlines_in_the_real_loop(self):
+        for kind in ('no_desk', 'live', 'ps_timeout', 'help_timeout', 'spawn_failure', 'unreapable_child'):
+            with self.subTest(kind=kind):
+                f = fixture_module.QueueTests(); f.setUp()
+                try:
+                    loop = RunLoop(f, EFFECTS[0], 'error'); loop.active = False; loop.seed()
+                    with f.q.db:
+                        f.q.db.execute("UPDATE entries SET phase='conflict' WHERE repo=? AND pr=1", (mq.REPOS[0],))
+                    f.data['comments'][mq.REPOS[0]+'#1'] = []
+                    registry = f.root/'desks.json'
+                    registry.write_text(json.dumps({'desks': {} if kind == 'no_desk' else {'sol': {'kind':'codex-session','model':'gpt-6.1-sol','effort':'high','sandbox':'workspace-write','last_auth':True,'busy':False}}}))
+                    brief=f.root/'conflict.txt'; brief.write_text('repair')
+                    phase = 'planned' if kind in ('no_desk', 'help_timeout', 'spawn_failure') else 'issued'
+                    identity = f'4242 Thu Oct 8 12:00:00 2026 python {f.root}/tools/room-bridge/dispatch.py --results {brief.with_suffix(".dispatch.jsonl")} send sol'
+                    with f.q.db:
+                        f.q.db.execute('INSERT INTO actions(key,kind,repo,pr,head,payload,phase,desk,dispatcher_pid,dispatcher_identity) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                                       ('fault', 'dispatch', mq.REPOS[0], 1, f.approved, str(brief), phase, 'sol' if phase == 'issued' else None, 4242 if phase == 'issued' else None, mq.hashlib.sha256(identity.encode()).hexdigest()))
+                    original=loop.request; faults=[]
+                    def request(argv,**kw):
+                        if argv[0]=='ps':
+                            faults.append('ps')
+                            if kind=='ps_timeout': raise mq.WaitExpired('process inventory transport deadline expired')
+                            if kind in ('spawn_failure','help_timeout','no_desk'): return ''
+                            return identity if 'pid=,lstart=,command=' in argv else identity.split('python ',1)[-1]
+                        if '--help' in argv:
+                            faults.append('help')
+                            if kind=='help_timeout': raise mq.WaitExpired('dispatcher preflight deadline expired')
+                            return '--family'
+                        return original(argv,**kw)
+                    loop.request=request
+                    class Child:
+                        def poll(self): return None
+                        def terminate(self): faults.append('terminate')
+                        def kill(self): faults.append('kill')
+                        def wait(self,timeout):
+                            if 'kill' not in faults: raise subprocess.TimeoutExpired('dispatcher',timeout)
+                    if kind=='unreapable_child': f.q.children['fault']=Child()
+                    popen = subprocess.Popen
+                    def spawn(argv, **kw):
+                        if len(argv)>1 and str(argv[1]).endswith('/room-bridge/dispatch.py'):
+                            faults.append('spawn')
+                            raise OSError('spawn fault')
+                        return popen(argv, **kw)
+                    with patch.dict(os.environ,{'CARR_HERMES_DESKS':str(registry)}), patch.object(mq.subprocess,'Popen',side_effect=spawn):
+                        for _ in range(4):
+                            loop.session(polls=12)
+                            if kind!='unreapable_child': f.restart()
+                    row=f.q.db.execute('SELECT * FROM actions WHERE key="fault"').fetchone()
+                    self.assertIn(row['phase'],('uncertain','exhausted'))
+                    self.assertIsNone(row['desk'])
+                    self.assertIn((mq.REPOS[0],2),{(r,n) for r,n,_ in loop.merged})
+                    if kind=='unreapable_child': self.assertIn('kill',faults)
+                    if kind=='spawn_failure': self.assertIn('spawn',faults)
+                    if kind=='help_timeout': self.assertIn('help',faults)
+                    if kind=='no_desk': EXERCISED.add('dispatch_no_desk')
+                finally: f.doCleanups()
+        EXERCISED.add('dispatch_process_faults')
+
+    def test_git_transport_fault_routes_drive_the_real_loop(self):
+        for route in ('ancestry', 'conflict', 'patch_base', 'patch_diff', 'patch_id', 'git_init', 'git_remote', 'git_remote_read', 'merge_confirmation'):
+            with self.subTest(route=route):
+                f=fixture_module.QueueTests(); f.setUp()
+                try:
+                    loop=RunLoop(f,EFFECTS[0],'error'); loop.active=False; entry=loop.seed()
+                    p=f.data['prs'][mq.REPOS[0]+'#1']
+                    if route=='ancestry': p.update(draft=True,mergeable_state='blocked')
+                    elif route=='conflict': p.update(mergeable=False,mergeable_state='dirty')
+                    elif route=='merge_confirmation':
+                        p.update(merged=True,state='closed',merge_commit_sha=f.merge_sha)
+                        with f.q.db: f.q.db.execute("UPDATE entries SET phase='merging',tested=? WHERE id=?",(f.approved,entry))
+                    else: p['head']['sha']=f.updated
+                    if route in ('git_init','git_remote'):
+                        shutil.rmtree(f.state/'repos/carr-system.git')
+                    original=subprocess.run; faults=[]
+                    def run(argv,**kw):
+                        current=f.q._github_entry
+                        target=current==entry
+                        hit=(route=='ancestry' and '--is-ancestor' in argv and 'origin/main' in argv and argv[-1]==f.approved or
+                             route=='conflict' and 'merge-tree' in argv or
+                             route=='patch_base' and 'merge-base' in argv and '--is-ancestor' not in argv or
+                             route=='patch_diff' and 'diff' in argv or route=='patch_id' and 'patch-id' in argv or
+                             route=='git_init' and 'init' in argv or route=='git_remote' and 'remote' in argv and 'add' in argv or
+                             route=='git_remote_read' and 'get-url' in argv or
+                             route=='merge_confirmation' and '--is-ancestor' in argv and f.merge_sha in argv)
+                        if target and hit:
+                            faults.append(argv)
+                            raise subprocess.TimeoutExpired('git',mq.BOUNDS['command']['seconds'])
+                        if 'remote' in argv and 'add' in argv and str(argv[-1]).startswith('https://github.com/'):
+                            argv=[*argv[:-1],str(f.remote)]
+                        return original(argv,**kw)
+                    with patch.object(mq.subprocess,'run',side_effect=run):
+                        loop.session(polls=12,reconcile=False); f.restart(); loop.session(polls=12,reconcile=False)
+                    self.assertEqual(len(faults),1,'transport fault was not exercised exactly once')
+                    row=f.q.db.execute('SELECT phase,outcome FROM entries WHERE id=?',(entry,)).fetchone()
+                    self.assertEqual(row['phase'],'blocked')
+                    self.assertIn((mq.REPOS[0],2),{(r,n) for r,n,_ in loop.merged})
+                finally: f.doCleanups()
+        EXERCISED.add('git_transport_routes')
+
+    def test_z_every_registry_bound_has_an_exercised_fault_scenario(self):
+        required={row['scenario'] for row in (*mq.BOUNDS.values(), *mq.WAIT_SITES.values())}
+        self.assertTrue(required <= EXERCISED, 'unexercised registry scenarios: ' + str(required-EXERCISED))
 
 
 if __name__ == '__main__':
