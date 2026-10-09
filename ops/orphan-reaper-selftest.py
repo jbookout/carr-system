@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """Offline orphan-process-reaper contract tests. No live processes are signaled."""
 import importlib.util
+import io
 import json
+import os
 import plistlib
+import shutil
 import signal
+import sqlite3
 import sys
 import tempfile
 import time
 import subprocess
 import unittest
 from dataclasses import replace
+from contextlib import redirect_stderr
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from lib import launchd_calendar
 spec = importlib.util.spec_from_file_location('orphan_reaper', ROOT / 'ops/orphan-reaper.py')
+assert spec is not None and spec.loader is not None
 r = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = r
 spec.loader.exec_module(r)
@@ -114,16 +123,144 @@ class ReaperTests(unittest.TestCase):
                            dry_run=dry, uid=501, home=Path('/Users/test'))
         return count, signals, reports, clock[0]
 
-    def test_term_then_kill_ten_seconds_one_log_and_finding(self):
+    def test_sensitive_arguments_never_leave_census(self):
+        secret = 'synthetic-token-client@example.invalid'
+        self.p = replace(self.p, args=self.p.args + ' ' + secret)
+        with self.assertRaises(RuntimeError):
+            self.run_fixture(reporting_error=True)
+        for path in (self.repo / 'out').iterdir():
+            self.assertNotIn(secret, path.read_text())
+        reports = []
+        r.run_once(self.repo, self.config, collect=lambda: ([], set()), clock=lambda: 2000,
+                   reporter=reports.append, uid=501, home=Path('/Users/test'))
+        self.assertNotIn(secret, json.dumps(reports))
+
+    def test_transport_timeout_does_not_print_payload(self):
+        def transport(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 30)
+        with patch.object(r, 'run_command', side_effect=transport):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), self.assertRaises(RuntimeError) as error:
+                r.record_defect(self.repo, {'idempotency_key': 'test'})
+            self.assertNotIn('idempotency_key', str(error.exception))
+            self.assertEqual(stderr.getvalue(), '')
+
+    def test_offline_runs_keep_collecting_reaping_and_recover_all_records(self):
+        with self.assertRaises(RuntimeError):
+            self.run_fixture(reporting_error=True)
+        reports, signals, calls = [], [], []
+        other = replace(self.p, pid=43)
+        def collect():
+            calls.append(True)
+            return [other], set()
+        def offline(payload):
+            raise RuntimeError('record layer unavailable')
+        now = [1900.0]
+        for poll in range(8):
+            now[0] = 1900.0 + poll * 300
+            with self.assertRaises(RuntimeError):
+                r.run_once(self.repo, self.config, collect=collect, clock=lambda: now[0],
+                           sleep=lambda n: now.__setitem__(0, now[0] + n), reporter=offline,
+                           send_signal=lambda *args: signals.append(args), uid=501, home=Path('/Users/test'))
+        self.assertGreaterEqual(len(calls), 7)
+        self.assertIn((43, signal.SIGTERM), signals)
+        state = r.read_state(self.repo / 'out/orphan-reaper-state.json')
+        self.assertEqual(len(state['pending']), 2)
+        keys = {p['idempotency_key'] for p in state['pending']}
+        r.run_once(self.repo, self.config, collect=lambda: ([], set()), clock=lambda: 4000,
+                   reporter=reports.append, uid=501, home=Path('/Users/test'))
+        self.assertEqual({p['idempotency_key'] for p in reports}, keys)
+        self.assertEqual(r.read_state(self.repo / 'out/orphan-reaper-state.json')['pending'], [])
+
+    def test_failed_intent_save_never_signals(self):
+        original_save, calls, signals = r.save, [0], []
+        def save(path, data):
+            calls[0] += 1
+            if calls[0] >= 3:
+                raise OSError('disk full')
+            original_save(path, data)
+        out = self.repo / 'out'
+        out.mkdir()
+        (out / 'orphan-reaper-state.json').write_text(json.dumps(self.mature()))
+        with patch.object(r, 'save', side_effect=save), self.assertRaises(OSError):
+            r.run_once(self.repo, self.config, collect=lambda: ([self.p], set()), clock=lambda: 1801,
+                       send_signal=lambda *args: signals.append(args), reporter=lambda _: None,
+                       uid=501, home=Path('/Users/test'))
+        self.assertEqual(signals, [])
+        self.assertEqual(r.read_state(self.repo / 'out/orphan-reaper-state.json')['pending'], [])
+
+    def test_crash_after_signal_keeps_intent_and_never_retries_signal(self):
+        class Crash(BaseException):
+            pass
+        out = self.repo / 'out'
+        out.mkdir()
+        path = out / 'orphan-reaper-state.json'
+        path.write_text(json.dumps(self.mature()))
+        def crash(pid, sig):
+            state = r.read_state(path)
+            self.assertEqual(len(state['pending']), 1)
+            actual = state['pending'][0]['actual']
+            row = json.loads(actual[actual.index('{'):])
+            self.assertEqual(row[sig.name], 'unconfirmed')
+            raise Crash()
+        with self.assertRaises(Crash):
+            r.run_once(self.repo, self.config, collect=lambda: ([self.p], set()), clock=lambda: 1801,
+                       send_signal=crash, reporter=lambda _: (_ for _ in ()).throw(RuntimeError('offline')),
+                       uid=501, home=Path('/Users/test'))
+        reports, signals = [], []
+        r.run_once(self.repo, self.config, collect=lambda: ([self.p], set()), clock=lambda: 1802,
+                   reporter=reports.append, send_signal=lambda *args: signals.append(args),
+                   uid=501, home=Path('/Users/test'))
+        self.assertEqual(signals, [])
+        self.assertEqual(len(reports), 1)
+        actual = reports[0]['actual']
+        self.assertEqual(json.loads(actual[actual.index('{'):])['SIGTERM'], 'unconfirmed')
+
+    def test_signal_outcomes_are_durable_and_truthful(self):
+        for error, outcome in [(ProcessLookupError(), 'process_missing'), (PermissionError(), 'failed')]:
+            with self.subTest(outcome=outcome):
+                reports = []
+                with patch.object(r.os, 'kill', side_effect=error):
+                    out = self.repo / 'out'
+                    out.mkdir(exist_ok=True)
+                    (out / 'orphan-reaper-state.json').write_text(json.dumps(self.mature()))
+                    try:
+                        r.run_once(self.repo, self.config, collect=lambda: ([self.p], set()), clock=lambda: 1801,
+                                   send_signal=r.os.kill, reporter=reports.append, uid=501, home=Path('/Users/test'))
+                    except PermissionError:
+                        pass
+                self.assertEqual(len(reports), 1)
+                actual = reports[0]['actual']
+                self.assertEqual(json.loads(actual[actual.index('{'):])['SIGTERM'], outcome)
+
+    def test_incident_time_survives_retry_across_midnight(self):
+        before = datetime(2026, 10, 8, 23, 59, 59, tzinfo=timezone.utc)
+        with patch.object(r.time, 'time', return_value=before.timestamp()), self.assertRaises(RuntimeError):
+            self.run_fixture(reporting_error=True)
+        state = r.read_state(self.repo / 'out/orphan-reaper-state.json')
+        self.assertEqual(state['pending'][0]['occurred_on'], '2026-10-08')
+        rows = [json.loads(line) for line in (self.repo / 'out/orphan-reaper.jsonl').read_text().splitlines()]
+        self.assertTrue(all(row['occurred_at'] == before.isoformat() for row in rows))
+        reports = []
+        after = datetime(2026, 10, 9, tzinfo=timezone.utc)
+        with patch.object(r.time, 'time', return_value=after.timestamp()):
+            r.run_once(self.repo, self.config, collect=lambda: ([], set()), clock=lambda: 2000,
+                       reporter=reports.append, uid=501, home=Path('/Users/test'))
+        self.assertEqual(reports[0], state['pending'][0])
+
+    def test_term_then_kill_ten_seconds_durable_outcomes_and_finding(self):
         count, signals, reports, now = self.run_fixture()
         self.assertEqual(count, 1)
         self.assertEqual(signals, [(42, signal.SIGTERM), (42, signal.SIGKILL)])
         self.assertGreaterEqual(now, 1811)
         lines = (self.repo / 'out/orphan-reaper.jsonl').read_text().splitlines()
-        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(lines), 4)
         row = json.loads(lines[0])
         self.assertEqual((row['pid'], row['cpu'], row['age']), (42, 99, 4000))
-        self.assertLessEqual(len(row['args']), self.config['args_limit'])
+        self.assertEqual([json.loads(line)['SIGTERM'] for line in lines],
+                         ['unconfirmed', 'sent', 'sent', 'sent'])
+        self.assertEqual([json.loads(line).get('SIGKILL') for line in lines],
+                         [None, None, 'unconfirmed', 'sent'])
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0]['detected_by'], 'check')
         self.assertEqual(reports[0]['rule_violated'], '36856823')
@@ -142,7 +279,7 @@ class ReaperTests(unittest.TestCase):
                 self.assertEqual(self.run_fixture(changed=p)[1], [])
 
     def test_pending_record_retries_same_key_without_resignaling(self):
-        with self.assertRaisesRegex(RuntimeError, 'record layer unavailable'):
+        with self.assertRaisesRegex(RuntimeError, 'record reporting unavailable'):
             self.run_fixture(reporting_error=True)
         state = json.loads((self.repo / 'out/orphan-reaper-state.json').read_text())
         key = state['pending'][0]['idempotency_key']
@@ -223,10 +360,76 @@ class ReaperTests(unittest.TestCase):
 
     def test_plist_uses_existing_wrapper_and_requested_interval(self):
         plist = plistlib.loads((ROOT / 'ops/launchd/com.carr.orphan-reaper.plist').read_bytes())
-        self.assertEqual(plist['StartInterval'], 300)
+        self.assertEqual(launchd_calendar.cadence_seconds(plist), 300)
         self.assertFalse(plist['RunAtLoad'])
         self.assertIn('{{REPO}}/bin/run-scheduled.sh', plist['ProgramArguments'])
         self.assertIn('{{REPO}}/ops/orphan-reaper.py', plist['ProgramArguments'])
+
+    def test_job_declares_its_mechanism_doctrine(self):
+        spec = importlib.util.spec_from_file_location('mechanism_doctrine', ROOT / 'ops/mechanism-doctrine-gate.py')
+        assert spec is not None and spec.loader is not None
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        self.assertIsNotNone(gate.declared_slug('ops/launchd/com.carr.orphan-reaper.plist'))
+
+    def test_plist_is_accepted_by_supported_installer(self):
+        spec = importlib.util.spec_from_file_location('reaper_installer', ROOT / 'ops/config-as-code.py')
+        assert spec and spec.loader
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        source = (ROOT / 'ops/launchd/com.carr.orphan-reaper.plist').read_text()
+        self.assertIsNone(installer.launchd_template_refusal(source))
+        source = source.replace('{{REPO}}', str(self.repo))
+        for target in ('bin/run-scheduled.sh', '.venv/bin/python', 'ops/orphan-reaper.py'):
+            path = self.repo / target
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture only')
+        templates, agents = self.repo / 'templates', self.repo / 'agents'
+        templates.mkdir()
+        agents.mkdir()
+        name = 'com.carr.orphan-reaper.plist'
+        (templates / name).write_text(source)
+        prior = plistlib.loads(installer.concrete(source).encode())
+        prior['StandardOutPath'] = str(self.repo / 'old.log')
+        (agents / name).write_bytes(plistlib.dumps(prior))
+        log, launchctl = self.repo / 'calls', self.repo / 'launchctl'
+        launchctl.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n')
+        launchctl.chmod(0o700)
+        result = subprocess.run([sys.executable, str(ROOT / 'ops/config-as-code.py'),
+            'reinstall-launchd-calendar', '--templates', str(templates), '--launch-agents', str(agents),
+            '--launchctl', str(launchctl), '--apply'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((agents / name).read_text(), installer.concrete(source))
+        self.assertIn('bootstrap', log.read_text())
+
+    def test_service_catalog_and_workflow_inventory_close(self):
+        services = json.loads((ROOT / 'ops/config/services.json').read_text())['services']
+        service = next((row for row in services if row['key'] == 'orphan-process-reaper'), None)
+        self.assertIsNotNone(service)
+        assert service is not None
+        environment = service['environments'][0]
+        self.assertEqual(service['repo_path'], 'ops/orphan-reaper.py')
+        self.assertEqual(environment['environment'], 'production')
+        self.assertEqual(environment['deploy_mechanism'], 'ops/launchd/com.carr.orphan-reaper.plist')
+        self.assertEqual(environment['expected_cadence_seconds'], 300)
+        result = subprocess.run(['node', '--input-type=module', '-e',
+            "import {workflowDefinitionInventory} from './ops/scac-mutation-inventory.mjs'; workflowDefinitionInventory()"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wrapper_records_declared_service_in_isolated_spool(self):
+        (self.repo / 'bin').mkdir()
+        for directory in ('lib', 'tools'):
+            (self.repo / directory).symlink_to(ROOT / directory, target_is_directory=True)
+        wrapper = self.repo / 'bin/run-scheduled.sh'
+        shutil.copyfile(ROOT / 'bin/run-scheduled.sh', wrapper)
+        spool = self.repo / 'spool.sqlite3'
+        result = subprocess.run(['/bin/zsh', str(wrapper), 'orphan-process-reaper', 'launchd.run', '/usr/bin/true'],
+            env=dict(os.environ, CARR_RUN_SPOOL_DB=str(spool)), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with sqlite3.connect(spool) as db:
+            rows = db.execute('select service, run_key, state from spool').fetchall()
+        self.assertEqual(rows, [('orphan-process-reaper', 'launchd.run', 'succeeded')])
 
 
 if __name__ == '__main__':

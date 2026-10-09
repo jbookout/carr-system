@@ -71,6 +71,25 @@
 
   "services": [
     {
+      "key": "orphan-process-reaper",
+      "name": "Orphan session process cleanup",
+      "purpose": "Every five minutes, observe same-user orphan session shells and stop sustained CPU burners after durable signal intent is recorded. Managed job trees remain protected.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "ops/orphan-reaper.py",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.orphan-reaper.plist",
+          "expected_cadence_seconds": 300,
+          "cadence_grace_seconds": 2700,
+          "notes": "Safe local signal evidence survives reporting outages. Failed censuses or pending record transport exit nonzero and are recorded by run-scheduled.sh; grace covers the thirty-minute run-spool flush."
+        }
+      ]
+    },
+    {
       "key": "flash-idle-stop",
       "name": "Flash idle shutdown",
       "purpose": "Every five minutes, stop and disable ds4-server and its Model Room desk after fifteen minutes without a request. Shared request locks protect in-flight work.",

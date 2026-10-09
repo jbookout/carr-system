@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,14 +50,14 @@ def identity(p):
 def load_config(path):
     config = json.loads(path.read_text())
     expected = {'version', 'cpu_threshold', 'min_age_seconds', 'term_grace_seconds',
-                'max_sample_gap_seconds', 'max_targets', 'args_limit'}
+                'max_sample_gap_seconds', 'max_targets'}
     if not isinstance(config, dict) or set(config) != expected or type(config['version']) is not int or config['version'] != 1:
         raise ValueError('invalid orphan reaper config')
     for key in expected - {'version'}:
         value = config[key]
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ValueError(f'invalid {key}')
-    for key in ('max_targets', 'args_limit'):
+    for key in ('max_targets',):
         if type(config[key]) is not int:
             raise ValueError(f'{key} must be an integer')
     if config['max_sample_gap_seconds'] < 300 or config['term_grace_seconds'] != 10:
@@ -118,7 +119,8 @@ def scan(table, managed, previous, now, config, uid, home):
         if now - since > config['min_age_seconds']:
             candidates.append(p)
     return {'observations': observations, 'protected': sorted(protected), 'config_digest': digest,
-            'pending': previous.get('pending', [])}, candidates
+            'pending': previous.get('pending', []),
+            'attempted': sorted(set(previous.get('attempted', [])) & {identity(p) for p in table})}, candidates
 
 
 def parse_ps(text, now):
@@ -201,6 +203,11 @@ def save(path, data):
             f.flush()
             os.fsync(f.fileno())
             os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -209,7 +216,7 @@ def read_state(path):
     if not path.exists():
         return {}
     state = json.loads(path.read_text())
-    if not isinstance(state, dict) or set(state) != {'observations', 'protected', 'pending', 'config_digest'}:
+    if not isinstance(state, dict) or set(state) != {'observations', 'protected', 'pending', 'config_digest', 'attempted'}:
         raise ValueError('invalid reaper state')
     if not isinstance(state['config_digest'], str) or not re.fullmatch('[a-f0-9]{64}', state['config_digest']):
         raise ValueError('invalid config digest')
@@ -222,6 +229,8 @@ def read_state(path):
             raise ValueError('invalid observation time')
     if any(not isinstance(key, str) for key in state['protected']):
         raise ValueError('invalid protected process')
+    if not isinstance(state['attempted'], list) or any(not isinstance(key, str) for key in state['attempted']):
+        raise ValueError('invalid attempted process')
     for payload in state['pending']:
         if not isinstance(payload, dict) or not payload.get('idempotency_key'):
             raise ValueError('invalid pending finding')
@@ -229,8 +238,11 @@ def read_state(path):
 
 
 def record_defect(repo, payload):
-    result = run_command([str(repo / 'run.sh'), 'call', 'record-defect', json.dumps(payload)],
-                         cwd=repo, timeout=30)
+    try:
+        result = run_command([str(repo / 'run.sh'), 'call', 'record-defect', json.dumps(payload)],
+                             cwd=repo, timeout=30)
+    except subprocess.SubprocessError:
+        raise RuntimeError('record-defect transport failed; finding remains pending') from None
     if result.returncode != 0:
         raise RuntimeError('record-defect failed; finding remains pending')
     try:
@@ -257,25 +269,55 @@ def run_once(repo, config, *, dry_run=False, collect=None, clock=time.monotonic,
             raise RuntimeError('another orphan reaper is running') from None
         state = read_state(path)
         def flush_pending():
-            while state.get('pending'):
+            for _ in range(config['max_targets']):
+                if not state.get('pending'):
+                    return
                 if clock() >= deadline:
                     raise RuntimeError('reaper deadline expired; findings remain pending')
-                reporter(state['pending'][0])
+                try:
+                    reporter(state['pending'][0])
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    raise RuntimeError('record reporting unavailable; findings remain pending') from None
                 state['pending'].pop(0)
                 save(path, state)
-        if not dry_run:
-            flush_pending()
-        table, managed = collect()
-        state, candidates = scan(table, managed, state, clock(), config, uid, home)
-        if len(candidates) > config['max_targets']:
-            raise RuntimeError('reap batch cap exceeded')
-        if dry_run:
-            print(json.dumps({'dry_run': True, 'would_reap': [p.pid for p in candidates]}))
-            return len(candidates)
-        save(path, state)
-        if not candidates:
-            return 0
+
+        def persist_action(payload, row):
+            payload['actual'] = ('An orphan session shell sustained high CPU beyond the observation limit. '
+                                 + json.dumps(row))
+            save(path, state)
+            with (out / 'orphan-reaper.jsonl').open('a') as log:
+                log.write(json.dumps(row) + '\n')
+                log.flush()
+                os.fsync(log.fileno())
+
+        def signal_action(p, sig, payload, row):
+            field = sig.name
+            row[field] = 'unconfirmed'
+            persist_action(payload, row)
+            try:
+                send_signal(p.pid, sig)
+            except ProcessLookupError:
+                row[field] = 'process_missing'
+                persist_action(payload, row)
+                return False
+            except OSError:
+                row[field] = 'failed'
+                persist_action(payload, row)
+                raise
+            row[field] = 'sent'
+            persist_action(payload, row)
+            return True
+
         try:
+            table, managed = collect()
+            state, candidates = scan(table, managed, state, clock(), config, uid, home)
+            candidates = [p for p in candidates if identity(p) not in state['attempted']]
+            if len(candidates) > config['max_targets']:
+                raise RuntimeError('reap batch cap exceeded')
+            if dry_run:
+                print(json.dumps({'dry_run': True, 'would_reap': [p.pid for p in candidates]}))
+                return len(candidates)
+            save(path, state)
             count = 0
             terminated = []
             for candidate in candidates:
@@ -286,41 +328,42 @@ def run_once(repo, config, *, dry_run=False, collect=None, clock=time.monotonic,
                 p = current.get(identity(candidate))
                 if p is None or p not in ready:
                     continue
-                try:
-                    send_signal(p.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    continue
-                row = {'pid': p.pid, 'args': p.args[:config['args_limit']], 'cpu': p.cpu, 'age': p.age}
+                occurred = datetime.fromtimestamp(time.time(), timezone.utc)
+                row = {'pid': p.pid, 'uid': p.uid, 'started': p.started,
+                       'shell': Path(p.comm).name, 'cpu': p.cpu, 'age': p.age,
+                       'occurred_at': occurred.isoformat()}
                 payload = {'idempotency_key': str(uuid.uuid4()), 'defect_class': 'orphan-session-cpu-burner',
+                           'occurred_on': occurred.date().isoformat(),
                            'claimed': 'Session subprocess cleanup confines background work to its owning session.',
-                           'actual': 'An orphan session shell sustained high CPU beyond the observation limit; SIGTERM sent. ' + json.dumps(row),
                            'rule_violated': '36856823', 'detected_by': 'check',
                            'source_unread': 'orphan-process-reaper process census'}
                 state['pending'].append(payload)
-                save(path, state)
-                with (out / 'orphan-reaper.jsonl').open('a') as log:
-                    log.write(json.dumps(row) + '\n')
-                    log.flush()
-                    os.fsync(log.fileno())
-                terminated.append(p)
+                state['attempted'].append(identity(p))
+                if not signal_action(p, signal.SIGTERM, payload, row):
+                    continue
+                terminated.append((p, payload, row))
                 count += 1
             if terminated:
                 end = clock() + config['term_grace_seconds']
                 while clock() < end:
                     sleep(min(.2, end - clock()))
-                for original in terminated:
+                for original, payload, row in terminated:
                     fresh, managed = collect()
                     state, ready = scan(fresh, managed, state, clock(), config, uid, home)
                     save(path, state)
                     current = {identity(p): p for p in fresh}
                     p = current.get(identity(original))
                     if p is not None and p in ready:
-                        try:
-                            send_signal(p.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                        signal_action(p, signal.SIGKILL, payload, row)
         finally:
-            flush_pending()
+            if not dry_run:
+                active_error = sys.exc_info()[0] is not None
+                try:
+                    flush_pending()
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    if not active_error:
+                        raise
+                    print('record reporting unavailable; findings remain pending', file=sys.stderr)
         return count
 
 

@@ -1460,6 +1460,72 @@
       "expectation_note": "Live installed job retained after source and cadence review on 2026-10-05."
     },
     {
+      "label": "com.carr.orphan-reaper",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "orphan-process-reaper",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/orphan-reaper.py"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 5
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 15
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 25
+          },
+          {
+            "Minute": 30
+          },
+          {
+            "Minute": 35
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 45
+          },
+          {
+            "Minute": 50
+          },
+          {
+            "Minute": 55
+          }
+        ],
+        "RunAtLoad": false
+      },
+      "expected_enabled": true,
+      "expected_installed": true,
+      "log_path": "~/carr-system/out/orphan-reaper.log",
+      "log_paths": [
+        "~/carr-system/out/orphan-reaper.log",
+        "~/carr-system/out/orphan-reaper.log"
+      ],
+      "log_max_age_seconds": 900,
+      "owner": "orchestrator",
+      "done_signal": "ops.run orphan-process-reaper/launchd.run; local wrapper receipt; durable safe signal evidence in out/orphan-reaper.jsonl and pending state",
+      "activity_path": "~/carr-system/out/run-scheduled-receipts/6db95144276bb8d2.fbc9c66faebfd4b4db566c360b68b894.receipt",
+      "expectation_note": "New source declaration; verify installation and first live run after source delivery. Machine placement is derived from lib/launchd_scope.py."
+    },
+    {
       "label": "com.carr.partner-ping",
       "scheduler": "launchd",
       "program_arguments": [
