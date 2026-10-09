@@ -35,8 +35,8 @@ OFFLOAD = [
     ("your_call",     re.compile(r"\b(your call|up to you|your preference|you decide|which way do you want)\b", re.I)),
     ("shall_i",       re.compile(r"\bshall I\b", re.I)),
     ("ok_if_i",       re.compile(r"\b(is it ok if I|are you ok with me|any objection)\b", re.I)),
-    ("want_me_prefix", re.compile(r"^\s*want me to\b", re.I | re.M)),
-    ("option_menu",   re.compile(r"^\s*(?:\*\*)?(?:Option\s+)?[A-C]\s*[\).:]\s+\S", re.M)),
+    ("want_me_prefix", re.compile(r"^[ \t]*want me to\b", re.I | re.M)),
+    ("option_menu",   re.compile(r"^[ \t]*(?:\*\*)?(?:Option\s+)?[A-C]\s*[\).:]\s+\S", re.M)),
 ]
 
 # (3) Soft wait — offload with no question mark. The council's #1 predicted
@@ -113,12 +113,30 @@ BARE_FENCE_CMD = re.compile(r"```[ \t]*\n[ \t]*(?:\$\s*)?(?:" + CMD_WORDS + r")\
 # An inline `command` whose first word is one the session holds. A question
 # prompt carries commands this way far more often than in a fenced block.
 INLINE_CMD = re.compile(r"`((?:\$\s*)?(?:" + CMD_WORDS + r")[^`\n]*)`", re.I)
+# Sentence/clause starts accept Markdown instructions but not label colons.
+# Horizontal whitespace avoids rescanning a whole newline run at every boundary.
+READER_INSTRUCTION = (
+    r"(?:^|(?<=[.!?;\n]))[ \t]*"
+    r"(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:\*\*|__)?"
+    r"(?:(?:after|before|once|when|if|unless|until|to|for)[ \t]+[^,\n.!?;]*,[ \t]*)?"
+    r"(?:(?:please|now|then|just|next)[ \t]+)*"
+    r"(?:you(?:'ll| will| can| should| need to)?[ \t]+(?:need to[ \t]+)?)?"
+)
+TERMINAL = r"(?:terminal|iterm|shell|command line)\b"
+COMMAND_VERB = r"(?:re-?)?(?:run|execute)|type|enter|paste|copy"
 HANDOFF_PROSE = [
-    ("run_this",      re.compile(r"\b(run|execute) (this|these|the following|it)\b", re.I)),
-    ("paste_this",    re.compile(r"\bpaste (this|these|it|the following)\b", re.I)),
-    ("in_terminal",   re.compile(r"\b(in|open|from) (your )?(the )?(terminal|iterm|shell|command line)\b", re.I)),
-    ("you_run",       re.compile(r"\byou'?(ll| will| can| should) (need to )?run\b", re.I)),
-    ("go_ahead_run",  re.compile(r"\bgo ahead and run\b", re.I)),
+    ("run_this", re.compile(READER_INSTRUCTION +
+                            r"(?:re-?)?(?:run|execute)[ \t]+(?:this|these|the following|it)\b", re.I)),
+    ("paste_this", re.compile(r"\bpaste (this|these|it|the following)\b", re.I)),
+    ("in_terminal", re.compile(
+        READER_INSTRUCTION + r"(?:"
+        r"(?:open|launch)[ \t]+(?:(?:a|the|your)[ \t]+)?" + TERMINAL +
+        r"|(?:" + COMMAND_VERB + r")\b[^\n]*\b(?:in|into|from|at)[ \t]+(?:the|a|your)[ \t]+" + TERMINAL +
+        r"|(?:in|into|from)[ \t]+your[ \t]+" + TERMINAL + r")"
+        r"|\byou(?:'ll| will| can| should)?[ \t]+[^\n]*\b(?:in|into|from)[ \t]+your[ \t]+" + TERMINAL,
+        re.I)),
+    ("you_run", re.compile(r"\byou'?(ll| will| can| should) (need to )?run\b", re.I)),
+    ("go_ahead_run", re.compile(r"\bgo ahead and run\b", re.I)),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

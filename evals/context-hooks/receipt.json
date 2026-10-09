@@ -1,43 +1,45 @@
 {
   "adapter": {
-    "adapter_id": "configured-preuse-event-matrix",
+    "adapter_id": "shared-conduct-classifier",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:3468f6feff626ce6c436e64b9cf2ff1ab599f36c32374055fcdfbf7de0ca9b15",
-    "harness_id": "evals/context-hooks/score.py",
-    "harness_version": "fce4221fa9c69be3016291d5596e390dd020d14e5353cb481e6c36a0912fdcb1",
+    "configuration_fingerprint": "sha256:3d93b01e5741f75aef6f9f75af6a6784cfd9b1ccfec83626fc0b4c5cd1cc27cf",
+    "harness_id": "evals/context-hooks/conduct_eval.py",
+    "harness_version": "426c2dfc16018853ca60eea892f8256132ce64e68c851ea21218052e28b4663e",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a10e01-1a2a-7590-b830-d1e05450f2a4",
+    "native_session_ref": "01a11ec7-cb8a-7d50-8dee-5d2d31e73a7e",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
   "cases": {
-    "total": 32,
-    "train": 16,
-    "test": 16,
-    "should_not_fire": 10,
+    "total": 586,
+    "train": 30,
+    "test": 556,
+    "should_not_fire": 161,
     "sources": [
-      "human_judged_hard_case"
+      "production_trace",
+      "human_judged_hard_case",
+      "synthesized"
     ]
   },
-  "change": "Wire NotebookEdit to the existing full-text preuse rule route; preserve every included and excluded tool class.",
+  "change": "Recognize reader instructions after introductory clauses while preserving first-person narration.",
   "cost": {
     "baseline_usd_per_case": 0.0,
     "candidate_usd_per_case": 0.0
   },
   "dimensions": [
     {
-      "dimension_id": "event-route-wiring",
+      "dimension_id": "reader-instruction",
       "critical": true,
       "status": "passed",
       "direction_vs_baseline": "improved",
       "evidence_refs": [
-        "evals/context-hooks/evidence/baseline.jsonl",
-        "evals/context-hooks/evidence/candidate.jsonl"
+        "evals/context-hooks/evidence/conduct-baseline.jsonl",
+        "evals/context-hooks/evidence/conduct-candidate.jsonl"
       ],
       "baseline": {
-        "score": 0.9375,
-        "ci_low": 0.9375,
-        "ci_high": 0.9375
+        "score": 0.7058823529411765,
+        "ci_low": 0.7058823529411765,
+        "ci_high": 0.7058823529411765
       },
       "candidate": {
         "score": 1.0,
@@ -45,37 +47,62 @@
         "ci_high": 1.0
       },
       "delta": {
-        "value": 0.0625,
-        "ci_low": 0.0625,
-        "ci_high": 0.0625
+        "value": 0.2941176470588235,
+        "ci_low": 0.2941176470588235,
+        "ci_high": 0.2941176470588235
+      }
+    },
+    {
+      "dimension_id": "narration-allowance",
+      "critical": true,
+      "status": "passed",
+      "direction_vs_baseline": "equivalent",
+      "evidence_refs": [
+        "evals/context-hooks/evidence/conduct-baseline.jsonl",
+        "evals/context-hooks/evidence/conduct-candidate.jsonl"
+      ],
+      "baseline": {
+        "score": 1.0,
+        "ci_low": 1.0,
+        "ci_high": 1.0
+      },
+      "candidate": {
+        "score": 1.0,
+        "ci_low": 1.0,
+        "ci_high": 1.0
+      },
+      "delta": {
+        "value": 0.0,
+        "ci_low": 0.0,
+        "ci_high": 0.0
       }
     }
   ],
   "evidence": {
     "scorer": {
-      "path": "evals/context-hooks/score.py",
+      "path": "evals/context-hooks/conduct_eval.py",
       "function": "score"
     },
     "source": {
-      "evals/context-hooks/score.py": "fce4221fa9c69be3016291d5596e390dd020d14e5353cb481e6c36a0912fdcb1",
-      "evals/context-hooks/make_report.py": "434e83d1550cb5d52cdb0c9159a525522e6364867d90cfb0d8d16ed78ae419a6"
+      "evals/context-hooks/conduct_eval.py": "426c2dfc16018853ca60eea892f8256132ce64e68c851ea21218052e28b4663e"
     },
     "dependencies": {
-      "ops/config/hooks.json": "bf198daae1a6e42746c913f1c32229c7a540051efe515c3270c3e5dbbf5d1494"
+      "hooks/conduct_patterns.py": "94b809545bc4ee22bf2e1f6f7fece782ba88c78f6334dd38b48283a92a5afb03",
+      "ops/conduct-gate-selftest.py": "f5272001877eee463920e095aa4118352ecb6f1a2c8a26deb4676e6b78a7dee9"
     },
     "expectations": {
-      "path": "evals/context-hooks/expectations.v1.json",
-      "version": "context-hooks-expectations/v1",
-      "sha256": "a53e4b5b266be1f3c2a6035438ff0239971eab5cb422427c9d1ca3ee03b48429"
+      "path": "evals/context-hooks/conduct-expectations.v3.json",
+      "version": "conduct-handoff-expectations/v3",
+      "sha256": "ab52b5e8982d942e08ac3d7458cb4829d36e3bdad1dd2907f8a94f1725606bbb"
     },
     "cohorts": {
       "baseline": {
-        "path": "evals/context-hooks/evidence/baseline.jsonl",
-        "sha256": "c4217e84d794d44afd28c029fb882df675de76dd90f125b1376c4fc18749f069"
+        "path": "evals/context-hooks/evidence/conduct-baseline.jsonl",
+        "sha256": "3622c00722e4ff2ae8de7383ade8eae6a994a626b8eaf9a04148bbd819e3dc8d"
       },
       "candidate": {
-        "path": "evals/context-hooks/evidence/candidate.jsonl",
-        "sha256": "49f0d9b1887560d4157e860568213f11398778d865fad48d5fc7db4538c23fd8"
+        "path": "evals/context-hooks/evidence/conduct-candidate.jsonl",
+        "sha256": "14cf24c52413129745c425207c7b57b62c7c4c060aee4e2f8ec628e509af1893"
       }
     }
   },
@@ -89,18 +116,19 @@
       "null_pass_rate": 0.0
     }
   },
-  "measured_on": "2026-10-05",
+  "measured_on": "2026-10-08",
   "min_useful_gain": 0.01,
   "noise_floor": 0,
   "notes": [
-    "Exact finite-matrix intervals; no confidence claim about model obedience. Live adapter invocation remains unverified."
+    "Deterministic classifier evaluation, not a measurement of model obedience. Real Stop deadline and exemptions are tested separately by conduct-gate-selftest.py. No model invocation is needed.",
+    "Test combinations were generated and scored after the source fix, without inspecting held-out texts to propose changes. Intervals describe the complete finite corpus only."
   ],
-  "primary_dimension": "event-route-wiring",
+  "primary_dimension": "reader-instruction",
   "repeats": 2,
   "rung": "regression",
   "schema_version": 2,
   "split": {
-    "method": "exhaustive finite tool-class matrix; paired semantic train/test events, no statistical generalization",
+    "method": "Known real excerpts and review regressions train; sealed generated grammar combinations test, first scored after implementation. Exact finite-corpus scores without generalization.",
     "seed": 0,
     "sealed_test": true
   },
@@ -109,17 +137,18 @@
       "stage_id": "delivery",
       "status": "passed",
       "dimension_ids": [
-        "event-route-wiring"
+        "reader-instruction",
+        "narration-allowance"
       ],
       "evidence_refs": [
-        "evals/context-hooks/evidence/baseline.jsonl",
-        "evals/context-hooks/evidence/candidate.jsonl"
+        "evals/context-hooks/evidence/conduct-baseline.jsonl",
+        "evals/context-hooks/evidence/conduct-candidate.jsonl"
       ]
     }
   ],
   "surface": "context-hooks",
   "verdict": {
     "decision": "ship",
-    "statement": "The finite wiring gap closes with no regression in its complete event matrix."
+    "statement": "Reader instruction recognition improves; every finite-corpus narration case remains allowed."
   }
 }
