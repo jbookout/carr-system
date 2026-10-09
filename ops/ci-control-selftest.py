@@ -6,7 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest.mock import Mock
+import tempfile
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -112,6 +113,71 @@ class Controls(unittest.TestCase):
         policy['temporary_controls']['github_actions_pause']['repository_actions_enabled']=False
         with self.assertRaises(Exception): mod.rerun(remote,123,456,'a'*40,policy,checks,dispatch)
         dispatch.assert_not_called()
+
+    def test_rerun_repository_selection(self):
+        mod = load('ci-rerun')
+        run = {'id':123, 'name':'CI', 'path':'.github/workflows/ci.yml',
+               'event':'pull_request', 'status':'completed', 'conclusion':'failure',
+               'head_sha':'a'*40, 'run_attempt':1, 'pull_requests':[{'number':1665}]}
+        job = {'id':456, 'run_id':123, 'name':'ops/ci.sh --strict --only gates',
+               'status':'completed', 'conclusion':'failure'}
+        pr = {'state':'open', 'head':{'sha':'a'*40}}
+        responses = {'actions/runs/123':run, 'actions/jobs/456':job, 'pulls/1665':pr,
+                     'actions/runs/123/jobs?filter=latest&per_page=100':{'jobs':[job]}}
+        with tempfile.TemporaryDirectory() as temp:
+            for repo, options in (
+                    ('jbookout/carr-system', []),
+                    ('jbookout/carr-system', ['--repo', 'jbookout/carr-system']),
+                    ('jbookout/doctorcre-app', ['--repo', 'jbookout/doctorcre-app']),
+                    ('jbookout/software-factory', ['--repo', 'jbookout/software-factory'])):
+                with self.subTest(repo=repo, options=options), tempfile.TemporaryDirectory(dir=temp) as attempt:
+                    calls = []
+                    def execute(command, **kwargs):
+                        calls.append(command)
+                        if command[:2] == ['gh', 'api']:
+                            prefix = 'repos/' + repo + '/'
+                            self.assertTrue(command[2].startswith(prefix))
+                            return Mock(stdout=json.dumps(responses[command[2][len(prefix):]]))
+                        self.assertEqual(command, ['gh','run','rerun','123','--job','456','--repo',repo])
+                        return Mock(returncode=0)
+                    def git_output(command, **kwargs):
+                        return 'a'*40 if command[1] == 'rev-parse' else ''
+                    with patch.object(sys, 'argv', ['ci-rerun.py','123','--job','456',*options]), \
+                            patch.object(mod.tempfile, 'gettempdir', return_value=attempt), \
+                            patch.object(mod.subprocess, 'check_output', side_effect=git_output), \
+                            patch.object(mod.subprocess, 'run', side_effect=execute), \
+                            patch.object(mod, 'local_checks') as checks:
+                        self.assertEqual(mod.main(), 0)
+                    checks.assert_called_once_with('gates')
+                    self.assertEqual(len(calls), 9)
+                    calls.clear()
+                    with patch.object(sys, 'argv', ['ci-rerun.py','123','--job','456',*options]), \
+                            patch.object(mod.tempfile, 'gettempdir', return_value=attempt), \
+                            patch.object(mod.subprocess, 'check_output', side_effect=git_output), \
+                            patch.object(mod.subprocess, 'run', side_effect=execute), \
+                            patch.object(mod, 'local_checks'):
+                        self.assertEqual(mod.main(), 1)
+                    self.assertTrue(all(command[:2] == ['gh', 'api'] for command in calls))
+                    receipts = list(Path(attempt).rglob('123-1.json'))
+                    self.assertEqual(len(receipts), 1)
+                    self.assertEqual(json.loads(receipts[0].read_text())['repo'], repo)
+                    if repo == 'jbookout/carr-system':
+                        self.assertEqual(receipts[0].parent, Path(attempt) / 'carr-ci-rerun')
+                    else:
+                        self.assertEqual(receipts[0].parent.name, repo.replace('/', '--'))
+
+    def test_rerun_unknown_repository_refused_before_validation(self):
+        mod = load('ci-rerun')
+        for repo in ('jbookout/other', 'someone/carr-system', 'jbookout/carr-system/extra'):
+            with self.subTest(repo=repo), \
+                    patch.object(sys, 'argv', ['ci-rerun.py','123','--job','456','--repo',repo]), \
+                    patch.object(mod.subprocess, 'check_output') as git, \
+                    patch.object(mod.subprocess, 'run') as execute:
+                with self.assertRaises(SystemExit) as raised:
+                    mod.main()
+                self.assertEqual(raised.exception.code, 2)
+                git.assert_not_called()
+                execute.assert_not_called()
 
 
 if __name__=='__main__': unittest.main()

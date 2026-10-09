@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Rerun one failed/cancelled CI class job, at most twice per run.
 
-Usage: ops/ci-rerun.sh RUN_ID --job JOB_ID. Successful jobs are retained;
+Usage: ops/ci-rerun.sh RUN_ID --job JOB_ID [--repo OWNER/REPO].
+The default repository is jbookout/carr-system. Successful jobs are retained;
 GitHub also reruns dependents. Local checks precede policy admission and the
 remote attempt/head is rechecked immediately before the single dispatch.
 """
@@ -24,6 +25,7 @@ assert spec is not None and spec.loader is not None
 evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evidence)
 REPO = 'jbookout/carr-system'
+ALLOWED_REPOS = (REPO, 'jbookout/doctorcre-app', 'jbookout/software-factory')
 MAX_ATTEMPTS = 3  # Initial run plus two job-only retries; job timeouts unchanged.
 
 
@@ -64,8 +66,13 @@ def rerun(remote, run_id, job_id, head, policy, checks, dispatch):
 
 
 class GitHub:
+    def __init__(self, repo=REPO):
+        if repo not in ALLOWED_REPOS:
+            raise Refusal('repository is not allowlisted')
+        self.repo = repo
+
     def api(self, path):
-        out = subprocess.run(['gh', 'api', f'repos/{REPO}/{path}'],
+        out = subprocess.run(['gh', 'api', f'repos/{self.repo}/{path}'],
                              capture_output=True, text=True, timeout=60, check=True)
         return json.loads(out.stdout)
 
@@ -95,6 +102,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('run_id', type=int)
     parser.add_argument('--job', required=True, type=int)
+    parser.add_argument('--repo', choices=ALLOWED_REPOS, default=REPO)
     args = parser.parse_args()
     if args.run_id <= 0 or args.job <= 0:
         parser.error('run and job IDs must be positive')
@@ -104,10 +112,13 @@ def main():
         head = subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
         policy = json.loads((ROOT / 'ops/config/platform-metering.v1.json').read_text())
         lock_dir = Path(tempfile.gettempdir()) / 'carr-ci-rerun'
-        lock_dir.mkdir(mode=0o700, exist_ok=True)
+        # Keep existing default-repository reservations effective after upgrade.
+        if args.repo != REPO:
+            lock_dir /= args.repo.replace('/', '--')
+        lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (lock_dir / f'{args.run_id}.lock').open('a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            remote = GitHub()
+            remote = GitHub(args.repo)
             def dispatch(run_id, job_id, attempt):
                 reservation = lock_dir / f'{run_id}-{attempt}.json'
                 if reservation.exists():
@@ -119,8 +130,8 @@ def main():
                 # Reserve before dispatch. An ambiguous timeout must not silently
                 # spend another retry. Hosted run_attempt is the durable limit.
                 with reservation.open('x') as receipt:
-                    json.dump({'run_id':run_id,'job_id':job_id,'attempt':attempt,'head_sha':head},receipt)
-                result = subprocess.run(['gh','run','rerun',str(run_id),'--job',str(job_id),'--repo',REPO],
+                    json.dump({'repo':args.repo,'run_id':run_id,'job_id':job_id,'attempt':attempt,'head_sha':head},receipt)
+                result = subprocess.run(['gh','run','rerun',str(run_id),'--job',str(job_id),'--repo',args.repo],
                                         capture_output=True, timeout=60)
                 if result.returncode:
                     raise Refusal('dispatch refused or uncertain; reservation retained')

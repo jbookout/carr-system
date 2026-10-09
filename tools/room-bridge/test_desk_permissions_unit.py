@@ -259,11 +259,16 @@ print(json.dumps({**result, "entries": reg.entries()}))
     def test_codex_live_resume_overrides_inherited_approval_policy(self):
         for thread in (None, "fixture-thread"):
             messages = []
+            replies = iter([
+                {"method": "item/completed", "params": {
+                    "item": {"type": "agentMessage", "text": "Synthetic result"}}},
+                {'method': 'turn/completed', 'params': {'threadId': 'fixture-thread',
+                    'turn': {'id': 'fixture-turn', 'status': 'completed'}}}])
             fake = SimpleNamespace(upgrade=lambda: None, send_json=messages.append,
-                receive_json=lambda: {"method": "item/completed", "params": {
-                    "item": {"type": "agentMessage", "text": "Synthetic result"}}})
+                receive_json=lambda: next(replies), sock=SimpleNamespace(close=lambda: None))
             with self.subTest(thread=thread), patch.object(dispatch.codex_wire, "Wire", return_value=fake), \
-                 patch.object(dispatch.codex_wire, "wait_response", return_value={"thread": {"id": "fixture-thread"}}):
+                 patch.object(dispatch.codex_wire, "wait_response", return_value={
+                     'thread': {'id': 'fixture-thread'}, 'turn': {'id': 'fixture-turn'}}):
                 dispatch.codex_wire.run_turn("/tmp/fixture.sock", "Synthetic task", thread_id=thread)
                 opened = next(m for m in messages if m.get("id") == "thread-open")
                 turn = next(m for m in messages if m.get("method") == "turn/start")
@@ -278,9 +283,11 @@ print(json.dumps({**result, "entries": reg.entries()}))
         client.request.return_value = {"resultType": "success"}
         with patch.object(dispatch.codex_ipc, "_open", return_value=client), \
              patch.object(dispatch.codex_ipc, "thread_owner", return_value="fixture-owner"):
-            dispatch._to_codex({"thread_id": "fixture-thread"}, "Synthetic task", env={}, live_desktop=True)
+            dispatch._to_codex({"thread_id": "fixture-thread", "model": "gpt-6.1-sol", "effort": "high"}, "Synthetic task", env={}, live_desktop=True)
         request = client.request.call_args.args[1]["turnStart"]["request"]
         self.assertEqual(request["approvalPolicy"], "never")
+        self.assertEqual(request["model"], "gpt-6.1-sol")
+        self.assertEqual(request["effort"], "high")
         self.assertEqual(request["input"][0]["text"], INSTRUCTION + "\n\nSynthetic task")
 
     def test_non_desk_desktop_messages_keep_their_original_posture(self):
@@ -302,7 +309,7 @@ print(json.dumps({**result, "entries": reg.entries()}))
                                       {"resultType": "success"}]
         with patch.object(dispatch.codex_ipc, "_open", return_value=client), \
              patch.object(dispatch.codex_ipc, "thread_owner", return_value="fixture-owner"):
-            result = dispatch._to_codex({"thread_id": "fixture-thread"}, "Synthetic task", env={}, live_desktop=True)
+            result = dispatch._to_codex({"thread_id": "fixture-thread", "model": "gpt-6.1-sol", "effort": "high"}, "Synthetic task", env={}, live_desktop=True)
         self.assertEqual(result["status"], "failed")
         self.assertIn("orchestrator", result["detail"])
         self.assertEqual(client.request.call_count, 1)
@@ -381,4 +388,6 @@ print(json.dumps({**result, "entries": reg.entries()}))
 
 
 if __name__ == "__main__":
-    unittest.main()
+    from test_codex_models_unit import catalog_fixture
+    with catalog_fixture():
+        unittest.main()
