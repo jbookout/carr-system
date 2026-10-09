@@ -503,7 +503,7 @@ def _activation_envelope(identity: dict, cursor: dict, response: dict | None) ->
     ]
     unsent = unsent_receipts()
     if unsent:
-        lines.append(f"Spool: {unsent} unsent continuity receipts; no replay. Growth: refused writes.")
+        lines.append(f"Spool: {unsent} unsent receipts; growth refuses writes.")
     return "\n".join(lines)
 
 

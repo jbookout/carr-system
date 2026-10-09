@@ -216,7 +216,7 @@ else:
         subagents = self.root / "subagents"
         subagents.mkdir()
         transcript = subagents / f"{agent_id}.jsonl"
-        transcript.write_text('{"type":"user","message":"local only"}\n', encoding="utf-8")
+        transcript.write_text("x" * 1_000_000, encoding="utf-8")
         mandatory = ("Objective:\n- objective sentinel\nCurrent corrections:\n- correction sentinel\n"
                      "Current constraints:\n- constraint sentinel\n"
                      "Pending external effects (verify; never replay):\n- pending sentinel\n"
@@ -244,9 +244,22 @@ else:
                     self.assertEqual(arguments["compaction_generation"], version)
                     self.assertEqual(arguments["session_id"], session_id)
                     self.assertEqual(arguments["native_agent_id"], agent_id)
+                    self.assertEqual(arguments["state"]["source_cursor"]["byte_offset"], 1_000_000)
                     for sentinel in ("objective sentinel", "correction sentinel", "constraint sentinel",
                                      "pending sentinel", "next sentinel"):
                         self.assertIn(sentinel, context)
+                    hook = load_hook()
+                    cursor = {"byte_offset": 2 ** 63 - 1, "mtime_ns": 2 ** 63 - 1,
+                              "source_digest": "f" * 64}
+                    identity = {key: arguments[key] for key in (
+                        "runtime", "session_id", "transcript_path_digest", "project_affinity",
+                        "parent_session_id", "native_agent_id")}
+                    recovery = {"found": True, "checkpoint": {
+                        "checkpoint_version": version, "compaction_generation": version}}
+                    with mock.patch.object(hook, "unsent_receipts", return_value=100):
+                        envelope = hook._activation_envelope(identity, cursor, recovery)
+                    self.assertLessEqual(len((envelope + "\n\n" +
+                                              self.base_env["RECOVERY_CAPSULE"]).encode()), 4800)
 
     def test_multibyte_agent_identifier_is_refused_before_recovery(self):
         self.set_mode("inject")
@@ -401,7 +414,7 @@ class ClaudeContinuityDeliversTest(ClaudeContinuityHookTest):
         self.run_hook("UserPromptSubmit")
         self.base_env["CARR_CLAUDE_CONTINUITY_CALL"] = str(self.caller)
         context = json.loads(self.run_hook("SessionStart", source="startup").stdout)
-        self.assertIn("unsent continuity receipt", context["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("1 unsent receipts", context["hookSpecificOutput"]["additionalContext"])
 
     def test_an_unsampled_tool_event_never_reads_the_transcript(self):
         self.set_mode("checkpoint")
