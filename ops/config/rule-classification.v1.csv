@@ -101,6 +101,7 @@ id,layer,class,moment
 7e9739f2,layer0,a,any turn replying to Joe
 80def9d2,pack,c,building a human-facing surface or choice for Joe/Dell
 81709f57,pack,c,convening a red team/review panel
+8400cd3d,pack,b,"starting a plan, a heavy-build plan, propose-ready-plan, or a Codex or Dot brief"
 847f9995,control,d,completion_evidence stop_gate - unattended-path credential verification
 86647daf,pack,b,finishing a substantive build/change/decision (posting to shared files)
 88e9b5eb,control,d,blocker_decider gate

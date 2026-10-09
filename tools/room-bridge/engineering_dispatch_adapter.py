@@ -635,14 +635,14 @@ def _desk_spec() -> dict:
         value = json.loads(DESK_SPEC_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DispatchRefusal("tracked Engineering desk configuration is unavailable") from exc
-    expected = {"schema_version", "name", "kind", "model", "effort", "cwd", "sandbox", "room_seat"}
+    expected = {"schema_version", "name", "kind", "family", "effort", "cwd", "sandbox", "room_seat"}
     if not isinstance(value, dict) or set(value) != expected:
         raise DispatchRefusal("tracked Engineering desk configuration has an unsupported shape")
     if (value["schema_version"] != "engineering-codex-desk.v1" or value["name"] != ENGINEERING_DESK
             or value["kind"] != "codex-session" or value["cwd"] != "{{REPO}}"
             or value["room_seat"] is not None):
         raise DispatchRefusal("tracked Engineering desk configuration is not dedicated and unseated")
-    for field in ("model", "effort", "sandbox"):
+    for field in ("family", "effort", "sandbox"):
         if not isinstance(value[field], str) or not value[field].strip():
             raise DispatchRefusal("tracked Engineering desk configuration is incomplete")
     return value
@@ -651,7 +651,7 @@ def _desk_spec() -> dict:
 def install_dedicated_codex_desk(registry: desks.Registry) -> dict:
     """Bootstrap only the tracked unseated desk, then return its exact readback."""
     spec = _desk_spec()
-    entry = registry.register(spec["name"], spec["kind"], model=spec["model"], effort=spec["effort"],
+    entry = registry.register(spec["name"], spec["kind"], family=spec["family"], effort=spec["effort"],
                               cwd=str(REPO), sandbox=spec["sandbox"],
                               add_dirs=_dedicated_writable_roots())
     return _dedicated_codex_desk(registry)
@@ -668,14 +668,14 @@ def _dedicated_codex_desk(registry: desks.Registry) -> dict:
     # characteristics.  The fixed desk itself is the local native surface.
     spec = _desk_spec()
     allowed_fields = {
-        "name", "kind", "model", "effort", "cwd", "sandbox", "add_dirs", "room_seat", "thread_id", "registered_at",
+        "name", "kind", "family", "effort", "cwd", "sandbox", "add_dirs", "room_seat", "thread_id", "registered_at",
         # These are bridge-owned liveness/auth observations, never execution
         # choices. They are allowed to change without widening the desk.
         "last_seen", "last_live", "last_auth", "last_auth_at",
     }
     if set(entry) - allowed_fields:
         raise DispatchRefusal("dedicated Engineering desk has an unapproved execution field")
-    expected = {"kind": spec["kind"], "model": spec["model"], "effort": spec["effort"],
+    expected = {"kind": spec["kind"], "family": spec["family"], "effort": spec["effort"],
                 "cwd": str(REPO), "sandbox": spec["sandbox"],
                 "add_dirs": _dedicated_writable_roots()}
     if entry.get("name") != ENGINEERING_DESK or any(entry.get(key) != value for key, value in expected.items()) or entry.get("room_seat") is not None:
@@ -727,6 +727,7 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
                 hydration["source_merge_required"], envelope),
         env=_safe_child_env(), fresh=True,
         config_overrides=AUTHORIZED_CODEX_CONFIG_OVERRIDES,
+        codex_timeout_s=EXECUTOR_TIMEOUT_SECONDS,
     )
     if not isinstance(row, dict) or row.get("status") != "completed":
         status = row.get("status") if isinstance(row, dict) else "invalid"
@@ -781,12 +782,12 @@ def main() -> int:
         if sys.argv[1:] == ["--preflight"]:
             entry = _dedicated_codex_desk(desks.Registry(DEDICATED_REGISTRY_PATH))
             print(json.dumps({"ok": True, "desk": {key: entry[key] for key in
-                  ("name", "kind", "model", "effort", "cwd", "sandbox", "add_dirs")}}, separators=(",", ":")))
+                  ("name", "kind", "family", "effort", "cwd", "sandbox", "add_dirs")}}, separators=(",", ":")))
             return 0
         if sys.argv[1:] == ["--install-desk"]:
             entry = install_dedicated_codex_desk(desks.Registry(DEDICATED_REGISTRY_PATH))
             print(json.dumps({"ok": True, "desk": {key: entry[key] for key in
-                  ("name", "kind", "model", "effort", "cwd", "sandbox", "add_dirs")}}, separators=(",", ":")))
+                  ("name", "kind", "family", "effort", "cwd", "sandbox", "add_dirs")}}, separators=(",", ":")))
             return 0
         if len(sys.argv) != 1:
             raise DispatchRefusal("engineering adapter received unsupported arguments")

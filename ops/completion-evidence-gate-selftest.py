@@ -37,21 +37,18 @@ RUNNING IT. No database, no network, no production access:
 """
 from __future__ import annotations
 
-import importlib.util
 import itertools
 import json
 import os
 import shlex
 import subprocess
-import tempfile
+import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-spec = importlib.util.spec_from_file_location(
-    "completion_evidence", os.path.join(REPO, "hooks", "completion-evidence-gate.py")
-)
-assert spec and spec.loader
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+sys.path.insert(0, REPO)
+from lib.selftest_harness import HookSandbox, load_hook
+
+mod = load_hook("completion-evidence-gate")
 
 
 def user(text):
@@ -420,11 +417,6 @@ DUAL_CASES = [
 ]
 
 
-# One scratch ledger for every fixture that spawns the real hook. Created at
-# import so all of them share it and none of them touches out/stop-latch.
-latch_state = tempfile.mkdtemp(prefix="completion-latch-state-")
-
-
 def machine_text_boundary():
     """Injected machine text is data, never an order.
 
@@ -657,12 +649,12 @@ def f05_rule_contract_binder_is_a_write():
     return passed
 
 
-def registry_prefix_coverage():
+def registry_prefix_coverage(*, required=False):
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
     if not os.path.exists(registry):
-        print("SKIP  live registry unavailable")
-        return True
+        print("FAIL  live registry unavailable" if required else "SKIP  live registry unavailable")
+        return not required
     script = (
         'import { TOOLS } from "./src/tools.js"; '
         'console.log(JSON.stringify(Object.keys(TOOLS).filter((n) => TOOLS[n].write).sort()))'
@@ -671,8 +663,8 @@ def registry_prefix_coverage():
                             cwd=os.path.join(REPO, "mcp-server"), text=True,
                             capture_output=True, timeout=30)
     if result.returncode:
-        print("SKIP  live registry could not load")
-        return True
+        print("FAIL  live registry could not load; run npm --prefix mcp-server ci" if required else "SKIP  live registry could not load")
+        return not required
     writes = json.loads(result.stdout)
     missing = [name for name in writes if not mod.is_write_action(name)]
     # notification-feed and read-doc-conversation are WR-000113/112 READS and must
@@ -748,6 +740,49 @@ def authority_family_coverage():
     return ok
 
 
+def prose_request_prints_no_advisory():
+    """A plain-prose request with no acceptance contract shows Joe nothing.
+
+    2026-10-05, Joe: "why do i keep seeing these jev messages ... Stop says: Semantic
+    requirement acceptance needs review." The no-contract branch returned that line on
+    nearly every turn; it named no requirement, bound no action and decided nothing,
+    so it was noise on his screen. Only an evaluated explicit contract may announce.
+    """
+    stdout = stop_output("prose", "check the queue and tell me how the PRs are going")
+    ok = stdout == ""
+    print(f"{'PASS' if ok else 'FAIL'}  prose request prints no advisory: {stdout[:120]!r}")
+    return ok
+
+
+def explicit_contract_needs_review_announces():
+    """An explicit contract that cannot be evaluated still reaches Joe.
+
+    The malformed form (criteria is prose, not a list) evaluates to needs_review
+    with an empty criteria list; quieting the prose branch must not swallow it.
+    """
+    ok = True
+    for criteria in ("report must say ready", [], None, {}, 0, "",
+                     [{"id": "ready", "kind": "semantic", "text": "report must say ready"}]):
+        prompt = json.dumps({"acceptance_contract": {"criteria": criteria}})
+        stdout = stop_output("contract", prompt)
+        announced = '"Acceptance needs review."' in stdout
+        print(f"{'PASS' if announced else 'FAIL'}  explicit-contract needs_review announces "
+              f"({criteria!r}): {stdout[:120]!r}")
+        ok = ok and announced
+    return ok
+
+
+def stop_output(label, prompt):
+    """Run the real gate on a Stop after a read-only turn answering `prompt`."""
+    records = [user(prompt), tool("Bash"), assistant("Ten PRs are in review.")]
+    with HookSandbox(prefix="completion-output-") as sandbox:
+        payload = {"session_id": f"selftest-{label}-{os.getpid()}",
+                   "stop_hook_active": False, "cwd": str(sandbox.repo)}
+        result = sandbox.fire("completion-evidence-gate", payload,
+                              turns=completed_fixture(records), timeout=20)
+        return result.stdout.strip()
+
+
 def real_hook_case(kind, non_carr=False):
     if kind == "codex":
         records = [
@@ -757,19 +792,8 @@ def real_hook_case(kind, non_carr=False):
         ]
     else:
         records = [user("reconcile"), tool("mcp__carr__update-deal"), assistant("Done.")]
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-        for row in completed_fixture(records):
-            fh.write(json.dumps(row) + "\n")
-        path = fh.name
-    try:
-        # A SESSION ID PER CASE, AND A SCRATCH LEDGER. As of 2026-08-23 this gate
-        # latches one intervention per claim-set per session, so a fixed
-        # "selftest" id makes these two cases silence each other — and makes the
-        # suite pass once and fail on every later run, because the ledger under
-        # out/ survives it. out/ is a symlink back to the canonical checkout from
-        # every worktree on this Mac, so that ledger is shared machine-wide: a
-        # fixture writing it would silence the running gate in a real session.
-        # Caught exactly this way, by both cases going red the second time.
+    with HookSandbox(prefix="completion-event-") as sandbox:
+        path = str(sandbox.transcript(completed_fixture(records)))
         session = f"selftest-{kind}-{os.getpid()}"
         payload = {"transcript_path": path, "session_id": session, "stop_hook_active": False}
         if kind == "codex":
@@ -777,14 +801,8 @@ def real_hook_case(kind, non_carr=False):
                        "hook_event_name": "Stop"}
         if non_carr:
             payload["cwd"] = "/private/tmp/non-carr-app"
-        hook = os.path.join(REPO, "hooks", "completion-evidence-gate.py")
-        result = subprocess.run([os.sys.executable, hook], input=json.dumps(payload), text=True,
-                                capture_output=True, timeout=20,
-                                env={**os.environ, "CARR_STOP_LATCH_STATE": latch_state})
-        body = json.loads(result.stdout or "{}")
-        return body.get("decision") == "block"
-    finally:
-        os.unlink(path)
+        result = sandbox.fire("completion-evidence-gate", payload, timeout=20)
+        return result.decision == "deny"
 
 
 def checkout_scope_is_clone_name_independent():
@@ -838,37 +856,31 @@ def latch_cases():
     is a symlink back to the canonical checkout from every worktree on this
     Mac, so a fixture writing the live ledger would silence the running gate.
     """
-    hook = os.path.join(REPO, "hooks", "completion-evidence-gate.py")
     results = []
 
-    def fires(records, session, state, name):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as fh:
-            for row in completed_fixture(records):
-                fh.write(json.dumps(row) + "\n")
-            path = fh.name
-        try:
-            proc = subprocess.run(
-                [os.sys.executable, hook], text=True, capture_output=True, timeout=30,
-                input=json.dumps({"transcript_path": path, "session_id": session,
-                                  "stop_hook_active": False, "cwd": REPO}),
-                env={**os.environ, "CARR_STOP_LATCH_STATE": state})
-            body = json.loads(proc.stdout or "{}")
-            return body.get("decision") == "block", body.get("reason", "")
-        finally:
-            os.unlink(path)
+    def fires(records, session):
+        payload = {
+            "session_id": session, "stop_hook_active": False, "cwd": str(sandbox.repo),
+        }
+        expect("event cwd belongs to copied hook checkout",
+               payload["cwd"] == str(sandbox.repo), True)
+        result = sandbox.fire("completion-evidence-gate", payload,
+                              turns=completed_fixture(records))
+        body = result.envelopes[0] if result.envelopes else {}
+        return result.decision == "deny", body.get("reason", "")
 
     def expect(name, got, want):
         ok = got == want
         results.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  latch: {name}: fired={got} want={want}")
 
-    with tempfile.TemporaryDirectory(prefix="completion-latch-") as state:
+    with HookSandbox(prefix="completion-latch-") as sandbox:
         # ── the floor duplicate, which is the ledger's own case ────────────
         floor = [user("reconcile the deal"), tool("mcp__carr__update-deal"),
                  assistant("Done.")]
-        first, _ = fires(floor, "latch-floor", state, "first")
+        first, _ = fires(floor, "latch-floor")
         expect("an unverified completion claim fires once", first, True)
-        second, _ = fires(floor, "latch-floor", state, "second")
+        second, _ = fires(floor, "latch-floor")
         expect("...and the same claim-set restated does not fire again", second, False)
 
         # Rewording is not a new finding. This is the half a message-text hash
@@ -876,30 +888,30 @@ def latch_cases():
         reworded = [user("reconcile the deal"), tool("mcp__carr__update-deal"),
                     assistant("That is complete now — the reconciliation is finished.")]
         expect("...nor does the same claim-set reworded",
-               fires(reworded, "latch-floor", state, "reworded")[0], False)
+               fires(reworded, "latch-floor")[0], False)
 
         # But NEW work is a new claim-set. Narrowing must never become muting.
         grew = [user("reconcile the deal"), tool("mcp__carr__update-deal"),
                 tool("mcp__carr__update-lead"), assistant("Done.")]
         expect("a new write in the same session still fires",
-               fires(grew, "latch-floor", state, "grew")[0], True)
+               fires(grew, "latch-floor")[0], True)
 
         # And another session hears it. A ledger keyed on anything shared would
         # let one session silence another's gate.
         expect("a second session is not silenced by the first",
-               fires(floor, "latch-other-session", state, "other")[0], True)
+               fires(floor, "latch-other-session")[0], True)
 
         # ── the clause layer ──────────────────────────────────────────────
         # Clause A ("recategorize the rules") is receipted by the work itself;
         # clause B ("load into every session") has no receipt from its live
         # surface. The gate must fire on B, once.
         b_open = CASE_STUDY_WORK + [assistant("The enforcement map is complete and reviewed.")]
-        fired, reason = fires(b_open, "latch-clause", state, "clause-first")
+        fired, reason = fires(b_open, "latch-clause")
         results.append(fired and "load into every session" in reason)
         print(f"{'PASS' if fired and 'load into every session' in reason else 'FAIL'}  "
               f"latch: an unaccounted clause fires, naming that clause")
         expect("...and the same unaccounted clause does not fire twice",
-               fires(b_open, "latch-clause", state, "clause-second")[0], False)
+               fires(b_open, "latch-clause")[0], False)
 
         # A DIFFERENT clause is a different finding, on identical files. This is
         # why the clause identity excludes paths: same patch, other clause open.
@@ -907,7 +919,7 @@ def latch_cases():
                             "and publish the map to the control room")] + CASE_STUDY_WORK[1:] + [
             assistant("The enforcement map is complete and reviewed.")]
         expect("a different clause over the same files still fires",
-               fires(other_order, "latch-clause", state, "clause-other")[0], True)
+               fires(other_order, "latch-clause")[0], True)
 
         # Once B carries its receipt, the close is clean — and A, banked as
         # satisfied while the gate was firing on B, does not come back.
@@ -915,7 +927,7 @@ def latch_cases():
             tool("mcp__carr__standing-context"),
             assistant("The map is complete and standing-context now loads all 218.")]
         expect("a turn restating both, with B receipted, fires on neither",
-               fires(b_receipted, "latch-clause", state, "clause-both")[0], False)
+               fires(b_receipted, "latch-clause")[0], False)
 
         # ── THE NEIGHBOUR CASE, which is the reason satisfaction is banked
         # even in a turn that fires. Verified live rather than assumed, because
@@ -934,16 +946,15 @@ def latch_cases():
         settled = CASE_STUDY_WORK + [
             tool("mcp__carr__standing-context"),
             assistant("Map complete and standing-context loads all 218.")]
-        expect("a receipted turn does not fire", fires(settled, "latch-neighbour", state,
-                                                       "settled")[0], False)
+        expect("a receipted turn does not fire", fires(settled, "latch-neighbour")[0], False)
         kept_working = settled + [patch("hooks/scoped-loader.py"),
                                   assistant("Also tidied the loader. Done.")]
         expect("...and more work after the receipt does not re-fire the settled clause",
-               fires(kept_working, "latch-neighbour", state, "kept-working")[0], False)
+               fires(kept_working, "latch-neighbour")[0], False)
         # The same transcript in a session that never saw the receipt DOES fire,
         # which is what proves the line above is the latch and not the gate.
         expect("...while a session with no banked receipt still fires on it",
-               fires(kept_working, "latch-neighbour-fresh", state, "fresh")[0], True)
+               fires(kept_working, "latch-neighbour-fresh")[0], True)
 
         # THE FIRING TURN ALSO BANKS. This is why satisfaction is recorded
         # BEFORE the blocked check rather than inside the not-blocked branch:
@@ -954,13 +965,13 @@ def latch_cases():
         # and a session with no banked receipt blocks on it.
         fires_on_b = CASE_STUDY_WORK + [assistant("The enforcement map is complete and reviewed.")]
         expect("a turn fires on one clause while the other is clean",
-               fires(fires_on_b, "latch-both", state, "both-first")[0], True)
+               fires(fires_on_b, "latch-both")[0], True)
         kept_going = fires_on_b + [patch("hooks/scoped-loader.py"),
                                    assistant("Loader tidied. Done.")]
         expect("...and the clean one does not come back after more work",
-               fires(kept_going, "latch-both", state, "both-second")[0], False)
+               fires(kept_going, "latch-both")[0], False)
         expect("...while a session that never banked it does block on it",
-               fires(kept_going, "latch-both-fresh", state, "both-fresh")[0], True)
+               fires(kept_going, "latch-both-fresh")[0], True)
 
         # BOTH FLOOR CLASSES ARE BANKED on a verified turn, because a later
         # restatement of the same artifacts can arrive as either one. Turn one
@@ -971,13 +982,13 @@ def latch_cases():
                          tool("Read", {"file_path": "x.py"}),
                          assistant("Done and verified.")]
         expect("a verified turn does not fire",
-               fires(verified_turn, "latch-floor-classes", state, "verified")[0], False)
+               fires(verified_turn, "latch-floor-classes")[0], False)
         restated = verified_turn + [user("summarise that"), tool("mcp__carr__update-deal"),
                                     assistant("Done.")]
         expect("...and the same claim-set restated unverified does not fire",
-               fires(restated, "latch-floor-classes", state, "restated")[0], False)
+               fires(restated, "latch-floor-classes")[0], False)
         expect("...while a session with no banked receipt does",
-               fires(restated, "latch-floor-classes-fresh", state, "fresh")[0], True)
+               fires(restated, "latch-floor-classes-fresh")[0], True)
 
         # ── the dual is never latched ─────────────────────────────────────
         dual = flat([user("capability-program says 0/51 completed — is the scoped "
@@ -986,9 +997,9 @@ def latch_cases():
                      assistant("The scoped loader was never built; nothing is on disk. "
                                "I'll start building it.")])
         expect("an unbuilt close contradicting a landed receipt fires",
-               fires(dual, "latch-dual", state, "dual-first")[0], True)
+               fires(dual, "latch-dual")[0], True)
         expect("...and fires again, because that one is never latched",
-               fires(dual, "latch-dual", state, "dual-second")[0], True)
+               fires(dual, "latch-dual")[0], True)
 
     return all(results)
 
@@ -1054,11 +1065,8 @@ def native_context_orders():
             ok = parsed_ok and blocked == expected and (label != "code-only follow-up" or reason == "no tracked mutation")
             outcomes.append(ok)
             print(f"{'PASS' if ok else 'FAIL'}  {kind} native context: {label}: {blocked} ({reason})")
-            with tempfile.TemporaryDirectory(prefix="completion-context-") as state:
-                path = os.path.join(state, "transcript.jsonl")
-                with open(path, "w") as fh:
-                    for record in records:
-                        fh.write(json.dumps(record) + "\n")
+            with HookSandbox(prefix="completion-context-") as sandbox:
+                path = str(sandbox.transcript(records))
                 config = "codex-hooks.json" if kind == "codex" else "hooks.json"
                 with open(os.path.join(REPO, "ops/config", config)) as fh:
                     wiring = json.load(fh)
@@ -1072,19 +1080,22 @@ def native_context_orders():
                     argv[0] = os.sys.executable
                 payload = ({"transcriptPath": path, "sessionId": "selftest"} if kind == "codex" else
                            {"transcript_path": path, "session_id": "selftest"})
-                payload.update(cwd=REPO, hook_event_name="Stop", stop_hook_active=False)
-                proc = subprocess.run(argv, input=json.dumps(payload), capture_output=True,
-                                      text=True, timeout=30,
-                                      env={**os.environ, "CARR_STOP_LATCH_STATE": state})
-                body = json.loads(proc.stdout or "{}")
-                event_ok = proc.returncode == 0 and (body.get("decision") == "block") == expected
+                payload.update(cwd=str(sandbox.repo), hook_event_name="Stop", stop_hook_active=False)
+                scope_ok = payload["cwd"] == str(sandbox.repo)
+                outcomes.append(scope_ok)
+                print(f"{'PASS' if scope_ok else 'FAIL'}  {kind} configured Stop cwd belongs to copied hook checkout")
+                result = sandbox.fire("completion-evidence-gate", payload, argv=argv)
+                event_ok = result.code == 0 and (result.decision == "deny") == expected
                 outcomes.append(event_ok)
                 print(f"{'PASS' if event_ok else 'FAIL'}  {kind} configured Stop: {label}")
     return all(outcomes)
 
 
 def main():
+    if sys.argv[1:] == ["--registry-only"]:
+        return 0 if registry_prefix_coverage(required=True) else 1
     outcomes = []
+    _dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b21', 'test_b22'])
     for name, recs, expected in CASES:
         got, reason = mod.evaluate(completed_fixture(recs))
         ok = got == expected
@@ -1119,6 +1130,8 @@ def main():
     outcomes.append(r03_notification_classification())
     outcomes.append(doc_conversation_write_door_classification())
     outcomes.append(latch_cases())
+    outcomes.append(prose_request_prints_no_advisory())
+    outcomes.append(explicit_contract_needs_review_announces())
     print(f"completion-evidence-gate-selftest: {sum(outcomes)}/{len(outcomes)} passed")
     return 0 if all(outcomes) else 1
 
@@ -1126,7 +1139,5 @@ def main():
 
 # Independently reproduced Dot cases share the offline behavioral fixtures.
 import runpy as _dot_runpy
-_dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b21', 'test_b22'])
-
 if __name__ == "__main__":
     raise SystemExit(main())

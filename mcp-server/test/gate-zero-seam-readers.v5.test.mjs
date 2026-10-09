@@ -569,7 +569,7 @@ test("BYTE-IDENTICAL TO MAIN: an unruled answer does not move for any query, val
     undefined, null, {}, [], "step:wr46-dissolution-outcome", 1, true,
     { stepRef: "step:wr40-repository-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
     { serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" },
-    { headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" },
+    { headSha: "a".repeat(40), checkName: "main canary" },
     { decision_id: FIXTURE_DECISION_IDS[0], stepRef: "step:wr46-dissolution-outcome" },
     { ruling_decision_ref: FIXTURE_DECISION_IDS[0] },
     { card_ref: "card:11", store_ref: "github:checks", finding: "gate_conclusion_observed" },
@@ -606,7 +606,7 @@ test("RULED: no query, valid or not, moves the closed half of a ruled answer", a
     undefined, null, {}, [], "step:wr46-dissolution-outcome", 1, true,
     { stepRef: "step:wr40-repository-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
     { serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" },
-    { headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" },
+    { headSha: "a".repeat(40), checkName: "main canary" },
     { decision_id: FIXTURE_DECISION_IDS[0], stepRef: "step:wr46-dissolution-outcome" },
     { ruling_decision_ref: FIXTURE_DECISION_IDS[0] },
     // The real ruling handed back in as a query field, which is the one shape a
@@ -1913,7 +1913,7 @@ test("STORES: a head sha that is not one never reaches the URL, and the path sta
       ["a-privileged-word", "green"],
     ])
       await assert.rejects(
-        () => stores.fetchCheckConclusionRows({ headSha, checkName: "main canary (gates, migration, types, freshness)" }),
+        () => stores.fetchCheckConclusionRows({ headSha, checkName: "main canary" }),
         error => stores.isSeamStoreUnreachable(error)
           && error.store_ref === "github:checks" && error.because === refused, label);
     assert.deepEqual(calls, [], "a sha this file will not serve reached the source anyway");
@@ -1922,12 +1922,12 @@ test("STORES: a head sha that is not one never reaches the URL, and the path sta
     // asserted on the NORMALIZED path rather than on a substring of the string
     // that was built — a `includes("/repos/jbookout/carr-system/")` passes just
     // as happily on a URL that then traverses back out of it.
-    await stores.fetchCheckConclusionRows({ headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
+    await stores.fetchCheckConclusionRows({ headSha: sha, checkName: "main canary" });
     assert.equal(calls.length, 1, "the checks store never called its source");
     const url = new URL(calls[0].url);
     assert.equal(url.origin, "https://api.github.com");
     assert.equal(url.pathname, `/repos/${AUTHORITATIVE_REPOSITORY}/commits/${sha}/check-runs`);
-    assert.equal(url.searchParams.get("check_name"), "main canary (gates, migration, types, freshness)");
+    assert.equal(url.searchParams.get("check_name"), "main canary");
 
     // A check name is not a path segment, and it may not become one.
     calls.length = 0;
@@ -3322,7 +3322,7 @@ test("RULED: the conclusion reader returns GitHub's own word, and translates not
   const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const sha = fixtureStores.FIXTURE_COMMIT_SHA;
 
-  const success = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
+  const success = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "main canary" });
   assert.equal(success.decision, "report");
   assert.equal(success.finding, "gate_conclusion_observed");
   assert.equal(success.conclusion, "success");
@@ -3358,7 +3358,7 @@ test("RULED: the conclusion reader returns GitHub's own word, and translates not
   assert.equal(invented.decision, "refuse");
   assertSwept("card13.invented", invented);
 
-  const badQuery = await ruled.readGateConclusionEvidence({ headSha: "nope", checkName: "main canary (gates, migration, types, freshness)" });
+  const badQuery = await ruled.readGateConclusionEvidence({ headSha: "nope", checkName: "main canary" });
   assert.equal(badQuery.reason_id, "gate_conclusion_query_invalid");
   assert.equal(badQuery.invalid_field, "headSha");
 });
@@ -3425,7 +3425,7 @@ test("RULED: with the real stores and nothing configured, every seam reports unr
     assert.equal(scheduler.reason_id, "scheduler_ledger_unreachable");
 
     const conclusion = await ruled.readGateConclusionEvidence({
-      headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" });
+      headSha: "a".repeat(40), checkName: "main canary" });
     assert.equal(conclusion.reason_id, "gate_conclusion_source_unreachable");
     assert.equal(conclusion.unavailable_because,
       "the checks source credentials are not configured in this process");
@@ -3531,7 +3531,7 @@ test("RULED: nothing a faulted store does to a reader gets past the reader's bou
   // refuses on the identity check, and the store it names in the refusal is the
   // RULED one, not the one that replied.
   const foreignStore = await ruled.readGateConclusionEvidence({
-    headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" });
+    headSha: "a".repeat(40), checkName: "main canary" });
   assert.equal(foreignStore.decision, "refuse");
   assert.equal(foreignStore.reason_id, "store_ref_not_the_ruled_one");
   assert.equal(foreignStore.finding, null);
@@ -3597,7 +3597,7 @@ test("SWEEP: the same sweep again, over real rows, with every credential configu
     assertSwept("rows.ledger", ledger);
 
     const checks = await staged.stores.fetchCheckConclusionRows(
-      { headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
+      { headSha: sha, checkName: "main canary" });
     assert.ok(checks.rows.length > 0, "the checks store returned no rows to sweep");
     assert.ok(calls.length > 0, "the checks store never called its source");
     assertSwept("rows.checks", checks);
@@ -3649,7 +3649,7 @@ test("SWEEP: the same sweep again, over real rows, with every credential configu
     assertSwept("rows.near-miss-receipt", nearMiss);
 
     const report13 = await staged.readers.readGateConclusionEvidence(
-      { headSha: sha, checkName: "main canary (gates, migration, types, freshness)" });
+      { headSha: sha, checkName: "main canary" });
     assert.equal(report13.finding, "gate_conclusion_observed");
     assert.equal(report13.conclusion, "success");
 
@@ -3709,7 +3709,7 @@ test("STORES: the checks store serves one repository, and refuses every other", 
   const calls = [];
   globalThis.fetch = fakeChecksSource(HOSTILE_CHECK_RUNS, calls);
   process.env.GITHUB_TOKEN = "a-token-this-test-wrote";
-  const query = { headSha: "a".repeat(40), checkName: "main canary (gates, migration, types, freshness)" };
+  const query = { headSha: "a".repeat(40), checkName: "main canary" };
   try {
     // (a) A FOREIGN REPOSITORY IN THE ENVIRONMENT IS REFUSED, and the refusal
     //     happens before anything is called — a refusal that first fetched would
@@ -4603,8 +4603,8 @@ function declaredWorkflowCheckNames() {
     // A matrix job declares ONE templated name and GitHub reports one check per
     // matrix value, so the template is expanded here into the names a reader
     // will actually be asked about (ci.yml's class groups since 2026-09-23).
-    // Only the single-axis `${{ matrix.<axis> }}` shape is expanded; anything
-    // else stays literal and the reader test refuses it, which is the point.
+    // Expand the single-axis shape and the bounded default-off DB conditional.
+    // Unknown expressions stay literal and the reader test refuses them.
     const matrices = new Map();
     let matrixJob = -1;
     let matrixAxis = null;
@@ -4618,6 +4618,14 @@ function declaredWorkflowCheckNames() {
       if (named !== null && current >= 0) names[current] = named[1];
       if (/^ {6}matrix:\s*$/.test(line)) { matrixJob = current; matrixAxis = null; continue; }
       if (matrixJob !== current || current < 0) continue;
+      // The default-off DB trial declares serial or exactly two extra values.
+      // Expand both declared alternatives; arbitrary expressions stay literal
+      // and fail the reader's exact-enumeration contract below.
+      const shadowAxis = /^ {8}(shard): \$\{\{ fromJSON\(github\.event_name == 'workflow_dispatch' && inputs\.shard_trial && '(\[[0-9,]+\])' \|\| '(\[[0-9,]+\])'\) \}\}$/.exec(line);
+      if (shadowAxis !== null) {
+        matrices.set(`${current}:${shadowAxis[1]}`, [...new Set([...JSON.parse(shadowAxis[2]), ...JSON.parse(shadowAxis[3])])]);
+        continue;
+      }
       const inlineAxis = /^ {8}([A-Za-z0-9_-]+):\s*(\[.*\])\s*$/.exec(line);
       if (inlineAxis !== null) { matrices.set(`${current}:${inlineAxis[1]}`, JSON.parse(inlineAxis[2])); matrixAxis = null; continue; }
       const blockAxis = /^ {8}([A-Za-z0-9_-]+):\s*$/.exec(line);
@@ -4626,6 +4634,19 @@ function declaredWorkflowCheckNames() {
       if (item !== null && matrixAxis !== null) matrices.get(matrixAxis).push(item[1] ?? item[2] ?? item[3]);
     }
     names.forEach((name, index) => {
+      // CI's metadata branch is skipped and cannot supply validation evidence.
+      // Enumerate its runnable alternative; unknown expressions remain literal.
+      const metadataName = /^\$\{\{ github\.event_name == 'pull_request' && github\.event\.action == 'edited' && !github\.event\.changes\.base\.ref && 'CI metadata edit ignored' \|\| '([^']+)' \}\}$/.exec(name);
+      if (metadataName !== null) {
+        names[index] = metadataName[1];
+        return;
+      }
+      const shadowName = /^\$\{\{ matrix\.(shard) == 0 && '([^']+)' \|\| format\('([^']+)', matrix\.shard\) \}\}$/.exec(name);
+      if (shadowName !== null) {
+        const values = matrices.get(`${index}:${shadowName[1]}`);
+        if (Array.isArray(values)) names.splice(index, 1, ...values.map(value => value === 0 ? shadowName[2] : shadowName[3].replace("{0}", String(value))));
+        return;
+      }
       const template = /^(.*)\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}(.*)$/.exec(name);
       if (template === null) return;
       const values = matrices.get(`${index}:${template[2]}`);
@@ -4638,7 +4659,7 @@ function declaredWorkflowCheckNames() {
   const posted = /^CHECK_NAME = "([^"\n]+)"$/m.exec(readFileSync(BACKUP_STATUS, "utf8"));
   assert.ok(posted, "ops/backup-workflow-status.py no longer declares CHECK_NAME where this test reads it");
   names.push(posted[1]);
-  return names.sort();
+  return [...new Set(names)].sort();
 }
 
 /** The set the reader module actually carries, read out of its source. */
@@ -4666,7 +4687,7 @@ function registeredReaderReasonIds() {
 const RETIRED_CHECK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 ._/()-]{0,99}$/;
 
 /** The one name main is actually guarded by, spelled once. */
-const MAIN_CANARY_CHECK = "main canary (gates, migration, types, freshness)";
+const MAIN_CANARY_CHECK = "main canary";
 
 test("CHECK NAME: the reader's set is exactly what the repository's own files declare", () => {
   const declared = declaredWorkflowCheckNames();
@@ -4748,6 +4769,24 @@ test("CHECK NAME: a newline, a path separator and three hundred characters are e
   }
 });
 
+test("CHECK NAME: ignored metadata names cannot supply validation evidence", async () => {
+  const source = readFileSync(join(WORKFLOWS, "ci.yml"), "utf8");
+  const named = /^ {4}name: (\$\{\{ github\.event_name[^\n]+)\n/m.exec(source);
+  assert.ok(named, "CI no longer separates metadata edits from its required check name");
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
+  // GitHub reports skipped expressions literally, with their delimiters removed.
+  for (const checkName of ["CI metadata edit ignored", named[1], named[1].slice(3, -2).trim()]) {
+    const answer = await ruled.readGateConclusionEvidence({
+      headSha: fixtureStores.FIXTURE_COMMIT_SHA, checkName,
+    });
+    assert.equal(answer.reason_id, "gate_conclusion_query_invalid");
+    assert.equal(answer.invalid_field, "checkName");
+    assert.equal(answer.decision, "refuse");
+    assert.equal(JSON.stringify(answer).includes(checkName), false);
+    assertSwept("card13.ignored-metadata", answer);
+  }
+});
+
 test("CHECK NAME CONTROL: the retired pattern has been seen to refuse the names this admits", () => {
   const declared = declaredWorkflowCheckNames();
   const wouldHaveBeenRefused = declared.filter(name => !RETIRED_CHECK_NAME_PATTERN.test(name)).sort();
@@ -4757,7 +4796,6 @@ test("CHECK NAME CONTROL: the retired pattern has been seen to refuse the names 
   // empty the acceptance test proves nothing, because the old validator would
   // have passed it too.
   assert.deepEqual(wouldHaveBeenRefused, [
-    MAIN_CANARY_CHECK,
     "pg_dump -> age-encrypt -> artifact",
   ], "the retired pattern no longer refuses anything, so the acceptance test is not load-bearing");
 

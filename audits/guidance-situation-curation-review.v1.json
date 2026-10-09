@@ -224,12 +224,12 @@
   "reviewed_base_inventory": {
     "excluded_rule_surface": "intro_politics",
     "path": "ops/config/rule-enforcement-map.json",
-    "sha256": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
-    "standing_source_count": 196
+    "sha256": "2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4",
+    "standing_source_count": 197
   },
   "reviewed_source_manifest": {
     "path": "audits/guidance-migration-manifest.v1.tsv",
-    "sha256": "9549f834aedd86b2d77fdc736ff81a7da503b4612ed0eac87c57e6830af016ce"
+    "sha256": "c33742350ddd2a4498fb6f691b240bbee22df63d292ab2d8f41c6162e4e1500c"
   },
   "schema": "guidance-situation-curation-review/v1"
 }
