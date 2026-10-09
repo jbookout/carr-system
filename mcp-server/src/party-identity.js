@@ -29,25 +29,59 @@ export const PARTY_IDENTITY_FIELDS = Object.freeze(["name", "org", "state"]);
 const CORROBORATING_FIELDS = Object.freeze(["firm", "email_domain", "city", "phone", "address", "npi"]);
 const UNCONFIRMED = /\b(?:unconfirmed|unverified|confirm|possible match|surname[- ]only|not (?:yet )?confirmed)\b/i;
 
-// Validate the evidence shape before withEnvelope, then its independence once
-// the party is resolved. Neither refusal reserves a key or emits an event.
+const NAME_IDENTIFIERS = new Set(["email_domain", "phone", "address", "npi"]);
+const normalizedText = v => typeof v === "string" ? v.trim().replace(/\s+/g, " ").toLowerCase() : "";
+
+function phoneIdentifier(value) {
+  if (typeof value !== "string" || !/^[+()\d .-]+$/.test(value)) return "";
+  const digits = value.replace(/\D/g, "");
+  return /^\d{10}$/.test(digits) ? digits : /^1\d{10}$/.test(digits) ? digits.slice(1) : "";
+}
+
+function storedIdentifierMatches(field, value, before) {
+  switch (field) {
+    case "email_domain": {
+      const domain = normalizedText(value);
+      const stored = typeof before.email === "string" ? before.email.trim().split("@") : [];
+      return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$/.test(domain)
+        && stored.length === 2 && Boolean(stored[0]) && normalizedText(stored[1]) === domain;
+    }
+    case "phone": {
+      const phone = phoneIdentifier(value);
+      return Boolean(phone) && [before.phone, before.cell].some(v => phoneIdentifier(v) === phone);
+    }
+    case "address":
+      return Boolean(normalizedText(before.street_address))
+        && normalizedText(before.street_address) === normalizedText(value);
+    case "npi":
+      return /^\d{10}$/.test(value) && before.npi === value;
+    default:
+      return false;
+  }
+}
+
+// Name fields require a typed identifier, then a match to the resolved record.
+// No name, alias, firm or city string can substitute for that match.
 function identityEvidence(args, before) {
   const evidence = args.evidence;
   const value = typeof evidence?.corroborating_value === "string" ? evidence.corroborating_value.trim() : "";
-  const identityValue = v => typeof v === "string" ? v.trim().replace(/\s+/g, " ").toLowerCase() : "";
-  const correctedValues = Object.entries(args.fields || {}).filter(([k]) => PARTY_IDENTITY_FIELDS.includes(k))
-    .flatMap(([k, v]) => [v, before?.[k === "org" ? "org_name" : k]]);
+  const changesName = args.fields?.name !== undefined || args.fields?.org !== undefined;
+  const city = evidence?.city;
   if (!evidence || evidence.confirmed !== true || !["high", "medium"].includes(evidence.confidence)
       || !CORROBORATING_FIELDS.includes(evidence.corroborating_field) || !value || value.length > 200
       || UNCONFIRMED.test(value) || /[;\r\n]|\s(?:or|\/)\s/i.test(value) || isPlaceholder(value)
       || (evidence.corroborating_field === "email_domain" && /(?:^|\.)carr\.us$/i.test(value))
-      || (evidence.corroborating_field === "firm"
-        && (args.fields?.org !== undefined || (before?.kind === "org" && args.fields?.name !== undefined)))
-      || correctedValues.some(v => identityValue(v) === identityValue(value)))
+      || (changesName && (!NAME_IDENTIFIERS.has(evidence.corroborating_field)
+        || (before && !storedIdentifierMatches(evidence.corroborating_field, value, before))))
+      || (city !== undefined && (typeof city !== "string" || !city.trim() || city.length > 200
+        || UNCONFIRMED.test(city) || /[;\r\n]|\s(?:or|\/)\s/i.test(city)
+        || (changesName && before && normalizedText(city) !== normalizedText(before.city))))
+      || (!changesName && [args.fields?.state, before?.state].some(v => normalizedText(v) === normalizedText(value))))
     throw new ToolError({ error: "identity_evidence_required",
-      hint: "identity must be confirmed:true at high or medium confidence, with an independent corroborating_field (firm, email_domain, city, phone, address or npi) and its confirmed corroborating_value; a corrected field cannot corroborate itself" });
+      hint: "identity must be confirmed:true at high or medium confidence; name and firm corrections require email_domain, phone, address or npi matching the stored party independently. City is supplementary only; names, aliases, firms, orgs and titles never corroborate a name correction" });
   return { confirmed: true, confidence: evidence.confidence,
-    corroborating_field: evidence.corroborating_field, corroborating_value: value };
+    corroborating_field: evidence.corroborating_field, corroborating_value: value,
+    ...(city === undefined ? {} : { city: city.trim() }) };
 }
 
 const US_STATES = new Set(("AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN " +
@@ -124,7 +158,7 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
   return {
     "correct-party-identity": {
       write: true,
-      description: "Correct a party's IDENTITY from a verified finding: name spelling, firm (org) and state. The companion to update-party-contact, which handles contact facts only. Per rule 578fdd91 enrichment applies its corrections rather than parking them as proposals, but only when identity is confirmed (high or medium confidence with a second corroborating field) and the value is one clean value from a re-verifiable source. source is REQUIRED, and every changed field writes an event with its prior value, so each correction can be undone (v_party_identity_correction lists them). base_version is the PARTY's version from a fresh read. ORG CHANGES FOLLOW RULE 8cddc6ad: a shared org row is never renamed. Sharing is counted across every foreign key into the org row, not only other people on it. If a live org already has the corrected identity the party is re-pointed to it; if nothing but this party refers to the current org row, that row is renamed in place; otherwise a new org is minted and only this party is re-pointed. The other people on the old org are read back and returned as `untouched`, and an old org left with no references is reported as `old_org_left_empty`. An ORG party's own name (fields.name) is renamed only when at most one record refers to it (its own role row); people on it, or more references of any kind, refuse and are named. Placeholder guard: a CARR agent's own number or a carr.us address is refused.",
+      description: "Correct a party's IDENTITY from a verified finding: name spelling, firm (org) and state. The companion to update-party-contact, which handles contact facts only. Per rule 578fdd91 enrichment applies its corrections rather than parking them as proposals, but only when identity is confirmed (high or medium confidence with a second corroborating field). Name and firm changes require an email domain, phone (office or cell), street address or NPI that matches the stored party independently. Firm, org, title, alias and other name-like evidence never count; city is supplementary only. Each corrected value must be one clean value from a re-verifiable source. source is REQUIRED, and every changed field writes an event with its prior value, so each correction can be undone (v_party_identity_correction lists them). base_version is the PARTY's version from a fresh read. ORG CHANGES FOLLOW RULE 8cddc6ad: a shared org row is never renamed. Sharing is counted across every foreign key into the org row, not only other people on it. If a live org already has the corrected identity the party is re-pointed to it; if nothing but this party refers to the current org row, that row is renamed in place; otherwise a new org is minted and only this party is re-pointed. The other people on the old org are read back and returned as `untouched`, and an old org left with no references is reported as `old_org_left_empty`. An ORG party's own name (fields.name) is renamed only when at most one record refers to it (its own role row); people on it, or more references of any kind, refuse and are named. Placeholder guard: a CARR agent's own number or a carr.us address is refused.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
         party: { type: "string", description: "P-#### ref, a role ref (V-/C-/L-/T-), or a name" },
@@ -139,7 +173,9 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
           confidence: { type: "string", enum: ["high", "medium"] },
           corroborating_field: { type: "string", enum: CORROBORATING_FIELDS },
           corroborating_value: { type: "string", minLength: 1, maxLength: 200,
-            description: "the confirmed second identity field matching this party and the source; independent of the field being corrected" } },
+            description: "For name or firm corrections: email domain, phone, street address or NPI matching the stored party. Address matches the latest unexpired source-backed address finding with value.street_address. City and firm alone are allowed only for state-only corrections" },
+          city: { type: "string", minLength: 1, maxLength: 200,
+            description: "Optional supplementary city; for a name or firm correction it must match the stored city and accompany a matching non-name identifier" } },
           required: ["confirmed", "confidence", "corroborating_field", "corroborating_value"] } },
         required: ["idempotency_key", "party", "base_version", "fields", "source", "evidence"] },
       handler: async (c, actor, args) => {
@@ -165,11 +201,16 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
           const { partyId, hopped } = await resolvePartyForWrite(c, args.party);
           await versionGuard(c, "party", partyId, args.base_version);
           const before = (await c.query(
-            `select p.kind, p.name, p.state, p.org_id, o.name as org_name from party p
-               left join party o on o.id=p.org_id where p.id=$1`, [partyId])).rows[0];
+            `select p.kind, p.name, p.state, p.org_id, o.name as org_name,
+                    p.email, p.phone, p.cell, p.npi, p.city,
+                    (select f.value->>'street_address' from record_flag f
+                       where f.subject_type='party' and f.subject_id=p.id and f.kind='address'
+                         and f.value->>'found'='true' and f.value->>'epistemic_status'='source_backed'
+                         and (f.expires_on is null or f.expires_on>=current_date)
+                       order by f.observed_at desc, f.id desc limit 1) as street_address
+               from party p left join party o on o.id=p.org_id where p.id=$1`, [partyId])).rows[0];
           if (!before) throw new ToolError({ error: "not_found", table: "party", id: partyId });
-          // The stored kind decides whether name and firm are the same field.
-          // Check prior values too, before any correction or envelope receipt.
+          // Check stored identifiers before any correction or envelope receipt.
           identityEvidence(args, before);
           if (fields.org !== undefined && before.kind !== "person")
             throw new ToolError({ error: "org_on_org_party",

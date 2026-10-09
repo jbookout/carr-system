@@ -49,15 +49,17 @@ const idKey = n => (n == null || !String(n).trim()) ? null : String(n).trim().re
 
 function basePlan({ org = { id: OLD_ORG, name: "Harbr Point Legal" }, others = [], refs = null,
   refsAfter = [], existing = [], kind = "person", name = "Alx Morgan", version = 4,
-  merged_into = null } = {}) {
+  merged_into = null, phone = "850-555-0100", cell = null, email = "alex@example-it.test",
+  npi = "1234567890", street_address = "123 Main Street", city = "Pensacola" } = {}) {
   // By default the only references to the old org are the other people on it.
   const refsBefore = refs ?? (others.length ? [{ source: "party.org_id", n: String(others.length) }] : []);
   return {
     "select subject_id from v_ref_index where subject_type='party' and ref ilike $1": [{ subject_id: TARGET }],
     "select merged_into from party where id=$1": [{ merged_into }],
     "select version from party where id=$1 for update": [{ version }],
-    "select p.kind, p.name, p.state, p.org_id, o.name as org_name from party p": [{
-      kind, name, state: null, org_id: org?.id ?? null, org_name: org?.name ?? null }],
+    "select p.kind, p.name, p.state, p.org_id, o.name as org_name": [{
+      kind, name, state: null, org_id: org?.id ?? null, org_name: org?.name ?? null,
+      phone, cell, email, npi, street_address, city }],
     "select org_identity_key($1) as new_key, org_identity_key($2) as cur_key":
       ([a, b]) => [{ new_key: idKey(a), cur_key: idKey(b) }],
     "and org_identity_key(name)=$1": existing,
@@ -71,7 +73,7 @@ function call(fake, args) {
   return TOOLS["correct-party-identity"].handler(fake, joe, {
     idempotency_key: "cpi-1", party: "P-0301", base_version: 4,
     source: "record-finding name observed 2026-10-08 https://example-it.test/team",
-    evidence: { confirmed: true, confidence: "high", corroborating_field: "city", corroborating_value: "Pensacola" },
+    evidence: { confirmed: true, confidence: "high", corroborating_field: "phone", corroborating_value: "850-555-0100" },
     ...args,
   });
 }
@@ -87,7 +89,7 @@ test("registered as a write verb in tools.js with the required arguments", () =>
   assert.match(tool.description, /8cddc6ad|shared org/i);
 });
 
-const confirmedEvidence = { confirmed: true, confidence: "high", corroborating_field: "city", corroborating_value: "Pensacola" };
+const confirmedEvidence = { confirmed: true, confidence: "high", corroborating_field: "phone", corroborating_value: "850-555-0100" };
 
 for (const [label, evidence] of [
   ["missing evidence", undefined],
@@ -135,9 +137,8 @@ test("unconfirmed or multiple corrected values and a bare source label never wri
   assert.deepEqual(fake.calls, []);
 });
 
-test("each allowed corroborating field can support a confirmed name correction", async () => {
-  for (const [field, value] of Object.entries({ firm: "Harbor Point Legal", email_domain: "example-it.test",
-    city: "Pensacola", phone: "850-555-0100", address: "123 Main Street", npi: "1234567890" })) {
+test("each matching non-name identifier can support a confirmed name correction", async () => {
+  for (const [field, value] of Object.entries({ email_domain: "example-it.test", phone: "850-555-0100", address: "123 Main Street", npi: "1234567890" })) {
     const fake = new Fake(basePlan());
     const evidence = { ...confirmedEvidence, corroborating_field: field, corroborating_value: value };
     const out = await call(fake, { fields: { name: "Alex Morgan" }, evidence, source: "NPPES NPI 1234567890" });
@@ -208,7 +209,7 @@ test("name and alias evidence fields never corroborate person or organization co
 test("prior firm and state values cannot corroborate corrections under another evidence label", async () => {
   for (const [fields, value] of [[{ org: "Harbor Point Legal" }, "  HARBR   POINT LEGAL  "], [{ state: "AL" }, " fl "]]) {
     const plan = basePlan();
-    plan["select p.kind, p.name, p.state, p.org_id, o.name as org_name from party p"][0].state = "FL";
+    plan["select p.kind, p.name, p.state, p.org_id, o.name as org_name"][0].state = "FL";
     const fake = new Fake(plan);
     await assert.rejects(call(fake, { fields,
       evidence: { ...confirmedEvidence, corroborating_field: "city", corroborating_value: value } }),
@@ -219,9 +220,8 @@ test("prior firm and state values cannot corroborate corrections under another e
   }
 });
 
-test("organization name corrections accept independent contact and location evidence", async () => {
-  for (const [field, value] of Object.entries({ email_domain: "example-it.test", city: "Pensacola",
-    phone: "850-555-0100", address: "123 Main Street", npi: "1234567890" })) {
+test("organization name corrections accept matching stored non-name identifiers", async () => {
+  for (const [field, value] of Object.entries({ email_domain: "example-it.test", phone: "850-555-0100", address: "123 Main Street", npi: "1234567890" })) {
     const fake = new Fake(basePlan({ kind: "org", name: "Harbr Point Legal", org: null }));
     const out = await call(fake, { fields: { name: "Harbor Point Legal" },
       evidence: { ...confirmedEvidence, corroborating_field: field, corroborating_value: value } });
@@ -537,4 +537,72 @@ test("a concurrent org creator wins without a false name creation event", async 
   assert.deepEqual(JSON.parse(events[0][7]), {
     org_id: EXISTING_ORG, org_name: "HARBOR Point Legal LLC", mode: "repoint_existing",
     source: "record-finding name observed 2026-10-08 https://example-it.test/team", evidence: confirmedEvidence });
+});
+
+const assertNoCorrection = fake => {
+  assert.equal(fake.writes("update party set").length, 0);
+  assert.equal(fake.events().length, 0);
+  assert.equal(fake.writes("insert into tool_call").length, 0);
+};
+
+for (const [label, kind, fields, evidence] of [
+  ["reviewer reordered person name as firm", "person", { name: "Alex Morgan" },
+    { ...confirmedEvidence, corroborating_field: "firm", corroborating_value: "Morgan, Alx" }],
+  ["reviewer organization acronym as city", "org", { name: "Harbor Point Legal" },
+    { ...confirmedEvidence, corroborating_field: "city", corroborating_value: "HPL" }],
+  ["firm and city alone", "person", { name: "Alex Morgan" },
+    { ...confirmedEvidence, corroborating_field: "firm", corroborating_value: "Harbor Point Legal", city: "Pensacola" }],
+  ["city alone", "person", { name: "Alex Morgan" },
+    { ...confirmedEvidence, corroborating_field: "city", corroborating_value: "Pensacola" }],
+  ["firm correction with only acronym as city", "person", { org: "Harbor Point Legal" },
+    { ...confirmedEvidence, corroborating_field: "city", corroborating_value: "HPL" }],
+]) {
+  test(`${label} refuses without updates, events or receipts`, async () => {
+    const fake = new Fake(basePlan({ kind }));
+    await assert.rejects(call(fake, { fields, evidence }), e => e.payload.error === "identity_evidence_required");
+    assertNoCorrection(fake);
+  });
+}
+
+for (const kind of ["person", "org"]) {
+  test(`${kind} name correction requires a matching stored phone`, async () => {
+    const matched = new Fake(basePlan({ kind }));
+    assert.deepEqual((await call(matched, { fields: { name: "Alex Morgan" },
+      evidence: { ...confirmedEvidence, corroborating_value: "+1 (850) 555-0100", city: "Pensacola" } })).updated, ["name"]);
+    for (const phone of [null, "850-555-0199"]) {
+      const unmatched = new Fake(basePlan({ kind, phone }));
+      await assert.rejects(call(unmatched, { fields: { name: "Alex Morgan" } }), e => e.payload.error === "identity_evidence_required");
+      assertNoCorrection(unmatched);
+    }
+  });
+}
+
+for (const [field, value] of Object.entries({ email_domain: "other.test", phone: "Morgan, Alx",
+  address: "HPL", npi: "1234567891" })) {
+  test(`a mismatched ${field} cannot corroborate a name or firm change`, async () => {
+    for (const fields of [{ name: "Alex Morgan" }, { org: "Harbor Point Legal" }]) {
+      const fake = new Fake(basePlan());
+      await assert.rejects(call(fake, { fields, evidence: { ...confirmedEvidence,
+        corroborating_field: field, corroborating_value: value } }), e => e.payload.error === "identity_evidence_required");
+      assertNoCorrection(fake);
+    }
+  });
+}
+
+test("a city mismatch cannot override a matching identifier", async () => {
+  const fake = new Fake(basePlan());
+  await assert.rejects(call(fake, { fields: { name: "Alex Morgan" }, evidence: { ...confirmedEvidence, city: "Mobile" } }),
+    e => e.payload.error === "identity_evidence_required");
+  assertNoCorrection(fake);
+});
+
+test("a stored cell phone also corroborates a name correction", async () => {
+  const fake = new Fake(basePlan({ phone: null, cell: "850-555-0100" }));
+  assert.deepEqual((await call(fake, { fields: { name: "Alex Morgan" } })).updated, ["name"]);
+});
+
+test("state-only correction preserves confirmed city corroboration", async () => {
+  const fake = new Fake(basePlan());
+  assert.deepEqual((await call(fake, { fields: { state: "FL" }, evidence: { ...confirmedEvidence,
+    corroborating_field: "city", corroborating_value: "Pensacola" } })).updated, ["state"]);
 });
