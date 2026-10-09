@@ -70,7 +70,9 @@ function basePlan({ org = { id: OLD_ORG, name: "Harbr Point Legal" }, others = [
 function call(fake, args) {
   return TOOLS["correct-party-identity"].handler(fake, joe, {
     idempotency_key: "cpi-1", party: "P-0301", base_version: 4,
-    source: "record-finding name observed 2026-10-08 example-it.test", ...args,
+    source: "record-finding name observed 2026-10-08 https://example-it.test/team",
+    evidence: { confirmed: true, confidence: "high", corroborating_field: "city", corroborating_value: "Pensacola" },
+    ...args,
   });
 }
 
@@ -80,10 +82,92 @@ test("registered as a write verb in tools.js with the required arguments", () =>
   assert.equal(tool.write, true);
   assert.notEqual(tool.authorityOnly, true);
   assert.equal(tool.registrySource, "mcp-server/src/party-identity.js");
-  assert.deepEqual(tool.inputSchema.required, ["idempotency_key", "party", "base_version", "fields", "source"]);
+  assert.deepEqual(tool.inputSchema.required, ["idempotency_key", "party", "base_version", "fields", "source", "evidence"]);
   assert.deepEqual(Object.keys(tool.inputSchema.properties.fields.properties).sort(), ["name", "org", "state"]);
   assert.match(tool.description, /8cddc6ad|shared org/i);
 });
+
+const confirmedEvidence = { confirmed: true, confidence: "high", corroborating_field: "city", corroborating_value: "Pensacola" };
+
+for (const [label, evidence] of [
+  ["missing evidence", undefined],
+  ["missing confidence", { ...confirmedEvidence, confidence: undefined }],
+  ["low confidence", { ...confirmedEvidence, confidence: "low" }],
+  ["unconfirmed identity", { ...confirmedEvidence, confirmed: false }],
+  ["missing confirmation", { ...confirmedEvidence, confirmed: undefined }],
+  ["missing corroborating field", { ...confirmedEvidence, corroborating_field: undefined }],
+  ["surname is not corroboration", { ...confirmedEvidence, corroborating_field: "surname" }],
+  ["missing corroborating value", { ...confirmedEvidence, corroborating_value: " " }],
+  ["unconfirmed corroboration", { ...confirmedEvidence, corroborating_value: "Pensacola (unconfirmed)" }],
+  ["alternative corroborations", { ...confirmedEvidence, corroborating_value: "Pensacola or Mobile" }],
+  ["agent domain placeholder", { ...confirmedEvidence, corroborating_field: "email_domain", corroborating_value: "carr.us" }],
+]) {
+  test(`${label} refuses before the envelope with zero writes or events`, async () => {
+    const fake = new Fake(basePlan());
+    await assert.rejects(call(fake, { fields: { name: "Alex Morgan", state: "FL", org: "Harbor Point Legal" }, evidence }),
+      e => e instanceof ToolError && e.payload.error === "identity_evidence_required" && /corroborat|confirm/i.test(e.payload.hint));
+    assert.deepEqual(fake.calls, [], "no envelope, queries, writes or events on refusal");
+  });
+}
+
+for (const fields of [{ name: "Jordan Smith" }, { state: "AL" }, { org: "Unconfirmed Smith Clinic" }]) {
+  test(`reviewer surname-only probe refuses ${Object.keys(fields)[0]} even with claimed high confidence`, async () => {
+    for (const evidence of [undefined, confirmedEvidence]) {
+      const fake = new Fake(basePlan());
+      await assert.rejects(call(fake, { fields, evidence,
+        source: "surname-only search; possible match, unconfirmed; no second corroborating field" }),
+      e => e instanceof ToolError && e.payload.error === "unconfirmed_identity");
+      assert.deepEqual(fake.calls, []);
+    }
+  });
+}
+
+test("unconfirmed or multiple corrected values and a bare source label never write", async () => {
+  for (const fields of [{ name: "Jordan Smith (confirm)" }, { org: "Unconfirmed Smith Clinic" },
+    { name: ["Jordan Smith", "John Smith"] }, { name: "Jordan Smith or John Smith" }]) {
+    const fake = new Fake(basePlan());
+    await assert.rejects(call(fake, { fields }), e => e instanceof ToolError);
+    assert.deepEqual(fake.calls, []);
+  }
+  const fake = new Fake(basePlan());
+  await assert.rejects(call(fake, { fields: { name: "Alex Morgan" }, source: "practice website" }),
+    e => e.payload.error === "source_not_a_locator");
+  assert.deepEqual(fake.calls, []);
+});
+
+test("each allowed corroborating field can support a confirmed name correction", async () => {
+  for (const [field, value] of Object.entries({ firm: "Harbor Point Legal", email_domain: "example-it.test",
+    city: "Pensacola", phone: "850-555-0100", address: "123 Main Street", npi: "1234567890" })) {
+    const fake = new Fake(basePlan());
+    const evidence = { ...confirmedEvidence, corroborating_field: field, corroborating_value: value };
+    const out = await call(fake, { fields: { name: "Alex Morgan" }, evidence, source: "NPPES NPI 1234567890" });
+    assert.deepEqual(out.updated, ["name"]);
+    assert.deepEqual(JSON.parse(fake.events()[0][1][7]).evidence, evidence);
+  }
+});
+
+test("a corrected firm cannot be its own second corroborating field", async () => {
+  const fake = new Fake(basePlan());
+  await assert.rejects(call(fake, { fields: { org: "Harbor Point Legal" },
+    evidence: { ...confirmedEvidence, corroborating_field: "firm", corroborating_value: "Harbor Point Legal" } }),
+  e => e.payload.error === "identity_evidence_required");
+  assert.deepEqual(fake.calls, []);
+});
+
+for (const confidence of ["high", "medium"]) {
+  test(`${confidence} confirmed correction records its source, evidence and previous values`, async () => {
+    const fake = new Fake(basePlan());
+    const evidence = { ...confirmedEvidence, confidence };
+    const out = await call(fake, { fields: { name: "Alex Morgan", state: "FL", org: "Harbor Point Legal" }, evidence });
+    assert.deepEqual(out.updated, ["name", "state", "org"]);
+    for (const [, params] of fake.events()) {
+      const old = JSON.parse(params[6]), finding = JSON.parse(params[7]);
+      assert.ok(Object.hasOwn(old, params[5]), "each finding keeps the prior value");
+      assert.deepEqual(finding.evidence, evidence);
+      assert.equal(finding.source, "record-finding name observed 2026-10-08 https://example-it.test/team");
+    }
+  });
+}
 
 test("profiles: held by the full profile, never by the unattended capture or away sets", () => {
   assert.equal(PROFILES.full, null, "full is every verb");
@@ -204,7 +288,8 @@ test("a shared org row is NEVER renamed: the target alone is re-pointed to a min
   const orgEvent = fake.events().map(([, p]) => p).find(p => p[5] === "org_id");
   assert.deepEqual(JSON.parse(orgEvent[6]), { org_id: OLD_ORG, org_name: "Harbr Point Legal" });
   assert.deepEqual(JSON.parse(orgEvent[7]),
-    { org_id: NEW_ORG, org_name: "Harbor Point Legal LLC", mode: "mint_and_repoint" });
+    { org_id: NEW_ORG, org_name: "Harbor Point Legal LLC", mode: "mint_and_repoint",
+      source: "record-finding name observed 2026-10-08 https://example-it.test/team", evidence: confirmedEvidence });
   const mintEvent = fake.events().map(([, p]) => p).find(p => p[4] === NEW_ORG);
   assert.equal(JSON.parse(mintEvent[7]).mode, "mint_and_repoint", "the mint event carries the mode too");
 });
@@ -373,5 +458,6 @@ test("a concurrent org creator wins without a false name creation event", async 
   assert.equal(events[0][5], "org_id");
   assert.deepEqual(JSON.parse(events[0][6]), { org_id: null, org_name: null });
   assert.deepEqual(JSON.parse(events[0][7]), {
-    org_id: EXISTING_ORG, org_name: "HARBOR Point Legal LLC", mode: "repoint_existing" });
+    org_id: EXISTING_ORG, org_name: "HARBOR Point Legal LLC", mode: "repoint_existing",
+    source: "record-finding name observed 2026-10-08 https://example-it.test/team", evidence: confirmedEvidence });
 });

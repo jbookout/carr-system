@@ -5,8 +5,9 @@
 //
 // Three properties carry the rule's trade-off (an occasional wrong edit that is
 // cheap to undo, over a pile of proposals nobody applies):
-//   - source is required, and every changed field writes an event holding the
-//     prior value, so any correction can be reversed from the record;
+//   - confirmed high/medium identity evidence, independent corroboration and a
+//     re-verifiable source are required before entering the write envelope;
+//     every changed field records its evidence and prior value for reversal;
 //   - base_version guards the party exactly as update-party-contact does;
 //   - an org change follows rule 8cddc6ad. A shared org row is never renamed,
 //     because renaming it would re-label every other record on it. "Shared" is
@@ -24,6 +25,25 @@
 import { ToolError } from "./tool-error.js";
 
 export const PARTY_IDENTITY_FIELDS = Object.freeze(["name", "org", "state"]);
+const CORROBORATING_FIELDS = Object.freeze(["firm", "email_domain", "city", "phone", "address", "npi"]);
+const UNCONFIRMED = /\b(?:unconfirmed|unverified|confirm|possible match|surname[- ]only|not (?:yet )?confirmed)\b/i;
+
+// Validate before withEnvelope: refused evidence must not reserve an
+// idempotency key, write a tool-call record, or emit an event.
+function identityEvidence(args) {
+  const evidence = args.evidence;
+  const value = typeof evidence?.corroborating_value === "string" ? evidence.corroborating_value.trim() : "";
+  if (!evidence || evidence.confirmed !== true || !["high", "medium"].includes(evidence.confidence)
+      || !CORROBORATING_FIELDS.includes(evidence.corroborating_field) || !value || value.length > 200
+      || UNCONFIRMED.test(value) || /[;\r\n]|\s(?:or|\/)\s/i.test(value) || isPlaceholder(value)
+      || (evidence.corroborating_field === "email_domain" && /(?:^|\.)carr\.us$/i.test(value))
+      || (evidence.corroborating_field === "firm" && args.fields?.org !== undefined)
+      || Object.values(args.fields || {}).some(v => typeof v === "string" && v.trim().toLowerCase() === value.toLowerCase()))
+    throw new ToolError({ error: "identity_evidence_required",
+      hint: "identity must be confirmed:true at high or medium confidence, with an independent corroborating_field (firm, email_domain, city, phone, address or npi) and its confirmed corroborating_value; a corrected field cannot corroborate itself" });
+  return { confirmed: true, confidence: evidence.confidence,
+    corroborating_field: evidence.corroborating_field, corroborating_value: value };
+}
 
 const US_STATES = new Set(("AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN " +
   "MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY PR VI GU").split(" "));
@@ -40,6 +60,9 @@ export function normalizeIdentityFields(fields) {
     hint: "identity fields only (name, org, state); contact facts go through update-party-contact" });
   const clean = {};
   for (const k of keys) {
+    if (typeof fields[k] === "string" && (UNCONFIRMED.test(fields[k]) || /[;\r\n]|\s(?:or|\/)\s/i.test(fields[k])))
+      throw new ToolError({ error: "unconfirmed_identity", field: k,
+        hint: "apply only one clean, confirmed value; values marked unconfirmed or confirm, or listing alternatives, cannot be written" });
     const value = typeof fields[k] === "string" ? fields[k].trim().replace(/\s+/g, " ") : "";
     if (k === "state") {
       const code = value.toUpperCase();
@@ -105,12 +128,27 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
           name: { type: "string", description: "the party's corrected name" },
           org: { type: "string", description: "the corrected firm name, for a person" },
           state: { type: "string", description: "two-letter US state code" } } },
-        source: { type: "string", description: "where the correction came from: 'record-finding <kind> observed <date> <url>', a registry and identifier, a firm website" } },
-        required: ["idempotency_key", "party", "base_version", "fields", "source"] },
+        source: { type: "string", description: "re-verifiable source: a URL, a registry and identifier, or a record-finding UUID; never an unconfirmed match" },
+        evidence: { type: "object", additionalProperties: false, properties: {
+          confirmed: { type: "boolean", const: true },
+          confidence: { type: "string", enum: ["high", "medium"] },
+          corroborating_field: { type: "string", enum: CORROBORATING_FIELDS },
+          corroborating_value: { type: "string", minLength: 1, maxLength: 200,
+            description: "the confirmed second identity field matching this party and the source; independent of the field being corrected" } },
+          required: ["confirmed", "confidence", "corroborating_field", "corroborating_value"] } },
+        required: ["idempotency_key", "party", "base_version", "fields", "source", "evidence"] },
       handler: async (c, actor, args) => {
         const source = typeof args.source === "string" ? args.source.trim() : "";
         if (!source) throw new ToolError({ error: "missing_source",
           hint: "an identity correction without provenance cannot be checked or undone; say where it came from" });
+        if (UNCONFIRMED.test(source)) throw new ToolError({ error: "unconfirmed_identity",
+          hint: "this source marks identity unconfirmed; record a possible match without applying a correction" });
+        const evidence = identityEvidence(args);
+        if (!/https?:\/\/[^\s/]+/i.test(source)
+            && !/\b(?:registry|nppes|npi|sunbiz)\b.*\b[a-z]*\d[a-z\d-]*\b/i.test(source)
+            && !/\brecord-finding\s+[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/i.test(source))
+          throw new ToolError({ error: "source_not_a_locator",
+            hint: "supply a re-verifiable URL, registry and identifier, or record-finding UUID" });
         const fields = normalizeIdentityFields(args.fields);
         return withEnvelope(c, actor, "correct-party-identity", args, async () => {
           // org_party_id returns only an ID, including on concurrent reuse.
@@ -133,7 +171,7 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
           // old_value->field and new_value->field, and new_value->>'mode'.
           const event = (subjectId, field, oldValue, newValue, { oldExtra = {}, newExtra = {} } = {}) =>
             writeEvent(c, actor, "correct-party-identity", "party", subjectId, {
-              field, old: { [field]: oldValue, ...oldExtra }, new: { [field]: newValue, ...newExtra },
+              field, old: { [field]: oldValue, ...oldExtra }, new: { [field]: newValue, ...newExtra, source, evidence },
               agent_rationale: `source: ${source}`, idempotency_key: args.idempotency_key });
           const lockIdentity = key => c.query("select pg_advisory_xact_lock(hashtext($1))", [`org_identity:${key}`]);
           const updated = [];
