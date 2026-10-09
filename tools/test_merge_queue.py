@@ -293,6 +293,34 @@ class QueueTests(unittest.TestCase):
             other.pr(module.REPOS[0], 1)
         self.assertGreaterEqual(starts[1] - starts[0], 1.99)
 
+    def test_shared_gh_spacing_rechecks_short_sleeps_after_delayed_start(self):
+        q = module.Queue(self.state, self.root)
+        other = module.Queue(self.root / 'other-state', self.root)
+        self.addCleanup(q.db.close); self.addCleanup(other.db.close)
+        now, starts, sleeps = [100.0], [], []
+        q.budget.clock = other.budget.clock = lambda: now[0]
+        real_fsync = os.fsync
+        def fsync(fd):
+            real_fsync(fd)
+            if not starts:
+                now[0] += .4
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += min(seconds, .05)
+        def command(argv, **kwargs):
+            starts.append(now[0])
+            now[0] += .1
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch('lib.github_rate_limit.os.fsync', side_effect=fsync), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+            other.api('repos/example/repo')
+        self.assertGreater(sleeps[0], .05)
+        self.assertGreaterEqual(len(sleeps), 2)
+        self.assertGreaterEqual(starts[1] - starts[0], 2.0)
+
     def test_orphan_dispatch_on_restart_releases_desk_without_replay(self):
         registry = self.root / 'desks.json'; registry.write_text('{"desks":{}}')
         os.environ['CARR_HERMES_DESKS'] = str(registry)
