@@ -813,6 +813,32 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(card['note'], 'Merge queue: waiting_ci. Hosted checks pending')
             self.assertEqual(self.q.db.execute('SELECT COUNT(*) FROM events WHERE published=1').fetchone()[0], 4)
 
+    def test_real_board_queue_events_preserve_existing_card_metadata(self):
+        board_root = self.root / 'board-output'
+        env = {'PROGRESS_BOARD_ROOT': str(board_root), 'PROGRESS_BOARD_LOCAL_ONLY': '1',
+               'PROGRESS_BOARD_SKIP_GH': '1', 'PROGRESS_BOARD_SKIP_PROBE': '1'}
+        board_cli = [sys.executable, str(ROOT / 'tools/progress_board.py')]
+        metadata = {'title': 'Assigned task', 'executor': 'Codex', 'provider': 'OpenAI',
+                    'model': 'fixture', 'effort': 'high'}
+        with patch.dict(os.environ, env):
+            module.command(board_cli + ['init', 'carr-v5', '--title', 'Queue test'])
+            for card, repo in zip(('pr-123', 'app-pr-123', 'factory-pr-123'), module.REPOS):
+                fields = [value for key, value in metadata.items() for value in ('--' + key, value)]
+                module.command(board_cli + ['task', 'carr-v5', card, *fields,
+                                            '--status', 'review', '--repo', repo, '--pr', '123'])
+            self.q.root = ROOT
+            for outcome, stage in (('waiting_ci', 'ci'), ('blocked_review', 'review')):
+                for repo in module.REPOS:
+                    with self.q.db:
+                        self.q.event(repo, 123, outcome, 'Queue update')
+                self.q.flush_events()
+                tasks = json.loads((board_root / 'boards/carr-v5.json').read_text())['tasks']
+                for card in ('pr-123', 'app-pr-123', 'factory-pr-123'):
+                    self.assertEqual({key: tasks[card][key] for key in metadata}, metadata)
+                    self.assertEqual(tasks[card]['stage'], stage)
+                    self.assertEqual(tasks[card]['note'], f'Merge queue: {outcome}. Queue update')
+            self.assertEqual(self.q.db.execute('SELECT COUNT(*) FROM events WHERE published=1').fetchone()[0], 6)
+
     def test_board_stderr_survives_retry_exhaustion_and_restart(self):
         script = self.root / 'tools/progress_board.py'
         script.write_text("import sys\nprint('board rejected: missing executor', file=sys.stderr)\nsys.exit(1)\n")
