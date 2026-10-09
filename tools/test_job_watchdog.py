@@ -953,6 +953,46 @@ class RunnerTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_scheduled_drift_recovery_reads_loop_envelope(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        c["actions"]["file_defects"] = False
+        for status in ("open", "done", "dropped"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                effects = w.Effects(root, c)
+                f = w.finding("scheduled_job_drift", "synthetic-schedule", "schedule missing", c)
+                w.reconcile(root, c, [f], effects, 100)
+                path = root / c["paths"]["findings"]
+                w.append(path, {"key": f["key"], "loop_id": "synthetic-loop"})
+                calls = []
+                def record(argv, config):
+                    verb, payload = argv[2], json.loads(argv[3])
+                    calls.append((verb, payload))
+                    if verb == "read-loop":
+                        self.assertEqual(payload, {"loop_id": "synthetic-loop"})
+                        return "local-verb identity -> test actor\n" + json.dumps({
+                            "loop": {"loop_id": "synthetic-loop", "version": 7, "status": status},
+                            "amended": False, "amendments": []})
+                    self.assertEqual(verb, "close-loop")
+                    return json.dumps({"ok": True})
+                with patch.object(w, "command", side_effect=record):
+                    recovered = w.reconcile(root, c, [], effects, 200)
+                    w.reconcile(root, c, [], effects, 300)
+                self.assertEqual(recovered, [])
+                self.assertEqual(w.read_latest(path)[f["key"]]["cleared_at"], w.stamp(200))
+                self.assertEqual([verb for verb, _ in calls],
+                                 ["read-loop", "close-loop"] if status == "open" else ["read-loop"])
+                if status == "open":
+                    closed = calls[1][1]
+                    self.assertEqual(closed["loop_id"], "synthetic-loop")
+                    self.assertEqual(closed["base_version"], 7)
+                    self.assertEqual(closed["resolution"], "done")
+                    self.assertEqual(closed["idempotency_key"], "scheduled-jobs-clear:synthetic-loop")
+                board = json.loads((root / "out/boards/carr-v5.json").read_text())
+                self.assertEqual(board["tasks"][effects.card(f)]["status"], "done")
+
     def test_fixer_uses_verified_model_room_desk_and_agent_runner(self):
         import job_watchdog as w
         from unittest.mock import patch
