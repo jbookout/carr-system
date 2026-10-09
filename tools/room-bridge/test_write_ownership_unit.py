@@ -75,6 +75,24 @@ class OwnershipTests(unittest.TestCase):
             run.assert_not_called()
         self.assertFalse(self.results.exists())
 
+    def test_open_pr_scan_runs_outside_the_ledger_lock(self):
+        # The scan paginates every open PR's files at ~2 s per gh call; holding
+        # the ledger lock across it refused every other desk for minutes.
+        observed = []
+        def scan(cwd):
+            with open(str(self.ledger) + '.lock', 'a') as lock:
+                try:
+                    write_ownership.fcntl.flock(lock, write_ownership.fcntl.LOCK_EX | write_ownership.fcntl.LOCK_NB)
+                    write_ownership.fcntl.flock(lock, write_ownership.fcntl.LOCK_UN)
+                    observed.append('free')
+                except BlockingIOError:
+                    observed.append('held')
+            return ('owner/repo', [])
+        with patch('dispatch.write_ownership.open_prs', side_effect=scan), \
+             patch.object(dispatch, '_to_codex', side_effect=self.completed):
+            self.send(writes=['tools/*.py'])
+        self.assertEqual(observed, ['free'])
+
     def test_inflight_overlap_catches_not_yet_created_paths(self):
         self.active(writes=['tools/new-*.py'])
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
