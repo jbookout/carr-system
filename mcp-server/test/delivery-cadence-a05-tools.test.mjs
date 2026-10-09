@@ -281,6 +281,17 @@ async function backdateOnlyReceipt(client, receiptId) {
     "alter table ops.v5_a05_cadence_receipt enable trigger v5_a05_cadence_receipt_immutable");
 }
 
+// A subject with no receipt reads no_receipt_on_record only until 14 days
+// after migration 0617 was applied, then missed (review finding 3). The
+// baseline schema stamps that date, so the expectation follows the database
+// rather than assuming the migration is young.
+async function neverReceiptedStatus(client) {
+  const { rows: [row] } = await client.query(
+    `select clock_timestamp() > applied_at + interval '14 days' as expired
+       from public.schema_migrations where filename = '0617_delivery_cadence_a05.sql'`);
+  return row?.expired ? "missed" : "no_receipt_on_record";
+}
+
 test("V5A05-READER-ROUTE-DB: cadence-status is refused on the carr_reader route and answers on the writer read-only route", async t => {
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
@@ -301,7 +312,7 @@ test("V5A05-READER-ROUTE-DB: cadence-status is refused on the carr_reader route 
   assert.equal(route, "writer_read_only");
   const status = await onRoute(client, route, () =>
     verb.handler(wrap(client), SYSTEM_ACTOR(joe.id), subject));
-  assert.equal(status.status, "no_receipt_on_record");
+  assert.equal(status.status, await neverReceiptedStatus(client));
   assert.equal(status.interval_days, 14);
 });
 
@@ -317,7 +328,7 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   const read = () => onRoute(client, "writer_read_only", () =>
     verbs["cadence-status"].handler(wrap(client), PARTNER_ACTOR(joe.id), subject));
 
-  assert.equal((await read()).status, "no_receipt_on_record");
+  assert.equal((await read()).status, await neverReceiptedStatus(client));
 
   const receiptArgs = { idempotency_key: randomUUID(), ...subject };
   const recorded = await dispatched(client, () =>
