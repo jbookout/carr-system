@@ -2304,12 +2304,15 @@ def add_v1_cards(state: dict[str, Any], discovered: dict) -> bool:
     return changed
 
 
-def reconcile_state(state: dict[str, Any], fetched: dict, at: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Cleanup plan on a copy: drop watchdog cards, fold duplicate PR cards, then
+def reconcile_state(state: dict[str, Any], fetched: dict, at: str,
+                    preserved_cards: set[str] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Cleanup plan on a copy: drop unprotected watchdog cards, fold duplicate PR cards, then
     apply the scheduled sync rule. GitHub read failures keep cards and fail the check."""
     result = copy.deepcopy(state)
     tasks = result.setdefault("tasks", {})
-    removed = {key: tasks.pop(key) for key in list(tasks) if key.startswith("wd-")}
+    preserved_cards = preserved_cards or set()
+    removed = {key: tasks.pop(key) for key in list(tasks)
+               if key.startswith("wd-") and key not in preserved_cards}
     folds = {}
     for task_id in list(tasks):
         task = tasks[task_id]
@@ -2372,7 +2375,17 @@ def command_reconcile(args: argparse.Namespace) -> None:
             fetched.update(discover_v1())
         except RuntimeError as exc:
             discovery_error = str(exc)
-    proposed, report = reconcile_state(initial, fetched, stamp())
+    watchdog = repo_lib("job_watchdog")
+    config = watchdog.load_config(os.environ.get("CARR_WATCHDOG_CONFIG",
+                                                str(REPO_ROOT / "ops/config/job-watchdog.json")))
+    preserved_cards = set()
+    if os.environ.get("CARR_JOB_BOARD", config["board"]) == args.project:
+        root = board_dir().parent.parent
+        effects = watchdog.Effects(root, config)
+        findings = watchdog.read_latest(watchdog.path_at(root, config["paths"]["findings"]))
+        preserved_cards = {effects.card(finding) for finding in findings.values()
+                           if finding.get("kind") == "vendor_release_fetch_error" and not finding.get("cleared_at")}
+    proposed, report = reconcile_state(initial, fetched, stamp(), preserved_cards)
     if discovery_error:
         report["failures"].append({"card": "V1 discovery", "error": discovery_error})
         report["check_passed"] = False

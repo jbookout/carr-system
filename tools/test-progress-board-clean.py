@@ -33,9 +33,10 @@ class CleanupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "watchdog.json"
-            config_path.write_text(json.dumps(config))
+            config_path.write_text(json.dumps({**config, "board": "default-board"}))
             with patch.dict(os.environ, {"PROGRESS_BOARD_ROOT": str(root / "out"),
                                          "PROGRESS_BOARD_LOCAL_ONLY": "1",
+                                         "CARR_JOB_BOARD": "test",
                                          "CARR_WATCHDOG_CONFIG": str(config_path)}):
                 incident = watchdog.finding("vendor_release_fetch_error", "vendor:https://vendor.example/docs",
                                             "Vendor unavailable", config, url="https://vendor.example/docs")
@@ -56,6 +57,14 @@ class CleanupTests(unittest.TestCase):
                 stored = watchdog.read_latest(root / config["paths"]["findings"])[incident["key"]]
                 self.assertEqual(stored["loop_id"], "vendor-loop")
                 self.assertIsNone(stored["cleared_at"])
+                watchdog.append(root / config["paths"]["findings"],
+                                {"key": incident["key"], "cleared_at": AT.isoformat(), "recovery_reported": True})
+                with patch.object(board, "discover_v1", return_value={}), \
+                        patch.object(board, "refresh_and_publish"), contextlib.redirect_stdout(io.StringIO()):
+                    board.main(["reconcile", "test", "--apply"])
+                recovered = board.read_state("test")
+                self.assertEqual(recovered["tasks"], {})
+                self.assertEqual(set(recovered["reconcile_archive"][-1]["tasks"]), {vendor_card})
 
     def test_preview_removes_watchdog_folds_duplicates_and_retires_terminal_prs(self):
         state = {"project": "test", "tasks": {
