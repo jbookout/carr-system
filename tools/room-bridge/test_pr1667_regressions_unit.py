@@ -109,6 +109,40 @@ class ReviewRegressions(unittest.TestCase):
         self.assertEqual(failures, ['write_set_overlap'])
         self.assertTrue(released.is_set())
 
+    def test_claim_created_and_released_during_snapshot_still_refuses(self):
+        # PR 1681 review: B reserves, publishes and releases while A's PR scan
+        # is in flight, so A's snapshot misses B's PR and B is no longer held.
+        snapshot, resume = threading.Event(), threading.Event()
+        failures = []
+        def read(cwd):
+            snapshot.set()
+            self.assertTrue(resume.wait(3))
+            return 'owner/repo', []
+        def reserve_a():
+            try:
+                ownership.reserve({'msg_id': 'a', 'task': 'build'}, '.', ['src/a.py'])
+            except desks.DeskError as exc:
+                failures.append(exc.code)
+        with patch.object(ownership, 'open_prs', side_effect=read), \
+             patch.object(ownership, 'termination_evidence', return_value='terminated fixture'):
+            reader = threading.Thread(target=reserve_a)
+            reader.start()
+            self.assertTrue(snapshot.wait(3))
+            with patch.object(ownership, 'open_prs', return_value=('owner/repo', [])):
+                ownership.reserve({'msg_id': 'b', 'task': 'build'}, '.', ['src/a.py'])
+            ownership.release('b', reason='PR published')
+            resume.set()
+            reader.join(3)
+        self.assertEqual(failures, ['write_set_overlap'])
+
+    def test_claim_released_before_snapshot_does_not_block(self):
+        with patch.object(ownership, 'open_prs', return_value=('owner/repo', [])), \
+             patch.object(ownership, 'termination_evidence', return_value='terminated fixture'):
+            ownership.reserve({'msg_id': 'old', 'task': 'build'}, '.', ['src/a.py'])
+            ownership.release('old', reason='merged long ago')
+            row = ownership.reserve({'msg_id': 'new', 'task': 'build'}, '.', ['src/a.py'])
+        self.assertEqual(row['ownership_state'], 'held')
+
     def test_registry_migration_cannot_overwrite_thread_update(self):
         path = self.root / 'legacy.json'
         path.write_text(json.dumps({'desks': {'sol': {'kind': 'codex-session',
