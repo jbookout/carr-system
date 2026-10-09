@@ -321,6 +321,29 @@ class QueueTests(unittest.TestCase):
         self.assertGreaterEqual(len(sleeps), 2)
         self.assertGreaterEqual(starts[1] - starts[0], 2.0)
 
+    def test_shared_gh_spacing_waits_for_reserved_slot_when_wall_clock_lags(self):
+        q = module.Queue(self.state, self.root)
+        other = module.Queue(self.root / 'other-state', self.root)
+        self.addCleanup(q.db.close); self.addCleanup(other.db.close)
+        wall, monotonic, starts, sleeps = [100.0], [100.0], [], []
+        q.budget.clock = other.budget.clock = lambda: wall[0]
+        def sleep(seconds):
+            sleeps.append(seconds)
+            monotonic[0] += seconds
+            wall[0] += seconds / 2
+        def command(argv, **kwargs):
+            starts.append((wall[0], monotonic[0]))
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+            reserved_slot = json.loads(q.budget.path.read_text())[q.budget.shared]['next_start']
+            other.api('repos/example/repo')
+        self.assertGreaterEqual(starts[1][0], reserved_slot)
+        self.assertGreaterEqual(starts[1][1] - starts[0][1], 2.0)
+        self.assertGreaterEqual(len(sleeps), 2)
+
     def test_cancelled_mutation_retains_uncertainty_and_shared_cooldown(self):
         q = module.Queue(self.state, self.root)
         self.addCleanup(q.db.close)
