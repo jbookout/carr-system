@@ -2,19 +2,19 @@
   "adapter": {
     "adapter_id": "shared-conduct-classifier",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:1b209f91643229536266a946c4cb6bcc471d843f2de77585ab0d0ed043e72628",
+    "configuration_fingerprint": "sha256:3d93b01e5741f75aef6f9f75af6a6784cfd9b1ccfec83626fc0b4c5cd1cc27cf",
     "harness_id": "evals/context-hooks/conduct_eval.py",
-    "harness_version": "b342da3a721f6d64d8e9d4df4527257ef23629db2cb0c8cf9ca7a6e2f48f1216",
+    "harness_version": "426c2dfc16018853ca60eea892f8256132ce64e68c851ea21218052e28b4663e",
     "model_id": "deterministic-no-model",
     "native_session_ref": "01a11ec7-cb8a-7d50-8dee-5d2d31e73a7e",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
   "cases": {
-    "total": 584,
-    "train": 28,
+    "total": 586,
+    "train": 30,
     "test": 556,
-    "should_not_fire": 159,
+    "should_not_fire": 161,
     "sources": [
       "production_trace",
       "human_judged_hard_case",
@@ -84,25 +84,25 @@
       "function": "score"
     },
     "source": {
-      "evals/context-hooks/conduct_eval.py": "b342da3a721f6d64d8e9d4df4527257ef23629db2cb0c8cf9ca7a6e2f48f1216"
+      "evals/context-hooks/conduct_eval.py": "426c2dfc16018853ca60eea892f8256132ce64e68c851ea21218052e28b4663e"
     },
     "dependencies": {
-      "hooks/conduct_patterns.py": "710fbb5d07729d545f308531ccb75fdecac7f5a61494289814de9817aea00307",
-      "ops/conduct-gate-selftest.py": "b52712f9522a014dd89a8d58333ffc468b87fc585cd14331b725eec16375806b"
+      "hooks/conduct_patterns.py": "94b809545bc4ee22bf2e1f6f7fece782ba88c78f6334dd38b48283a92a5afb03",
+      "ops/conduct-gate-selftest.py": "f5272001877eee463920e095aa4118352ecb6f1a2c8a26deb4676e6b78a7dee9"
     },
     "expectations": {
-      "path": "evals/context-hooks/conduct-expectations.v2.json",
-      "version": "conduct-handoff-expectations/v2",
-      "sha256": "a933eeb93c8f173bfae619bef6d881a36990b5575fc8c89ef8325e8b9e5e29d1"
+      "path": "evals/context-hooks/conduct-expectations.v3.json",
+      "version": "conduct-handoff-expectations/v3",
+      "sha256": "ab52b5e8982d942e08ac3d7458cb4829d36e3bdad1dd2907f8a94f1725606bbb"
     },
     "cohorts": {
       "baseline": {
         "path": "evals/context-hooks/evidence/conduct-baseline.jsonl",
-        "sha256": "b0ac09728f08f8ab92c92c53fe69574a6ffe159cde2937dbd188e993070ec1b3"
+        "sha256": "3622c00722e4ff2ae8de7383ade8eae6a994a626b8eaf9a04148bbd819e3dc8d"
       },
       "candidate": {
         "path": "evals/context-hooks/evidence/conduct-candidate.jsonl",
-        "sha256": "bbf52d32a71cde5535e770e4fcca42a264fbb1e14113dd0e129b337d0519e932"
+        "sha256": "14cf24c52413129745c425207c7b57b62c7c4c060aee4e2f8ec628e509af1893"
       }
     }
   },

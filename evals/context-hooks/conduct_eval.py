@@ -95,8 +95,8 @@ def make_report():
     for label, action in itertools.product(['The button label is: ', 'The application offers to '],
                                           ['Open Terminal', 'Launch Terminal']):
         add(label + action + '.', False, 'test')
-    exp = {'version': 'conduct-handoff-expectations/v2', 'baseline_ref': BASE, 'cases': cases}
-    exp_path = HERE / 'conduct-expectations.v2.json'
+    exp = {'version': 'conduct-handoff-expectations/v3', 'baseline_ref': BASE, 'cases': cases}
+    exp_path = HERE / 'conduct-expectations.v3.json'
     exp_path.write_text(json.dumps(exp, indent=2) + '\n')
     arms = observe(exp)
     measured = score(exp, arms['baseline'], arms['candidate'])

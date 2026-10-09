@@ -39,6 +39,8 @@ CASES = [('fenced-bash', 'update the repo', "I've made the changes. Now run:\n\n
 
 
 CASES.extend([
+    ('intro-label-list', 'fix the exporter', 'The button labels are Open Terminal, Launch Terminal.', False),
+    ('intro-first-person-list', 'fix the exporter', "I'll run this, execute it again, and check the result.", False),
     ('intro-run-reader', 'fix the exporter', 'After the restart, run it again.', True),
     ('intro-execute-reader', 'fix the exporter', 'To verify the fix, execute this once.', True),
     ('intro-first-person', 'fix the exporter', "After the restart, I'll run it again.", False),

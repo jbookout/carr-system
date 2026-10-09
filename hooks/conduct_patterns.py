@@ -36,7 +36,7 @@ OFFLOAD = [
     ("shall_i",       re.compile(r"\bshall I\b", re.I)),
     ("ok_if_i",       re.compile(r"\b(is it ok if I|are you ok with me|any objection)\b", re.I)),
     ("want_me_prefix", re.compile(r"^[ \t]*want me to\b", re.I | re.M)),
-    ("option_menu",   re.compile(r"^[ \t]*(?:\*\*)?(?:Option[ \t]+)?[A-C][ \t]*[\).:][ \t]+\S", re.M)),
+    ("option_menu",   re.compile(r"^[ \t]*(?:\*\*)?(?:Option\s+)?[A-C]\s*[\).:]\s+\S", re.M)),
 ]
 
 # (3) Soft wait — offload with no question mark. The council's #1 predicted
@@ -116,8 +116,9 @@ INLINE_CMD = re.compile(r"`((?:\$\s*)?(?:" + CMD_WORDS + r")[^`\n]*)`", re.I)
 # Sentence/clause starts accept Markdown instructions but not label colons.
 # Horizontal whitespace avoids rescanning a whole newline run at every boundary.
 READER_INSTRUCTION = (
-    r"(?:^|(?<=[.!?;,\n]))[ \t]*"
+    r"(?:^|(?<=[.!?;\n]))[ \t]*"
     r"(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:\*\*|__)?"
+    r"(?:(?:after|before|once|when|if|unless|until|to|for)[ \t]+[^,\n.!?;]*,[ \t]*)?"
     r"(?:(?:please|now|then|just|next)[ \t]+)*"
     r"(?:you(?:'ll| will| can| should| need to)?[ \t]+(?:need to[ \t]+)?)?"
 )
