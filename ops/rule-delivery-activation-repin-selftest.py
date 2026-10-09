@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the retirement repin against PostgreSQL and the current overlay."""
+"""Exercise the sizing-rule and burst-control repins against PostgreSQL and the current overlay."""
 import importlib.util
 import os
 from pathlib import Path
@@ -15,30 +15,29 @@ from lib.disposable_pg_fixture import DisposablePostgres, postgres_fixture_group
 from lib.rule_delivery_activation import EXPECTED_IDS, load_validated
 
 
+FROM_IMPLEMENTATION_REF = "hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js"
+FROM_TEST_REF = "command:python3 hooks/gate-integrity.py --selftest"
+TO_IMPLEMENTATION_REF = "hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py"
+TO_TEST_REF = "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py"
+
+
 def main():
-    def only(pattern, why):
-        found = list(ROOT.glob(pattern))
-        assert len(found) == 1, why
-        return found[0].read_text()
-
-    def digest_in(text, name):
-        return re.search(rf"{name} constant text := '([0-9a-f]{{64}})'", text)[1]
-
-    retirement = only("migrations/[0-9][0-9][0-9][0-9]_repin_rule_delivery_activation_after_control_retirement.sql",
-                      "control retirement needs one forward activation repin")
-    burst = only("migrations/[0-9][0-9][0-9][0-9]_repin_rule_delivery_activation_after_*burst_guard_control.sql",
-                 "the burst-guard control registration needs one forward activation repin")
-    prior = (ROOT / "migrations/0772_repin_rule_delivery_activation_after_model_choice_rule.sql").read_text()
+    migrations = list(ROOT.glob("migrations/[0-9][0-9][0-9][0-9]_repin_rule_delivery_activation_after_sizing_rule.sql"))
+    assert len(migrations) == 1, "the sizing rule needs one forward activation repin"
+    repin = migrations[0].read_text()
+    contract_fields = (
+        "short_id", "expected_scope", "expected_pack", "from_control",
+        "from_enforcement_class", "from_implementation_ref", "from_test_ref",
+        "to_control", "to_enforcement_class", "to_implementation_ref", "to_test_ref",
+        "map_digest",
+    )
+    for field in contract_fields:
+        assert re.search(rf"\b{field}\b", repin), f"repin does not guard {field}"
+    prior = (ROOT / "migrations/0837_repin_rule_delivery_activation_after_control_retirement.sql").read_text()
+    old_digest = re.search(r"v_new constant text := '([0-9a-f]{64})'", prior)[1]
     _, overlay = load_validated()
-    # Each repin guards the digest the previous one produced; the chain must be
-    # unbroken and end at the digest the reviewed overlay now carries.
-    assert digest_in(retirement, "v_old") == re.search(r"v_new constant text := '([0-9a-f]{64})'", prior)[1]
-    assert digest_in(burst, "v_old") == digest_in(retirement, "v_new")
-    assert digest_in(burst, "v_new") == overlay["base_map_sha256"], "the repin chain must end at the reviewed overlay digest"
-    cases = [
-        (retirement, digest_in(retirement, "v_old"), digest_in(retirement, "v_new")),
-        (burst, digest_in(burst, "v_old"), digest_in(burst, "v_new")),
-    ]
+    new_digest = re.search(r"v_new constant text := '([0-9a-f]{64})'", repin)[1]
+    burst_repin = (ROOT / "migrations/0863_repin_rule_delivery_activation_after_github_burst_guard_control.sql").read_text()
     spec = importlib.util.spec_from_file_location("local_pg_ci", ROOT / "ops/local-pg-ci.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -63,18 +62,18 @@ def main():
             for name in ("rule_delivery_activation_target", "rule_delivery_policy"):
                 conn.execute(re.search(rf"CREATE TABLE ops\.{name}\b.*?;", schema, re.S)[0])
             conn.execute("insert into ops.rule_delivery_policy (mode) values ('enforced')")
-            for repin, old_digest, new_digest in cases:
-                conn.execute("delete from ops.rule_delivery_activation_target")
-                for target in overlay["targets"]:
-                    conn.execute("""insert into ops.rule_delivery_activation_target values
-                      (%s,%s,%s,%s,%s,'boot-ref','boot-test',%s,%s,'pack-ref','pack-test',%s)""",
-                      (target["short_id"], target["scope"], target["pack"], target["from_control"],
-                       target["from_enforcement_class"], target["to_control"],
-                       target["to_enforcement_class"], old_digest))
+            for target in overlay["targets"]:
+                conn.execute("""insert into ops.rule_delivery_activation_target values
+                  (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                  (target["short_id"], target["scope"], target["pack"], target["from_control"],
+                   target["from_enforcement_class"], FROM_IMPLEMENTATION_REF, FROM_TEST_REF,
+                   target["to_control"], target["to_enforcement_class"], TO_IMPLEMENTATION_REF,
+                   TO_TEST_REF, old_digest))
 
-                def rows():
-                    return conn.execute("select * from ops.rule_delivery_activation_target order by short_id").fetchall()
+            def rows():
+                return conn.execute("select * from ops.rule_delivery_activation_target order by short_id").fetchall()
 
+            def exercise_repin(repin, old_digest, new_digest, guard_contract):
                 baseline = rows()
                 conn.execute(repin, prepare=False)
                 assert rows() == [(*row[:-1], new_digest) for row in baseline], "repin must change only the digest"
@@ -100,7 +99,41 @@ def main():
                             raise AssertionError(f"repin accepted {label}")
                         assert rows() == before, f"refused {label} changed a target"
                     print(f"PASS {label} refuses atomically")
+
+                if guard_contract:
+                    contract_mutations = (
+                        ("expected_scope", "dell"),
+                        ("expected_pack", "wrong-pack"),
+                        ("from_control", "wrong-from-control"),
+                        ("from_enforcement_class", "wrong-from-class"),
+                        ("from_implementation_ref", "wrong-from-implementation"),
+                        ("from_test_ref", "wrong-from-test"),
+                        ("to_control", "wrong-to-control"),
+                        ("to_enforcement_class", "wrong-to-class"),
+                        ("to_implementation_ref", "wrong-to-implementation"),
+                        ("to_test_ref", "wrong-to-test"),
+                    )
+                    for column, wrong_value in contract_mutations:
+                        with conn.transaction(force_rollback=True):
+                            conn.execute("update ops.rule_delivery_activation_target set map_digest=%s", (old_digest,))
+                            conn.execute(
+                                f"update ops.rule_delivery_activation_target set {column}=%s where short_id='25fcddee'",
+                                (wrong_value,),
+                            )
+                            before = rows()
+                            try:
+                                with conn.transaction():
+                                    conn.execute(repin, prepare=False)
+                            except psycopg.errors.RaiseException as error:
+                                assert "REFUSED" in str(error), str(error)
+                            else:
+                                raise AssertionError(f"repin accepted changed {column}")
+                            assert rows() == before, f"refused changed {column} changed a target"
+                        print(f"PASS changed {column} refuses atomically")
                 assert set(row[0] for row in rows()) == EXPECTED_IDS
+            exercise_repin(repin, old_digest, new_digest, True)
+            exercise_repin(burst_repin, new_digest, overlay["base_map_sha256"], False)
+            print("PASS sizing-rule output feeds the burst-control repin without changing contracts or mode")
     return 0
 
 

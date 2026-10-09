@@ -52,7 +52,7 @@ NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
 PID_SOCKET = re.compile(r"^\d+\.sock$")
 
-KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live", "flash-local", "grok-cli")
+KINDS = ("claude-session", "claude-desktop", "claude-remote", "codex-session", "codex-live", "flash-local", "grok-cli")
 # the old name for the Codex kind, before it carried a thread
 KIND_ALIASES = {"codex-exec": "codex-session"}
 EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
@@ -132,7 +132,8 @@ def refuse_pid_socket(sock: str) -> None:
 def _normalize_effort(kind: str, effort: str | None) -> str | None:
     if effort is None:
         return None
-    if effort not in EFFORT_CHOICES:
+    choices = ("low", "medium", "high", "xhigh", "max") if kind == "claude-remote" else EFFORT_CHOICES
+    if effort not in choices:
         raise DeskError(
             "bad_effort",
             "reasoning effort must be one of minimal, low, medium, high, xhigh",
@@ -144,6 +145,22 @@ def _normalize_effort(kind: str, effort: str | None) -> str | None:
             "chooses its own model and reasoning profile",
         )
     return effort
+
+
+def remote_posture(entry: dict) -> None:
+    host = entry.get("host")
+    if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:@[A-Za-z0-9][A-Za-z0-9_.-]*)?", host):
+        raise DeskError("bad_remote_host", "remote desk needs an SSH host or user@host, never an option")
+    model = entry.get("model")
+    if not isinstance(model, str) or not re.fullmatch(r"claude-[a-z0-9]+(?:-[a-z0-9]+)+", model):
+        raise DeskError("missing_model", "remote desk needs a full Claude model ID, never an alias")
+    if not entry.get("effort"):
+        raise DeskError("missing_effort", "remote desk needs an explicit reasoning effort")
+    _normalize_effort("claude-remote", entry["effort"])
+    dispatched_permission_mode(entry.get("permission_mode"))
+    timeout = entry.get("timeout_s")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
+        raise DeskError("bad_remote_timeout", "remote desk deadline must be greater than 0 and at most 3600 seconds")
 
 
 class Registry:
@@ -176,6 +193,8 @@ class Registry:
         sandbox: str | None = None,
         add_dirs: list[str] | None = None,
         permission_mode: str | None = None,
+        host: str | None = None,
+        timeout_s: float = 900,
     ) -> dict:
         if not NAME_OK.match(name or ""):
             raise DeskError(
@@ -214,6 +233,10 @@ class Registry:
                 # session's authority or leaving a hidden prompt waiting.
                 "permission_mode": dispatched_permission_mode(permission_mode),
             }
+        elif kind == "claude-remote":
+            entry = {"kind": kind, "host": host, "model": model, "effort": effort,
+                     "timeout_s": timeout_s, "permission_mode": dispatched_permission_mode(permission_mode)}
+            remote_posture(entry)
         elif kind == "grok-cli":
             if model != "grok-4.7" or effort != "high" or sandbox != "read-only":
                 raise DeskError("bad_grok_posture", "Grok requires grok-4.7/high/read-only")
@@ -281,6 +304,8 @@ class Registry:
         entry = {**entry, "kind": kind}
         if kind not in KINDS:
             raise DeskError("bad_kind", f"desk {name!r} has kind {kind!r}")
+        if kind == "claude-remote":
+            remote_posture(entry)
         if kind in ("claude-session", "claude-desktop"):
             # Recheck edited/legacy entries at the dispatch boundary.
             entry["permission_mode"] = dispatched_permission_mode(entry.get("permission_mode"))

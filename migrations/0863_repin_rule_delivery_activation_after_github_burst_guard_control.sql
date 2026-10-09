@@ -3,11 +3,11 @@
 -- digest (ops/config/rule-enforcement-map.json gains one control_catalog entry;
 -- no rule text, delivery mode, approval or rule-to-control binding moves). The
 -- pack cutover contracts stay the same; move their identity forward without
--- changing anything else, exactly as 0837 did for the stale_claim retirement.
+-- changing anything else, after 0851 repinned them for the sizing rule.
 do $rule_delivery_0863$
 declare
-  v_old constant text := 'b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308';
-  v_new constant text := '46ef9935803244ea4b64f5e528148b89199995e7fc3c24323c4de8b2c8474921';
+  v_old constant text := '2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4';
+  v_new constant text := 'c7b9c8a4e2d4f7b3a6a161a1959f346501746d49d15c74a57272df307bc72842';
   v_ids constant text[] := array[
     '113b3833','25fcddee','3fa17fa0','49533583',
     '557838a5','57d13061','72e06bdf','c66dc739'

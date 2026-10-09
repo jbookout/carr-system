@@ -53,9 +53,11 @@ def check(label: str, fn) -> None:
 class FakeAppServer:
     """Speaks the server half: upgrade, then answer the four messages."""
 
-    def __init__(self, path: str, answer: str = "the live seat answered"):
+    def __init__(self, path: str, answer: str = "the live seat answered",
+                 silent_turn: bool = False):
         self.path = path
         self.answer = answer
+        self.silent_turn = silent_turn
         self.seen: list[dict] = []
         try:
             os.unlink(path)
@@ -157,6 +159,8 @@ class FakeAppServer:
                     self._send(conn, {"id": msg["id"], "result": {"thread": {"id": tid}}})
                 elif method == "turn/start":
                     self._send(conn, {"id": msg["id"], "result": {"turn": {"id": "turn-1"}}})
+                    if self.silent_turn:
+                        continue
                     self._send(conn, {"method": "item/completed", "params": {
                         "item": {"type": "agentMessage", "text": self.answer}}})
 
@@ -257,6 +261,67 @@ def main() -> int:
 
     check("a codex-live desk whose app-server is gone is refused",
           a_dead_app_server_is_refused)
+
+    def a_silent_seat_stops_at_the_callers_limit():
+        """PR 1660 re-review: a queued codex-live job ignored the claim-scoped
+        limit, and each read could wait the full per-read timeout. A seat that
+        accepts but never answers must stop at the caller's whole-call limit."""
+        import time as _time
+        quiet = str(root / "quiet.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(quiet)
+        server.listen(8)
+        held: list = []
+        stop = threading.Event()
+
+        def accept_and_hold():
+            server.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    conn, _ = server.accept()
+                    held.append(conn)
+                except OSError:
+                    continue
+
+        t = threading.Thread(target=accept_and_hold, daemon=True)
+        t.start()
+        try:
+            reg.register("cx-quiet", "codex-live", socket=quiet, cwd=str(root),
+                         model="gpt-5.1-codex-mini", effort="medium")
+            began = _time.monotonic()
+            row = dispatch.dispatch("cx-quiet", "do the thing", registry=reg,
+                                    results_path=results, codex_timeout_s=1)
+            took = _time.monotonic() - began
+            assert row["status"] == "timed_out", row
+            assert took < 10, took
+        finally:
+            stop.set()
+            t.join(timeout=2)
+            for conn in held:
+                conn.close()
+            server.close()
+
+    check("a silent live Codex seat stops at the caller's whole-call limit",
+          a_silent_seat_stops_at_the_callers_limit)
+
+    def a_turn_that_times_out_keeps_its_new_thread():
+        """PR 1660 re-review: a timeout after thread/start returned the input
+        thread id (None for a fresh desk), so a retry opened a second thread."""
+        stalled = str(root / "stalled.sock")
+        srv = FakeAppServer(stalled, silent_turn=True)
+        try:
+            reg.register("cx-stall", "codex-live", socket=stalled, cwd=str(root),
+                         model="gpt-5.1-codex-mini", effort="medium")
+            row = dispatch.dispatch("cx-stall", "do the thing", registry=reg,
+                                    results_path=results, codex_timeout_s=1)
+            assert row["status"] == "timed_out", row
+            assert row["thread_id"] == "thread-live-0001", row
+            assert reg.entries()["cx-stall"].get("thread_id") == "thread-live-0001", reg.entries()["cx-stall"]
+        finally:
+            srv.close()
+
+    check("a live Codex turn that times out keeps the thread it started",
+          a_turn_that_times_out_keeps_its_new_thread)
 
     tmp.cleanup()
     print()

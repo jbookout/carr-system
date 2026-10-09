@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import shutil
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -64,6 +65,8 @@ def make_fixture_map(entries):
     tmp = tempfile.mkdtemp(prefix="rule-shape-gate-selftest-")
     os.makedirs(os.path.join(tmp, "hooks"))
     os.makedirs(os.path.join(tmp, "ops", "config"))
+    os.makedirs(os.path.join(tmp, "lib"), exist_ok=True)
+    shutil.copyfile(os.path.join(REPO, "lib", "hook_runtime.py"), os.path.join(tmp, "lib", "hook_runtime.py"))
     with open(os.path.join(tmp, "hooks", "rule-shape-gate.py"), "w") as fh:
         fh.write(open(HOOK).read())
     with open(os.path.join(tmp, "hooks", "hook_meter.py"), "w") as fh:
