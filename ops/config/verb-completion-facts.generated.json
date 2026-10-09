@@ -461,6 +461,18 @@
     "record-board-answer-applied": {
       "completionClass": "write"
     },
+    "list-research-sites": {
+      "completionClass": "read"
+    },
+    "add-research-site": {
+      "completionClass": "write"
+    },
+    "remove-research-site": {
+      "completionClass": "write"
+    },
+    "correct-party-identity": {
+      "completionClass": "write"
+    },
     "schedule-board": {
       "completionClass": "read"
     },
@@ -596,6 +608,9 @@
     "read-session-identity": {
       "completionClass": "read"
     },
+    "read-doc-outcome-cards": {
+      "completionClass": "read"
+    },
     "read-dispatch-history": {
       "completionClass": "read"
     },
@@ -604,9 +619,6 @@
     },
     "acknowledge-dispatch": {
       "completionClass": "write"
-    },
-    "read-doc-outcome-cards": {
-      "completionClass": "read"
     },
     "capability-program": {
       "completionClass": "read"

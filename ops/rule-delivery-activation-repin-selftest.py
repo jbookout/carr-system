@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the retirement repin against PostgreSQL and the current overlay."""
+"""Exercise the sizing-rule repin against PostgreSQL and the current overlay."""
 import importlib.util
 import os
 from pathlib import Path
@@ -15,11 +15,25 @@ from lib.disposable_pg_fixture import DisposablePostgres, postgres_fixture_group
 from lib.rule_delivery_activation import EXPECTED_IDS, load_validated
 
 
+FROM_IMPLEMENTATION_REF = "hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js"
+FROM_TEST_REF = "command:python3 hooks/gate-integrity.py --selftest"
+TO_IMPLEMENTATION_REF = "hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py"
+TO_TEST_REF = "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py"
+
+
 def main():
-    migrations = list(ROOT.glob("migrations/[0-9][0-9][0-9][0-9]_repin_rule_delivery_activation_after_control_retirement.sql"))
-    assert len(migrations) == 1, "control retirement needs one forward activation repin"
+    migrations = list(ROOT.glob("migrations/[0-9][0-9][0-9][0-9]_repin_rule_delivery_activation_after_sizing_rule.sql"))
+    assert len(migrations) == 1, "the sizing rule needs one forward activation repin"
     repin = migrations[0].read_text()
-    prior = (ROOT / "migrations/0772_repin_rule_delivery_activation_after_model_choice_rule.sql").read_text()
+    contract_fields = (
+        "short_id", "expected_scope", "expected_pack", "from_control",
+        "from_enforcement_class", "from_implementation_ref", "from_test_ref",
+        "to_control", "to_enforcement_class", "to_implementation_ref", "to_test_ref",
+        "map_digest",
+    )
+    for field in contract_fields:
+        assert re.search(rf"\b{field}\b", repin), f"repin does not guard {field}"
+    prior = (ROOT / "migrations/0837_repin_rule_delivery_activation_after_control_retirement.sql").read_text()
     old_digest = re.search(r"v_new constant text := '([0-9a-f]{64})'", prior)[1]
     _, overlay = load_validated()
     new_digest = overlay["base_map_sha256"]
@@ -49,10 +63,11 @@ def main():
             conn.execute("insert into ops.rule_delivery_policy (mode) values ('enforced')")
             for target in overlay["targets"]:
                 conn.execute("""insert into ops.rule_delivery_activation_target values
-                  (%s,%s,%s,%s,%s,'boot-ref','boot-test',%s,%s,'pack-ref','pack-test',%s)""",
+                  (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                   (target["short_id"], target["scope"], target["pack"], target["from_control"],
-                   target["from_enforcement_class"], target["to_control"],
-                   target["to_enforcement_class"], old_digest))
+                   target["from_enforcement_class"], FROM_IMPLEMENTATION_REF, FROM_TEST_REF,
+                   target["to_control"], target["to_enforcement_class"], TO_IMPLEMENTATION_REF,
+                   TO_TEST_REF, old_digest))
 
             def rows():
                 return conn.execute("select * from ops.rule_delivery_activation_target order by short_id").fetchall()
@@ -82,6 +97,36 @@ def main():
                         raise AssertionError(f"repin accepted {label}")
                     assert rows() == before, f"refused {label} changed a target"
                 print(f"PASS {label} refuses atomically")
+
+            contract_mutations = (
+                ("expected_scope", "dell"),
+                ("expected_pack", "wrong-pack"),
+                ("from_control", "wrong-from-control"),
+                ("from_enforcement_class", "wrong-from-class"),
+                ("from_implementation_ref", "wrong-from-implementation"),
+                ("from_test_ref", "wrong-from-test"),
+                ("to_control", "wrong-to-control"),
+                ("to_enforcement_class", "wrong-to-class"),
+                ("to_implementation_ref", "wrong-to-implementation"),
+                ("to_test_ref", "wrong-to-test"),
+            )
+            for column, wrong_value in contract_mutations:
+                with conn.transaction(force_rollback=True):
+                    conn.execute("update ops.rule_delivery_activation_target set map_digest=%s", (old_digest,))
+                    conn.execute(
+                        f"update ops.rule_delivery_activation_target set {column}=%s where short_id='25fcddee'",
+                        (wrong_value,),
+                    )
+                    before = rows()
+                    try:
+                        with conn.transaction():
+                            conn.execute(repin, prepare=False)
+                    except psycopg.errors.RaiseException as error:
+                        assert "REFUSED" in str(error), str(error)
+                    else:
+                        raise AssertionError(f"repin accepted changed {column}")
+                    assert rows() == before, f"refused changed {column} changed a target"
+                print(f"PASS changed {column} refuses atomically")
             assert set(row[0] for row in rows()) == EXPECTED_IDS
     return 0
 

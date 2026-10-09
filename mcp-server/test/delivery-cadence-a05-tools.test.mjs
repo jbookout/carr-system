@@ -204,6 +204,26 @@ async function joeAndDell(client) {
   return { joe, dell };
 }
 
+async function setActivationAge(t, pg, client, days) {
+  const filename = "0617_delivery_cadence_a05.sql";
+  const prior = (await client.query(
+    "select applied_at::text as applied_at from public.schema_migrations where filename=$1",
+    [filename])).rows[0];
+  assert.ok(prior, "the cadence activation migration must be recorded");
+  t.after(async () => {
+    const cleanup = await connect(pg);
+    try {
+      await cleanup.query("update public.schema_migrations set applied_at=$1::timestamptz where filename=$2",
+        [prior.applied_at, filename]);
+    } finally {
+      await cleanup.end();
+    }
+  });
+  await client.query(
+    "update public.schema_migrations set applied_at=clock_timestamp()-$1*interval '1 day' where filename=$2",
+    [days, filename]);
+}
+
 // Every incident these proofs seed is removed once the file finishes: the
 // migration class shares one database, and program3-incident-gate.py counts
 // every open production incident, so a leftover row fails a later gate.
@@ -285,6 +305,7 @@ test("V5A05-READER-ROUTE-DB: cadence-status is refused on the carr_reader route 
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
   const client = await connect(pg);
+  await setActivationAge(t, pg, client, 0);
   t.after(() => client.end().catch(() => {}));
   const { joe } = await joeAndDell(client);
   const subject = { subject_type: "engineering_program", subject_ref: `v5a05-route-${randomUUID()}` };
@@ -309,6 +330,7 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
   const client = await connect(pg);
+  await setActivationAge(t, pg, client, 0);
   t.after(() => client.end().catch(() => {}));
   const { joe } = await joeAndDell(client);
 
@@ -346,6 +368,22 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
     verbs["record-cadence-receipt"].handler(wrap(client), PARTNER_ACTOR(joe.id),
       { idempotency_key: randomUUID(), ...subject }));
   assert.equal(replanned.replan_of, recorded.receipt_id);
+});
+
+test("V5A05-ACTIVATION-WINDOW: no receipt after the activation interval is a missed cadence", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  await setActivationAge(t, pg, client, 20);
+  const { joe } = await joeAndDell(client);
+  const subject = { subject_type: "engineering_program", subject_ref: `v5a05-aged-${randomUUID()}` };
+  const status = await onRoute(client, "writer_read_only", () =>
+    a05()["cadence-status"].handler(wrap(client), PARTNER_ACTOR(joe.id), subject));
+  assert.equal(status.status, "missed");
+  assert.equal(status.reason_id, "cadence_interval_exceeded_since_activation");
+  assert.equal(status.last_receipt_issued_at, null);
+  assert.equal(status.requires_replan, true);
 });
 
 test("V5A05-CADENCE-MISS-VERIFIED: the server re-reads the cadence status; a miss the server cannot see is refused", async t => {

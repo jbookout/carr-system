@@ -1,4 +1,4 @@
-import { RESEARCH_EVIDENCE_SCHEMA, UUID_RE, config, fmtPhoneUS, researchEvidence, resolvePartyByRef, resolveSubject, stampResearch, validateLinkKind } from "./verb-support.js";
+import { RESEARCH_EVIDENCE_SCHEMA, UUID_RE, config, fmtPhoneUS, researchEvidence, resolvePartyByRef, resolvePartyForWrite, resolveSubject, stampResearch, validateLinkKind } from "./verb-support.js";
 import { ToolError } from "./tool-error.js";
 import { versionGuard, withEnvelope, writeEvent } from "./versioned-write.js";
 import { dealEvidenceEntries, mergeRelationshipFields, requireRelationshipPartner, trustedOverride } from "./vendor-relationship.js";
@@ -504,7 +504,7 @@ export function partyTools() {
     "update-party-contact": {
       discoveryOrder: 45,
       write: true,
-      description: "Promote a VERIFIED contact fact onto a party: phone (office), cell (mobile), email, title, city, county — CONTACT FACTS ONLY. Identity fields (name, org, npi, specialty) are deliberately out of reach: a discrepancy there goes through record-finding's proposes_correction and is applied by the owning partner, never by this verb (rule 5d44d3f3). source is REQUIRED on every call — provenance is binding, and the usual value is the record-finding row or thread being promoted. Accepts any ref (P-####, V-/C-/L-/T-, or a name); a role ref resolves to the PERSON under it, and a merged party hops to its survivor (reported in the result). base_version is the PARTY's version, from a fresh read. Placeholder guard: a CARR agent's own number or any carr.us address in a client/vendor contact field is a placeholder, never data — refused, not stored.",
+      description: "Promote a VERIFIED contact fact onto a party: phone (office), cell (mobile), email, title, city, county — CONTACT FACTS ONLY. Identity fields are out of reach here: name, firm (org) and state are corrected through correct-party-identity, which records the prior value and never renames a shared org row. source is REQUIRED on every call — provenance is binding, and the usual value is the record-finding row or thread being promoted. Accepts any ref (P-####, V-/C-/L-/T-, or a name); a role ref resolves to the PERSON under it, and a merged party hops to its survivor (reported in the result). base_version is the PARTY's version, from a fresh read. Placeholder guard: a CARR agent's own number or any carr.us address in a client/vendor contact field is a placeholder, never data — refused, not stored.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" },
         party: { type: "string", description: "P-#### ref, a role ref (V-/C-/L-/T-), or a name" },
@@ -519,28 +519,12 @@ export function partyTools() {
       handler: async (c, actor, args) => withEnvelope(c, actor, "update-party-contact", args, async () => {
         if (!args.source || !args.source.trim())
           throw new ToolError({ error: "missing_source", hint: "a contact fact without provenance is a rumour; say where it came from" });
-        const s = await resolveSubject(c, args.party);
-        if (s.type === "deal")
-          throw new ToolError({ error: "not_a_party", hint: "a deal has no contact fields; pass the person or their role ref" });
-        let partyId;
-        if (s.type === "party") partyId = s.id;
-        else {
-          const r = await c.query(
-            "select party_id from v_ref_index where subject_type=$1 and subject_id=$2", [s.type, s.id]);
-          if (!r.rows.length || !r.rows[0].party_id)
-            throw new ToolError({ error: "no_party_under_ref", resolved: s });
-          partyId = r.rows[0].party_id;
-        }
-        // A merged party is a pointer; writing to a tombstone strands the fact.
-        const hop = await c.query("select merged_into from party where id=$1", [partyId]);
-        if (!hop.rows.length) throw new ToolError({ error: "not_found", table: "party", id: partyId });
-        const hopped = hop.rows[0].merged_into !== null;
-        if (hopped) partyId = hop.rows[0].merged_into;
+        const { partyId, hopped } = await resolvePartyForWrite(c, args.party);
 
         const allowed = ["phone","cell","email","title","city","county"];
         const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
         if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed,
-          hint: "contact facts only; identity corrections go through record-finding proposes_correction" });
+          hint: "contact facts only; name, org and state corrections go through correct-party-identity" });
 
         // Placeholder rule 54e2bcb9: an agent's own details standing in for a contact
         // nobody had. Stored, they read as enriched while being emptier than a blank.

@@ -1,7 +1,10 @@
+import { researchSiteTools } from "./research-sites.js";
+import { partyIdentityTools } from "./party-identity.js";
+import { resolvePartyForWrite } from "./verb-support.js";
 import { TOOLS, registerTools } from "./tool-registry.js";
 import { invoiceTrackerTools } from "./invoice-tracker.js";
 import { ToolError } from "./tool-error.js";
-import { withEnvelope, writeEvent } from "./versioned-write.js";
+import { versionGuard, withEnvelope, writeEvent } from "./versioned-write.js";
 import { doctrineTools } from "./doctrine.js";
 import { systemWorkTools } from "./system-work-census.v5.js";
 import { boardAnswerTools } from "./board-answers.js";
@@ -101,6 +104,8 @@ registerTools(invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }), "mcp
 registerTools(doctrineTools({ withEnvelope, writeEvent, ToolError }), "mcp-server/src/doctrine.js");
 registerTools(systemWorkTools(), "mcp-server/src/system-work-census.v5.js");
 registerTools(boardAnswerTools({ withEnvelope, writeEvent }), "mcp-server/src/board-answers.js");
+registerTools(researchSiteTools({ withEnvelope, writeEvent }), "mcp-server/src/research-sites.js");
+registerTools(partyIdentityTools({ withEnvelope, writeEvent, versionGuard, resolvePartyForWrite }), "mcp-server/src/party-identity.js");
 registerTools(scheduleBoardTools(), "mcp-server/src/schedule-board.js");
 
 // WR-AI-006: curation proposals are machine-callable; approval and retirement

@@ -133,6 +133,25 @@ export function fmtPhoneUS(v) {
   return `(${t.slice(0, 3)}) ${t.slice(3, 6)}-${t.slice(6)}`;
 }
 
+export async function resolvePartyForWrite(c, ref) {
+  const s = await resolveSubject(c, ref);
+  if (s.type === "deal")
+    throw new ToolError({ error: "not_a_party", hint: "a deal has no party fields; pass the person or their role ref" });
+  let partyId;
+  if (s.type === "party") partyId = s.id;
+  else {
+    const r = await c.query(
+      "select party_id from v_ref_index where subject_type=$1 and subject_id=$2", [s.type, s.id]);
+    if (!r.rows.length || !r.rows[0].party_id)
+      throw new ToolError({ error: "no_party_under_ref", resolved: s });
+    partyId = r.rows[0].party_id;
+  }
+  const hop = await c.query("select merged_into from party where id=$1", [partyId]);
+  if (!hop.rows.length) throw new ToolError({ error: "not_found", table: "party", id: partyId });
+  const hopped = hop.rows[0].merged_into !== null;
+  return { partyId: hopped ? hop.rows[0].merged_into : partyId, hopped };
+}
+
 export async function resolveSubject(client, ref) {
   // Accepts 'L-204', 'C-127', 'V-CPA-006', a deal name, or a party/practice name.
   //

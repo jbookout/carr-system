@@ -101,18 +101,20 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # PR validation supersedes by workflow + PR. Non-PR verdicts are independent:
-  # sharing a non-cancelling group would still replace older pending runs.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Metadata edits get a unique group and skip jobs: even cancel=false replaces
+  # a pending run in the same group. Base edits validate in their new base group.
+  # Only synchronize supersedes older heads on the same PR/base.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}-${{ github.event.action == 'edited' && !github.event.changes.base.ref && github.run_id || github.event.pull_request.base.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 permissions:
   contents: read
 
 jobs:
   classes:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref }}
     name: ops/ci.sh --strict --only ${{ matrix.classes }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -128,7 +130,7 @@ jobs:
     # Both PR 1121 and PR 1406 exhausted a 20-minute migration job while
     # their separate database acceptance passed. Preserve measured headroom
     # and cover that lane's declared budget without extending other groups.
-    # zsh setup retains its own short deadline below.
+    # zsh setup retains its own bounded deadline below.
     timeout-minutes: ${{ matrix.classes == 'migration' && 35 || 20 }}
 
     services:
@@ -206,23 +208,31 @@ jobs:
           npm --prefix mcp-server ci
           npm --prefix practice-plugin ci
 
+      - name: Identify the runner image for the zsh archive
+        id: zsh-image
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: Restore zsh package archives
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/zsh-debs/*.deb
+          key: zsh-ubuntu24-${{ runner.arch }}-${{ steps.zsh-image.outputs.version }}-${{ hashFiles('ops/ci-zsh.sh') }}
       - name: Install zsh
         # bin/review-council-runner.sh has a #!/bin/zsh shebang and its test
         # invokes it by that interpreter. Use the runner's installed shell
         # when available; otherwise try its indexes before refreshing them.
-        # Bound apt processes as well as individual network requests;
-        # an unavailable package still fails the job, never skips its tests.
-        timeout-minutes: 3
-        run: |
-          set -euo pipefail
-          if zsh --version >/dev/null 2>&1; then
-            exit 0
-          fi
-          apt_options=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
-          if ! timeout --kill-after=5s 45s sudo apt-get "${apt_options[@]}" install -y -qq zsh; then
-            timeout --kill-after=5s 60s sudo apt-get "${apt_options[@]}" update -qq
-            timeout --kill-after=5s 45s sudo apt-get "${apt_options[@]}" install -y -qq zsh
-          fi
+        # The download is the only step that depends on the Ubuntu mirror, so
+        # it alone is retried (up to three bounded attempts, index refresh
+        # once after the first miss). The unpack runs from the local cache and
+        # has its own 120-second deadline, separate from download deadlines. Every process
+        # is bounded; an unavailable package still fails the job, never skips
+        # its tests. Budget: 3*65 + 65 + 125 + 15 = 400 seconds;
+        # plus 60 seconds of overhead, rounded up, requires exactly 8 minutes.
+        # Cached archives avoid mirror downloads on subsequent runs.
+        timeout-minutes: 12
+        env:
+          ZSH_RETRY_BACKOFF: "5"
+          ZSH_ARCHIVE_DIR: ${{ runner.temp }}/zsh-debs
+        run: ops/ci-zsh.sh
 
       - name: Install PostgreSQL 17
         # Role-migration fixtures own clusters so roles cannot leak into the
@@ -307,26 +317,29 @@ jobs:
     # success into a red context. Without `always()` a failed group would
     # leave this job skipped, and a required check that never reports blocks
     # the merge silently instead of saying why.
-    name: ops/ci.sh --strict
-    runs-on: ubuntu-latest
+    # A skipped metadata job must not publish the required success context.
+    name: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base.ref && 'CI metadata edit ignored' || 'ops/ci.sh --strict' }}
+    runs-on: ubuntu-24.04
     needs: classes
-    if: ${{ always() }}
+    permissions:
+      contents: read
+      actions: read
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref) }}
     timeout-minutes: 5
     steps:
-      - name: Fail unless every class group succeeded
-        env:
-          CLASSES_RESULT: ${{ needs.classes.result }}
-        run: |
-          echo "class groups: $CLASSES_RESULT"
-          if [ "$CLASSES_RESULT" != "success" ]; then
-            echo "ops/ci.sh --strict: a class group did not succeed (result: $CLASSES_RESULT)"
-            exit 1
-          fi
-          echo "ops/ci.sh --strict: every class group green"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+      - name: Fail unless every class group succeeded
+        env:
+          CLASSES_RESULT: ${{ needs.classes.result }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 ops/ci-evidence.py verdict
+          if [ "$CLASSES_RESULT" != "success" ]; then
+            echo "aggregate matrix result: $CLASSES_RESULT"
+            exit 1
+          fi
       - name: Record the tested tree and class contract
         run: python3 ops/ci-evidence.py record --output ci-evidence.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

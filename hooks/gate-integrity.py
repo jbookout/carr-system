@@ -1001,7 +1001,8 @@ def arm_rule_boot(payload):
         sys.path.insert(0, REPO)
         from lib.rule_boot_gate import arm_session
         return arm_session(payload.get("session_id") or payload.get("sessionId"),
-                           payload.get("source"))
+                           payload.get("source"),
+                           agent_id=payload.get("agent_id") or payload.get("agentId"))
     except Exception as exc:
         return f"RULE BOOT: could not arm the rule gate ({exc}); read the rules with standing-context detail=boot before acting."
 

@@ -5,10 +5,12 @@ import {checkRegistryChain} from '../../ops/registry-chain-check.mjs';
 import {SCAC_MUTATION_OPERATIONS} from '../src/scac-mutation-registry.current.generated.js';
 
 test('the current chain retains the sealed Worker declaration-source successor', () => {
-  const worker = registryChain.versions.find(row => row.version === 'scac-mutation-registry.v114');
+  const worker = registryChain.versions.find(row => row.migration === 'migrations/0855_architecture_worker_registration_scac_successor.sql');
   assert.ok(worker, 'the Worker registration seal must survive the registry-chain integration');
-  assert.equal(worker.predecessor, 'scac-mutation-registry.v113');
-  assert.equal(worker.migration, 'migrations/0850_architecture_worker_registration_scac_successor.sql');
+  assert.equal(registryChain.versions[113].migration, 'migrations/0850_research_site_scac_successor.sql');
+  assert.equal(registryChain.versions[114].migration, 'migrations/0853_party_identity_scac_successor.sql');
+  assert.equal(worker.predecessor, 'scac-mutation-registry.v115');
+  assert.equal(worker.migration, 'migrations/0855_architecture_worker_registration_scac_successor.sql');
   assert.equal(SCAC_MUTATION_OPERATIONS['update-lead'].source_locator, 'mcp-server/src/lead-tools.js');
   assert.equal(SCAC_MUTATION_OPERATIONS['find-rule'].source_locator, 'mcp-server/src/rule-tools.js');
 });

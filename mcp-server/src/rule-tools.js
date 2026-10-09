@@ -135,6 +135,12 @@ const RULE_ENFORCEMENT_FALLBACK_REFUSALS = Object.freeze(new Set([
   "rule_enforcement_fallback_receipts_append_only",
 ]));
 
+function validateRuleScope(scope) {
+  if (scope !== undefined && (scope === null || typeof scope !== "object" || Array.isArray(scope)))
+    throw new ToolError({ error: "invalid_object", field: "scope",
+      hint: "scope must be a JSON object, e.g. {} or {\"section\":\"...\"}; omit scope to use the existing default" });
+}
+
 export async function resolveRuleId(c, value, field = "rule_id") {
   const raw = String(value || "").trim();
   if (!raw) throw new ToolError({ error: "rule_id_required", field });
@@ -224,7 +230,7 @@ export function ruleTools() {
     "record-finding": {
       discoveryOrder: 53,
       write: true,
-      description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is passed as proposes_correction, which is recorded as a proposal for the owning partner and applied by them, never by this verb. STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface. NOT ONLY PEOPLE SINCE 0066: subject_kind campaign / platform / pillar / format files a finding against a THING — a platform, a content pillar, a format, a campaign — which is how the marketing seat's measured conclusions finally get a home. Read them back through v_record_flag_subject, which resolves every branch to a name. AND NOT ONLY BUSINESS RECORDS SINCE 0101: a finding can be filed against CODE — pass 'commit:<sha>' (the one repo at that commit), 'owner/name@<sha>', or 'repo:owner/name' (the codebase itself) and the subject is minted on first use. That is how a code review's result — INCLUDING its failure finding, which is the one a reader most needs — becomes part of the record instead of surviving only in a local sidecar. Read code findings back through v_code_finding, which carries repo and commit_sha as their own columns.",
+      description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is recorded here with proposes_correction carrying the prior and corrected values. This verb never applies it: when identity is confirmed (rule 578fdd91), apply the correction in the same run through correct-party-identity (name, org, state) or update-party-contact (contact facts). STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface. NOT ONLY PEOPLE SINCE 0066: subject_kind campaign / platform / pillar / format files a finding against a THING — a platform, a content pillar, a format, a campaign — which is how the marketing seat's measured conclusions finally get a home. Read them back through v_record_flag_subject, which resolves every branch to a name. AND NOT ONLY BUSINESS RECORDS SINCE 0101: a finding can be filed against CODE — pass 'commit:<sha>' (the one repo at that commit), 'owner/name@<sha>', or 'repo:owner/name' (the codebase itself) and the subject is minted on first use. That is how a code review's result — INCLUDING its failure finding, which is the one a reader most needs — becomes part of the record instead of surviving only in a local sidecar. Read code findings back through v_code_finding, which carries repo and commit_sha as their own columns.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" },
         subject: { type: "string", description: "C-127 / L-204 / V-CPA-006 / P-0301, an exact deal name, or — when subject_kind is campaign/platform/pillar/format — a campaign name or a marketing_subject slug ('twitter', 'reel'). CODE (0101): 'commit:<sha>' files against the one repo at that commit, 'owner/name@<sha>' against another repo, 'repo:owner/name' against the codebase itself." },
@@ -425,6 +431,7 @@ export function ruleTools() {
         why_no_machine: { type: "string", description: "REQUIRED when enforcement_home is 'judgment_advisory'. One line: why no mechanical control can carry this rule." } },
         required: ["idempotency_key","statement","human_quote","enforcement_home"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "teach", args, async () => {
+        validateRuleScope(args.scope);
         // ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10). See the description
         // above: a clear, named refusal rather than a silent default, so an
         // existing caller that has not been told about this yet gets an error
@@ -931,6 +938,7 @@ export function ruleTools() {
         reason: { type: "string", description: "REQUIRED. Why the wording is being corrected — an unexplained edit to a binding rule is indistinguishable from drift." } },
         required: ["idempotency_key","rule_id","base_version","reason"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "amend-rule", args, async () => {
+        validateRuleScope(args.scope);
         const reason = String(args.reason || "").trim();
         if (!reason) throw new ToolError({ error: "reason_required",
           hint: "say in one line why the wording is wrong; a silent edit to a binding rule reads as drift later" });
