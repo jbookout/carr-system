@@ -66,6 +66,53 @@ class OwnershipTests(unittest.TestCase):
             'ownership_state': 'held', 'launch_marker': 'fixture', 'executor': {'kind': 'unconfirmed'},
             **kwargs}) + '\n')
 
+    def test_matching_machine_recovers_dead_executor_after_hostname_rename(self):
+        machine = '11111111-1111-4111-8111-111111111111'
+        self.active(executor={'kind': 'process_group', 'host': 'before-rename',
+            'machine_id': machine, 'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id', return_value=machine, create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='after-rename'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'released')
+
+    def test_foreign_machine_matching_hostname_cannot_release(self):
+        self.active(executor={'kind': 'process_group', 'host': 'same-name',
+            'machine_id': '22222222-2222-4222-8222-222222222222',
+            'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='same-name'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill, \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'held')
+            kill.assert_not_called()
+
+    def test_legacy_observed_hostname_recovers_after_rename(self):
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='observed-before'):
+            write_ownership.process_owner()
+        self.active(executor={'kind': 'process_group', 'host': 'observed-before',
+                              'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='after-rename'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'released')
+
+    def test_legacy_unobserved_hostname_stays_held_even_if_current(self):
+        self.active(executor={'kind': 'process_group', 'host': 'never-observed',
+                              'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='never-observed'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill, \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'held')
+            kill.assert_not_called()
+
     def test_open_pr_overlap_refuses_before_launch(self):
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [
                 {'number': 42, 'title': 'the other builder', 'files': ['tools/new.py']}])) , \
