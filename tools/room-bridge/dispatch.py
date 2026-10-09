@@ -413,7 +413,7 @@ def dispatch(
         raise DeskError("unsupported_retrieval", "explicit source retrieval requires a Grok desk")
     if stream_output and entry["kind"] not in ("codex-session", "codex-exec"):
         raise DeskError("unsupported_stream", "stream output requires a headless Codex desk")
-    stream_options = {"stream_output": True} if stream_output else {}
+    stream_options: dict = {"stream_output": True} if stream_output else {}
     original_task = task
     # The background wire validates the original task before adding its own
     # instruction. Prepending here would turn a blank task into valid work.
@@ -460,6 +460,7 @@ def dispatch(
             _record(results_path, {**base, **ownership, 'status': 'running'})
 
     executor_options: dict = {'on_executor': executor_started} if ownership else {}
+    codex_options: dict = {**executor_options, 'claim_id': msg_id} if ownership else {}
 
     try:
         if checkout is not None:
@@ -502,16 +503,14 @@ def dispatch(
             outcome = _to_codex(
                 {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
                 timeout_s=codex_timeout_s, **stream_options,
-                **executor_options,
-                claim_id=msg_id if ownership else None,
+                **codex_options,
             )
         else:
             outcome = _to_codex(
                 entry, task, env, fresh=fresh, config_overrides=config_overrides,
                 live_desktop=live_desktop, timeout_s=codex_timeout_s,
                 **stream_options,
-                **executor_options,
-                claim_id=msg_id if ownership else None,
+                **codex_options,
             )
             # pin the desk to its thread so the next task lands in the same one
             if outcome.get("thread_id"):
