@@ -69,6 +69,22 @@ def census(source):
     return calls
 
 
+def transports(source):
+    calls = Counter()
+    for method in ast.walk(ast.parse(source)):
+        if not isinstance(method, ast.FunctionDef):
+            continue
+        for node in ast.walk(method):
+            if not isinstance(node, ast.Call):
+                continue
+            name = ast.unparse(node.func)
+            if name in ('command', 'subprocess.run', 'subprocess.Popen'):
+                calls[(method.name, name)] += 1
+            elif name == 'self.git':
+                calls[(method.name, 'git:' + ast.unparse(node.args[1]))] += 1
+    return calls
+
+
 def operation(argv):
     if argv[0] == 'gh':
         a = argv[1:]
@@ -128,7 +144,7 @@ class RunLoop:
         if op is None:
             return self.commands(argv, **kwargs)
         self.seen[op[0]] += 1
-        if self.active and self.target(op, argv):
+        if self.active and self.fault != 'pause' and self.target(op, argv):
             self.failures += 1
             if self.fault == 'timeout':
                 raise subprocess.TimeoutExpired(argv, kwargs.get('timeout', 120))
@@ -229,7 +245,7 @@ class RunLoop:
 
     def session(self, polls=8):
         q = self.f.q
-        deadline = self.now + polls * 300
+        deadline = self.now + polls * 30
         saved_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
         def sleep(seconds):
             self.now += max(seconds, .01)
@@ -248,16 +264,35 @@ class RunLoop:
             stack.enter_context(patch.object(mq, 'time', types.SimpleNamespace(time=lambda: self.now, monotonic=lambda: self.now, sleep=sleep)))
             stack.enter_context(patch.object(q, 'discover', discover))
             stack.enter_context(patch.object(q, 'flush_events', flush))
+            if self.fault == 'pause':
+                original_request, original_reserve = q._gh_request, q.budget.reserve
+                current = []
+                def request(args, decode, validate):
+                    current[:] = ['gh', *args]
+                    return original_request(args, decode, validate)
+                def reserve(resource):
+                    if self.active and self.target(operation(current), current):
+                        raise mq.GitHubReadPaused(self.now + 900)
+                    return original_reserve(resource)
+                stack.enter_context(patch.object(q, '_gh_request', request))
+                stack.enter_context(patch.object(q.budget, 'reserve', reserve))
             if self.effect.scenario == 'migration':
                 try:
                     q.migrate_holds(self.legacy, apply=True)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired):
                     pass
-            q.run(poll=300)
+            q.run(poll=30)
+            q.stopped = False
             for e in q.db.execute("SELECT id FROM entries WHERE tested IS NOT NULL AND phase IN ('merging','merge_rejected','exhausted','blocked')").fetchall():
                 self.reconciliations += 1
                 try:
                     q.reconcile(e['id'], retry=not self.active)
+                except (RuntimeError, OSError, subprocess.TimeoutExpired):
+                    pass
+            for a in q.db.execute("SELECT key FROM actions WHERE kind IN ('update','retarget') AND phase='issued'").fetchall():
+                self.reconciliations += 1
+                try:
+                    q.reconcile_action(a['key'], retry=not self.active)
                 except (RuntimeError, OSError, subprocess.TimeoutExpired):
                     pass
         for s, handler in saved_handlers.items():
@@ -266,11 +301,50 @@ class RunLoop:
 
 class LivenessTests(unittest.TestCase):
     def test_fault_table_covers_external_call_sites(self):
+        source = '\n'.join(p.read_text() for p in sorted((ROOT / 'tools/merge_queue').rglob('*.py')))
         expected = Counter(site for effect in EFFECTS for site in effect.sites)
-        self.assertEqual(census((ROOT / 'tools/merge_queue/main.py').read_text()), expected,
+        self.assertEqual(census(source), expected,
                          'New external call sites require a fault-table entry and run-loop scenario')
-        added = (ROOT / 'tools/merge_queue/main.py').read_text() + '\ndef new_effect(self):\n    self.api("new/external/path")\n'
+        added = source + '\ndef new_effect(self):\n    self.api("new/external/path")\n'
         self.assertNotEqual(census(added), expected)
+        known_transports = Counter({
+            ('command', 'subprocess.run'): 1, ('_gh_request', 'command'): 1,
+            ('flush_events', 'command'): 1, ('git', 'command'): 3,
+            ('patch', 'command'): 1, ('conflict', 'subprocess.run'): 1,
+            ('dispatcher_identity', 'command'): 1, ('_dispatch_conflicts', 'command'): 2,
+            ('_dispatch_conflicts', 'subprocess.Popen'): 1, ('behind', 'subprocess.run'): 1,
+            ('install_agent', 'command'): 3,
+            ('fetch', "git:'fetch'"): 1, ('patch', "git:'diff'"): 1,
+            ('patch', "git:'merge-base'"): 1, ('_tick_repo', "git:'merge-base'"): 1,
+            ('archive_legacy', "git:'merge-base'"): 1,
+        })
+        self.assertEqual(transports(source), known_transports,
+                         'New subprocess routes must be classified and assigned a fault scenario')
+        direct = source + '\ndef bypass(self):\n    command(["gh", "api", "new/path"])\n'
+        self.assertNotEqual(transports(direct), known_transports)
+
+    def test_failed_discovery_keeps_tick_and_the_discovery_schedule_running(self):
+        f = fixture_module.QueueTests()
+        f.setUp()
+        try:
+            loop = RunLoop(f, EFFECTS[0], 'error')
+            loop.active = False
+            loop.seed()
+            original = f.q.discover
+            times = []
+            def fail_first():
+                times.append(loop.now)
+                if len(times) == 1:
+                    raise OSError('injected discovery failure before tick')
+                return original()
+            with patch.object(f.q, 'discover', fail_first):
+                loop.session(polls=22)
+            self.assertEqual(len(times), 3)
+            self.assertTrue(all(b - a >= 300 for a, b in zip(times, times[1:])))
+            self.assertTrue({(r, 2) for r in mq.REPOS} <= {(r, n) for r, n, _ in loop.merged})
+            self.assertIn('discovery_failed', (f.state / 'queue.log').read_text())
+        finally:
+            f.doCleanups()
 
     def test_persistent_faults_release_other_work_across_restarts(self):
         for effect in EFFECTS:
@@ -281,11 +355,12 @@ class LivenessTests(unittest.TestCase):
                     try:
                         loop = RunLoop(f, effect, fault)
                         entry = loop.seed()
-                        for _ in range(3):
+                        for _ in range(4):
                             loop.session()
                             f.restart()
                         self.assertGreater(loop.failures, 0, 'Fault site was never reached')
-                        self.assertLessEqual(loop.failures, 4, 'Persistent fault issued more than four requests')
+                        limit = 8 if effect.name == 'merge_intent' else 4
+                        self.assertLessEqual(loop.failures, limit, 'Persistent fault exceeded automatic and reconciliation budgets')
                         count = loop.failures
                         loop.session()
                         self.assertEqual(loop.failures, count, 'Restart replenished the failure budget')
@@ -293,6 +368,8 @@ class LivenessTests(unittest.TestCase):
                         self.assertTrue({(repo, 2) for repo in mq.REPOS} <= progressed,
                                         'Persistent fault starved another repository or the next PR')
                         loop.active = False
+                        f.restart()
+                        loop.session()
                         f.restart()
                         loop.session()
                         row = f.q.db.execute('SELECT * FROM entries WHERE id=?', (entry,)).fetchone()
@@ -306,6 +383,36 @@ class LivenessTests(unittest.TestCase):
                         self.assertGreaterEqual(loop.polls, 4)
                     finally:
                         f.doCleanups()
+
+    def test_resource_and_mutation_pauses_do_not_charge_or_issue_intents(self):
+        for name in ('merge_intent', 'update', 'merge'):
+            with self.subTest(effect=name):
+                f = fixture_module.QueueTests()
+                f.setUp()
+                try:
+                    effect = next(e for e in EFFECTS if e.name == name)
+                    loop = RunLoop(f, effect, 'pause')
+                    entry = loop.seed()
+                    for _ in range(3):
+                        loop.session()
+                        f.restart()
+                    row = f.q.db.execute('SELECT * FROM entries WHERE id=?', (entry,)).fetchone()
+                    self.assertEqual((row['github_attempts'], row['read_attempts'], row['transient_attempts']),
+                                     (1 if name == 'merge_intent' else 0, 0, 0))
+                    if name in ('update', 'merge'):
+                        self.assertEqual(row['merge_attempts'], 0)
+                        self.assertNotIn((mq.REPOS[0], 1), {(r, n) for r, n, _ in loop.merged})
+                        actions = f.q.db.execute('SELECT phase,attempts FROM actions WHERE pr=1').fetchall()
+                        self.assertTrue(all(tuple(a) == ('planned', 0) for a in actions))
+                    progressed = {(r, n) for r, n, _ in loop.merged}
+                    self.assertTrue({(r, 2) for r in mq.REPOS} <= progressed)
+                    loop.active = False
+                    loop.session()
+                    f.restart()
+                    loop.session()
+                    self.assertIn((mq.REPOS[0], 1), {(r, n) for r, n, _ in loop.merged})
+                finally:
+                    f.doCleanups()
 
     def test_rate_limit_pause_is_scheduling_and_recovers_after_restarts(self):
         f = fixture_module.QueueTests()
