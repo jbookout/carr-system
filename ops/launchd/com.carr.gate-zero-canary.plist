@@ -6,7 +6,7 @@
   <!--
     THE GATE ZERO SCHEDULER CANARY, AND IT IS WRITTEN DOWN UNINSTALLED.
 
-    This agent is listed in DEFINITION_ONLY in ops/config-as-code.py, so its
+    This agent is listed in DEFINITION_ONLY in lib/launchd_hold.py, so its
     PRESENCE in ~/Library/LaunchAgents is a drift finding until Joe removes it
     from that list deliberately. Activating a schedule is a human act; this
     file is the definition of what would be activated, in the repo, where the

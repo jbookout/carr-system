@@ -3,7 +3,7 @@
 # doctrine: runbook
 """Rollback-only acceptance for SECURITY DEFINER object qualification.
 
-0849 pins every public/ops definer's search_path with pg_temp last, which stops
+0854 pins every public/ops definer's search_path with pg_temp last, which stops
 temporary-object substitution. This gate holds the second half of the review
 finding that followed it: a definer body must not depend on search_path at all
 for the application objects it touches. Every application relation, row type

@@ -1388,11 +1388,15 @@ def main() -> int:
             # The append records start only after the exact 0532a transition.
             # Their evidence timestamp is captured before release and must not
             # extend the old live authority window.
+            # Cross a second boundary so transaction-start review timestamps fail reliably.
+            one(cur, "select pg_sleep(1.1)")
             terminal_evidence_time = one(
                 cur, "select date_trunc('second',clock_timestamp())")[0]
             cc.set_jobs(cur)
             receipt_id = cc.receipt(cur, fixture, claim, "claimed_complete")
             cc.reset_role(cur)
+            # The review's default now() must start after terminal evidence completion.
+            conn.commit()
             a2.insert_review(cur, fixture, receipt_id)
             released_at = one(cur, "select released_at from ops.canonical_ownership_lease where id=%s",
                               (lease["lease_id"],))[0]
@@ -1731,6 +1735,8 @@ def main() -> int:
                 """select id,reviewer_session_ref,fact,date_trunc('second',created_at)
                    from ops.engineering_reviewer_fact where receipt_id=%s""",
                 (receipt_id,))
+            check("independent review timestamp follows terminal evidence after transaction delay",
+                  reviewer_created_at >= terminal_evidence_time)
             check("Passport engineering-review.v1 fact is exact", one(cur, """select
               contract_version='engineering-review.v1'
               and (select array_agg(key order by key) from jsonb_object_keys(fact) key)=array[

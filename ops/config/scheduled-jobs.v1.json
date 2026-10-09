@@ -12,6 +12,50 @@
   "captured_at": "2026-10-05T17:56:20Z",
   "jobs": [
     {
+      "label": "com.carr.build-duration-check",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "build-duration-check",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/build-duration-check.py",
+        "--record-loops"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 30
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 50
+          }
+        ],
+        "RunAtLoad": false
+      },
+      "expected_enabled": true,
+      "expected_installed": true,
+      "log_path": "~/carr-system/out/build-duration-check.log",
+      "log_max_age_seconds": 1800,
+      "owner": "orchestrator",
+      "done_signal": "out/build-duration-check.json receipt with scan cursor; deduplicated build-duration workflow loops; primary only",
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
+    },
+    {
       "label": "com.carr.calendar-eventkit",
       "scheduler": "launchd",
       "program_arguments": [
@@ -2185,6 +2229,35 @@
       "expectation_note": "Live installed job retained after source and cadence review on 2026-10-05."
     },
     {
+      "label": "com.carr.storage-hygiene",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "storage-hygiene",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/storage_hygiene.py"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": {
+          "Hour": 4,
+          "Minute": 10
+        },
+        "RunAtLoad": false,
+        "ThrottleInterval": 60
+      },
+      "expected_enabled": false,
+      "expected_installed": false,
+      "log_path": "~/carr-system/out/storage-hygiene.log",
+      "log_max_age_seconds": null,
+      "owner": "orchestrator",
+      "done_signal": "Inactive source definition; when reviewed and installed, ops.run storage-hygiene/launchd.run plus ~/carr-system/out/storage-hygiene.jsonl",
+      "expectation_note": "Definition only; held uninstalled and unloaded pending review.",
+      "freshness_exception": "Not expected to run; no freshness signal applies."
+    },
+    {
       "label": "com.carr.tailscale-up",
       "scheduler": "launchd",
       "program_arguments": [
@@ -2370,6 +2443,34 @@
       "owner": "orchestrator",
       "done_signal": "Canonical out/boards/*.json and authenticated publish acknowledgement",
       "expectation_note": "Required board publisher named in gap #3. Cadence is the lib/launchd_calendar.py two-minute form; StartInterval does not fire on macOS 27."
+    },
+    {
+      "label": "com.carr.expert-reply-watch",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "expert-reply-watch",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/expert_reply_watch.py"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": {
+          "Weekday": 1,
+          "Hour": 6,
+          "Minute": 0
+        },
+        "RunAtLoad": false
+      },
+      "expected_enabled": true,
+      "expected_installed": true,
+      "log_path": "~/carr-system/out/expert-reply-watch.log",
+      "log_max_age_seconds": 691200,
+      "owner": "orchestrator",
+      "done_signal": "Dated out/expert-reply-watch/ledger.json run is ok; new replies have capture_id acknowledgements. CLI failure records one defect and exits nonzero.",
+      "expectation_note": "Monday 06:00 local on primary only; installed via config-as-code from canonical main."
     }
   ],
   "expectations_reviewed_at": "2026-10-05",

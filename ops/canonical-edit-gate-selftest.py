@@ -178,6 +178,8 @@ def build_fixture(hook_src):
     os.makedirs(os.path.join(root, "hooks"))
     shutil.copyfile(hook_src, os.path.join(root, "hooks",
                                            "canonical-edit-gate.py"))
+    os.makedirs(os.path.join(root, "lib"), exist_ok=True)
+    shutil.copyfile(os.path.join(REPO, "lib", "hook_runtime.py"), os.path.join(root, "lib", "hook_runtime.py"))
     with open(os.path.join(root, "tracked.py"), "w") as fh:
         fh.write("# a file the fixture repo really tracks\n")
     run(["git", "init", "-q", "-b", "main"], root)

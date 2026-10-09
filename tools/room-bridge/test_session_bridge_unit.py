@@ -238,7 +238,7 @@ def test_dispatch_forwards_the_live_desktop_opt_in():
         def remember_thread(self, *_a):
             pass
 
-    def fake_to_codex(entry, task, env, fresh=False, config_overrides=(), live_desktop=False):
+    def fake_to_codex(entry, task, env, fresh=False, config_overrides=(), live_desktop=False, timeout_s=None):
         seen.append(live_desktop)
         return {"status": "completed", "result": "ok"}
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# ci: runs-outside-ci — needs a database still at the pre-0849 ledger (origin/main's db/schema.sql plus 0848 applied); the branch snapshot CI loads has already absorbed 0849-0851, so CI has no pending batch to rehearse
+# ci: runs-outside-ci — needs a database still at the pre-0854 ledger (origin/main's db/schema.sql plus 0853 applied); the branch snapshot CI loads has already absorbed 0854-0857, so CI has no pending batch to rehearse
 # doctrine: runbook
-"""Two-connection lock-contention rehearsal for the 0849/0850/0851 batch.
+"""Two-connection lock-contention rehearsal for the 0854/0855/0856/0857 batch.
 
 The definer hardening applies as ONE transaction (tools/migrate.py
-ATOMIC_MIGRATION_GROUPS): 0849 rewrites function metadata, 0850 adds view
-barriers, 0851 drops and recreates registry constraints and triggers and seals
-v114. 0851's ALTER TABLE and DROP TRIGGER take ACCESS EXCLUSIVE locks on the
+ATOMIC_MIGRATION_GROUPS): 0854 rewrites function metadata, 0855 adds view
+barriers, 0856 qualifies definer dependencies, 0857 drops and recreates registry constraints and triggers and seals
+v116. 0857's ALTER TABLE and DROP TRIGGER take ACCESS EXCLUSIVE locks on the
 registry tables, and every lock is held until the whole batch commits.
 
 This rehearsal answers the four production-apply questions on a disposable
@@ -21,7 +21,7 @@ loopback database that still has the batch pending:
      registry tables' constraints and triggers, the registry version rows and
      the migration ledger -- must equal the fingerprint taken before.
   3. SAFE RETRY. With the blocker gone the same command must apply the batch,
-     leave v114 live and its catalog seal current.
+     leave v116 live and its catalog seal current.
   4. APPLY WINDOW. The successful batch is timed, and a concurrent reader of
      the registry measures the longest it was made to wait.
 
@@ -46,9 +46,10 @@ from registry_chain import registry_chain
 
 REPO = Path(__file__).resolve().parents[1]
 BATCH = (
-    "0849_dot_security_definer_hardening.sql",
-    "0850_completion_tenant_security_barriers.sql",
-    "0851_dot_hardening_scac_successor.sql",
+    "0854_dot_security_definer_hardening.sql",
+    "0855_completion_tenant_security_barriers.sql",
+    "0856_qualify_security_definer_dependencies.sql",
+    "0857_dot_hardening_scac_successor.sql",
 )
 CHAIN = registry_chain()['versions']
 HARDENING = next(row for row in CHAIN if Path(row['migration']).name == BATCH[-1])
@@ -101,7 +102,7 @@ def run_batch(dsn: str) -> tuple[int, float, str]:
 def main() -> int:
     dsn = os.environ.get("CARR_LOCAL_PG_DSN", "")
     if not dsn:
-        return fail("CARR_LOCAL_PG_DSN is required (a disposable loopback database at the pre-0849 ledger)")
+        return fail("CARR_LOCAL_PG_DSN is required (a disposable loopback database at the pre-0854 ledger)")
     info = conninfo_to_dict(dsn)
     if info.get("host") not in ("127.0.0.1", "localhost") or "password" in info:
         return fail("refusing a non-loopback or credentialed DSN; this rehearsal applies migrations")
@@ -111,7 +112,7 @@ def main() -> int:
         if PREDECESSOR not in applied or applied & set(BATCH):
             return fail(f"database must have {PREDECESSOR} applied and the hardening batch pending")
         # A snapshot-built database has no rules and no policy epochs, so the
-        # deferred epoch refresh never runs at commit and 0851's re-validated
+        # deferred epoch refresh never runs at commit and 0857's re-validated
         # epoch constraint scans nothing. Production has both. Seed, in this
         # disposable database only, the same one-rule coherent projection
         # mcp-server/test/definer-hardening-catalog-postgres.sql uses, plus a
@@ -216,21 +217,21 @@ def main() -> int:
             """select registry_version from ops.scac_mutation_registry_version
                 order by regexp_replace(registry_version,'^.*[.]v','','')::integer desc limit 1"""
         ).fetchall()[0][0]
-        current = conn.execute("select ops.scac_mutation_catalog_v114_current()").fetchall()[0][0]
+        current = conn.execute("select ops.scac_mutation_catalog_v116_current()").fetchall()[0][0]
         unpinned = conn.execute(
             """select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
                 where p.prosecdef and n.nspname in ('public','ops')
                   and not exists (select 1 from unnest(p.proconfig) s
                                    where s like 'search_path=%' and s like '%pg_temp')"""
         ).fetchall()[0][0]
-    if ledger != set(BATCH) or live != "scac-mutation-registry.v114" or current is not True or unpinned:
+    if ledger != set(BATCH) or live != "scac-mutation-registry.v116" or current is not True or unpinned:
         return fail(f"retry left an unexpected state: ledger={sorted(ledger)} live={live} "
                     f"catalog_current={current} unpinned_definers={unpinned}")
     if fingerprint(dsn) == before:
         return fail("retry reported success but the catalog fingerprint did not change")
     longest = max(waits) if waits else 0.0
     print(f"safe retry: batch applied in {applied_seconds:.1f}s end to end (runner start to exit); "
-          f"v114 live, catalog seal current, 0 definers without pg_temp")
+          f"v116 live, catalog seal current, 0 definers without pg_temp")
     print(f"apply window: {len(waits)} concurrent registry reads, longest wait {longest:.2f}s")
     print("db-gate-proof: definer-hardening lock rehearsal refused under contention, rolled back "
           "completely, and applied on retry")
