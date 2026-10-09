@@ -1,16 +1,16 @@
 {
  "counts": {
-  "jev_compiled_triggers": 119,
+  "jev_compiled_triggers": 120,
   "pack_fallback_triggers": 7,
-  "seeded_detector_rule_ids": 51,
-  "seeded_detector_triggers": 15,
+  "seeded_detector_rule_ids": 52,
+  "seeded_detector_triggers": 16,
   "structural_extra_triggers": 2,
-  "triggers": 149
+  "triggers": 151
  },
  "generated_from": {
-  "jev_triggers_sha256": "e64514d2711b5ecb4dad9b0a2524c480237fd41ef3cd85b256b7cf819f0e0f00",
-  "map_sha256": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
-  "triage_sha256": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c"
+  "jev_triggers_sha256": "42f77f3373d49fab1fcb7bee9360434b4fb3ca8fb71ed18576b233df5895fb33",
+  "map_sha256": "2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4",
+  "triage_sha256": "8448ff314937781e9eeaa586dd1b24ab12b5285c4311a656c99e65245bec87ea"
  },
  "generated_note": "Compiled by ops/rule-jit-compile.py from ops/config/rule-triage.v1.json's per-rule `detector` fields and ops/config/rule-enforcement-map.json's rule_packs/rule_load_layers. Never hand-edit this file \u2014 run the compiler again after changing either input, and `--check` verifies the two never drift apart.",
  "max_rules_per_trigger": 5,
@@ -95,6 +95,18 @@
    ],
    "source": "seeded_detector",
    "trigger_id": "49a3410cc883"
+  },
+  {
+   "kind": "content_regex",
+   "packs": [
+    "governance-rules"
+   ],
+   "pattern": "\\b(?:EnterPlanMode|UpdatePlan|update_plan|propose-ready-plan|heavy[-\\s]?build(?:\\s+plan)?|Codex\\s+brief|Dot\\s+brief)\\b",
+   "rule_ids": [
+    "8400cd3d"
+   ],
+   "source": "seeded_detector",
+   "trigger_id": "265cbc0911b6"
   },
   {
    "kind": "content_regex",
@@ -1355,6 +1367,19 @@
    ],
    "source": "jev_compiled",
    "trigger_id": "c3ac9bf9cbb8"
+  },
+  {
+   "kind": "prompt_regex",
+   "negative_pattern": "\\bvisible\\s+step\\b",
+   "packs": [
+    "governance-rules"
+   ],
+   "pattern": "\\bopens\\s+grill\\-with\\-docs\\b|\\bgrill\\-with\\-docs\\s+work\\b|\\bmedium\\-to\\-large\\s+work\\b|\\bgrill\\-with\\-docs\\b|\\bmedium\\-to\\-large\\b|\\bmoves\\s+wayfinder\\b|\\bstarts\\s+sizing\\b|\\bsizing\\s+step\\b|\\boutgrows\\b|\\bsizing\\b",
+   "rule_ids": [
+    "8400cd3d"
+   ],
+   "source": "jev_compiled",
+   "trigger_id": "3af6fc775ffc"
   },
   {
    "kind": "prompt_regex",

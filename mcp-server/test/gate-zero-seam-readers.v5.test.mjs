@@ -4603,8 +4603,8 @@ function declaredWorkflowCheckNames() {
     // A matrix job declares ONE templated name and GitHub reports one check per
     // matrix value, so the template is expanded here into the names a reader
     // will actually be asked about (ci.yml's class groups since 2026-09-23).
-    // Only the single-axis `${{ matrix.<axis> }}` shape is expanded; anything
-    // else stays literal and the reader test refuses it, which is the point.
+    // Expand the single-axis shape and the bounded default-off DB conditional.
+    // Unknown expressions stay literal and the reader test refuses them.
     const matrices = new Map();
     let matrixJob = -1;
     let matrixAxis = null;
@@ -4618,6 +4618,14 @@ function declaredWorkflowCheckNames() {
       if (named !== null && current >= 0) names[current] = named[1];
       if (/^ {6}matrix:\s*$/.test(line)) { matrixJob = current; matrixAxis = null; continue; }
       if (matrixJob !== current || current < 0) continue;
+      // The default-off DB trial declares serial or exactly two extra values.
+      // Expand both declared alternatives; arbitrary expressions stay literal
+      // and fail the reader's exact-enumeration contract below.
+      const shadowAxis = /^ {8}(shard): \$\{\{ fromJSON\(github\.event_name == 'workflow_dispatch' && inputs\.shard_trial && '(\[[0-9,]+\])' \|\| '(\[[0-9,]+\])'\) \}\}$/.exec(line);
+      if (shadowAxis !== null) {
+        matrices.set(`${current}:${shadowAxis[1]}`, [...new Set([...JSON.parse(shadowAxis[2]), ...JSON.parse(shadowAxis[3])])]);
+        continue;
+      }
       const inlineAxis = /^ {8}([A-Za-z0-9_-]+):\s*(\[.*\])\s*$/.exec(line);
       if (inlineAxis !== null) { matrices.set(`${current}:${inlineAxis[1]}`, JSON.parse(inlineAxis[2])); matrixAxis = null; continue; }
       const blockAxis = /^ {8}([A-Za-z0-9_-]+):\s*$/.exec(line);
@@ -4626,6 +4634,19 @@ function declaredWorkflowCheckNames() {
       if (item !== null && matrixAxis !== null) matrices.get(matrixAxis).push(item[1] ?? item[2] ?? item[3]);
     }
     names.forEach((name, index) => {
+      // CI's metadata branch is skipped and cannot supply validation evidence.
+      // Enumerate its runnable alternative; unknown expressions remain literal.
+      const metadataName = /^\$\{\{ github\.event_name == 'pull_request' && github\.event\.action == 'edited' && !github\.event\.changes\.base\.ref && 'CI metadata edit ignored' \|\| '([^']+)' \}\}$/.exec(name);
+      if (metadataName !== null) {
+        names[index] = metadataName[1];
+        return;
+      }
+      const shadowName = /^\$\{\{ matrix\.(shard) == 0 && '([^']+)' \|\| format\('([^']+)', matrix\.shard\) \}\}$/.exec(name);
+      if (shadowName !== null) {
+        const values = matrices.get(`${index}:${shadowName[1]}`);
+        if (Array.isArray(values)) names.splice(index, 1, ...values.map(value => value === 0 ? shadowName[2] : shadowName[3].replace("{0}", String(value))));
+        return;
+      }
       const template = /^(.*)\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}(.*)$/.exec(name);
       if (template === null) return;
       const values = matrices.get(`${index}:${template[2]}`);
@@ -4745,6 +4766,24 @@ test("CHECK NAME: a newline, a path separator and three hundred characters are e
     if (name.length >= 6 && name !== "toString" && name !== "constructor")
       assert.equal(JSON.stringify(answer).includes(name.slice(0, 6)), false,
         `${why} put the caller's own bytes in the answer`);
+  }
+});
+
+test("CHECK NAME: ignored metadata names cannot supply validation evidence", async () => {
+  const source = readFileSync(join(WORKFLOWS, "ci.yml"), "utf8");
+  const named = /^ {4}name: (\$\{\{ github\.event_name[^\n]+)\n/m.exec(source);
+  assert.ok(named, "CI no longer separates metadata edits from its required check name");
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
+  // GitHub reports skipped expressions literally, with their delimiters removed.
+  for (const checkName of ["CI metadata edit ignored", named[1], named[1].slice(3, -2).trim()]) {
+    const answer = await ruled.readGateConclusionEvidence({
+      headSha: fixtureStores.FIXTURE_COMMIT_SHA, checkName,
+    });
+    assert.equal(answer.reason_id, "gate_conclusion_query_invalid");
+    assert.equal(answer.invalid_field, "checkName");
+    assert.equal(answer.decision, "refuse");
+    assert.equal(JSON.stringify(answer).includes(checkName), false);
+    assertSwept("card13.ignored-metadata", answer);
   }
 });
 

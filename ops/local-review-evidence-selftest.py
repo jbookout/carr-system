@@ -43,6 +43,15 @@ def copy_ci(root):
                        check=True, capture_output=True)
 
 
+def stub_gate_baselines(root, integrity_exit=0):
+    """Stand in for the two repository-wide checks every gates class runs first."""
+    for relative, code in (("hooks/gate-integrity.py", integrity_exit),
+                           ("lib/gate_declarations.py", 0)):
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"raise SystemExit({code})\n")
+
+
 class CheckArtifacts(unittest.TestCase):
     def test_eval_caller_and_inherited_probe_receive_identical_body_arguments(self):
         self.enterContext(patch.dict(os.environ, CARR_PR_BODY_FILE='outside-fixture-body'))
@@ -51,7 +60,7 @@ class CheckArtifacts(unittest.TestCase):
             for folder in ["ops", "hooks"]:
                 (root / folder).mkdir()
             copy_ci(root)
-            (root / "hooks/gate-integrity.py").write_text("raise SystemExit(0)\n")
+            stub_gate_baselines(root)
             (root / "ops/check-eval-receipt.py").write_text(
                 "import sys\nfrom pathlib import Path\nPath('eval-args').write_text(' '.join(sys.argv[1:]))\nraise SystemExit(1 if '--pr-body-file' in sys.argv else 0)\n")
             (root / "ops/inherited-from-main.py").write_text(
@@ -100,11 +109,11 @@ class CheckArtifacts(unittest.TestCase):
         spec.loader.exec_module(adapter)
         with tempfile.TemporaryDirectory(prefix="review-floor-gates-") as td:
             root = Path(td)
-            for folder in ["ops", "hooks", "bin"]:
+            for folder in ["ops", "hooks", "bin", "lib"]:
                 (root / folder).mkdir()
             copy_ci(root)
             shutil.copy(ROOT / "bin/with-timeout.py", root / "bin/with-timeout.py")
-            (root / "hooks/gate-integrity.py").write_text("raise SystemExit(0)\n")
+            stub_gate_baselines(root)
             result = root / "result.json"
             for rc, expected in [(0, "passed"), (78, "partial")]:
                 with self.subTest(rc=rc):
@@ -128,7 +137,7 @@ class CheckArtifacts(unittest.TestCase):
             for folder in ["ops", "hooks"]:
                 (root / folder).mkdir()
             copy_ci(root)
-            (root / "hooks/gate-integrity.py").write_text("raise SystemExit(1)\n")
+            stub_gate_baselines(root, integrity_exit=1)
             (root / "ops/inherited-from-main.py").write_text("print('INHERITED FROM MAIN: seeded baseline failure')\n")
             result = root / "result.json"
             run = subprocess.run(["bash", str(root / "ops/ci.sh"), "--strict", "--only", "gates",
@@ -141,8 +150,7 @@ class CheckArtifacts(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="review-quarantined-logs-") as td:
             root = Path(td)
             copy_ci(root)
-            (root / 'hooks').mkdir()
-            (root / 'hooks/gate-integrity.py').write_text('raise SystemExit(0)\n')
+            stub_gate_baselines(root)
             (root / 'bin').mkdir()
             shutil.copy(ROOT / 'bin/with-timeout.py', root / 'bin/with-timeout.py')
             shutil.copy(ROOT / 'ops/ci-secret-scan.py', root / 'ops/ci-secret-scan.py')

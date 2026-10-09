@@ -2,11 +2,11 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:3738e55a6e2b9961a44df42fd6e384dae298f43090cb80d557c0756935aa5572",
+    "configuration_fingerprint": "sha256:b65ae84e180db62505408b6dcc56f7042d507afc60ca88993df3c13c078b14ed",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "3f049576a98b237d34ae4a664a287f8b1b13508d635838d06d9270e69ad2f4a6",
     "model_id": "deterministic-no-model",
-    "native_session_ref": "01a11852-9f43-7b51-a0e3-5208109c19b1",
+    "native_session_ref": "01a12019-ba76-7be0-a3b5-5a5511ae3500",
     "provider_id": "none",
     "surface": "offline_programmatic"
   },
@@ -108,15 +108,15 @@
         "score": 0.2627118644067797
       },
       "candidate": {
-        "ci_high": 0.3212121212121212,
-        "ci_low": 0.19937694704049844,
-        "score": 0.25895316804407714
+        "ci_high": 0.3223684210526316,
+        "ci_low": 0.20306513409961685,
+        "score": 0.260989010989011
       },
       "critical": true,
       "delta": {
-        "ci_high": 0.0,
-        "ci_low": -0.008830790132047656,
-        "value": -0.0037586963627025405
+        "ci_high": 0.004556846662109815,
+        "ci_low": -0.0083502024291498,
+        "value": -0.0017228534177686772
       },
       "dimension_id": "human-delivery-precision",
       "direction_vs_baseline": "equivalent",
@@ -164,25 +164,26 @@
       },
       "candidate": {
         "path": "evals/rule-delivery/evidence/candidate.jsonl",
-        "sha256": "74335621b232a198b410f565a99842642dda64469cf1018d00279858f44bcfa6"
+        "sha256": "8b814f9a2bbb71ab8b3fdda4afe9affa261f77fcca206e0ed777ebf6c4200ce0"
       }
     },
     "dependencies": {
       "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
-      "hooks/rule-pack-preuse-reselection.py": "454615bb28d9e345642b606ff7655d6df9be503db3f07a2b709b4f95bd46b681",
+      "hooks/rule-pack-preuse-reselection.py": "dbb3268002ab1fb448fd114f1366b8a1fcfd39de73e7ba08a7fe6dd399740b25",
       "lib/claude_continuity_config.py": "9e6d1afd1c5714bd61892ca1da7de058dbcfebae84f9131fd70d24d6a91985f5",
       "lib/claude_rule_delivery_dedupe.py": "6b37b3e0cd950410332fcc4099c17b61650d87eb63158bf550c5d259ca0540b4",
-      "lib/rule_delivery_preuse.py": "3a4e46653d2255561a2b171b4762dce6d74581eb7f2156cce6afc320e26adee2",
+      "lib/hook_runtime.py": "98fb90335be414e80e52aac30d93f9d150a6f8112287692a1b4c9d296e5afa5a",
+      "lib/rule_delivery_preuse.py": "2665f2aef16ad69ca49935c0feb6495ea26a485d872d8efc60bac55a6360bb70",
       "lib/rule_delivery_shadow.py": "b39b504ff0bf77819b578a12f97821bc3da2e8226e90b5f17d3a40ccb1cb7417",
-      "lib/rule_routes.py": "84f227f016caa8424bcd98bf0acb68424f22bc48437965d244de235f44f51d62",
+      "lib/rule_routes.py": "03358163502892be114cb13de447c589ee1e8a7bcf1c0034408992885ad38ad0",
       "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
       "ops/config/jev-cost-guard.v1.json": "8920873a41078dca949d8e31f50705e1330bcfa087b5260c22693f220488a2f8",
-      "ops/config/rule-classes.v1.json": "b659eeb6806156b7a518ac3cdb27963de583a7c174618857ccc7951b37463968",
-      "ops/config/rule-enforcement-map.json": "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308",
-      "ops/config/rule-jev-triggers.v1.json": "e64514d2711b5ecb4dad9b0a2524c480237fd41ef3cd85b256b7cf819f0e0f00",
-      "ops/config/rule-jit-triggers.v1.json": "7b7b72027a4cee14968973205955034b58916e413887f4e61239114bab35d21a",
-      "ops/config/rule-routes.v1.json": "a430be96f45260f858f9ad021064a103d0b80cb32e3fbd04b9c9782b4c64714e",
-      "ops/config/rule-selection-corpus.v1.json": "64d1e2c0305e80a8035311a2d005b2b43ca657b697ad50fd6e6317c1046022e2",
+      "ops/config/rule-classes.v1.json": "a78009e28bf32422695c31b1c4344c82a652ff5d3b9e3f489b2afb339638a852",
+      "ops/config/rule-enforcement-map.json": "2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4",
+      "ops/config/rule-jev-triggers.v1.json": "42f77f3373d49fab1fcb7bee9360434b4fb3ca8fb71ed18576b233df5895fb33",
+      "ops/config/rule-jit-triggers.v1.json": "5e160660cef1292d0998521d9fab32357913cfa4563f6569e2e1b71e6287356d",
+      "ops/config/rule-routes.v1.json": "a7d07fd53511114bb4b380074f27628ff945f133be01ead9b46c7ad2f1baac75",
+      "ops/config/rule-selection-corpus.v1.json": "9d9aa0d84329fa29790ee36825caf22924b33717ee152f15c02e81d6872a7454",
       "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
       "ops/fixtures/real-replay/read-calls.jsonl": "19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
       "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
@@ -217,7 +218,7 @@
       "result": "pass"
     }
   },
-  "measured_on": "2026-10-07",
+  "measured_on": "2026-10-09",
   "min_useful_gain": 0.7,
   "noise_floor": 0.3,
   "notes": [

@@ -1,6 +1,6 @@
 {
  "schema": "rule-selection-corpus.v1",
- "note": "Full active rule statements for judged rule selection, keyed by the record layer short id. Refreshed from live standing-context on 2026-09-23; the five retired rules were removed and three newly active rules added. Scope and active-state authority remain in the record layer. 2026-09-29: rule ede4b241 (cloud model choice) added ahead of its approval so its delivery route can be verified; it is proposed in the record layer until one approve-rule act by Joe.",
+ "note": "Full active rule statements for judged rule selection, keyed by the record layer short id. Refreshed from live standing-context on 2026-09-23; the five retired rules were removed and three newly active rules added. Scope and active-state authority remain in the record layer. 2026-09-29: rule ede4b241 (cloud model choice) added ahead of its approval so its delivery route can be verified; it is proposed in the record layer until one approve-rule act by Joe. 2026-10-08: rule 8400cd3d (new-work sizing) added ahead of approval so its planning-moment delivery route can be verified; it remains proposed in the record layer.",
  "rules": [
   {
    "id": "015183f5",
@@ -895,6 +895,12 @@
    "scope": {
     "section": "verification"
    }
+  },
+  {
+   "id": "8400cd3d",
+   "gist": "EVERY NEW PIECE OF WORK STARTS WITH A SIZING STEP",
+   "statement": "EVERY NEW PIECE OF WORK STARTS WITH A SIZING STEP. Tiny work is built in one go. Medium-to-large work opens with /grill-with-docs. Work that outgrows one session moves to /wayfinder. Never start with /wayfinder.",
+   "scope": {}
   },
   {
    "id": "83b9a362",
