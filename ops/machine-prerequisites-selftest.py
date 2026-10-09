@@ -106,7 +106,7 @@ assert spec and spec.loader
 config = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(config)
 setattr(config, "codex_configuration_state", lambda: "absent")
-setattr(config, "pairs", lambda: [])
+setattr(config, "pairs", lambda holds=None: [])
 setattr(config, "hook_scripts_untracked", lambda: [])
 setattr(config, "secondary_scheduled_task_violations", lambda: [])
 setattr(config, "PREREQUISITE_CHECK", lambda _repo: [

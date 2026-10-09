@@ -286,12 +286,12 @@ def record(kind: str, target: str, command: str, reason: str,
             f"The change stands. Say so in your reply.\n")
 
 
-def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:                                        # noqa: BLE001
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
+
+@decision(failure="raise")
+def decide(payload):
     command = (payload.get("tool_input") or {}).get("command") or ""
     if not command:
         return 0
@@ -316,6 +316,10 @@ def main() -> int:
     outcome = "applied" if code in (0, None) else "failed"
     record(kind, target, command, reason or "(none stated)", outcome, session_id)
     return 0
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":

@@ -691,9 +691,9 @@ async function routeRequest(request, env, ctx) {
     const refused = mcpOriginRefusal(request, env);
     if (refused) return refused;
   }
-  // The confidential reports host is an isolated leaf. Unknown paths close as
-  // report-surface 404s and can never alias MCP, OAuth, capture, or Deal Room.
-  if (isReportsHostRequest(request)) return reportsHandler.fetch(request, env, ctx);
+  // The production reports host isolates all paths. Staging browser hosts
+  // select only existing reports routes so their auth and MCP doors coexist.
+  if (isReportsHostRequest(request, env)) return reportsHandler.fetch(request, env, ctx);
   // The old Deal Room hostname is a browser bookmark bridge only. Keep it
   // ahead of machine-token doors so /mcp and other API paths fail closed on
   // that hostname instead of reaching an unrelated machine surface.

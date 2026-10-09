@@ -175,6 +175,19 @@ class DispatcherTests(unittest.TestCase):
             self.assertEqual(row["status"], "unavailable")
             self.assertEqual(row["reason"], "time_budget_exhausted")
 
+    def test_stop_hides_bare_needs_review_from_joe(self):
+        # Joe 2026-10-05: "[jev done_claim] needs_review ... these keep appearing after every
+        # response". A needs_review verdict binds no action, so the Stop line Joe sees omits it;
+        # the receipt still records it.
+        m = load("advise")
+        review = {"check": "done_claim", "verdict": "needs_review",
+                  "advice": "Bind the completion claim to explicit criteria and current evidence; needs review."}
+        concrete = {"check": "done_claim", "verdict": "unsupported",
+                    "advice": "Completion conflicts with unresolved check failures."}
+        self.assertTrue(m._notable(review))
+        self.assertFalse(m._joe_facing(review))
+        self.assertTrue(m._joe_facing(concrete))
+
     def test_off_mode_runs_nothing(self):
         m = load("off")
         fake = FakeLibs()

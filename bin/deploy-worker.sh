@@ -1603,19 +1603,46 @@ if (live.get("git_sha") or {}).get("value")!=sha or (live.get("worker_version") 
   if [ -n "$DO_MIGRATION_VERSION_ID" ]; then
     PROVIDER_VERSION_ID="$DO_MIGRATION_VERSION_ID"
   else
-    set +e
     if [ -n "$PROBE_TOKENS_FILE" ]; then
       set -- --secrets-file "$PROBE_TOKENS_FILE"
     else
       set --
     fi
-    VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload "$@" --var "GIT_SHA:$HEAD_SHA" \
-      --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
-      --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
-    VERSION_UPLOAD_RC=$?
-    set -e
-    printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
-    [ "$VERSION_UPLOAD_RC" -eq 0 ] || fail "Cloudflare version upload failed."
+    # A CONNECTIVITY FAILURE IS NOT A VERDICT ON THE RELEASE. On 2026-10-02
+    # wrangler's first API read (GET .../workers/services/carr-mcp) timed out
+    # once with `fetch failed`, before anything was uploaded, and the release
+    # pipeline marked bde9be154445 failed for good: it never retries a SHA, so
+    # one network blip burned a release that had nothing wrong with it.
+    # Retry ONLY that shape, and only while Cloudflare has named no version:
+    # an auth error, a refused build or a pending migration fails at once as
+    # before, and output carrying a Worker Version ID is never retried. A
+    # timeout after Cloudflare stored a version but before wrangler printed it
+    # leaves at most an extra version with no traffic, because promotion moves
+    # exactly the id parsed below.
+    UPLOAD_ATTEMPTS="${CARR_UPLOAD_ATTEMPTS:-3}"
+    UPLOAD_RETRY_SLEEP="${CARR_UPLOAD_RETRY_SLEEP:-30}"
+    UPLOAD_ATTEMPT=0
+    while :; do
+      UPLOAD_ATTEMPT=$((UPLOAD_ATTEMPT + 1))
+      set +e
+      VERSION_UPLOAD_OUTPUT="$("$WRANGLER" versions upload "$@" --var "GIT_SHA:$HEAD_SHA" \
+        --var "CANDIDATE_MANIFEST:$CANDIDATE_MANIFEST" \
+        --var "CANDIDATE_MANIFEST_DIGEST:$CANDIDATE_MANIFEST_DIGEST" 2>&1)"
+      VERSION_UPLOAD_RC=$?
+      set -e
+      printf '%s\n' "$VERSION_UPLOAD_OUTPUT"
+      [ "$VERSION_UPLOAD_RC" -ne 0 ] || break
+      [ "$UPLOAD_ATTEMPT" -lt "$UPLOAD_ATTEMPTS" ] || break
+      case "$VERSION_UPLOAD_OUTPUT" in
+        *"Worker Version ID:"*) break ;;
+        *"fetch failed"*|*ETIMEDOUT*|*ECONNRESET*|*ECONNREFUSED*|*ENOTFOUND*|*EAI_AGAIN*|*UND_ERR_*) ;;
+        *) break ;;
+      esac
+      echo "  version upload attempt $UPLOAD_ATTEMPT/$UPLOAD_ATTEMPTS hit a connectivity failure before Cloudflare named a version; retrying in ${UPLOAD_RETRY_SLEEP}s"
+      sleep "$UPLOAD_RETRY_SLEEP"
+    done
+    [ "$VERSION_UPLOAD_RC" -eq 0 ] \
+      || fail "Cloudflare version upload failed after $UPLOAD_ATTEMPT attempt(s)."
     PROVIDER_VERSION_ID="$(printf '%s\n' "$VERSION_UPLOAD_OUTPUT" \
       | sed -nE 's/^.*Worker Version ID:[[:space:]]*([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}).*$/\1/p' \
       | tail -n 1 | tr 'A-F' 'a-f')"

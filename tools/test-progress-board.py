@@ -7,6 +7,8 @@ commands and publishes the JSON data contract that page renders.
 """
 
 import copy
+import functools
+import itertools
 import io
 import json
 import importlib.util
@@ -14,6 +16,7 @@ import os
 # These tests assert per-render GitHub sync; the production reuse window is covered in test-progress-board-rest.py.
 os.environ["PROGRESS_BOARD_PR_FRESH_SECONDS"] = "0"
 import plistlib
+import runpy
 import shutil
 import subprocess
 import sys
@@ -32,6 +35,12 @@ SPEC = importlib.util.spec_from_file_location("progress_board", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 BOARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BOARD)
+
+def fixture_budget(fixture):
+    return BOARD.repo_lib("github_rate_limit").GitHubReadBudget(
+        {"GH_LIMITER_DIR": str(fixture.parent / "fake-gh-limiter")},
+        path=fixture.parent / f"github-budget-{os.getpid()}.json",
+        clock=itertools.count(step=2).__next__)
 
 # One dispatcher for every gh call the board makes. The fixture file says what
 # each call returns; tests rewrite it between runs.
@@ -180,8 +189,12 @@ class BoardCase(unittest.TestCase):
         self.tempdir.cleanup()
 
     def run_board(self, *args, input_text=None, check=True):
+        command = [sys.executable, str(SCRIPT), *args]
+        if "BOARD_GH_FIXTURE" in self.env:
+            command = [sys.executable, str(Path(__file__).resolve()),
+                       "--fixture-board", str(SCRIPT), *args]
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            command,
             cwd=REPO,
             env=self.env,
             input=input_text,
@@ -207,6 +220,17 @@ class BoardCase(unittest.TestCase):
         self.env["BOARD_GH_FIXTURE"] = str(self.fixture)
         self.env["BOARD_GH_LOG"] = str(self.gh_log)
         self.fixture.write_text(json.dumps(fixture))
+        if not hasattr(self, "fixture_reader"):
+            budget = fixture_budget(self.fixture)
+            @functools.lru_cache(maxsize=None)
+            def fixture_reader(binary, timeout):
+                return BOARD.repo_lib("github_reader").GitHubReader(
+                    gh=binary, timeout=timeout, retry_delays=BOARD.GH_RETRY_DELAYS,
+                    budget=budget)
+            self.fixture_reader = fixture_reader
+            reader_patch = patch.object(BOARD, "gh_reader", fixture_reader)
+            reader_patch.start()
+            self.addCleanup(reader_patch.stop)
         return gh
 
     def set_fixture(self, fixture):
@@ -2038,6 +2062,38 @@ class ReviewRound1420(BoardCase):
         result = self.run_board("note", "demo", "--text", "x")
         self.assertIn("not published", result.stderr)
 
+    def test_11_b_deferred_mutation_does_not_refresh_or_publish(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        with self.in_process(PROGRESS_BOARD_LOCAL_ONLY="1"), \
+             patch.object(BOARD, "render", side_effect=AssertionError("local mutation refreshed the whole board")), \
+             patch.object(BOARD, "publish_board", side_effect=AssertionError("local mutation published")):
+            BOARD.main(["task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex",
+                        "--defer-refresh"])
+        self.assertEqual(self.read_state("demo")["tasks"]["a"]["status"], "running")
+
+    def test_11_c_task_receipt_captures_locked_before_state_and_cas_noop(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--note", "Original evidence")
+        before = self.read_state("demo")["tasks"]["a"]
+
+        applied = self.run_board("task", "demo", "a", "--status", "blocked", "--health", "blocked",
+                                 "--reason", "Synthetic failure", "--next-action", "Recover",
+                                 "--note", "Watchdog overlay", "--receipt")
+        receipt = json.loads(applied.stdout)
+        self.assertTrue(receipt["applied"])
+        self.assertEqual(receipt["before"], before)
+        self.assertEqual(receipt["after"], self.read_state("demo")["tasks"]["a"])
+
+        current = receipt["after"]
+        refused = self.run_board("task", "demo", "a", "--status", "done", "--note", "stale restore",
+                                 "--expected-task", json.dumps({"status": "running"}), "--receipt")
+        receipt = json.loads(refused.stdout)
+        self.assertFalse(receipt["applied"])
+        self.assertEqual(receipt["before"], current)
+        self.assertEqual(receipt["after"], current)
+        self.assertEqual(self.read_state("demo")["tasks"]["a"], current)
+
 
 def merged_view(oid):
     """A complete merged PR as gh reports it, merged at `oid`."""
@@ -2274,4 +2330,13 @@ class DeliveryTargetRelease(BoardCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    if sys.argv[1:2] == ["--fixture-board"]:
+        assert "BOARD_GH_FIXTURE" in os.environ, "fixture runner requires fake gh"
+        budget = fixture_budget(Path(os.environ["BOARD_GH_FIXTURE"]))
+        github_reader = BOARD.repo_lib("github_reader")
+        github_reader.GitHubReader = functools.partial(
+            github_reader.GitHubReader, budget=budget)
+        sys.argv = sys.argv[2:]
+        runpy.run_path(sys.argv[0], run_name="__main__")
+    else:
+        unittest.main(verbosity=2)
