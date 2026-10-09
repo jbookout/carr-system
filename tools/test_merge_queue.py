@@ -344,6 +344,34 @@ class QueueTests(unittest.TestCase):
         self.assertGreaterEqual(starts[1][1] - starts[0][1], 2.0)
         self.assertGreaterEqual(len(sleeps), 2)
 
+    def test_reserved_slot_is_rechecked_after_provider_budget_check(self):
+        q = module.Queue(self.state, self.root)
+        self.addCleanup(q.db.close)
+        wall, monotonic, starts = [100.0], [100.0], []
+        q.budget.clock = lambda: wall[0]
+        with q.budget.state() as data:
+            data[q.budget.shared] = {'next_start': 102.0}
+        original_check = q.budget.check
+        checks = []
+        def check(resource):
+            original_check(resource)
+            checks.append(wall[0])
+            if len(checks) == 1:
+                wall[0] -= 1.0
+        def sleep(seconds):
+            wall[0] += seconds
+            monotonic[0] += seconds
+        def command(argv, **kwargs):
+            starts.append(wall[0])
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(q.budget, 'check', side_effect=check), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+        self.assertGreaterEqual(starts[0], 102.0)
+        self.assertGreaterEqual(len(checks), 2)
+
     def test_cancelled_mutation_retains_uncertainty_and_shared_cooldown(self):
         q = module.Queue(self.state, self.root)
         self.addCleanup(q.db.close)
