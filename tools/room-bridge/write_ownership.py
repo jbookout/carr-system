@@ -1,9 +1,18 @@
-"""Reserve repository write globs before an executor starts."""
+"""Reserve repository write globs before an executor starts.
+
+Machine IDs read from the OS are authoritative across hostname changes. Legacy
+process records lacking an ID require a hostname observed by process_owner on
+this machine, in a separate machine-bound journal. Supplied identities never
+teach aliases; corrupt, ambiguous or unavailable observations fail closed.
+Legacy provider-only records without host metadata retain their existing exact
+thread/turn terminal readback policy, not permission to probe local processes.
+"""
 from __future__ import annotations
 
 from contextlib import contextmanager
 import fcntl
 from fnmatch import fnmatchcase
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -30,6 +39,91 @@ from ops.git_env import scrubbed_env
 LEDGER = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.config' / 'carr' / 'hermes-write-ownership.jsonl'
 
 
+def _valid_machine_id(value) -> str | None:
+    if isinstance(value, str) and re.fullmatch(
+            r'(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})', value):
+        return value.lower()
+    return None
+
+
+@lru_cache(maxsize=1)
+def machine_id() -> str | None:
+    """Cache only the OS machine identity; a hostname is never its substitute."""
+    try:
+        if sys.platform == 'darwin':
+            result = subprocess.run(['/usr/sbin/ioreg', '-r', '-d', '1', '-c',
+                                     'IOPlatformExpertDevice'],
+                                    capture_output=True, text=True, check=True, timeout=2)
+            match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"\n]+)"', result.stdout)
+            return _valid_machine_id(match[1]) if match else None
+        if sys.platform == 'linux':
+            return _valid_machine_id(Path('/etc/machine-id').read_text().strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _alias_path() -> Path:
+    return Path(str(LEDGER) + '.host-aliases.jsonl')
+
+
+def _aliases(path: Path) -> dict[str, set[str]]:
+    aliases: dict[str, set[str]] = {}
+    if path.exists():
+        for line in path.read_text(encoding='utf-8').splitlines():
+            row = json.loads(line)
+            if (not isinstance(row, dict) or set(row) != {'host', 'machine_id'}
+                    or not isinstance(row['host'], str) or not row['host']
+                    or _valid_machine_id(row['machine_id']) is None):
+                raise ValueError('invalid hostname observation')
+            aliases.setdefault(row['host'], set()).add(_valid_machine_id(row['machine_id']))
+    return aliases
+
+
+def _observe_host(host: str, current: str | None) -> None:
+    if not current:
+        return
+    path = _alias_path()
+    try:
+        with _locked(path, timeout=0):
+            if current not in _aliases(path).get(host, set()):
+                _append(path, {'host': host, 'machine_id': current})
+    except (OSError, ValueError, TypeError, DeskError):
+        pass
+
+
+def _local_identity(identity: dict) -> bool:
+    current = _valid_machine_id(machine_id())
+    if not current:
+        return False
+    if 'machine_id' in identity:
+        return _valid_machine_id(identity['machine_id']) == current
+    host = identity.get('host')
+    if not isinstance(host, str) or not host:
+        return False
+    path = _alias_path()
+    try:
+        with _locked(path):
+            return _aliases(path).get(host) == {current}
+    except (OSError, ValueError, TypeError, DeskError):
+        return False
+
+
+def _same_process(identity: dict, current: dict) -> bool:
+    return (_local_identity(identity) and type(identity.get('pid')) is int
+            and identity['pid'] == current['pid'] and bool(identity.get('start_time'))
+            and identity['start_time'] == current['start_time'])
+
+
+def _executor_identity(identity: dict, current: dict) -> dict:
+    if not current['machine_id'] or ('machine_id' in identity
+            and _valid_machine_id(identity['machine_id']) != current['machine_id']):
+        raise DeskError('claim_identity_conflict', 'executor machine identity is not local')
+    if 'machine_id' not in identity and 'host' in identity and not _local_identity(identity):
+        raise DeskError('claim_identity_conflict', 'executor hostname has no local observation')
+    return {**identity, 'host': current['host'], 'machine_id': current['machine_id']}
+
+
 def process_start(pid: int) -> str | None:
     """Read kernel start time; an unavailable identity never authorizes release."""
     try:
@@ -52,13 +146,15 @@ def process_start(pid: int) -> str | None:
 
 
 def process_owner() -> dict:
-    return {'host': socket.gethostname(), 'pid': os.getpid(),
+    host, current = socket.gethostname(), _valid_machine_id(machine_id())
+    _observe_host(host, current)
+    return {'host': host, 'machine_id': current, 'pid': os.getpid(),
             'start_time': process_start(os.getpid())}
 
 
 def process_terminated(identity: dict, *, group: bool = False) -> bool:
     pid = identity.get('pid')
-    if (identity.get('host') != socket.gethostname() or type(pid) is not int or pid <= 0
+    if (not _local_identity(identity) or type(pid) is not int or pid <= 0
             or not identity.get('start_time')):
         return False
     try:
@@ -86,6 +182,11 @@ def process_terminated(identity: dict, *, group: bool = False) -> bool:
 
 def termination_evidence(row: dict) -> str | None:
     executor = row.get('executor') or {}
+    owner = row.get('owner_process') or {}
+    for identity in (owner, executor):
+        if (('machine_id' in identity or 'host' in identity)
+                and not _local_identity(identity)):
+            return None
     if not row.get('launch_marker'):
         if executor.get('kind') not in ('reservation', 'unconfirmed'):
             return None
@@ -96,7 +197,8 @@ def termination_evidence(row: dict) -> str | None:
     if kind == 'no_launch' and executor.get('reason') in ('setup_pending', 'desktop_not_live', 'start_rejected'):
         return 'executor did not launch: ' + executor['reason']
     if row.get('gated_launch') and process_terminated(row.get('owner_process') or {}):
-        if executor == {'kind': 'unconfirmed'}:
+        if (kind == 'unconfirmed'
+                and set(executor) <= {'kind', 'host', 'machine_id'}):
             return 'dispatcher terminated; no executor identity recorded behind launch gate'
         if kind == 'launch_gate' and process_terminated(executor, group=True):
             return 'dispatcher and unopened launch gate terminated; executor never authorized'
@@ -244,10 +346,10 @@ def overlaps(left: str, right: str) -> bool:
 
 
 @contextmanager
-def _locked(path: Path):
+def _locked(path: Path, *, timeout: float = 5):
     path.parent.mkdir(parents=True, exist_ok=True)
     with Path(str(path) + '.lock').open('a') as lock:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + timeout
         while True:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -271,7 +373,9 @@ def _append(path: Path, row: dict) -> None:
 
 def record(path: Path, row: dict) -> None:
     """Result snapshots are never used to decide ownership."""
-    if path.resolve() in (LEDGER.resolve(), Path(str(LEDGER) + '.lock').resolve()):
+    protected = (LEDGER, _alias_path())
+    if path.resolve() in {target.resolve() for authority in protected
+                          for target in (authority, Path(str(authority) + '.lock'))}:
         raise DeskError('bad_results_path', 'results cannot overwrite the ownership authority')
     with _locked(path):
         _append(path, row)
@@ -345,8 +449,10 @@ def reserve(row: dict, cwd: str, writes: list[str]) -> dict:
                 raise DeskError('write_set_overlap', f"write set owned by in-flight job "
                     f"{previous['msg_id']} (desk {previous.get('desk', '?')}); "
                     f"stuck or running: claim held; run dispatch.py reconcile --claim {previous['msg_id']}; {advice}")
+        current = process_owner()
         return _persist({**row, 'repo': repo, 'writes': writes, 'own_pr': mine,
-                         'owner_process': process_owner(), 'executor': {'kind': 'reservation'},
+                         'owner_process': current,
+                         'executor': _executor_identity({'kind': 'reservation'}, current),
                          'ownership_state': 'held', 'status': 'running'})
 
 
@@ -354,11 +460,13 @@ def launch(msg_id: str, request: dict | None = None, *, on_bound=None) -> dict:
     """Mark handoff, then bind a gated child before any adapter can launch work."""
     with _locked(LEDGER):
         row = _claim(msg_id)
+        current = process_owner()
         if (row['ownership_state'] != 'held' or row.get('launch_marker')
-                or row['owner_process'] != process_owner()):
+                or not _same_process(row['owner_process'], current)):
             raise DeskError('claim_launch_conflict', 'claim is not awaiting its first launch')
         row = _persist({**row, 'launch_marker': datetime.now(timezone.utc).isoformat(),
-                        'gated_launch': True, 'executor': {'kind': 'unconfirmed'}})
+                        'gated_launch': True,
+                        'executor': _executor_identity({'kind': 'unconfirmed'}, current)})
     if request is None:
         return row
     return _run_gated(msg_id, request, on_bound)
@@ -395,7 +503,7 @@ def _run_gated(msg_id: str, request: dict, on_bound=None) -> dict:
                     if initial:
                         if (identity.get('kind') != 'launch_gate' or identity.get('pid') != proc.pid
                                 or identity.get('pgid') != proc.pid
-                                or identity.get('host') != socket.gethostname()
+                                or not _local_identity(identity)
                                 or not identity.get('start_time')
                                 or identity.get('start_time') != process_start(proc.pid)):
                             raise RuntimeError('executor kernel identity unavailable')
@@ -437,10 +545,16 @@ def _run_gated(msg_id: str, request: dict, on_bound=None) -> dict:
 def bind_executor(msg_id: str, identity: dict) -> dict:
     with _locked(LEDGER):
         row = _claim(msg_id)
+        current = process_owner()
         if (row['ownership_state'] != 'held' or not row.get('launch_marker')
-                or row['owner_process'] != process_owner()):
+                or not _same_process(row['owner_process'], current)):
             raise DeskError('claim_launch_conflict', 'executor needs a held launch claim')
+        identity = _executor_identity(identity, current)
         old = row['executor']
+        if (('machine_id' in old or 'host' in old) and not _local_identity(old)):
+            raise DeskError('claim_identity_conflict', 'recorded executor identity is not local')
+        if old.get('machine_id') == identity['machine_id']:
+            old = {**old, 'host': identity['host']}
         gate_handoff = (old.get('kind') == 'launch_gate' and identity == {**old, 'kind': 'unconfirmed'})
         no_launch_transition = (identity.get('kind') == 'no_launch' and (
             (old.get('kind') == 'codex_desktop'
