@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 function canonicalize(value) {
@@ -32,7 +33,7 @@ export function preservesRegistryChainHistory(before, after) {
     same(after.strict_atomic_groups, [...before.strict_atomic_groups, ...appended.filter(row => row.strict_atomic).map(row => row.atomic_pair)]);
 }
 
-export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest, chain = registryChain }) {
+export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest, chain = registryChain, predecessorSql = null }) {
   const predecessor = chain.versions.at(-1);
   const domains = Array.isArray(domainMigration) ? domainMigration : [domainMigration];
   const domain = domains.at(-1);
@@ -61,15 +62,31 @@ export function appendSuccessor({ rows, domainMigration, catalog, entrySetDigest
     dependencies: [basename(predecessor.migration), ...domains.map(item => basename(item.filename))],
     snapshot: {include_current_entry_set: true, catalog_function: `ops.scac_mutation_catalog_v${number}_current()`},
   };
-  const template = readFileSync(new URL('../' + predecessor.migration, import.meta.url), 'utf8');
+  const template = predecessorSql ?? readFileSync(new URL('../' + predecessor.migration, import.meta.url), 'utf8');
   if (digest(template) !== predecessor.migration_sha256) throw new Error('predecessor migration pin drifted');
   const request = { template, predecessor: { number: predecessor.number, digest: predecessor.digest,
     entry_count: predecessor.entry_count, source_count: predecessor.source_count, catalog: predecessor.catalog,
     entry_set: predecessor.entry_set_digest }, rows, baseline, entry_set: entrySetDigest,
     dependencies: [{ filename: basename(predecessor.migration), sql: template }, ...domains] };
-  const sql = execFileSync('python3', ['-c',
-    'import json,sys; from successor_generation import render_sql; r=json.load(sys.stdin); print(render_sql(r["template"],r["predecessor"],r["rows"],r["baseline"],r["entry_set"],r["dependencies"]),end="")'],
-    { cwd: fileURLToPath(new URL('./', import.meta.url)), input: JSON.stringify(request), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  const directory = mkdtempSync(join(tmpdir(), 'scac-successor-'));
+  const descriptors = [];
+  let sql;
+  try {
+    const input = join(directory, 'request.json');
+    const output = join(directory, 'successor.sql');
+    writeFileSync(input, JSON.stringify(request));
+    // Full source requests and SQL are megabytes; inherited files avoid a
+    // bidirectional synchronous pipe exchange during pooled verification.
+    descriptors.push(openSync(input, 'r'));
+    descriptors.push(openSync(output, 'w'));
+    execFileSync('python3', ['-c',
+      'import json,sys; from successor_generation import render_sql; r=json.load(sys.stdin); print(render_sql(r["template"],r["predecessor"],r["rows"],r["baseline"],r["entry_set"],r["dependencies"]),end="")'],
+      { cwd: fileURLToPath(new URL('./', import.meta.url)), stdio: [...descriptors, 'pipe'] });
+    sql = readFileSync(output, 'utf8');
+  } finally {
+    for (const descriptor of descriptors) closeSync(descriptor);
+    rmSync(directory, {recursive: true, force: true});
+  }
   current.migration_sha256 = digest(sql);
   const fixture = JSON.parse(readFileSync(new URL('./config/scac-registry-source-inventory-fixtures.v1.json', import.meta.url), 'utf8'));
   const previous = new Map(fixture.base.rows.map(row => [row.ingress_key, row]));

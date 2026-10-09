@@ -61,11 +61,14 @@ source = {
     "ANTHROPIC_API_KEY": "secret",
     "SAFE_LOCAL_FLAG": "must-not-cross",
     "CARR_JEV_OFFLINE_REPLAY": "1",
+    "CARR_LOCAL_PG_BIN_DIR": "/fake/postgresql18/bin",
 }
 clean = mod.scrub_cloud_environment(source)
 check("required local environment survives", clean["PATH"] == source["PATH"] and clean["HOME"] == source["HOME"])
 check("explicit offline CI mode survives credential scrubbing",
       clean.get("CARR_JEV_OFFLINE_REPLAY") == "1")
+check("nested proofs retain the selected PostgreSQL binaries",
+      clean.get("CARR_LOCAL_PG_BIN_DIR") == source["CARR_LOCAL_PG_BIN_DIR"])
 check("unregistered ambient values are scrubbed", "SAFE_LOCAL_FLAG" not in clean)
 check("owner DSN is scrubbed", "DATABASE_URL" not in clean)
 check("routine DB DSNs are scrubbed", "CARR_DB_JOBS_URL" not in clean)
@@ -181,6 +184,15 @@ check("true pre-0450 fingerprint is captured", events[8][-1] == "--fingerprint-o
 check("migration class runs through canonical CI", events[9][-2:] == ("--only", "migration"))
 check("migration gates discover the selected PostgreSQL binaries in the scrubbed child",
       child_envs[9]["PATH"].split(os.pathsep)[0] == "/fake")
+check(
+    "contract probes read initialized reference while migration retains an empty target",
+    child_envs[9].get("CARR_CAPTURE_DATABASE_URL")
+    == "postgres://carr_ci@127.0.0.1:55432/carr_ci_a2_pre"
+    and child_envs[9].get("CARR_CI_DATABASE_URL")
+    == "postgres://carr_ci@127.0.0.1:55432/carr_ci",
+)
+check("initialized contract reference is not exposed to unrelated live fixtures",
+      "CARR_LOCAL_PG_DSN" not in child_envs[9])
 check(
     "F03 PostgreSQL acceptance runs immediately after canonical CI",
     events[10][-1].endswith("tools/test-f03-production-migration.py"),

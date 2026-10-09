@@ -1113,7 +1113,7 @@ def main() -> int:
                    state,admitted_by,admitted_at)
                 values (%s,%s,'machine_enforceable','hard_enforced','before fixture action',
                         '{"workflows":["db-gate"]}',
-                        '{"targets":["db-gate"]}', '{"paths":["database"]}',
+                        '{"targets":["db-gate"],"delivery":{"load_layer":"control","packs":[],"why":"fixture control"}}', '{"paths":["database"]}',
                         '{"type":"object"}',
                         array['ops/control-plane-db-gate.py'],'admitted',%s,now())
             """, (rule_id, intake_id, actor))
@@ -1142,12 +1142,13 @@ def main() -> int:
                   select r.id,r.version,encode(digest(r.statement,'sha256'),'hex') statement_hash,
                          jsonb_build_object(
                            'fixture','control-plane-db-gate',
-                           'binding_moment','before fixture action',
-                           'applicability','{"workflows":["db-gate"]}'::jsonb,
-                           'projection','{"targets":["db-gate"]}'::jsonb,
-                           'reachability','{"paths":["database"]}'::jsonb,
-                           'input_contract','{"type":"object"}'::jsonb) contract
-                    from rule r where r.id=%s
+                           'binding_moment',a.binding_moment,
+                           'applicability',a.applicability,
+                           'projection',a.projection,
+                           'reachability',a.reachability,
+                           'input_contract',a.input_contract) contract
+                    from rule r join ops.rule_admission a on a.rule_id=r.id
+                   where r.id=%s
                 )
                 insert into ops.rule_approval_receipt
                   (idempotency_key,rule_id,rule_version,statement_hash,actor_id,policy_kind,

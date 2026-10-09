@@ -190,7 +190,7 @@ def activate_enforced_rule_fixture(cur: psycopg.Cursor[Any], rule_id: Any,
          applicability,projection,reachability,input_contract,fixture_refs,
          state,admitted_by,admitted_at,reason)
         values (%s,%s,'machine_enforceable','hard_enforced','database acceptance',
-                '{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,
+                '{}'::jsonb,'{"delivery":{"load_layer":"control","packs":[],"why":"fixture control"}}'::jsonb,'{}'::jsonb,'{}'::jsonb,
                 array['ops/guidance-registry-db-gate.py'],'admitted',%s,now(),
                 'rollback-only rule-backed guidance fixture')""",
         (rule_id, intake_id, actor_id))
@@ -204,7 +204,7 @@ def activate_enforced_rule_fixture(cur: psycopg.Cursor[Any], rule_id: Any,
                    'fixture','guidance-registry-db-gate',
                    'binding_moment','database acceptance',
                    'applicability','{}'::jsonb,
-                   'projection','{}'::jsonb,
+                   'projection','{"delivery":{"load_layer":"control","packs":[],"why":"fixture control"}}'::jsonb,
                    'reachability','{}'::jsonb,
                    'input_contract','{}'::jsonb) contract
             from rule r where r.id=%s

@@ -212,6 +212,7 @@ def scrub_cloud_environment(source: Mapping[str, str]) -> dict[str, str]:
         "LC_CTYPE",
         # CI may explicitly forbid live Jev spend; this is a nonsecret mode.
         "CARR_JEV_OFFLINE_REPLAY",
+        "CARR_LOCAL_PG_BIN_DIR",
         "LOGNAME",
         "PATH",
         "SHELL",
@@ -566,6 +567,9 @@ def run_local_ci(
             print("local-db-ci: " + json.dumps(integration_source, sort_keys=True))
         ci_env = dict(clean_env)
         ci_env["CARR_CI_DATABASE_URL"] = dsn
+        # Contract probes run before the migration class. Give their read-only
+        # grant check the initialized reference, keeping migration's target empty.
+        ci_env["CARR_CAPTURE_DATABASE_URL"] = pre_dsn
         ci_command: list[str | Path] = [repo / "ops/ci.sh"]
         if ci_class == "strict":
             ci_command.append("--strict")

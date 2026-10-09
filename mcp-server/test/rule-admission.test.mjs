@@ -127,10 +127,10 @@ test("approve-rule is one human authority act, not separate admission and activa
   assert.equal(tool.humanOnly, undefined);
   assert.equal(tool.authorityOnly, true);
   assert.deepEqual(new Set(tool.inputSchema.required), new Set([
-    "idempotency_key", "rule_id", "policy_kind", "control_keys", "reason",
+    "idempotency_key", "rule_id", "reason",
   ]));
   assert.deepEqual(tool.inputSchema.properties.policy_kind.enum,
-    ["machine_enforceable", "human_only"]);
+    ["machine_enforceable", "human_only", "judgment_advisory"]);
   assert.equal(tool.inputSchema.properties.enforcement_points, undefined,
     "callers must not claim implementation/test evidence");
 });

@@ -21,20 +21,22 @@ def main() -> int:
                       "failure_mode":"deny"}}
     built=admission_contract("aaaaaaaa","shared",{
         "category":"hard_pre_action","enforcement_class":"deny_gate",
-        "binding_moment":"before write","control":"gate","exceptions":"none"},catalog)
+        "binding_moment":"before write","control":"gate","exceptions":"none"},catalog,
+        {"load_layer":"control","packs":[],"why":"installed deny gate"})
     check("built machine control is admitted",built["state"]=="admitted" and built["enforcement_class"]=="machine_enforceable")
     check("built control carries implementation and fixture evidence",
           built["enforcement_points"][0]["implementation_ref"]=="hooks/gate.py"
           and built["fixture_refs"]==["ops/gate-test.py"])
     ambient=admission_contract("bbbbbbbb","joe",{
         "category":"judgment_advisory","enforcement_class":"judgment_ambient",
-        "why_unenforceable":"requires contextual judgment"},catalog)
+        "why_unenforceable":"requires contextual judgment"},catalog,
+        {"load_layer":"layer0","packs":[],"why":"applies to every reply"})
     check("genuine judgment is explicitly admitted without fake code",
           ambient["state"]=="admitted" and ambient["enforcement_class"]=="judgment_advisory"
           and ambient["enforcement_points"]==[])
     unbuilt=admission_contract("cccccccc","shared",{
         "category":"judgment_advisory","enforcement_class":"unbuilt",
-        "planned_control":"build it"},catalog)
+        "planned_control":"build it"},catalog,{"load_layer":"pack","packs":["engineering-git"]})
     check("unbuilt machine promise remains visibly needs_revision",
           unbuilt["state"]=="needs_revision" and unbuilt["enforcement_points"]==[])
     check("all four D-04 dimensions are explicit",
@@ -42,7 +44,7 @@ def main() -> int:
     reviewed=json.loads((REPO/"ops/config/rule-enforcement-map.json").read_text(encoding="utf-8"))
     cognition=admission_contract("5e89c211","shared",
                                  reviewed["rule_controls"]["5e89c211"],
-                                 reviewed["control_catalog"])
+                                 reviewed["control_catalog"],reviewed["rule_load_layers"]["5e89c211"])
     point=cognition["enforcement_points"]
     check("cognition-token rule backfills as machine-enforceable",
           cognition["state"]=="admitted" and cognition["enforcement_class"]=="machine_enforceable"
@@ -56,6 +58,8 @@ def main() -> int:
               "execution", "input_schema_version", "output_schema_version", "budget",
               "canonical_write_authority"]
           and cognition["projection"]["targets"]==["workflow-manifest", "typed-broker"])
+    check("admission includes the reviewed delivery tag alongside its typed projection",
+          cognition["projection"].get("delivery")==reviewed["rule_load_layers"]["5e89c211"])
     # WHO OWNS THE ROW. Added 2026-08-23 after the first real run against
     # Production stopped on migration 0228's immutability trigger: the backfill
     # tried to rewrite the contract of a rule Joe had already approved.

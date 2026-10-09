@@ -30,7 +30,7 @@ def backfill_owns_row(existing_reason: str | None, approved: bool) -> bool:
 
 
 def admission_contract(rule_id: str, scope: str, entry: dict[str,Any],
-                       catalog: dict[str,Any]) -> dict[str,Any]:
+                       catalog: dict[str,Any], delivery: dict[str,Any]) -> dict[str,Any]:
     cls=entry["enforcement_class"]
     admission=entry.get("admission", {})
     if not isinstance(admission, dict):
@@ -43,7 +43,7 @@ def admission_contract(rule_id: str, scope: str, entry: dict[str,Any],
                 "category":entry.get("category")}
     reachability={"paths":["record-layer","session-boot","CI"],"exceptions":entry.get("exceptions")}
     applicability=admission.get("applicability", applicability)
-    projection=admission.get("projection", projection)
+    projection={**admission.get("projection", projection), "delivery":dict(delivery)}
     reachability=admission.get("reachability", reachability)
     input_contract=admission.get("input_contract", {
         "type":"object","required":["workflow","surface","tier"],

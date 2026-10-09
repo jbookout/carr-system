@@ -64,7 +64,8 @@ def main()->int:
             if not backfill_owns_row(existing_reason,approved):
                 counts["kept_approved" if approved else "kept_hand_authored"]+=1
                 continue
-            contract=admission_contract(short,scope_by_id[short],data["rule_controls"][short],data["control_catalog"])
+            contract=admission_contract(short,scope_by_id[short],data["rule_controls"][short],
+                                        data["control_catalog"],data["rule_load_layers"][short])
             contract_json=json.dumps(contract,sort_keys=True,separators=(",",":"))
             contract_hash=hashlib.sha256(contract_json.encode()).hexdigest()
             source=f"rule:{rid}"

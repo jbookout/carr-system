@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class GeneratedFrontier(unittest.TestCase):
     def setUp(self):
-        self.repo = Path(tempfile.mkdtemp(prefix='scac-frontier-')) / 'repo'
+        temporary = tempfile.TemporaryDirectory(prefix='scac-frontier-')
+        self.addCleanup(temporary.cleanup)
+        self.repo = Path(temporary.name) / 'repo'
         subprocess.run(['git', 'clone', '-q', '--shared', str(ROOT), str(self.repo)],
                        env=fixture_env(), check=True, capture_output=True)
         shutil.copyfile(ROOT / 'ops/scac-mutation-inventory.mjs', self.repo / 'ops/scac-mutation-inventory.mjs')
@@ -28,6 +30,10 @@ class GeneratedFrontier(unittest.TestCase):
             'expected_count': previous['expected_count'],
             'expected_sha256': previous['expected_sha256'],
         })
+
+    def test_fixture_cleanup_removes_temporary_clone(self):
+        self.doCleanups()
+        self.assertFalse(self.repo.parent.exists())
 
     def run_node(self, code):
         self.path.write_text(json.dumps(self.fixture))

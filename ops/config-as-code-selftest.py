@@ -231,6 +231,11 @@ def main():
             json.dumps(hooks_source, indent=2) + "\n", encoding="utf-8"
         )
         mod.REPO = str(repo)
+        mod.TOKENS = [(token, str(repo) if token == "{{REPO}}" else
+                       str(home) if token == "{{HOME}}" else value)
+                      for token, value in mod.TOKENS]
+        subprocess.run(["git", "init", "-q", "--initial-branch=main", str(repo)],
+                       env=fixture_env(), check=True, capture_output=True)
         mod.SETTINGS = str(home / ".claude" / "settings.json")
         mod.CLAUDE_CONTINUITY_MODE_FILE = str(
             home / ".config/carr/claude-continuity-mode.json")
