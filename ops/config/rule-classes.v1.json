@@ -888,6 +888,14 @@
    "summary": "When convening a red team, assign distinct lenses and one seat that re-runs the evidence, never redundant votes.",
    "when": "convening a red team/review panel"
   },
+  "8400cd3d": {
+   "always_on": false,
+   "chars": 211,
+   "class": "b",
+   "moment": "starting a plan, a heavy-build plan, propose-ready-plan, or a Codex or Dot brief",
+   "summary": "Size new work first: one go for tiny, /grill-with-docs for medium-to-large, and /wayfinder only after one session.",
+   "when": "starting a plan, a heavy-build plan, propose-ready-plan, or a Codex or Dot brief"
+  },
   "847f9995": {
    "always_on": true,
    "always_on_reason": "stop-gate:completion_evidence",
