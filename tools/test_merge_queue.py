@@ -344,6 +344,26 @@ class QueueTests(unittest.TestCase):
         self.assertGreaterEqual(starts[1][1] - starts[0][1], 2.0)
         self.assertGreaterEqual(len(sleeps), 2)
 
+    def test_shared_gh_spacing_survives_forward_wall_clock_step_from_delay_peer(self):
+        q = module.Queue(self.state, self.root)
+        self.addCleanup(q.db.close)
+        wall, monotonic, starts = [100.0], [100.0], []
+        q.budget.clock = lambda: wall[0]
+        peer = module.GitHubReadBudget({}, path=q.budget.path, clock=lambda: wall[0])
+        self.assertEqual(peer.reserve('core'), 0.0)
+        peer_start = monotonic[0]
+        def sleep(seconds):
+            monotonic[0] += seconds
+            wall[0] += seconds + (1.9 if monotonic[0] < 100.3 else 0)
+        def command(argv, **kwargs):
+            starts.append(monotonic[0])
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+        self.assertGreaterEqual(starts[0] - peer_start, 2.0)
+
     def test_reserved_slot_is_rechecked_after_provider_budget_check(self):
         q = module.Queue(self.state, self.root)
         self.addCleanup(q.db.close)
