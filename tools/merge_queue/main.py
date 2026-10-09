@@ -42,12 +42,38 @@ class ActionRejected(RuntimeError):
     pass
 
 
+class ReadRejected(RuntimeError):
+    pass
+
+
 class ActionExhausted(RuntimeError):
     pass
 
 
 class Cancelled(Exception):
     pass
+
+
+def gh_api_read(argv):
+    method, fields, body = None, [], False
+    for index, arg in enumerate(argv[3:], 3):
+        if arg in ('-X', '--method'):
+            method = argv[index + 1]
+        elif arg.startswith('--method='):
+            method = arg.split('=', 1)[1]
+        elif arg.startswith('-X'):
+            method = arg[2:]
+        elif arg in ('-f', '-F', '--field', '--raw-field'):
+            fields.append(argv[index + 1])
+        elif arg.startswith(('--field=', '--raw-field=')):
+            fields.append(arg.split('=', 1)[1])
+        elif arg.startswith(('-f', '-F')):
+            fields.append(arg[2:])
+        elif arg == '--input' or arg.startswith('--input='):
+            body = True
+    if argv[2] == 'graphql':
+        return any(re.match(r'query=\s*(?:query\b|\{)', field) for field in fields)
+    return (method or ('POST' if fields or body else 'GET')).upper() in ('GET', 'HEAD')
 
 
 def command(argv, *, cwd=None, data=None, timeout=120, observe=None):
@@ -62,7 +88,10 @@ def command(argv, *, cwd=None, data=None, timeout=120, observe=None):
                                                          'required status check',
                                                          'base branch policy prohibits')):
             raise MergeRejected('GitHub rejected the merge; verify provider state before retry')
-        if argv[0] == 'gh' and (argv[1] == 'api' or argv[1:3] == ['pr', 'edit']) and re.search(r'HTTP 4[0-9]{2}', p.stderr):
+        status = re.search(r'HTTP (4[0-9]{2})', p.stderr)
+        if argv[:2] == ['gh', 'api'] and status and gh_api_read(argv):
+            raise ReadRejected(f'GitHub read rejected (HTTP {status[1]}); reread before retry')
+        if argv[0] == 'gh' and (argv[1] == 'api' or argv[1:3] == ['pr', 'edit']) and status:
             raise ActionRejected('GitHub rejected the action; reread before retry')
         # Child stderr can contain authenticated URLs. Keep it in the child's domain.
         raise RuntimeError(f'{Path(argv[0]).name} {argv[1]} failed (exit {p.returncode})')
@@ -95,6 +124,7 @@ class Queue:
             additions = {
                 'entries': {'merge_attempts': 'INTEGER NOT NULL DEFAULT 0',
                             'transient_attempts': 'INTEGER NOT NULL DEFAULT 0',
+                            'read_attempts': 'INTEGER NOT NULL DEFAULT 0',
                             'auto_attempts': 'INTEGER NOT NULL DEFAULT 0',
                             'ci_since': 'REAL', 'ci_head': 'TEXT'},
                 'actions': {'attempts': 'INTEGER NOT NULL DEFAULT 0', 'expected_base': 'TEXT',
@@ -690,6 +720,16 @@ class Queue:
             except ActionExhausted as exc:
                 self.report(e, 'action_exhausted', str(exc), 'exhausted')
                 return
+            except ReadRejected as exc:
+                with self.db:
+                    self.db.execute('UPDATE entries SET read_attempts=read_attempts+1 WHERE id=?', (e['id'],))
+                    attempts = self.db.execute('SELECT read_attempts FROM entries WHERE id=?', (e['id'],)).fetchone()[0]
+                exhausted = attempts >= MAX_ATTEMPTS
+                self.report(e, 'read_exhausted' if exhausted else 'read_rejected',
+                            f'{exc}; {attempts} of {MAX_ATTEMPTS} read attempts', 'blocked' if exhausted else None)
+                if exhausted:
+                    continue
+                return
             except ActionRejected as exc:
                 self.report(e, 'action_rejected', str(exc))
                 return
@@ -726,10 +766,14 @@ class Queue:
 
     def _reconcile(self, entry, retry=False):
         e = self.db.execute('SELECT * FROM entries WHERE id=?', (entry,)).fetchone()
-        if not e or e['phase'] not in ('merging', 'merge_rejected', 'exhausted') or not e['tested']:
+        if not e or e['phase'] not in ('merging', 'merge_rejected', 'exhausted', 'blocked') or not e['tested']:
             raise RuntimeError('reconciliation requires a persisted merge intent')
         p = self.pr(e['repo'], e['pr'])
         if p.get('merged'):
+            if retry:
+                with self.db:
+                    self.db.execute('UPDATE entries SET transient_attempts=0,read_attempts=0 WHERE id=?', (entry,))
+                self.report(e, 'reconciled', 'Provider reports merged; resume commit confirmation and post-merge refresh', 'merging')
             return
         if self.held(p) or p['base']['ref'] != 'main':
             raise RuntimeError('head is held or base changed; no retry authorized')

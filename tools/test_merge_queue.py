@@ -255,6 +255,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(sum('update-branch' in str(a) for a in self.load()['calls']), 4)
         self.assertEqual(self.q.db.execute('SELECT phase,outcome FROM entries').fetchone()[:],
                          ('exhausted', 'action_exhausted'))
+        self.assertEqual(self.q.db.execute('SELECT read_attempts FROM entries').fetchone()[0], 0)
 
     def test_rejected_merge_exhausts_after_three_retries_across_restart(self):
         self.pr(); self.data['merge_reject'] = True; self.save()
@@ -414,7 +415,8 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(entry['transient_attempts'], 0)
         self.assertEqual(entry['merge_attempts'], 0)
         calls = self.load()['calls']
-        self.assertEqual(sum(a[0]=='api' and a[1].split('?')[0]==path for a in calls), 4)
+        next_merge = next(i for i, a in enumerate(calls) if a[:3]==['pr', 'merge', '2'])
+        self.assertEqual(sum(a[0]=='api' and a[1].split('?')[0]==path for a in calls[:next_merge]), 4)
         self.assertEqual([a[2] for a in self.calls('merge')], ['2'])
         reason = self.q.db.execute('SELECT detail FROM events WHERE entry_id=? AND outcome=?',
                                   (first, 'read_exhausted')).fetchone()[0]
@@ -430,24 +432,51 @@ class QueueTests(unittest.TestCase):
     def test_rejected_check_read_is_bounded_and_next_pr_runs(self):
         self.assert_rejected_read_is_bounded(f'repos/jbookout/carr-system/commits/{self.approved}/check-runs', 404)
 
-    def test_exhausted_merged_entry_reconciles_and_refreshes_without_remerging(self):
+    def test_rejected_api_reads_follow_effective_method_and_graphql_operation(self):
+        self.pr()
+        cases = (
+            ('repos/jbookout/carr-system/pulls/1', ('-X', 'GET', '-f', 'page=1'), module.ReadRejected),
+            ('repos/jbookout/carr-system/pulls/1', ('--method=HEAD',), module.ReadRejected),
+            ('repos/jbookout/carr-system/pulls/1', ('-f', 'body=comment'), module.ActionRejected),
+            ('repos/jbookout/carr-system/pulls/1', ('-X', 'PUT', '-f', 'expected_head_sha='+self.approved), module.ActionRejected),
+            ('graphql', ('-f', 'query=query { viewer { login } }'), module.ReadRejected),
+            ('graphql', ('-f', 'query=mutation { effect }'), module.ActionRejected),
+        )
+        for path, args, error in cases:
+            with self.subTest(path=path, args=args):
+                self.data['api_failure'] = {'path': path, 'status': 403}
+                self.save()
+                with self.assertRaises(error):
+                    self.q.api(path, *args)
+                self.load()
+
+    def assert_merged_entry_reconciles_and_refreshes(self, status, phase):
         self.pr()
         self.pr(2, state='behind')
         entry = self.q.enqueue(module.REPOS[0], 1, self.approved)
         self.q.tick()
         self.assertEqual(len(self.calls('merge')), 1)
-        self.data['api_failure'] = {'path': 'repos/jbookout/carr-system/pulls/1', 'status': 500}
+        self.data['api_failure'] = {'path': 'repos/jbookout/carr-system/pulls/1', 'status': status}
         self.save()
         for _ in range(4):
             self.q.tick()
             self.restart()
         self.assertEqual(self.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0],
-                         'exhausted')
+                         phase)
         self.load()
         del self.data['api_failure']
         self.save()
+        self.q.reconcile(entry)
+        self.assertEqual(self.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], phase)
         self.q.reconcile(entry, retry=True)
         self.restart()
+        self.data['api_failure'] = {'path': 'repos/jbookout/carr-system/pulls/1', 'status': status}
+        self.save()
+        self.q.tick()
+        self.assertEqual(self.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], 'merging')
+        self.load()
+        del self.data['api_failure']
+        self.save()
         self.q.tick()
         self.assertEqual(self.q.db.execute('SELECT phase,outcome,tested,merge_attempts FROM entries WHERE id=?',
                                           (entry,)).fetchone()[:], ('done', 'merged', self.approved, 1))
@@ -458,6 +487,28 @@ class QueueTests(unittest.TestCase):
                                   (entry,)).fetchone()[0]
         self.assertIn(self.merge_sha, reason)
         self.assertIn('post-merge refresh complete', reason)
+
+    def test_exhausted_merged_entry_reconciles_and_refreshes_without_remerging(self):
+        self.assert_merged_entry_reconciles_and_refreshes(500, 'exhausted')
+
+    def test_blocked_merged_entry_reconciles_and_refreshes_without_remerging(self):
+        self.assert_merged_entry_reconciles_and_refreshes(404, 'blocked')
+
+    def test_merged_reconciliation_never_replays_merge_after_inconsistent_readback(self):
+        self.pr()
+        entry = self.q.enqueue(module.REPOS[0], 1, self.approved)
+        self.q.tick()
+        self.load()
+        with self.q.db:
+            self.q.db.execute("UPDATE entries SET phase='exhausted',transient_attempts=4 WHERE id=?", (entry,))
+        self.q.reconcile(entry, retry=True)
+        self.data['prs'][module.REPOS[0]+'#1'].update(merged=False, state='open')
+        self.save()
+        self.restart()
+        self.q.tick()
+        self.assertEqual(len(self.calls('merge')), 1)
+        self.assertEqual(self.q.db.execute('SELECT phase,outcome FROM entries WHERE id=?', (entry,)).fetchone()[:],
+                         ('merging', 'merge_uncertain'))
 
     def test_issued_merge_observation_exhausts_without_losing_intent(self):
         self.pr(); self.q.enqueue(module.REPOS[0], 1, self.approved)
