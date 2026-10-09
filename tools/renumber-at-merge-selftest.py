@@ -385,7 +385,7 @@ const rows=historicalRows(row.number);
 if (process.argv[3]) rows.push({...rows[0],ingress_key:'mcp-tool:pending-source',source_locator:process.argv[3],
 source_digest:createHash('sha256').update(fs.readFileSync(process.argv[3])).digest('hex')});
 rows.sort((a,b)=>a.ingress_key.localeCompare(b.ingress_key));
-const result=appendSuccessor({rows,catalog:row.catalog,entrySetDigest:row.entry_set_digest,
+const result=await appendSuccessor({rows,catalog:row.catalog,entrySetDigest:row.entry_set_digest,
 domainMigration:{filename:process.argv[1],sql:'select 1;\\n',successor_filename:process.argv[2]}});
 process.stdout.write(JSON.stringify(result));
 """

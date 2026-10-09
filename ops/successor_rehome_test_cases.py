@@ -34,7 +34,7 @@ class SuccessorCommands(unittest.TestCase):
 import {appendSuccessor,registryChain} from './ops/registry-chain.mjs';
 import {historicalRows} from './ops/registry-history.mjs';
 const row=registryChain.versions.at(-1);
-const result=appendSuccessor({rows:historicalRows(row.number),catalog:row.catalog,
+const result=await appendSuccessor({rows:historicalRows(row.number),catalog:row.catalog,
 entrySetDigest:row.entry_set_digest,domainMigration:{filename:process.argv[1],
 sql:fs.readFileSync(process.argv[1],'utf8'),successor_filename:process.argv[2].split('/').at(-1)}});
 fs.writeFileSync(process.argv[2],result.sql);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import { registryChain, appendSuccessor } from '../../ops/registry-chain.mjs';
 
-test('append owns the successor seal, runtime projection and atomic migration pair', () => {
+test('append owns the successor seal, runtime projection and atomic migration pair', async () => {
   const before = structuredClone(registryChain);
   const current = before.versions.at(-1);
   const rows = [{ ingress_key: 'mcp-tool:example', ingress_kind: 'mcp_tool', operation: 'example',
@@ -11,7 +11,7 @@ test('append owns the successor seal, runtime projection and atomic migration pa
     write: false, human_only: false, authority_only: false, delegates_to: [] }];
   const catalog = { ...current.catalog, secdef_execute: { count: 2, digest: 'sha256:' + 'c'.repeat(64) },
     relation_dml: { count: 3, digest: 'sha256:' + 'd'.repeat(64) }, column_dml: { count: 0, digest: 'sha256:' + 'e'.repeat(64) } };
-  const result = appendSuccessor({ rows, domainMigration: { filename: '0900_example.sql', sql: 'select 1;' }, catalog,
+  const result = await appendSuccessor({ rows, domainMigration: { filename: '0900_example.sql', sql: 'select 1;' }, catalog,
     entrySetDigest: 'sha256:' + 'f'.repeat(64), chain: before });
   assert.equal(result.current.number, current.number + 1);
   assert.equal(result.current.predecessor, current.version);
@@ -30,8 +30,11 @@ test('append handles the complete source set through the same interface', async 
   const {historicalRows} = await import('../../ops/registry-history.mjs');
   const current = registryChain.versions.at(-1);
   const rows = historicalRows(current.number);
-  const result = appendSuccessor({rows, domainMigration:{filename:'0900_complete.sql',sql:'select 1;'},
+  let yielded = false;
+  setImmediate(() => { yielded = true; });
+  const result = await appendSuccessor({rows, domainMigration:{filename:'0900_complete.sql',sql:'select 1;'},
     catalog:current.catalog, entrySetDigest:current.entry_set_digest});
+  assert.ok(yielded, 'complete SQL compilation must let the input stream finish asynchronously');
   assert.ok(result.sql.length > 1024*1024, 'exercise the complete SQL seed across the compiler adapter');
   assert.equal(result.current.source_count, rows.length);
   assert.equal(result.fixture.patches.at(-1).expected_count, rows.length);

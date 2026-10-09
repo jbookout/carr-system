@@ -44,7 +44,7 @@ try {
     const successor = allocated(row.migration.split('/').at(-1));
     const domains = row.atomic_pair.filter(name => name !== row.migration.split('/').at(-1));
     if (!domains.length) throw new Error('pending registry lacks its domain migration group');
-    const result = appendSuccessor({chain, rows:rows[index], catalog:row.catalog, entrySetDigest:row.entry_set_digest,
+    const result = await appendSuccessor({chain, rows:rows[index], catalog:row.catalog, entrySetDigest:row.entry_set_digest,
       domainMigration:domains.map((name, i) => ({filename:allocated(name),
         sql:readFileSync('migrations/'+allocated(name), 'utf8'),
         ...(i === domains.length-1 ? {successor_filename:successor} : {})}))});

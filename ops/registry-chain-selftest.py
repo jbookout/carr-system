@@ -15,7 +15,7 @@ class RegistryChain(unittest.TestCase):
         script = """import {appendSuccessor,registryChain} from './ops/registry-chain.mjs';
 import {historicalRows} from './ops/registry-history.mjs';
 const current=registryChain.versions.at(-1);
-process.stdout.write(JSON.stringify(appendSuccessor({rows:historicalRows(current.number),
+process.stdout.write(JSON.stringify(await appendSuccessor({rows:historicalRows(current.number),
 domainMigration:{filename:'0900_snapshot_fixture.sql',sql:'select 1;'},
 catalog:current.catalog,entrySetDigest:current.entry_set_digest})));"""
         generated = json.loads(subprocess.check_output(['node', '--input-type=module', '-e', script], cwd=root))
