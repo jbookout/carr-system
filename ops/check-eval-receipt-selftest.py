@@ -663,6 +663,25 @@ class EndToEnd(unittest.TestCase):
         out = self.run_check(f"no-eval: session-instructions: {NoEvalLines.REASON}")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
+    def test_research_tasks_need_their_own_exemption_when_hooks_also_change(self):
+        self.commit("hooks/guard-unattended.py", "print('changed')\n")
+        tasks = ("contact-enrichment-weekly", "content-fuel-harvest-weekly",
+                 "deal-history-research-weekly", "social-batch-weekly")
+        for task in tasks:
+            self.commit(f"ops/scheduled-tasks/{task}.SKILL.md",
+                        "Read the research-site index, then search the open web.\n")
+        body = f"no-eval: context-hooks: {NoEvalLines.REASON}"
+        out = self.run_check(body)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        failures = self.fails(out)
+        self.assertEqual(len(failures), 1, out.stderr)
+        self.assertIn("session-instructions changed", failures[0])
+        for task in tasks:
+            self.assertIn(f"{task}.SKILL.md", failures[0])
+        out = self.run_check(body + f"\nno-eval: session-instructions: {NoEvalLines.REASON}")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("2 surface(s) touched", out.stdout)
+
     def fails(self, out) -> list[str]:
         return [line for line in out.stderr.splitlines() if "FAIL" in line]
 

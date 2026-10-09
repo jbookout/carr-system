@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import argparse
 from contextlib import ExitStack
+import atexit
 import os
 import shutil
 import subprocess
@@ -32,7 +33,13 @@ ENV = fixture_env()  # every fixture git call below runs with this: no inherited
 
 FAILURES: list[str] = []
 SANDBOXED = os.path.exists(fr.SANDBOX_EXEC)
-TEMPS: list[str] = []
+TEMP_STACK = ExitStack()
+atexit.register(TEMP_STACK.close)
+
+
+def _managed_temp(*, prefix, directory=None):
+    return os.path.realpath(TEMP_STACK.enter_context(
+        tempfile.TemporaryDirectory(prefix=prefix, dir=directory)))
 
 
 def check(name, fn):
@@ -56,9 +63,7 @@ def sandboxed(fn):
 
 
 def _work():
-    d = os.path.realpath(tempfile.mkdtemp(prefix="flash-run-sbx-"))
-    TEMPS.append(d)
-    return d
+    return _managed_temp(prefix="flash-run-sbx-")
 
 
 def _run(program, work, *, reads=(), execs=(), port=None, timeout=30):
@@ -187,8 +192,7 @@ except OSError as e:
 
 
 def _plant_secret():
-    home = os.path.realpath(tempfile.mkdtemp(prefix="flash-fakehome-"))
-    TEMPS.append(home)
+    home = _managed_temp(prefix="flash-fakehome-")
     secret = os.path.join(home, "stand_in_secret.txt")
     with open(secret, "w") as fh:
         fh.write("TOP-SECRET-STANDIN-VALUE")
@@ -683,8 +687,7 @@ def sandbox_env_carries_no_caller_api_key_and_redirects_the_harness_tmp():
 def the_launcher_exec_allowance_opens_that_one_file_not_its_folder():
     # agent_execs() allows the launcher by exact path; a sibling beside it (a model-planted or unrelated tool in
     # ~/.local/bin) must still be refused. Mirrors the real layout: the folder is read-denied except the launcher.
-    tools = os.path.realpath(tempfile.mkdtemp(prefix="flash-fakebin-", dir=os.path.expanduser("~")))
-    TEMPS.append(tools)
+    tools = _managed_temp(prefix="flash-fakebin-", directory=os.path.expanduser("~"))
     launcher, sibling = os.path.join(tools, "flash"), os.path.join(tools, "other")
     for path, word in ((launcher, "LAUNCHER_RAN"), (sibling, "SIBLING_RAN")):
         with open(path, "w") as fh:
@@ -763,8 +766,7 @@ def main() -> int:
         if getattr(fn, "_live", False) and not args.live:
             continue
         check(name.replace("_", " "), fn)
-    for d in TEMPS:
-        shutil.rmtree(d, ignore_errors=True)
+    TEMP_STACK.close()
     if FAILURES:
         print(f"{len(FAILURES)} sandbox test(s) failed", file=sys.stderr)
         return 1

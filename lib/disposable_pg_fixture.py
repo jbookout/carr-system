@@ -93,7 +93,9 @@ class DisposablePostgres:
                         signum, _pending_signal = _pending_signal, None
                         _on_signal(signum, None)
 
-    def close(self):
+    def close(self, *, remove_root=True):
+        # remove_root=False keeps evidence when the caller cannot prove it owned
+        # every process; closing still deregisters it from the exit hook.
         with self._lock:
             if self._closed:
                 return
@@ -108,7 +110,7 @@ class DisposablePostgres:
                         status = run([str(self.pg_ctl), '-D', str(data), 'status'], **kwargs)
                         if status.returncode != 3 and (data / 'PG_VERSION').exists():
                             raise RuntimeError('postmaster shutdown not verified')
-                if self.root.exists():
+                if remove_root and self.root.exists():
                     if self.root.is_symlink() or self.root.stat().st_ino != self._identity:
                         raise RuntimeError('temporary root identity changed')
                     shutil.rmtree(self.root)

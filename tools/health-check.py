@@ -20,6 +20,7 @@ brand-new task is never mistaken for a broken one. See the scheduler section bel
 import importlib.util
 import json, os, sys, glob, time, re, subprocess, calendar
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
@@ -109,8 +110,8 @@ def _reader_args(argv):
         # A parent shell may carry this old ambient variable.  Normal health must
         # not pass it to any child or let a child silently choose a Drive reader.
         os.environ.pop("CARR_VAULT", None)
-    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "costs", "uptime"):
-        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|costs|uptime")
+    if section not in ("all", "exports", "jobs", "registry", "credentials", "jev-spend", "jev-cap", "grok-session", "tailscale", "headless", "costs", "builds", "uptime", "storage"):
+        raise SystemExit("health-check: --section must be all|exports|jobs|registry|credentials|jev-spend|jev-cap|grok-session|tailscale|headless|costs|builds|uptime|storage")
     if fixture and recovery:
         raise SystemExit("health-check: --fixture is for hermetic canonical tests only")
     return recovery, reason, vault, section, fixture, findings_json, rest
@@ -1263,6 +1264,17 @@ def _calendar_prebrief_unknowns(now, path=CALENDAR_PREBRIEF_LAST_RUN):
              f"on its {when.date()} run · {CALENDAR_PREBRIEF_UNKNOWN_BREACH}")]
 
 
+# MONITORS NOT YET PROVISIONED (Joe 2026-10-06: "don't just leave them in place and let them
+# block things"). Both checks landed with today's batch before their backing services existed,
+# so their "cannot read" state failed every release's health baseline. Until provisioning lands,
+# that state prints as WARN and never as hard_error. A real failure the monitor DOES report
+# (production down, a cost spike) stays hard. Delete an entry the day its service is live.
+PROVISIONING_PENDING = {
+    "production_uptime": "carr-uptime monitor unreachable (Worker/secrets not provisioned)",
+    "system_costs": "billing readers unavailable (cost collector not provisioned)",
+}
+
+
 def _canonical_finding(key, detail, *, subject="", count=1, hard_error=False, time_rolling=False):
     print(f"  CANONICAL_FINDING {key} — {detail}")
     for row in _FINDINGS:
@@ -1347,6 +1359,26 @@ def _tailscale_row():
     return module.row(binary=os.environ.get("TAILSCALE_BIN", module.TAILSCALE_BIN))
 
 
+_BUILD_DURATION_UNAVAILABLE = ("UNAVAILABLE build duration · on breach: orchestrator restore scheduled "
+                               "checker; verify ops/build-duration-check.py --health; "
+                               "auto-clear after fresh complete scan")
+
+
+def _build_duration_row():
+    from lib.machine_role import is_primary
+    if not CANONICAL_FIXTURE and not is_primary(REPO_ROOT):
+        return 'SKIP build duration · primary-only monitor; secondary machine', 0
+    checker = os.path.join(REPO_ROOT, 'ops', 'build-duration-check.py')
+    args = [sys.executable, checker, '--health']
+    if CANONICAL_SECTION == 'builds' and CANONICAL_FIXTURE:
+        args.extend(['--fixture', CANONICAL_FIXTURE])
+    result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+    lines = result.stdout.strip().splitlines()
+    if result.returncode not in (0, 1) or not lines:
+        return _BUILD_DURATION_UNAVAILABLE, 1
+    return lines[0], result.returncode
+
+
 def _system_cost_row():
     import system_costs
     snapshot = system_costs.load_snapshot(os.path.join(REPO_ROOT, 'out/system-costs.json'))
@@ -1359,15 +1391,39 @@ def _branch_janitor_row():
     return health(REPO_ROOT)
 
 
+def _storage_hygiene_row():
+    if sys.platform != "darwin":
+        return ("SKIP storage hygiene — Studio Data volume check not applicable "
+                "outside macOS", False)
+    import storage_hygiene
+    _tmp, clone_root, _replay = storage_hygiene._defaults()
+    used, clones = storage_hygiene.storage_snapshot(
+        Path("/System/Volumes/Data"), clone_root)
+    return (storage_hygiene.health_row(used_bytes=used, clone_count=clones),
+            used > storage_hygiene.DATA_THRESHOLD_BYTES)
+
+
 def _canonical_health():
     """The normal health surface: record/control-plane/local truth only."""
     _FINDINGS.clear()
     rc = 0
+    if CANONICAL_SECTION in ('all', 'builds'):
+        try:
+            build_line, build_rc = _build_duration_row()
+        except (OSError, subprocess.TimeoutExpired):
+            build_line, build_rc = _BUILD_DURATION_UNAVAILABLE, 1
+        print('  ' + build_line)
+        if build_rc:
+            rc = _red('build_duration', build_line, hard_error=build_line.startswith('UNAVAILABLE'), time_rolling=True)
+        if CANONICAL_SECTION == 'builds':
+            print(_HEALTH_COMPLETION_MARKER)
+            return rc
     if CANONICAL_SECTION == "all":
         _cost_snapshot, _cost_line = _system_cost_row()
         print("  " + _cost_line)
         if _cost_snapshot['state'] != 'ready' or _cost_snapshot['alerts']:
-            rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable')
+            rc = _red('system_costs', _cost_line, hard_error=_cost_snapshot['state'] == 'unavailable'
+                      and 'system_costs' not in PROVISIONING_PENDING)
     if CANONICAL_SECTION in ("all", "credentials", "jev-cap"):
         _cap_line = _jev_paid_cap_row()
         print("  " + _cap_line)
@@ -1381,7 +1437,7 @@ def _canonical_health():
         if " over budget: " in _site_line or _site_line.startswith("UNKNOWN"):
             rc = _red("jev_site_budget", _site_line, hard_error=_site_line.startswith("UNKNOWN"))
     try:
-        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session", "uptime") else _canonical_snapshot()
+        snap = {} if CANONICAL_SECTION in ("jev-cap", "grok-session", "storage", "uptime") else _canonical_snapshot()
     except Exception as exc:
         print(f"canonical health: REFUSED ({type(exc).__name__}: {exc})")
         _red("canonical_health_refused", f"{type(exc).__name__}: {exc}", hard_error=True)
@@ -1397,6 +1453,20 @@ def _canonical_health():
         return 1
 
     print(f"Façade check (rule 28) — {time.strftime('%Y-%m-%d %H:%M')} — canonical receipts, not Drive renders")
+    if CANONICAL_SECTION in ("all", "storage") and not CANONICAL_FIXTURE:
+        try:
+            storage_line, storage_failed = _storage_hygiene_row()
+            print("  " + storage_line)
+            if storage_failed:
+                rc = _red("storage_capacity", storage_line, subject="studio-data-volume",
+                          time_rolling=True)
+        except (OSError, ValueError) as exc:
+            storage_line = (f"storage hygiene unavailable ({type(exc).__name__}) · on breach: "
+                            "owner orchestrator · restore tools/storage_hygiene.py · "
+                            "verify: run.sh health --section storage · auto-clear after readback")
+            print("  WARN " + storage_line)
+            rc = _red("storage_health_unavailable", storage_line,
+                      subject="studio-data-volume", hard_error=True)
     if CANONICAL_SECTION in ("all", "jobs") and not CANONICAL_FIXTURE:
         flash_line = flashlib.health_row()
         print("  " + flash_line)
@@ -1947,7 +2017,9 @@ def _canonical_health():
         line, failed = _uptime.row()
         print("  " + line)
         if failed:
-            rc = _red("production_uptime", line, subject="carr-uptime", hard_error=True)
+            _unprovisioned = ("production_uptime" in PROVISIONING_PENDING
+                              and "monitor unreachable" in line)
+            rc = _red("production_uptime", line, subject="carr-uptime", hard_error=not _unprovisioned)
 
     if CANONICAL_SECTION in ("all", "tailscale"):
         try:

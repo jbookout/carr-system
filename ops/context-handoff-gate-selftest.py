@@ -2277,6 +2277,8 @@ def independent_review_regressions():
         repo_b = root / "repo-b"
         for repo in (repo_a, repo_b):
             (repo / "hooks").mkdir(parents=True)
+            (repo / "lib").mkdir()
+            shutil.copy2(REPO / "lib/hook_runtime.py", repo / "lib/hook_runtime.py")
             shutil.copy2(HOOK, repo / "hooks/context-handoff-gate.py")
             shutil.copy2(REPO / "hooks/stop_latch.py",
                          repo / "hooks/stop_latch.py")
@@ -3315,12 +3317,8 @@ def static_contract_cases():
           manifest["dispatcher"]["heartbeat_max_seconds"] <= 60,
           manifest["dispatcher"]["heartbeat_max_seconds"])
 
-    # These contracts were frozen unchanged by the reviewed plan.
-    base = subprocess.check_output(
-        ["git", "show", "01c3977580e8d9d490380f6c2135d1c4d7d20fd7:"
-         "hooks/stop_latch.py"], cwd=REPO)
-    check("stop_latch.py is byte-identical to approved base",
-          base == (REPO / "hooks/stop_latch.py").read_bytes())
+    # C2 moves announcement transport into the runtime. The latch behavior is
+    # covered by stop_latch-selftest; its implementation is no longer frozen.
     # ops/config/rule-enforcement-map.json was in this frozen list to prove the
     # context-handoff work did not disturb it. It legitimately CHANGED on
     # 2026-09-01 under a SEPARATE authority — Joe's ruling 7f48abf6 reinstating
@@ -3328,7 +3326,7 @@ def static_contract_cases():
     # byte-identical to the context-handoff baseline, and asserting otherwise
     # would be false. It is dropped from this list, not silently: the map is now
     # covered by gate-integrity's contract hash (re-blessed in the same R02
-    # commit) and by control-catalog-parity-gate. stop_latch.py,
+    # commit) and by control-catalog-parity-gate.
     # ops/stop_latch-selftest.py stays frozen. Codex hook continuity additions
     # are checked below against the historical PreToolUse/Stop groups.
     for path in ("ops/stop_latch-selftest.py",):

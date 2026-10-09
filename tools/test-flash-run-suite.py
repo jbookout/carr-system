@@ -28,10 +28,11 @@ class SuiteSelection(unittest.TestCase):
         sandbox_case.__module__ = model_case.__module__ = "__main__"
         suite.sandboxed(sandbox_case)
         suite.live(model_case)
-        with patch.dict(vars(suite), {"sandbox_case": sandbox_case, "model_case": model_case}), \
+        with contextlib.ExitStack() as temps, \
+                patch.dict(vars(suite), {"sandbox_case": sandbox_case, "model_case": model_case}), \
                 patch.object(suite, "SANDBOXED", sandbox_available), \
                 patch.object(suite, "_flash_up", side_effect=available) as probe, \
-                patch.object(suite, "FAILURES", []), patch.object(suite, "TEMPS", []), \
+                patch.object(suite, "FAILURES", []), patch.object(suite, "TEMP_STACK", temps), \
                 patch.object(sys, "argv", ["test-flash-run-sandbox.py", *args]), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             code = suite.main()

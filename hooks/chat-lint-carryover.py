@@ -55,35 +55,36 @@ def carry_path(session):
     return os.path.join(repo_root(), "out", "chat-lint-carry", f"{safe}.txt")
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
-    try:
-        path = carry_path(payload.get("session_id"))
-        if not os.path.exists(path):
-            return 0
-        with open(path) as fh:
-            note = fh.read().strip()
-        # Consume it either way: a note that survives its delivery would be
-        # re-injected on every following turn.
-        try:
-            os.remove(path)
-        except Exception:
-            pass
-        if not note:
-            return 0
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": note,
-            }
-        }))
-    except Exception:
+
+@decision
+def decide(payload):
+    path = carry_path(payload.get("session_id"))
+    if not os.path.exists(path):
         return 0
+    with open(path) as fh:
+        note = fh.read().strip()
+    # Consume it either way: a note that survives its delivery would be
+    # re-injected on every following turn.
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+    if not note:
+        return 0
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": note,
+        }
+    }))
     return 0
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":

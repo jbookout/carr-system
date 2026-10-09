@@ -9,7 +9,7 @@
 // at request time. A Worker has no filesystem, so this is a checked-in module.
 
 export const RULE_BOOT_CLASSES_SOURCE = "ops/config/rule-classes.v1.json";
-export const RULE_BOOT_CLASSES_DIGEST = "sha256:b1637bdefb79b6b5f962ef0c1bd663d4c4eadca5dccc51e90bb0ad63fb1c6364";
+export const RULE_BOOT_CLASSES_DIGEST = "sha256:e04a95101915950a2948902ecf3ecf9a466ddc5961ce6dc1d6ef424d850396a3";
 export const RULE_BOOT_BUDGET_TOKENS = 80000;
 export const RULE_BOOT_CHARS_PER_TOKEN = 3.6;
 
@@ -116,6 +116,7 @@ export const RULE_BOOT_CLASSES = Object.freeze({
   "7e9739f2": Object.freeze({"cls": "a", "on": true, "personal_to": "joe", "summary": "Every reply to Joe must be clear, concise, scannable, and matched in shape to his question", "when": "any turn replying to Joe"}),
   "80def9d2": Object.freeze({"cls": "c", "on": true, "summary": "When building any human-facing surface or choice, follow ux-doctrine: one action, say what changed.", "when": "building a human-facing surface or choice for Joe/Dell"}),
   "81709f57": Object.freeze({"cls": "c", "on": true, "summary": "When convening a red team, assign distinct lenses and one seat that re-runs the evidence, never redundant votes.", "when": "convening a red team/review panel"}),
+  "8400cd3d": Object.freeze({"cls": "b", "on": true, "summary": "Size new work first: one go for tiny, /grill-with-docs for medium-to-large, and /wayfinder only after one session.", "when": "starting a plan, a heavy-build plan, propose-ready-plan, or a Codex or Dot brief"}),
   "847f9995": Object.freeze({"cls": "d", "on": true, "summary": "When building or reviewing any unattended/scheduled job, never let it depend on an expiring interactive credential.", "when": "unattended-path credential verification"}),
   "86647daf": Object.freeze({"cls": "b", "on": true, "summary": "When a build or decision changes the shared system, post it to shared files immediately", "when": "finishing a substantive build, change or decision"}),
   "88e9b5eb": Object.freeze({"cls": "d", "on": true, "summary": "When reporting a blocker, name whether it's a refusal or true impossibility; never conflate the two.", "when": "blocker_decider gate"}),

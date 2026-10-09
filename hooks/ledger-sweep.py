@@ -383,90 +383,95 @@ def mentions_ledger_verb(rec):
     return any(v in blob for v in LEDGER_VERBS)
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _decision_error(exc):
+    log(f"ALLOW(internal-error) ledger-sweep {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    # Do not re-fire while the session is already being stopped repeatedly.
+    if payload.get("stop_hook_active"):
+        sys.exit(0)
+    path = payload.get("transcript_path")
+    if not path or not os.path.exists(path):
+        sys.exit(0)
+
+    recs = read_tail(path)
+    # Walk backwards to the last GENUINE human turn. Skip harness-injected
+    # records (task-notifications, system-reminders, tool results) rather
+    # than stopping at the raw last "user"-typed record in the transcript.
+    last_human_idx, last_human = None, None
+    for i in range(len(recs) - 1, -1, -1):
+        t = human_text(recs[i])
+        if not t:
+            continue
+        if is_harness_injected(recs[i], t):
+            continue
+        last_human_idx, last_human = i, t
+        break
+    if last_human is None:
+        sys.exit(0)
+
+    # Already logged since that turn? Then the rule ran. Stay quiet.
+    if any(mentions_ledger_verb(r) for r in recs[last_human_idx + 1:]):
+        sys.exit(0)
+
+    hits = [name for name, pat in TRIGGERS if pat.search(last_human)]
+    if is_pure_question(last_human):
+        # A pure interrogative doesn't rule or overrule on its own; an
+        # embedded ruling inside a question (trailing "right?") still has
+        # a declarative lead and was never suppressed here.
+        hits = [h for h in hits if h not in SUPPRESSIBLE_ON_QUESTION]
+    if is_past_outcome_report(last_human):
+        hits = [h for h in hits if not h.startswith("2 ")]
+    if not hits:
+        sys.exit(0)
+
+    # SCOPE GATE — narrowed 2026-08-13 to trigger 4's weak register only
+    # (see is_weak_trigger4_only). Everything after the last human turn is
+    # what the session actually did in response; it is the second of the
+    # two signals that can put this exchange inside the work. Serialised
+    # whole rather than walked, because tool names and paths land in
+    # several shapes across record formats and a substring test reads all
+    # of them.
+    if is_weak_trigger4_only(hits, last_human):
+        response_blob = json.dumps(recs[last_human_idx + 1:])
+        if not exchange_touches_carr(last_human, response_blob):
+            log(f"SILENT(out-of-scope) {hits} :: "
+                f"{' '.join(last_human.split())[:100]}")
+            sys.exit(0)
+
+    quote = " ".join(last_human.split())[:220]
+    msg = ("LEDGER SWEEP — the partner's last turn matched "
+           + ("triggers " if len(hits) > 1 else "trigger ")
+           + "; ".join(hits)
+           + " from rule bbffc139, and no log-decision or teach call has "
+             "followed it.\n\nHis words: \"" + quote + "\"\n\n"
+           "Decide deliberately, do not skip by default. If it belongs in a "
+           "ledger, log it NOW with log-decision (override, calibration, or "
+           "his framing) — logging is free and binds nobody. If it genuinely "
+           "does not, that is a fine answer and needs no action. This rule "
+           "produced ZERO entries across the weeks it was active, and then "
+           "failed again within an hour of being rewritten with explicit "
+           "triggers, which is why it is a hook now and not a reminder.")
+    log(f"LEDGER-SWEEP {hits} :: {quote[:120]}")
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": msg,
+        }
+    }))
+    sys.exit(0)
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        sys.exit(0)
-
-    try:
-        # Do not re-fire while the session is already being stopped repeatedly.
-        if payload.get("stop_hook_active"):
-            sys.exit(0)
-        path = payload.get("transcript_path")
-        if not path or not os.path.exists(path):
-            sys.exit(0)
-
-        recs = read_tail(path)
-        # Walk backwards to the last GENUINE human turn. Skip harness-injected
-        # records (task-notifications, system-reminders, tool results) rather
-        # than stopping at the raw last "user"-typed record in the transcript.
-        last_human_idx, last_human = None, None
-        for i in range(len(recs) - 1, -1, -1):
-            t = human_text(recs[i])
-            if not t:
-                continue
-            if is_harness_injected(recs[i], t):
-                continue
-            last_human_idx, last_human = i, t
-            break
-        if last_human is None:
-            sys.exit(0)
-
-        # Already logged since that turn? Then the rule ran. Stay quiet.
-        if any(mentions_ledger_verb(r) for r in recs[last_human_idx + 1:]):
-            sys.exit(0)
-
-        hits = [name for name, pat in TRIGGERS if pat.search(last_human)]
-        if is_pure_question(last_human):
-            # A pure interrogative doesn't rule or overrule on its own; an
-            # embedded ruling inside a question (trailing "right?") still has
-            # a declarative lead and was never suppressed here.
-            hits = [h for h in hits if h not in SUPPRESSIBLE_ON_QUESTION]
-        if is_past_outcome_report(last_human):
-            hits = [h for h in hits if not h.startswith("2 ")]
-        if not hits:
-            sys.exit(0)
-
-        # SCOPE GATE — narrowed 2026-08-13 to trigger 4's weak register only
-        # (see is_weak_trigger4_only). Everything after the last human turn is
-        # what the session actually did in response; it is the second of the
-        # two signals that can put this exchange inside the work. Serialised
-        # whole rather than walked, because tool names and paths land in
-        # several shapes across record formats and a substring test reads all
-        # of them.
-        if is_weak_trigger4_only(hits, last_human):
-            response_blob = json.dumps(recs[last_human_idx + 1:])
-            if not exchange_touches_carr(last_human, response_blob):
-                log(f"SILENT(out-of-scope) {hits} :: "
-                    f"{' '.join(last_human.split())[:100]}")
-                sys.exit(0)
-
-        quote = " ".join(last_human.split())[:220]
-        msg = ("LEDGER SWEEP — the partner's last turn matched "
-               + ("triggers " if len(hits) > 1 else "trigger ")
-               + "; ".join(hits)
-               + " from rule bbffc139, and no log-decision or teach call has "
-                 "followed it.\n\nHis words: \"" + quote + "\"\n\n"
-               "Decide deliberately, do not skip by default. If it belongs in a "
-               "ledger, log it NOW with log-decision (override, calibration, or "
-               "his framing) — logging is free and binds nobody. If it genuinely "
-               "does not, that is a fine answer and needs no action. This rule "
-               "produced ZERO entries across the weeks it was active, and then "
-               "failed again within an hour of being rewritten with explicit "
-               "triggers, which is why it is a hook now and not a reminder.")
-        log(f"LEDGER-SWEEP {hits} :: {quote[:120]}")
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "Stop",
-                "additionalContext": msg,
-            }
-        }))
-        sys.exit(0)
-    except Exception as exc:
-        log(f"ALLOW(internal-error) ledger-sweep {exc}")
-        sys.exit(0)
+    sys.exit(run(decide))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

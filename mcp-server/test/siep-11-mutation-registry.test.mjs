@@ -992,6 +992,22 @@ test("source-only migration diagnostics preserve the sealed runtime frontier", (
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
 });
 
+test("Worker upload retry evidence binds current script bytes without changing sealed authority", () => {
+  const fixture = JSON.parse(readRegistryArtifact(new URL("../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const ingressKey = "external-admin:bin/deploy-worker.sh";
+  const sealed = frozenInventory(CURRENT_REGISTRY_VERSION).find(row => row.ingress_key === ingressKey);
+  const review = fixture.current_source_reviews[CURRENT_REGISTRY_VERSION];
+  const reviewed = review?.upsert.find(row => row.ingress_key === ingressKey) || sealed;
+  assert.ok(reviewed, "upload retry must have registered evidence at the current frontier");
+  const digest = sha256(readRegistryArtifact(new URL("../../bin/deploy-worker.sh", import.meta.url), "utf8"));
+  assert.equal(reviewed.schema_digest, digest);
+  assert.equal(reviewed.handler_digest, digest);
+  const authorityContract = row => Object.fromEntries(Object.entries(row)
+    .filter(([key]) => !["schema_digest", "handler_digest"].includes(key)));
+  assert.deepEqual(authorityContract(reviewed), authorityContract(sealed));
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS, CURRENT_REGISTRY_VERSION), true);
   // The push toll calls the bare API; its default must follow the newest frontier.
@@ -1000,7 +1016,7 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 119);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0786", "0787", "0807", "0812", "0825", "0827", "0840", "0842", "0844", "0846", "0854"]);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498", "0501", "0503", "0512", "0516", "0518", "0522", "0524", "0526", "0528", "0530", "0532", "0541", "0543", "0545", "0547", "0548", "0549", "0550", "0551", "0552", "0553", "0555", "0557", "0558", "0559", "0560", "0561", "0562", "0563", "0564", "0566", "0567", "0568", "0569", "0570", "0572", "0576", "0578", "0581", "0582", "0584", "0585", "0588", "0589", "0600", "0603", "0609", "0614", "0618", "0625", "0627", "0629", "0701", "0705", "0707", "0709", "0718", "0720", "0722", "0723", "0725", "0727", "0730", "0731", "0734", "0737", "0739", "0741", "0743", "0745", "0748", "0750", "0755", "0763", "0767", "0768", "0786", "0787", "0807", "0812", "0825", "0827", "0840", "0842", "0844", "0846", "0855"]);
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 110);
   assert.equal(paths.length, 229);
   // 0502 IS DELIBERATELY ABSENT FROM THIS LIST. It is a hand-authored domain
