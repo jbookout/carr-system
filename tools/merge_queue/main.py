@@ -288,7 +288,7 @@ class Queue:
         return all(c['bucket'] in ('pass', 'skipping') for c in checks)
 
     def action(self, kind, repo, n, head, payload, expected_base=None):
-        key = f'{kind}:{repo}:{n}:{head}:{payload}' + (f':{expected_base}' if kind == 'retarget' else '')
+        key = f'{kind}:{repo}:{n}:{head}:{payload}'
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO actions(key,kind,repo,pr,head,payload,expected_base) VALUES(?,?,?,?,?,?,?)',
                             (key, kind, repo, n, head, payload, expected_base))

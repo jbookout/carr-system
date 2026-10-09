@@ -310,6 +310,17 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.calls('edit'), [])
         self.assertEqual(self.load()['prs'][module.REPOS[0]+'#2']['base']['ref'], 'other-unmerged')
 
+    def test_upgrade_does_not_replace_an_issued_retarget_intent(self):
+        self.pr(n=2, base='branch-1')
+        key = f'retarget:{module.REPOS[0]}:2:{self.approved}:main'
+        with self.q.db:
+            self.q.db.execute('INSERT INTO actions(key,kind,repo,pr,head,payload,phase) VALUES(?,?,?,?,?,?,?)',
+                              (key, 'retarget', module.REPOS[0], 2, self.approved, 'main', 'issued'))
+        self.restart()
+        self.q.refresh(module.REPOS[0], 'branch-1')
+        self.assertEqual(self.calls('edit'), [])
+        self.assertEqual(self.q.db.execute('SELECT COUNT(*) FROM actions').fetchone()[0], 1)
+
     def test_ci_wait_deadline_survives_restart(self):
         self.pr(); self.data['required'] = [{'bucket':'pending'}]; self.save()
         self.q.enqueue(module.REPOS[0], 1, self.approved)
