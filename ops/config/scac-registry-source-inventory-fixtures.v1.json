@@ -106564,7 +106564,7 @@
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/party-identity.js",
           "schema_digest": "2ca07b5386188c767e4959feec17776bbbbf0290d4b23834925b6d82af72d4ea",
-          "source_digest": "c09310d423dfb1458285cb38613ae8241e0b4a007ee2301e1906b089e24a038d",
+          "source_digest": "05fce0404a11f665909a93fbef45f3cfff046ba51d7d3904f1487ab8a8ca26c5",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -108904,8 +108904,8 @@
           "operation": "ops/party-identity-local-pg-gate.py",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/party-identity-local-pg-gate.py",
-          "schema_digest": "a6b1c267b400705ff25f5490e276f25d08eb27e4f1f5e53f06e071af70358c7f",
-          "handler_digest": "a6b1c267b400705ff25f5490e276f25d08eb27e4f1f5e53f06e071af70358c7f",
+          "schema_digest": "c788deccbd064e9137451e4c36656fad85f07317050241330031876551a8999c",
+          "handler_digest": "c788deccbd064e9137451e4c36656fad85f07317050241330031876551a8999c",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -109498,7 +109498,7 @@
         }
       ],
       "expected_count": 1187,
-      "expected_sha256": "0627a80e4aae0399f4b91d8270120957ed3a7df758e8c08df1e6d0821d6c9a19"
+      "expected_sha256": "06f7dc71fe586b0c059419badd6fd65b73ee7bc8c74a20a303601e9c3b0a965a"
     }
   ],
   "current_source_review": {
