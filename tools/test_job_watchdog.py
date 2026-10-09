@@ -993,6 +993,26 @@ class StateTests(unittest.TestCase):
                 board = json.loads((root / "out/boards/carr-v5.json").read_text())
                 self.assertEqual(board["tasks"][effects.card(f)]["status"], "done")
 
+    def test_scheduled_drift_recovery_refuses_invalid_loop_readback(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        loop = {"loop_id": "synthetic-loop", "version": 7, "status": "open"}
+        responses = [{}, loop, {"loop": None}, {"loop": {**loop, "loop_id": "other-loop"}},
+                     {"loop": {**loop, "version": True}}, {"loop": {**loop, "version": 0}},
+                     {"loop": {**loop, "status": "unknown"}}]
+        with tempfile.TemporaryDirectory() as directory:
+            effects = w.Effects(Path(directory), c)
+            for response in responses:
+                with self.subTest(response=response), \
+                     patch.object(w, "command", return_value=json.dumps(response)) as command, \
+                     patch.object(w, "board_task") as board:
+                    with self.assertRaisesRegex(RuntimeError, "scheduled-job loop readback failed"):
+                        effects.clear({"kind": "scheduled_job_drift", "loop_id": "synthetic-loop"}, [])
+                    command.assert_called_once()
+                    self.assertEqual(command.call_args.args[0][2], "read-loop")
+                    board.assert_not_called()
+
     def test_fixer_uses_verified_model_room_desk_and_agent_runner(self):
         import job_watchdog as w
         from unittest.mock import patch
