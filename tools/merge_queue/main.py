@@ -334,15 +334,23 @@ class Queue:
         with self.budget.call_slot(timeout=BOUNDS['pacing_lock']['seconds']) as mark_started:
             read = gh_api_read(['gh', *args]) if args[0] == 'api' else args[:2] == ('pr', 'checks')
             resource = resource_for(list(args))
-            delay = max(self.budget.reserve(resource), self.gap - (time.monotonic() - self.last_gh))
-            end = time.monotonic() + max(0, delay)
+            slot = self.budget.reserve(resource, absolute=True)
+            clock = self.budget.clock
+            end = time.monotonic() + BOUNDS['spacing']['seconds']
+            delay = max(slot - clock(), self.last_gh + self.gap - time.monotonic())
             if delay > BOUNDS['spacing']['seconds']:
                 raise WaitExpired('Shared pacing reservation exceeds spacing deadline; entry stopped')
             while time.monotonic() < end:
                 self.check_cancelled()
-                time.sleep(min(.2, max(0, end - time.monotonic())))
-            self.budget.check(resource)
-            self.check_cancelled()
+                if clock() < slot or time.monotonic() < self.last_gh + self.gap:
+                    time.sleep(min(.2, max(0, end - time.monotonic())))
+                    continue
+                self.budget.check(resource)
+                self.check_cancelled()
+                if clock() >= slot and time.monotonic() >= self.last_gh + self.gap:
+                    break
+            else:
+                raise WaitExpired('Shared pacing wait exceeded spacing deadline; entry stopped')
             include = args[0] == 'api' and '--include' not in args
             observed_at = time.time()
             def observe(p):

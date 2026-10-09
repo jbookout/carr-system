@@ -643,10 +643,10 @@ class RunLoop:
                 def request(args, decode, validate):
                     current[:] = ['gh', *args]
                     return original_request(args, decode, validate)
-                def reserve(resource):
+                def reserve(resource, **kwargs):
                     if self.active and self.target(operation(current), current):
                         raise mq.GitHubReadPaused(self.now + 900)
-                    return original_reserve(resource)
+                    return original_reserve(resource, **kwargs)
                 stack.enter_context(patch.object(q, '_gh_request', request))
                 stack.enter_context(patch.object(q.budget, 'reserve', reserve))
             if self.effect.scenario == 'migration':
@@ -903,6 +903,45 @@ class LivenessTests(unittest.TestCase):
             self.assertTrue({(r,2) for r in mq.REPOS} <= {(r,n) for r,n,_ in loop.merged})
         finally: f.doCleanups()
 
+    def test_frozen_wall_clock_expires_spacing_wait_without_dispatch(self):
+        f = fixture_module.QueueTests(); f.setUp()
+        try:
+            now, sleeps = [100.0], []
+            f.q.budget.clock = lambda: 100.0
+            with f.q.budget.state() as data:
+                data[f.q.budget.shared] = {'next_start': 102.0}
+            def sleep(seconds):
+                sleeps.append(seconds)
+                now[0] += seconds
+            with patch.object(mq.time, 'monotonic', side_effect=lambda: now[0]), \
+                    patch.object(mq.time, 'sleep', side_effect=sleep), \
+                    patch.dict(mq.BOUNDS['spacing'], seconds=3), \
+                    patch.object(mq, 'command') as command:
+                with self.assertRaises(mq.WaitExpired):
+                    f.q.api('repos/example/repo')
+            command.assert_not_called()
+            self.assertAlmostEqual(now[0], 103.0)
+            self.assertGreater(len(sleeps), 1)
+        finally: f.doCleanups()
+
+    def test_cancellation_during_reserved_slot_wait_prevents_dispatch(self):
+        f = fixture_module.QueueTests(); f.setUp()
+        try:
+            now = [100.0]
+            f.q.budget.clock = lambda: 100.0
+            with f.q.budget.state() as data:
+                data[f.q.budget.shared] = {'next_start': 102.0}
+            def sleep(seconds):
+                now[0] += seconds
+                f.q.stopped = True
+            with patch.object(mq.time, 'monotonic', side_effect=lambda: now[0]), \
+                    patch.object(mq.time, 'sleep', side_effect=sleep), \
+                    patch.object(mq, 'command') as command:
+                with self.assertRaises(mq.Cancelled):
+                    f.q.api('repos/example/repo')
+            command.assert_not_called()
+        finally: f.doCleanups()
+
     def test_bounded_transports_and_registry_caps(self):
         with self.assertRaises(mq.WaitExpired):
             list(mq.bounded_items('snapshot', range(mq.BOUNDS['snapshot']['attempts'] + 1)))
@@ -935,7 +974,7 @@ class LivenessTests(unittest.TestCase):
                     f.q.enqueue(mq.REPOS[0], 9, f.approved)
             finally: connection.close()
             record_fault('sqlite_contention')
-            with patch.object(f.q.budget, 'reserve', return_value=mq.BOUNDS['spacing']['seconds'] + 1):
+            with patch.object(f.q.budget, 'reserve', return_value=f.q.budget.clock() + mq.BOUNDS['spacing']['seconds'] + 1):
                 with self.assertRaises(mq.WaitExpired): f.q.pr(mq.REPOS[0], 1)
             record_fault('spacing_pause')
             pacing = Path(str(f.q.budget.path) + '.call.lock')
