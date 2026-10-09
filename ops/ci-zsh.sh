@@ -22,7 +22,9 @@ import sys
 import tempfile
 from urllib.parse import unquote
 
-signal.alarm(10)
+# Cold runners can take tens of seconds to answer apt-cache; keep a finite
+# bound that a slow index read does not trip.
+signal.alarm(60)
 root = Path(sys.argv[1])
 private, cache, phase = Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4]
 for archive in root.glob("*.deb"):
@@ -31,7 +33,7 @@ for archive in root.glob("*.deb"):
     if match and archive.is_file() and not archive.is_symlink():
         package, version, architecture = match.groups()
         metadata = subprocess.run(["apt-cache", "show", "--no-all-versions", package + ":" + architecture],
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=30)
         if metadata.returncode not in (0, 100):
             metadata.check_returncode()
         content = archive.read_bytes()

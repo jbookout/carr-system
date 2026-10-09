@@ -116,7 +116,7 @@ jobs:
         # its tests. Budget: 3*65 + 65 + 125 + 15 = 400 seconds;
         # plus 60 seconds of overhead, rounded up, requires exactly 8 minutes.
         # Cached archives avoid mirror downloads on subsequent runs.
-        timeout-minutes: 8
+        timeout-minutes: 12
         env:
           ZSH_RETRY_BACKOFF: "5"
           ZSH_ARCHIVE_DIR: ${{ runner.temp }}/zsh-debs
