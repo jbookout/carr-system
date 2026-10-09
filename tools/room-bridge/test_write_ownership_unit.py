@@ -75,6 +75,33 @@ class OwnershipTests(unittest.TestCase):
             run.assert_not_called()
         self.assertFalse(self.results.exists())
 
+    def test_held_draft_overlap_warns_without_blocking(self):
+        # A parked do_not_merge draft has no live builder; 2026-10-09 two of them
+        # claimed every staging-harness file and froze all V1 harness fixes.
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [
+                {'number': 197, 'title': 'parked design', 'files': ['tools/new.py'], 'held': True}])), \
+             patch.object(dispatch, '_to_codex', side_effect=self.completed) as run, \
+             patch('sys.stderr', new_callable=io.StringIO) as err:
+            self.send(writes=['tools/*.py'])
+        run.assert_called_once()
+        self.assertIn('held draft PR 197', err.getvalue())
+
+    def test_held_needs_both_draft_and_do_not_merge_label(self):
+        class Reader:
+            def __init__(self, **kwargs): pass
+            def json(self, args): return {'nameWithOwner': 'owner/repo'}
+            def api(self, path, paginate=False):
+                if path.endswith('/files'):
+                    return [{'filename': 'tools/new.py'}]
+                return [
+                    {'number': 5, 'title': 'parked', 'draft': True, 'labels': [{'name': 'do_not_merge'}]},
+                    {'number': 6, 'title': 'ready but held', 'draft': False, 'labels': [{'name': 'do_not_merge'}]},
+                    {'number': 7, 'title': 'live draft', 'draft': True, 'labels': []},
+                ]
+        with patch.object(write_ownership, 'GitHubReader', Reader):
+            _, prs = write_ownership.open_prs('.')
+        self.assertEqual({pr['number']: pr['held'] for pr in prs}, {5: True, 6: False, 7: False})
+
     def test_open_pr_scan_runs_outside_the_ledger_lock(self):
         # The scan paginates every open PR's files at ~2 s per gh call; holding
         # the ledger lock across it refused every other desk for minutes.
