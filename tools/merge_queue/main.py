@@ -336,18 +336,19 @@ class Queue:
             resource = resource_for(list(args))
             slot = self.budget.reserve(resource, absolute=True)
             clock = self.budget.clock
+            slot_deadline = time.monotonic() + max(0, slot - clock())
             end = time.monotonic() + BOUNDS['spacing']['seconds']
-            delay = max(slot - clock(), self.last_gh + self.gap - time.monotonic())
+            delay = max(slot - clock(), slot_deadline - time.monotonic(), self.last_gh + self.gap - time.monotonic())
             if delay > BOUNDS['spacing']['seconds']:
                 raise WaitExpired('Shared pacing reservation exceeds spacing deadline; entry stopped')
             while time.monotonic() < end:
                 self.check_cancelled()
-                if clock() < slot or time.monotonic() < self.last_gh + self.gap:
+                if clock() < slot or time.monotonic() < max(slot_deadline, self.last_gh + self.gap):
                     time.sleep(min(.2, max(0, end - time.monotonic())))
                     continue
                 self.budget.check(resource)
                 self.check_cancelled()
-                if clock() >= slot and time.monotonic() >= self.last_gh + self.gap:
+                if clock() >= slot and time.monotonic() >= max(slot_deadline, self.last_gh + self.gap):
                     break
             else:
                 raise WaitExpired('Shared pacing wait exceeded spacing deadline; entry stopped')
