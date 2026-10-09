@@ -1486,15 +1486,16 @@ def test_hosted_zsh_setup_does_not_refresh_working_indexes():
     setup = next(st for st in wf["jobs"]["classes"]["steps"]
                  if st.get("name") == "Install zsh")
     # Three download attempts, one refresh, one unpack; each timeout also
-    # permits five seconds to kill its process group. Reserve one minute for
-    # shell/setup overhead. Backoff occurs after attempts one and two only.
+    # permits five seconds to kill its process group. Backoff occurs after
+    # attempts one and two only.
     check("hosted zsh setup uses the shared installer", setup["run"] == "ops/ci-zsh.sh")
     installer_source = (REPO / "ops/ci-zsh.sh").read_text()
     backoff = int(setup["env"]["ZSH_RETRY_BACKOFF"])
     attempts = len(re.search(r"for attempt in ([0-9 ]+); do", installer_source).group(1).split())
     download, refresh, unpack = [int(grace) + int(limit) for grace, limit in
                                 re.findall(r"timeout --kill-after=(\d+)s (\d+)s", installer_source)]
-    budget_seconds = attempts * download + refresh + unpack + sum(range(1, attempts)) * backoff + 60
+    verification = int(re.search(r"signal\.alarm\((\d+)\)", installer_source).group(1))
+    budget_seconds = attempts * download + refresh + unpack + sum(range(1, attempts)) * backoff + verification + 30
     deadline_minutes = (budget_seconds + 59) // 60
     check("zsh setup deadline equals its retry budget plus bounded overhead",
           setup.get("timeout-minutes") == deadline_minutes,
@@ -1615,6 +1616,74 @@ except subprocess.TimeoutExpired:
                       for args in calls if "--no-download" in args), calls)
 
 
+def test_hosted_zsh_cache_requires_authenticated_bytes():
+    installer = (REPO / "ops/ci-zsh.sh").read_text()
+    with tempfile.TemporaryDirectory(prefix="ci-zsh-cache-") as tmp:
+        fixture = pathlib.Path(tmp)
+        for name, source in {
+            "zsh": "#!/bin/sh\nexit 1\n",
+            "timeout": '#!/bin/sh\nshift 2\nexec "$@"\n',
+            "sudo": '#!/bin/sh\nexec "$@"\n',
+            "apt-cache": "#!" + sys.executable + "\n" + '''
+import hashlib, os, sys
+if os.environ["CI_CACHE_MODE"] == "missing-metadata":
+    sys.exit(0)
+if os.environ["CI_CACHE_MODE"] == "metadata-error":
+    sys.exit(2)
+print("Package: zsh\\nVersion: 1\\nArchitecture: amd64\\nSHA256: " +
+      hashlib.sha256(b"trusted-zsh-package").hexdigest())
+''',
+            "apt-get": "#!" + sys.executable + "\n" + '''
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ["ZSH_ARCHIVE_DIR"])
+archive = root / "zsh_1_amd64.deb"
+log = pathlib.Path(os.environ["CI_CACHE_LOG"])
+state = json.loads(log.read_text()) if log.exists() else {}
+if "--download-only" in sys.argv:
+    state["restored"] = {p.name: p.read_text() for p in root.glob("*.deb")}
+    # Model apt's filename+size shortcut instead of repairing a bad cache.
+    if not archive.exists():
+        archive.write_bytes(b"trusted-zsh-package")
+elif "--no-download" in sys.argv:
+    state["installed"] = archive.read_text()
+log.write_text(json.dumps(state))
+''',
+        }.items():
+            path = fixture / name
+            path.write_text(source)
+            path.chmod(0o755)
+        for mode in ("valid", "same-size-tampered", "other-version", "old-version-filename",
+                     "missing-metadata", "metadata-error"):
+            archives = fixture / mode
+            archives.mkdir()
+            archive = archives / ("zsh_2_amd64.deb" if mode == "old-version-filename" else "zsh_1_amd64.deb")
+            restored = (b"trusted-zsh-package" if mode in ("valid", "old-version-filename") else
+                        b"older-zsh-package!!" if mode == "other-version" else b"altered-zsh-package")
+            archive.write_bytes(restored)
+            log = fixture / (mode + ".json")
+            env = scrubbed_env()
+            env.update(PATH=str(fixture) + os.pathsep + os.environ["PATH"],
+                       ZSH_ARCHIVE_DIR=str(archives), ZSH_RETRY_BACKOFF="0",
+                       CI_CACHE_MODE=mode, CI_CACHE_LOG=str(log))
+            ran = subprocess.run(["bash", "-c", installer], cwd=fixture, env=env,
+                                 capture_output=True, text=True, timeout=10)
+            state = json.loads(log.read_text()) if log.exists() else {}
+            if mode == "metadata-error":
+                check("zsh cache verification error stops before apt can consume archives",
+                      ran.returncode != 0 and not state, {"rc": ran.returncode, "state": state})
+                continue
+            check(f"zsh cache {mode} installs authenticated package bytes",
+                  ran.returncode == 0 and state.get("installed") == "trusted-zsh-package",
+                  {"rc": ran.returncode, "state": state, "stderr": ran.stderr})
+            expected = {"zsh_1_amd64.deb": "trusted-zsh-package"} if mode == "valid" else {}
+            check(f"zsh cache {mode} exposes only verified restored archives to apt",
+                  state.get("restored") == expected, state)
+            if mode != "valid":
+                quarantined = archives / "quarantine" / archive.name
+                check(f"zsh cache {mode} preserves rejected bytes in quarantine",
+                      quarantined.is_file() and quarantined.read_bytes() == restored)
+
+
 def main(argv=None):
     if (sys.argv[1:] if argv is None else argv) == ["--collection-only"]:
         test_every_test_file_in_the_tree_is_collected()
@@ -1648,7 +1717,8 @@ def main(argv=None):
                test_hosted_ci_runs_classes_in_parallel_behind_one_required_context,
                test_hosted_migration_budget_covers_observed_acceptance_runtime,
                test_gate_replay_has_an_independent_required_class,
-               test_hosted_zsh_setup_does_not_refresh_working_indexes):
+               test_hosted_zsh_setup_does_not_refresh_working_indexes,
+               test_hosted_zsh_cache_requires_authenticated_bytes):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip
