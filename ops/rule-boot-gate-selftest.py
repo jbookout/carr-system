@@ -652,7 +652,7 @@ def case_piped_formatter(c):
     c.arm()
     pipes = [(f"{abs_cmd(1)} | {PY_FORMAT}", indent2),
              (f"{abs_cmd(2)} 2>&1 | jq .", indent2),
-             (f"{abs_cmd(3)} | jq -r .rule_boot", lambda b: json.dumps(json.loads(b)["rule_boot"], indent=2)),
+             (f"{abs_cmd(3)} | jq -c '{{ok: .ok, rule_boot: .rule_boot}}'", indent2),
              (f"{abs_cmd(4)} | head -n 4000", None),
              (f"{abs_cmd(5)} </dev/null | python3 -m json.tool", indent2)]
     for p, (cmd, out) in enumerate(pipes, start=1):
@@ -939,30 +939,32 @@ def case_compact_rearms_the_served_set(c):
 
 
 def case_filtered_fetch_counts_with_digest(c):
-    """A fetch piped through jq or python3 -c counts when the call
-    succeeded and its printed output carries the boot's digest."""
+    """A fetch piped through jq or Python counts when the call
+    preserves the upstream success envelope and boot digest."""
     c.stub_sized("a", pages=4)
     c.arm()
     dig = c.boot(1)["digest"]
     forms = [
-        (f"{abs_cmd(1)} | jq -r '.rule_boot | .digest, .text'",
-         lambda b: dig + "\n" + json.loads(b)["rule_boot"]["text"]),
-        (f"{abs_cmd(2)} | jq -c '{{d: .rule_boot.digest, t: .rule_boot.text}}'",
-         lambda b: json.dumps(dict(d=dig, t=json.loads(b)["rule_boot"]["text"]))),
-        (f"{abs_cmd(3)} | python3 -c \"import json,sys; b=json.load(sys.stdin)['rule_boot']; print(b['digest']); print(b['text'])\"",
-         lambda b: dig + "\n" + json.loads(b)["rule_boot"]["text"] + "\n"),
-        (f"{abs_cmd(4)} | jq -r .rule_boot.digest", lambda b: dig + "\n"),
+        f"{abs_cmd(1)} | jq -c '{{ok: .ok, rule_boot: {{digest: .rule_boot.digest}}}}'",
+        f"{abs_cmd(2)} | jq -c '{{ok: .ok, rule_boot: .rule_boot}}'",
+        f"{abs_cmd(3)} | python3 -m json.tool",
+        f"{abs_cmd(4)} | jq -c '{{ok: .ok, rule_boot: {{digest: .rule_boot.digest}}}}' | cat",
     ]
-    for p, (cmd, out) in enumerate(forms, start=1):
-        pre, post = c.fetch_cmd(cmd, p, stdout=out)
-        assert not denied(pre), f"a jq or python3 -c filter keeps it a fetch: {cmd}: {pre}"
-        assert not notice(post), f"digest printed: counted silently: {cmd}: {post}"
-    assert c.call(*READ) is None, "four filtered pages, each carrying the digest: allowed"
+    for p, cmd in enumerate(forms, start=1):
+        filters = cmd.split(" | ", 1)[1]
+        result = subprocess.run(filters, input=json.dumps({"ok": True, "rule_boot": c.boot(p)}),
+                                shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result
+        pre, post = c.fetch_cmd(cmd, p, stdout=lambda b: result.stdout)
+        assert not denied(pre), f"a jq or Python filter keeps it a fetch: {cmd}: {pre}"
+        assert not notice(post), f"success and digest preserved: counted silently: {cmd}: {post}"
+    assert c.call(*READ) is None, "four filtered pages preserving upstream success: allowed"
     # Without the digest, or with another digest, the page does not count.
     c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
     c2.stub_sized("a", pages=1)
     c2.arm()
-    for cmd, out in ((f"{abs_cmd(1)} | jq -c '{{p: .rule_boot.page, t: .rule_boot.text}}'",
+    for cmd, out in ((f"{abs_cmd(1)} | jq -r .rule_boot.digest", lambda b: dig + "\n"),
+                     (f"{abs_cmd(1)} | jq -c '{{p: .rule_boot.page, t: .rule_boot.text}}'",
                       lambda b: json.dumps(dict(p=1, t=json.loads(b)["rule_boot"]["text"]))),
                      (f"{abs_cmd(1)} | jq -c '{{rule_boot: {{digest: \"sha256:x\"}}}}'",
                       lambda b: '{"rule_boot": {"digest": "sha256:x"}}'),
@@ -975,6 +977,9 @@ def case_filtered_fetch_counts_with_digest(c):
     # A filtered call that failed is not a read, whatever it printed.
     c2.fetch_cmd(f"{abs_cmd(1)} | jq -r .rule_boot.digest", 1, answer="Exit code 1\n" + dig)
     assert denied(c2.call(*READ)), "a failed call never counts"
+    failed_command = f"{abs_cmd(1)} | jq -c '{{ok: .ok, rule_boot: {{digest: .rule_boot.digest}}}}'"
+    c2.fetch_cmd(failed_command, 1, answer=json.dumps({"ok": True, "rule_boot": {"digest": dig}}))
+    assert denied(c2.call(*READ)), "a failure-hook event cannot confirm even a success-shaped receipt"
     # The digest check needs an armed digest to compare against.
     c3 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
     c3.stub_sized("a", pages=1)
@@ -1038,6 +1043,52 @@ def case_failed_upstream_filter_cannot_confirm(c):
                   "tool_name": "Bash", "tool_input": {"command": command},
                   "tool_response": {"stdout": result.stdout, "stderr": "", "interrupted": False}})
     assert denied(numeric.call(*READ)), "a numeric jq constant cannot prove digest provenance"
+
+
+def case_error_echo_filter_cannot_confirm(c):
+    c.stub_sized("aaaaaaaa", pages=1)
+    c.arm()
+    hexpart = c.boot(1)["digest"][7:]
+    args = json.dumps({"detail": "boot", "page": 1, hexpart: True})
+    command = shlex.quote(RUN_SH) + " call standing-context " + shlex.quote(args)
+    error = {"ok": False, "error": "unregistered_operation_fields", "fields": [hexpart]}
+    upstream = os.path.join(c.work, "error-echo.py")
+    with open(upstream, "w", encoding="utf-8") as fh:
+        fh.write("import sys; print(" + repr(json.dumps(error)) + ", file=sys.stderr); sys.exit(1)")
+    flt = "python3 -c " + shlex.quote("import sys; print(sys.stdin.read())")
+    result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " 2>&1 | " + flt,
+                            shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and hexpart in result.stdout, result
+    command += " 2>&1 | " + flt
+    assert not denied(c.call("Bash", {"command": command}))
+    c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+            "tool_name": "Bash", "tool_input": {"command": command},
+            "tool_response": {"stdout": result.stdout, "stderr": result.stderr, "interrupted": False}})
+    assert denied(c.call(*READ)), "upstream error echo counted as a successful page read"
+
+    for flt, source in (
+        ("python3 -c " + shlex.quote('import json,sys; d=json.load(sys.stdin); print(d["fields"][0])'),
+         {"ok": False, "fields": [json.dumps({"ok": True, "rule_boot": c.boot(1)})]}),
+        ("jq -c '{ok: .ok, rule_boot: {digest: .rule_boot.digest}}'", error),
+        ("jq -c '{ok: .ok, rule_boot: {digest: .rule_boot.digest}}'",
+         {"ok": False, "rule_boot": {"digest": c.boot(1)["digest"]}}),
+        ("jq -c '{ok: .allowed, rule_boot: {digest: .received}}'",
+         {"ok": False, "allowed": True, "received": c.boot(1)["digest"]}),
+    ):
+        with open(upstream, "w", encoding="utf-8") as fh:
+            fh.write("import sys; print(" + repr(json.dumps(source)) + "); sys.exit(1)")
+        result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " | " + flt,
+                                shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result
+        command = abs_cmd(1) + " | " + flt
+        c.call("Bash", {"command": command})
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_response": {"stdout": result.stdout, "stderr": result.stderr, "interrupted": False}})
+        assert denied(c.call(*READ)), f"failed upstream confirmed through {flt}"
+    c.fetch_cmd(abs_cmd(1), 1, stdout=lambda b: json.dumps({"ok": True, "rule_boot": {"digest": c.boot(1)["digest"]}}))
+    assert denied(c.call(*READ)), "a direct incomplete envelope cannot confirm a page"
+
 
 
 def case_interrupted_result_cannot_confirm(c):
@@ -1117,7 +1168,7 @@ def case_child_rearm_outage_keeps_parent(c):
     assert denied(c.call(*READ, agent="sub-a")), "the compacted child is held"
 
 
-CASES = [case_failed_upstream_filter_cannot_confirm, case_interrupted_result_cannot_confirm,
+CASES = [case_error_echo_filter_cannot_confirm, case_failed_upstream_filter_cannot_confirm, case_interrupted_result_cannot_confirm,
          case_child_start_keeps_parent_boot, case_child_compaction_rearms_only_that_child,
          case_child_rearm_digest_change_regates_all, case_child_rearm_outage_keeps_parent,
          case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
@@ -1245,15 +1296,19 @@ MUTANTS = {
     "any-python-code": [('            return _py_pure(args[1])', '            return True')],
     "any-jq-filter": [('    return isinstance(flt, str) and bool(flt.strip()) and not _JQ_REFUSED.search(flt)', '    return True')],
     # Digest-confirmed filtered pages and agreeing epochs.
-    "digest-not-checked": [('            and _carries_digest(response.get("stdout", "") if isinstance(response, dict) else response, arm.get("digest"))):', '            ):')],
+    "digest-not-checked": [('            and _filtered_success(response, arm.get("digest"))):', '            ):')],
     "digest-confirms-direct-answers": [('    if (not direct and answer == "inconclusive" and succeeded',
-                                        '    if (answer == "inconclusive" and succeeded')],
+                                        '    if (answer == "inconclusive" and succeeded'),
+                                       ('    preserves_success = not direct and _bash_preserves_success((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))',
+                                        '    preserves_success = True')],
     "digest-confirms-failed-calls": [('    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse" and not interrupted',
                                       '    succeeded = True')],
     "interrupted-confirms": [('    interrupted = isinstance(response, dict) and response.get("interrupted")',
                                '    interrupted = False')],
-    "filter-provenance-ignored": [('    projects_input = direct or _bash_projects_input((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))',
-                                    '    projects_input = True')],
+    "success-envelope-ignored": [('            and _filtered_success(response, arm.get("digest"))):',
+                                   '            and True):')],
+    "success-provenance-ignored": [('    preserves_success = not direct and _bash_preserves_success((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))',
+                                     '    preserves_success = True')],
     "racing-epochs": [('            arm.setdefault("epoch", "fetch-" + safe_key(digest.replace("sha256:", ""), "none")[:12])',
                        '            arm.setdefault("epoch", secrets.token_hex(6))')],
     "python-unsafe-builtins": [('            elif node.id in _PY_UNSAFE_BUILTINS:\n                return False',

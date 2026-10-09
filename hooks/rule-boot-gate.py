@@ -11,8 +11,8 @@ other tool call. hooks/gate-integrity.py arms the gate at SessionStart
 The server's pages_total determines the required set. Compaction re-arms that
 set for the new context. Confirmed pages remain counted within their context,
 including when a later re-read fails. A successful filtered fetch counts when
-its output carries the armed digest; whole-page JSON also retains the length
-check.
+its output preserves upstream ok:true and the armed digest. Whole-page JSON
+also retains the length check.
 
 Registered on PreToolUse with matcher ".*" so it sees every tool, which is why
 it is deliberately tiny: no network, no model, one small state read. Also
@@ -29,7 +29,8 @@ the recovery paths that remain available while effects are held.
     in lib/rule_boot_gate.py)                 -> allow, and record the attempt;
     a page counts as READ only when PostToolUse finds that page's rule_boot
     (matching page, digest and text) in the result, with lengths checked against
-    total_chars, or a successful filtered result carries the armed digest
+    total_chars, or a canonical filtered result retains upstream ok:true and
+    the armed digest
   · other standing-context calls, the read-only rule verbs, ToolSearch -> allow
   · every page of the armed digest confirmed in this context          -> allow
   · incomplete boot, outage, absent deployment, unwritable state or repeated

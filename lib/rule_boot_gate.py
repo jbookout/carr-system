@@ -110,8 +110,9 @@ TOOLLESS_AGENT_TYPES = frozenset({"statusline-setup"})
 # WHAT A PIPED PAGE PROVES. A
 # filter may keep the whole JSON, and then the page is confirmed like a direct
 # read (digest, page, text and length). Or it may keep less: the page then
-# counts when the call SUCCEEDED and what it printed carries the armed boot's
-# digest. Joe's ruling: a context that fetched the page and kept the digest
+# counts when the call SUCCEEDED and its canonical JSON projection retains
+# the upstream ok:true and rule_boot.digest fields. A context that fetched
+# the page and kept the digest
 # has done the read; demanding the whole JSON made sessions fetch every page
 # twice. The cost, accepted on purpose: a filtered page has no length evidence,
 # and a filter that keeps the digest and drops the text still counts.
@@ -502,57 +503,10 @@ def _harmless_filter(stage):
     return False
 
 
-def _jq_projection(flt):
-    """Only paths, compositions and objects of paths can prove input provenance."""
-    tokens = re.findall(r"\.[A-Za-z_][A-Za-z0-9_.]*|\.|[A-Za-z_][A-Za-z0-9_]*|[{}:,|]", flt)
-    if "".join(tokens) != re.sub(r"\s+", "", flt):
-        return False
-    i = 0
-
-    def expression():
-        nonlocal i
-        if i >= len(tokens):
-            return False
-        if tokens[i].startswith("."):
-            path = tokens[i]
-            i += 1
-            return path == "." or all(part for part in path[1:].split("."))
-        if tokens[i] != "{":
-            return False
-        i += 1
-        while i < len(tokens):
-            key = tokens[i]
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,29}", key):
-                return False
-            i += 1
-            if i >= len(tokens) or tokens[i] != ":":
-                return False
-            i += 1
-            if not expression() or i >= len(tokens):
-                return False
-            end = tokens[i]
-            i += 1
-            if end == "}":
-                return True
-            if end != ",":
-                return False
-        return False
-
-    if not expression():
-        return False
-    while i < len(tokens):
-        if tokens[i] not in ("|", ","):
-            return False
-        i += 1
-        if not expression():
-            return False
-    return True
-
-
-def _py_projection(code):
-    """Prove every printed value derives from stdin without data mutation."""
+def _py_preserves_root(code):
+    """Prove printed values retain the complete stdin response without mutation."""
     tree = ast.parse(code)
-    variables = set()
+    variables, roots = set(), set()
 
     def data(node):
         if isinstance(node, ast.Name):
@@ -578,14 +532,29 @@ def _py_projection(code):
                 and isinstance(k.value.value, (int, bool, type(None))) for k in node.keywords)
         return False
 
-    printed = False
+    def root(node):
+        if isinstance(node, ast.Name):
+            return node.id in roots
+        if not isinstance(node, ast.Call):
+            return False
+        chain = _py_chain(node.func)
+        if chain in (("sys", "stdin", "read"), ("json", "load")):
+            return data(node)
+        return chain in (("json", "loads"), ("json", "dumps")) and data(node) and root(node.args[0])
+
+    printed, preserves_root = False, True
     for statement in tree.body:
         if isinstance(statement, ast.Import):
             continue  # capability validation has already limited imports to json/sys
         if isinstance(statement, ast.Assign):
             if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name) or not data(statement.value):
                 return False
-            variables.add(statement.targets[0].id)
+            name = statement.targets[0].id
+            is_root = root(statement.value)
+            variables.add(name)
+            roots.discard(name)
+            if is_root:
+                roots.add(name)
         elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
             call = statement.value
             if not (isinstance(call.func, ast.Name) and call.func.id == "print"
@@ -596,30 +565,10 @@ def _py_projection(code):
                     or not isinstance(k.value.value, str) or k.value.value.strip() for k in call.keywords):
                 return False
             printed = True
+            preserves_root = preserves_root and len(call.args) == 1 and root(call.args[0])
         else:
             return False
-    return printed
-
-
-def _bash_projects_input(command):
-    """Capability-safe filters may run, but only projections can confirm a page."""
-    tokens = _lex(str(command or "").strip())
-    stages = []
-    for token in tokens or []:
-        if token[:2] == ("op", "|"):
-            stages.append([])
-        elif stages:
-            stages[-1].append(token[1])
-    for stage in stages:
-        prog, args = stage[0], stage[1:]
-        if prog == "jq":
-            flt = _jq_filter(args)
-            if flt is not None and not _jq_projection(flt):
-                return False
-        elif prog in ("python", "python3") and args[:1] == ["-c"]:
-            if not _py_projection(args[1]):
-                return False
-    return True
+    return printed and preserves_root
 
 
 def parse_bash_fetch(command, cwd):
@@ -731,7 +680,8 @@ def fetch_instructions(pages, digest=None, pages_total=None):
         "(applicable-rules, resolve-doctrine-rules, read-doctrine, search-doctrine, doctrine-index, "
         "doctrine-sections) and ToolSearch will run. A leading `cd <absolute repo path> &&` and a pipe "
         "into a filter (jq, python3 -c from the repo root, head) keep it a fetch; a filtered page counts "
-        "when what it prints keeps .rule_boot.digest (or the whole JSON). Anything run after the fetch "
+        "when it prints the whole JSON or keeps the upstream .ok and .rule_boot.digest fields. "
+        "Anything run after the fetch "
         "(&&, ;, ||, &) is not a fetch. "
         "Ordinary tools stay held until the complete boot is verified; recovery rule reads remain available.")
 
@@ -1045,9 +995,9 @@ def _short_text(folder, arm):
 
 
 INCONCLUSIVE_NOTICE = (
-    "RULE BOOT: page {page}'s answer carried neither the whole page nor the boot's digest, so it "
-    "does not count as read. Fetch page {page} again without the pipe, or with a filter that keeps "
-    ".rule_boot.digest in what it prints (for example jq -r '.rule_boot | .digest, .text').")
+    "RULE BOOT: page {page}'s answer did not preserve a successful boot response, so it "
+    "does not count as read. Fetch page {page} again without the pipe, or keep the upstream "
+    "ok and digest fields with jq -c '{{ok: .ok, rule_boot: {{digest: .rule_boot.digest}}}}'.")
 
 # The c<N> marker of a page confirmed by its digest through a filter: no length.
 DIGEST_ONLY = "digest"
@@ -1062,23 +1012,46 @@ def _clear_stale(folder, page):
             pass
 
 
-def _printed(response):
-    """Everything a Bash call printed, as one string."""
-    texts = []
-    _strings(response, texts)
-    return "\n".join(texts)
+def _bash_preserves_success(command):
+    """A compact receipt must retain the source's ok and rule_boot fields.
+
+    Arbitrary projections prove input origin but can rename error fields into
+    success fields. Only identity formatting and these canonical jq projections
+    retain the success contract when page text is omitted.
+    """
+    tokens = _lex(str(command or "").strip())
+    stages = []
+    for token in tokens or []:
+        if token[:2] == ("op", "|"):
+            stages.append([])
+        elif stages:
+            stages[-1].append(token[1])
+    for stage in stages:
+        prog, args = stage[0], stage[1:]
+        if prog == "jq":
+            flt = _jq_filter(args)
+            if flt is not None and re.sub(r"\s+", "", flt) not in (
+                    ".", "{ok:.ok,rule_boot:.rule_boot}",
+                    "{ok:.ok,rule_boot:{digest:.rule_boot.digest}}"):
+                return False
+        elif prog in ("python", "python3") and args[:1] == ["-c"]:
+            if not _py_preserves_root(args[1]):
+                return False
+    return bool(stages)
 
 
-def _carries_digest(response, digest):
-    """True when the printed output names `digest` whole: "sha256:<hex>", or
-    the bare hex when it is long enough to be unambiguous."""
-    digest = str(digest or "")
-    if not digest.startswith("sha256:") or len(digest) < 15:
+def _filtered_success(response, digest):
+    """Read the canonical success envelope from stdout, never error substrings."""
+    stdout = response.get("stdout", "") if isinstance(response, dict) else response
+    if not isinstance(stdout, str):
         return False
-    hexpart = digest[7:]
-    printed = _printed(response)
-    pattern = re.escape(hexpart) if len(hexpart) >= 32 else re.escape(digest)
-    return re.search(r"(?<![0-9a-f])" + pattern + r"(?![0-9a-f])", printed) is not None
+    try:
+        receipt = json.loads(stdout)
+    except ValueError:
+        return False
+    return (isinstance(receipt, dict) and receipt.get("ok") is True
+            and isinstance(receipt.get("rule_boot"), dict)
+            and receipt["rule_boot"].get("digest") == digest)
 
 
 def observe(payload):
@@ -1087,9 +1060,9 @@ def observe(payload):
 
     A page is confirmed only by an answer that is that page (_is_page), and
     its text length is recorded so completion can be checked against the
-    boot's total_chars. A successful filtered fetch can also be confirmed by
-    the armed digest in its output, without length evidence. Other filtered
-    answers are INCONCLUSIVE because the filter may be what failed; they
+    boot's total_chars. A filtered fetch can also be confirmed by a canonical
+    upstream success envelope and armed digest, without length evidence. Other
+    filtered answers are INCONCLUSIVE because the filter may be what failed; they
     neither confirm a page nor unlock the context as an outage."""
     session_id = payload.get("session_id") or payload.get("sessionId")
     agent_id = payload.get("agent_id") or payload.get("agentId")
@@ -1105,9 +1078,11 @@ def observe(payload):
         response = payload.get("error")
     interrupted = isinstance(response, dict) and response.get("interrupted")
     succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse" and not interrupted
-    projects_input = direct or _bash_projects_input((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))
+    preserves_success = not direct and _bash_preserves_success((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))
     answer, boot = read_answer(response)
-    if interrupted or not projects_input or (not succeeded and answer == "boot"):
+    if not direct and answer == "boot" and (not preserves_success or not _filtered_success(response, boot.get("digest"))):
+        answer = "inconclusive"
+    if interrupted or (not succeeded and answer == "boot"):
         answer = "inconclusive"
     if answer == "boot" and not _is_page(boot, page):
         answer = "inconclusive"
@@ -1116,9 +1091,10 @@ def observe(payload):
     arm = read_arm(session_id)
     # Only a FILTERED fetch can be confirmed by its digest alone: an unfiltered
     # answer printed everything, so a wrong page or a missing text is just that.
-    if (not direct and answer == "inconclusive" and succeeded and projects_input and arm and arm.get("status") == "armed"
-            and _carries_digest(response.get("stdout", "") if isinstance(response, dict) else response, arm.get("digest"))):
-        # Filtered, succeeded, and printed the armed digest: the page is read.
+    if (not direct and answer == "inconclusive" and succeeded and arm and arm.get("status") == "armed"
+            and preserves_success
+            and _filtered_success(response, arm.get("digest"))):
+        # The projected envelope retains upstream success and the armed digest.
         folder = _fetch_dir(session_id, agent_id, arm)
         _touch(folder, f"p{page}")
         _put(folder, f"c{page}", DIGEST_ONLY)

@@ -37,6 +37,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import codex_models
 import desks  # noqa: E402
 import registry_ext  # noqa: E402
 from desks import DeskError  # noqa: E402
@@ -45,7 +46,7 @@ from desks import DeskError  # noqa: E402
 def cmd_register(reg: desks.Registry, args) -> int:
     entry = reg.register(
         args.name, args.kind, socket=args.socket, model=args.model, cwd=args.cwd,
-        effort=getattr(args, "effort", None), sandbox=args.sandbox, add_dirs=args.add_dirs,
+        family=getattr(args, "family", None), effort=getattr(args, "effort", None), sandbox=args.sandbox, add_dirs=args.add_dirs,
         permission_mode=getattr(args, "permission_mode", None),
     )
     if args.seat:
@@ -76,7 +77,7 @@ def cmd_refresh(reg: desks.Registry, args) -> int:
         # dispatch starts a fresh thread in the corrected directory.
         entry = reg.register(
             args.name, entry["kind"], socket=entry.get("socket"), model=entry.get("model"),
-            effort=entry.get("effort"), cwd=args.cwd, sandbox=entry.get("sandbox"),
+            family=entry.get("family"), effort=entry.get("effort"), cwd=args.cwd, sandbox=entry.get("sandbox"),
             add_dirs=entry.get("add_dirs"), permission_mode=entry.get("permission_mode"),
         )
         if entry.get("room_seat") is None:
@@ -113,7 +114,11 @@ def cmd_list(reg: desks.Registry, args) -> int:
         seat = e.get("room_seat", "(no room seat — bridge will not route to it)")
         last_seen = e.get("last_seen", "never")
         last_live = e.get("last_live")
-        if e.get("kind") in ("claude-desktop", "codex-session", "codex-live", "grok-cli") and e.get("model"):
+        if kind in codex_models.CODEX_KINDS:
+            family = e.get("family")
+            model = codex_models.resolve_model(family) if family else "job family required"
+            where = f"family={family} model={model} effort={e.get('effort')}"
+        elif e.get("kind") in ("claude-desktop", "grok-cli") and e.get("model"):
             where = f"{e.get('model')} (effort={e.get('effort')})"
         else:
             where = e.get("socket") or "?"
@@ -147,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--kind", required=True, choices=list(desks.KINDS))
     r.add_argument("--socket", default=None)
     r.add_argument("--model", default=None)
+    r.add_argument("--family", choices=codex_models.FAMILIES)
     r.add_argument("--effort", default=None, choices=list(desks.EFFORT_CHOICES))
     r.add_argument("--cwd", default=None)
     r.add_argument("--permission-mode", default=None,
