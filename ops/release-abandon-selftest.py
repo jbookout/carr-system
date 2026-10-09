@@ -190,20 +190,32 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
         yield dsn
 
 
+def staging_fixture_revisions(count: int) -> list[str]:
+    revisions = subprocess.run(
+        ["git", "rev-list", "--first-parent", f"--max-count={count}", "origin/main"],
+        cwd=REPO, capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.splitlines()
+    if len(revisions) != count:
+        raise RuntimeError("release-abandon fixtures require enough delivered main history")
+    return revisions
+
+
 def _cases(dsn: str) -> None:
     provision_authority_principal(dsn)
     record(dsn, "sync-registry")
     # Candidate intake verifies every environment before opening the database,
     # so every abandonment fixture uses a real staging manifest rather than a
     # synthetic shape that the release door must refuse. Each fixture uses a
-    # distinct repository revision so their immutable source evidence differs.
+    # distinct delivered revision so their immutable source evidence differs.
+    # Topic ancestors can contain migrations repaired later in the same PR.
     staging_manifests: dict[str, Path] = {}
     staging_error = ""
     fixture_keys = ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor")
+    revisions = staging_fixture_revisions(len(fixture_keys))
     for offset, key in enumerate(fixture_keys, start=1):
         staging_built = subprocess.run(
             [sys.executable, str(REPO / "tools" / "release-manifest.py"),
-             "build", "--sha", f"HEAD~{offset}", "--environment", "staging",
+             "build", "--sha", revisions[offset - 1], "--environment", "staging",
              "--performance-budget-ref", "runbook:worker-performance-v1",
              "--performance-budget-ms", "1500",
              "--recovery-strategy", "rollback",
