@@ -391,7 +391,7 @@ class Queue:
                         if not isinstance(row['filename'], str):
                             raise ValueError('GitHub returned an invalid filename')
                 if page == BOUNDS['pages']['attempts'] and (self._next_page is True or self._next_page is None and len(rows) >= 100):
-                    raise RuntimeError('GitHub pagination limit reached; refusing partial read')
+                    raise WaitExpired('GitHub pagination limit reached; refusing partial read; reconcile before retry')
             data = self.api(f'{path}{separator}page={page}', validate=validate)
             rows = data[collection] if collection else data
             pages.extend(rows)

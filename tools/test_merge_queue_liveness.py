@@ -670,7 +670,7 @@ class LivenessTests(unittest.TestCase):
                 validate(page)
                 return page
             with patch.object(f.q, 'api', side_effect=full_page):
-                with self.assertRaisesRegex(RuntimeError, 'pagination'):
+                with self.assertRaisesRegex(mq.WaitExpired, 'pagination'):
                     f.q.pages('repos/example/repo/issues/1/comments?per_page=100')
             EXERCISED.add('pagination_cap')
             f.pr(); entry = f.q.enqueue(mq.REPOS[0], 1, f.approved)
@@ -681,6 +681,34 @@ class LivenessTests(unittest.TestCase):
             self.assertEqual(f.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], 'review')
             self.assertIsNotNone(f.q.db.execute("SELECT 1 FROM events WHERE outcome='auto_enqueue_exhausted'").fetchone())
             EXERCISED.add('reenqueue_cap')
+        finally: f.doCleanups()
+
+    def test_pagination_cap_stops_the_entry_and_releases_next_pr_in_the_real_loop(self):
+        f = fixture_module.QueueTests(); f.setUp()
+        try:
+            loop = RunLoop(f, EFFECTS[0], 'error'); loop.active = False
+            entry = loop.seed()
+            original_request = loop.request
+            calls = []
+            page = [{'id': i, 'body': '', 'author_association': 'OWNER'} for i in range(100)]
+            def request(argv, **kwargs):
+                if operation(argv) == ('approval', mq.REPOS[0], 1):
+                    calls.append(argv)
+                    return 'HTTP/2.0 200 OK\nLink: <next>; rel="next"\n\n' + json.dumps(page)
+                return original_request(argv, **kwargs)
+            loop.request = request
+            with patch.dict(mq.BOUNDS['pages'], attempts=2):
+                loop.session(polls=1, reconcile=False)
+                row = f.q.db.execute('SELECT phase,outcome FROM entries WHERE id=?', (entry,)).fetchone()
+                self.assertEqual(tuple(row), ('blocked', 'wait_exhausted'))
+                self.assertIn((mq.REPOS[0], 2), {(r,n) for r,n,_ in loop.merged})
+                f.restart()
+                loop.session(polls=1, reconcile=False)
+                self.assertEqual(f.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], 'blocked')
+                self.assertNotIn((mq.REPOS[0], 1), {(r,n) for r,n,_ in loop.merged})
+                self.assertLessEqual(len(calls), 4, 'pagination exceeded the entry and discovery caps')
+            self.assertIsNotNone(f.q.db.execute("SELECT 1 FROM events WHERE entry_id=? AND detail LIKE '%pagination limit%'", (entry,)).fetchone())
+            EXERCISED.add('pagination_cap')
         finally: f.doCleanups()
 
     def test_budget_contention_times_out_and_sigterm_cancels_the_real_loop(self):
