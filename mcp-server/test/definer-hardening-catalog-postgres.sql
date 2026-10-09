@@ -17,10 +17,14 @@ insert into ops.rule_load_layer(rule_id,short_id,load_layer,packs,scope,why,sour
   ('30000000-0000-4000-8000-000000000002','30000000','pack',array['catalog-fixture'],
    'shared','Synthetic fixture','ops/config/rule-enforcement-map.json',repeat('0',64));
 do $coherence$
-declare snapshot jsonb; version text;
+declare snapshot jsonb; version text; head text; ok boolean;
 begin
+  -- The head is derived from the registry chain itself, so a renumber or a
+  -- later successor needs no edit here; the live epoch must still equal it.
+  select registry_version into head from ops.scac_mutation_registry_version
+   order by substring(registry_version from '[0-9]+$')::int desc limit 1;
   snapshot:=ops.scac_policy_epoch_snapshot();
-  if snapshot->>'registry_version'<>'scac-mutation-registry.v114' then
+  if snapshot->>'registry_version' is distinct from head then
     raise exception 'hardening successor is not the current policy registry';
   end if;
   foreach version in array array(select registry_version from ops.scac_mutation_registry_version) loop
@@ -28,15 +32,20 @@ begin
       raise exception 'registry seal invalid: %',version;
     end if;
   end loop;
-  if not ops.scac_mutation_catalog_v114_current() then
+  execute format('select ops.%I()','scac_mutation_catalog_'||substring(head from '[^.]+$')||'_current') into ok;
+  if not ok then
     raise exception 'hardening successor does not match the live catalog';
   end if;
 end $coherence$;
 -- An unrelated search path change must still invalidate the current seal.
 alter function ops.engineering_admission_source(text) set search_path=pg_catalog,ops,public;
 do $drift$
+declare head text; ok boolean;
 begin
-  if ops.scac_mutation_catalog_v114_current() then
+  select registry_version into head from ops.scac_mutation_registry_version
+   order by substring(registry_version from '[0-9]+$')::int desc limit 1;
+  execute format('select ops.%I()','scac_mutation_catalog_'||substring(head from '[^.]+$')||'_current') into ok;
+  if ok then
     raise exception 'hardening successor accepted unsealed metadata';
   end if;
   begin
