@@ -1436,6 +1436,25 @@ for non_dispatch_command in NON_DISPATCH_COMMANDS:
     check(f"non-dispatch command excludes sizing: {non_dispatch_command}",
           "8400cd3d" not in hits, hits)
 
+DELEGATION_RULE_IDS = {"2b66211d", "5e89c211", "6cfb67f5", "d7f74c93", "fb110a39"}
+for command in DISPATCH_COMMANDS:
+    if "dispatch.py" not in command:
+        continue
+    hits = set(routed_for("Bash", {"command": command}))
+    check(f"dispatcher command delivers delegation rules: {command}",
+          DELEGATION_RULE_IDS <= hits, sorted(hits))
+for command in NON_DISPATCH_COMMANDS + (
+        "grep dispatch.py send docs.txt",
+        "cat dispatch.py send docs.txt",
+        "echo dispatch.py send report",
+        "echo ./dispatch.py send report",
+        "echo '/Users/booko/carr-system/tools/room-bridge/dispatch.py send report'",
+        "grep 'dispatch.py send' docs.txt",
+        "cat docs.txt; echo 'dispatch.py send report'"):
+    hits = set(routed_for("Bash", {"command": command}))
+    check(f"non-dispatch command excludes delegation rules: {command}",
+          not (DELEGATION_RULE_IDS & hits), sorted(hits))
+
 with tempfile.TemporaryDirectory() as dispatch_tmp:
     saved_env = dict(os.environ)
     os.environ["CARR_RULE_ROUTE_DEDUPE_DIR"] = str(Path(dispatch_tmp) / "dedupe")
@@ -1724,7 +1743,7 @@ with tempfile.TemporaryDirectory() as route_tmp:
               and repeat_runner.calls == [])
         # A different tool re-delivers the rules both tools route.
         other = gen_payload(tool="Bash",
-                            tool_input={"command": "python3 ops/dispatch.py send claude-desk x"},
+                            tool_input={"command": "python3 tools/room-bridge/dispatch.py send claude-desk x"},
                             session="route-session", tool_use_id="route-3")
         other_ids = rail.routed_rule_ids(other)
         shared = sorted(set(other_ids) & set(agent_ids))
