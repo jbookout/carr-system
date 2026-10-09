@@ -1358,6 +1358,8 @@ for routine_tool, routine_input in (
           "8400cd3d" not in hits, hits)
 
 DISPATCH_COMMANDS = (
+    './dispatch.py send report',
+    'dispatch.py send report',
     'python3 tools/room-bridge/dispatch.py send codex-desk "fix the review"',
     'python3 ./tools/room-bridge/dispatch.py send codex-desk "fix the review"',
     '/Users/booko/carr-system/tools/room-bridge/dispatch.py send codex-desk "fix the review"',
@@ -1383,6 +1385,12 @@ DISPATCH_COMMANDS = (
     "'tools/room-bridge/dispatch.py' --registry 'desk registry.json' send codex-desk x",
     '"/Users/booko/carr-system/bin/dot-relay" --credentials=x send-job brief.txt',
 ) + tuple(
+    f'python3 {executable}{options} send report'
+    for executable in ('dispatch.py', './dispatch.py',
+                       'tools/room-bridge/dispatch.py',
+                       '/opt/checkouts/carr-system/tools/room-bridge/dispatch.py')
+    for options in ('', ' --registry X')
+) + tuple(
     f'{interpreter} {executable} {subcommand} report'
     for interpreter in ('/usr/bin/python3', '/usr/local/bin/python3',
                         '/opt/homebrew/bin/python3', '.venv/bin/python3', './.venv/bin/python3',
@@ -1405,8 +1413,6 @@ NON_DISPATCH_COMMANDS = (
     r'echo example\; bin/dot-relay send-job report',
     'python3 /tmp/unrelated/bin/dot-relay send-job report',
     '/tmp/unrelated/bin/dot-relay send-job report',
-    './dispatch.py send report',
-    'dispatch.py send report',
     './dot-relay send-job report',
     'dot-relay send-job report',
     'python3 tools/room-bridge/dispatch.py desks',
