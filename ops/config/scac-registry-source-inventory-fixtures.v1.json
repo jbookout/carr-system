@@ -106563,8 +106563,8 @@
           "operation": "correct-party-identity",
           "effect_class": "administrative_mutation",
           "source_locator": "mcp-server/src/party-identity.js",
-          "schema_digest": "2ca07b5386188c767e4959feec17776bbbbf0290d4b23834925b6d82af72d4ea",
-          "source_digest": "05fce0404a11f665909a93fbef45f3cfff046ba51d7d3904f1487ab8a8ca26c5",
+          "schema_digest": "b057945fcb27f35f976735418a9c13db6e791c96df8698af52ca7abb7f4b9470",
+          "source_digest": "d813e6c22c2910ba52b2b47e9e14683ef71ae03e5a92f40207c36a69114b40c9",
           "write": true,
           "human_only": false,
           "authority_only": false,
@@ -109498,7 +109498,7 @@
         }
       ],
       "expected_count": 1187,
-      "expected_sha256": "06f7dc71fe586b0c059419badd6fd65b73ee7bc8c74a20a303601e9c3b0a965a"
+      "expected_sha256": "36e71ef7bb68f703289a9d8c44cf734df92f4a8767ea84e863dbcc3c085db105"
     }
   ],
   "current_source_review": {
