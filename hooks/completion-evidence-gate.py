@@ -324,6 +324,8 @@ WRITE_ACTION_EXACT = {
                                     # is a write for the same reason review-deal is
     "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
     "correct-memory",  # immutable successor write; exact transition
+    "correct-party-identity",  # writes party name, org and state; exact for the same
+                                # reason as correct-memory: "correct" is not a prefix
     "forget-memory",   # reversible suppression write; exact transition
     "issue-execution-envelope",  # persists one immutable governed execution envelope
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
