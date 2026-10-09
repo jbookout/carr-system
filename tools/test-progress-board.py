@@ -550,6 +550,26 @@ board.main(["task", "demo", "work", "--status", "done", "--note", "Recovered",
                          ("Codex", "gpt-6-sol", "xhigh", "Check the route."))
         self.assertEqual(task["stage_history"][0]["stage"], "queued")
 
+    def test_creation_defaults_preserve_metadata_but_allow_explicit_reassignment(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        assigned = {"title": "Assigned task", "executor": "Codex", "provider": "OpenAI",
+                    "model": "fixture", "effort": "high"}
+        defaults = {"title": "Queue card", "executor": "Merge queue", "provider": "Unknown",
+                    "model": "unknown", "effort": "unknown"}
+        fields = lambda values: [item for key, value in values.items() for item in ("--" + key, value)]
+        self.run_board("task", "demo", "existing", *fields(assigned), "--status", "running", "--pr", "42")
+        for card in ("existing", "new"):
+            self.run_board("task", "demo", card, *fields(defaults), "--creation-defaults",
+                           "--status", "review", "--pr", "42", "--stage", "ci", "--note", "Checks pending")
+        tasks = self.read_state("demo")["tasks"]
+        for card, expected in (("existing", assigned), ("new", defaults)):
+            self.assertEqual({key: tasks[card][key] for key in expected}, expected)
+            self.assertEqual((tasks[card]["status"], tasks[card]["stage"], tasks[card]["note"]),
+                             ("review", "ci", "Checks pending"))
+        self.run_board("task", "demo", "existing", *fields(defaults))
+        task = self.read_state("demo")["tasks"]["existing"]
+        self.assertEqual({key: task[key] for key in defaults}, defaults)
+
     def test_backfill_uses_pr_title_and_retains_existing_task_history(self):
         state = {"tasks": {
             "pr": {"title": "PR 42", "executor": "gpt-6-sol high (Codex)",

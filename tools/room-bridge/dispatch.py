@@ -6,24 +6,23 @@ does not reason at all, which is the point — a router that needs its own model
 to route costs the tokens the routing was supposed to save.
 
     dispatch.py send claude-desk "reconcile the loop board"
-    dispatch.py send codex-desk "rename this variable across the package"
+    dispatch.py send codex-desk "rename this variable across the package" --family luna --effort low
+    dispatch.py send codex-desk "repair the build" --family sol --effort high --fresh --checkout new:repair-build
+    dispatch.py send codex-desk "Own PR: #1667\nWrites: tools/room-bridge/*.py\nrepair dispatch" --effort high
     dispatch.py desks
     dispatch.py register claude-desk --socket /tmp/cc-socks/claude-desk.sock
-    dispatch.py register codex-desk --model gpt-5.1-codex-mini --cwd ~/carr-system
+    dispatch.py register codex-desk --family sol --effort high --cwd ~/carr-system
     dispatch.py where            # how to find THIS session's socket
 
-TWO KINDS, AND WHY THE DIFFERENCE MATTERS TO A ROUTER.
-A claude-session desk is a live conversation: it keeps its context, it can be
-mid-way through something, and a task lands there as one more turn. A
-codex-exec desk is a shot: it starts empty, runs headless at a named model,
-and hands back its last message. Context-carrying work goes to the first;
-self-contained mechanical work goes to the second, which is the cheaper seat.
+Codex desks preserve their thread context. The registry names a default family,
+never a model version. Each send resolves Sol or Luna from the current local
+Codex catalog, prints the executor slug and effort, and records them in its row.
 
 EVERY DISPATCH LEAVES A LINE in the results file, NDJSON, one object per
 dispatch. That file is how Hermes learns what happened without holding a
 connection open — a claude-session answers in its own window on its own time,
 so the line records that the turn was DELIVERED, not what the session decided.
-A codex-exec run is synchronous, so its line carries the actual result.
+A headless Codex run is synchronous, so its line carries the actual result.
 """
 
 from __future__ import annotations
@@ -35,6 +34,7 @@ import os
 import re
 import shlex
 import signal
+import select
 import subprocess
 import sys
 import time
@@ -47,6 +47,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import codex_models  # noqa: E402
+import codex_checkout  # noqa: E402
+from ops.git_env import scrubbed_env  # noqa: E402
+import write_ownership  # noqa: E402
 import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
@@ -84,9 +88,7 @@ def _now() -> str:
 
 
 def _record(results_path: Path, row: dict) -> None:
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    with results_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+    write_ownership.record(results_path, row)
 
 
 def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
@@ -133,28 +135,76 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
-def _run_codex_streamed(argv, env, timeout):
-    """Preserve result parsing while exposing actual executor output to its job log."""
-    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    chunks = []
-    def relay():
-        with proc.stdout:
-            for line in proc.stdout:
-                chunks.append(line)
-                print(line, end="", flush=True)
-    reader = threading.Thread(target=relay, daemon=True)
-    reader.start()
+def _run_codex_process(argv, env, timeout, on_executor, stream_output, **options):
+    """Track a dedicated process group, including children surviving a CLI exit."""
+    receipt_read, receipt_write = os.pipe()
+    gate_read, gate_write = os.pipe()
     try:
-        code = proc.wait(timeout=timeout)
+        proc = subprocess.Popen([sys.executable, str(HERE / 'ownership_executor.py'),
+                                 str(receipt_write), str(gate_read), *argv],
+                                env=env, stdin=subprocess.DEVNULL, **options,
+                                start_new_session=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT if stream_output else subprocess.PIPE,
+                                text=True, pass_fds=(receipt_write, gate_read))
     except BaseException:
-        proc.kill()
-        proc.wait()
+        os.close(receipt_read)
+        os.close(gate_write)
         raise
-    reader.join(timeout=timeout)
-    if reader.is_alive():
-        raise subprocess.TimeoutExpired(argv, timeout)
-    return subprocess.CompletedProcess(argv, code, "".join(chunks), "")
+    finally:
+        os.close(receipt_write)
+        os.close(gate_read)
+    identity = {}
+    chunks = []
+    reader = None
+    try:
+        if not select.select([receipt_read], [], [], 5)[0]:
+            raise RuntimeError('executor identity handshake timed out')
+        identity = json.loads(os.read(receipt_read, 4096))
+        if identity.get('pid') != proc.pid or identity.get('pgid') != proc.pid or not identity.get('start_time'):
+            raise RuntimeError('executor kernel identity unavailable')
+        if on_executor:
+            on_executor(identity)
+        os.write(gate_write, b'1')
+        if stream_output:
+            def relay():
+                with proc.stdout:
+                    for line in proc.stdout:
+                        chunks.append(line)
+                        print(line, end='', flush=True)
+            reader = threading.Thread(target=relay, daemon=True)
+            reader.start()
+            proc.wait(timeout=timeout)
+            reader.join(timeout=timeout)
+            if reader.is_alive():
+                raise subprocess.TimeoutExpired(argv, timeout)
+            stdout, stderr = ''.join(chunks), ''
+        else:
+            stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            # An unkillable group retains the claim; do not hang on its pipes.
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        if isinstance(exc, subprocess.TimeoutExpired):
+            exc.termination_confirmed = write_ownership.process_terminated(identity, group=True)
+        raise
+    finally:
+        os.close(receipt_read)
+        os.close(gate_write)
+        if reader is None or not reader.is_alive():
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+    result = subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+    result.termination_confirmed = write_ownership.process_terminated(identity, group=True)
+    return result
 
 
 def _to_codex(
@@ -166,6 +216,8 @@ def _to_codex(
     live_desktop: bool = False,
     stream_output: bool = False,
     timeout_s: float | None = None,
+    on_executor=None,
+    claim_id: str | None = None,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -195,10 +247,20 @@ def _to_codex(
     # Desktop thread on every retry (PR #1345 review). "delivered_live" says the
     # answer arrives in the session's own window and nowhere a caller can wait on.
     if live_desktop and thread and codex_ipc.thread_owner(thread) is not None:
-        live = codex_ipc.start_turn(thread, task, approval_policy="never")
+        marker = f'Room write owner: {claim_id}' if claim_id else None
+        if marker:
+            task += '\n\n' + marker
+        if on_executor:
+            on_executor({'kind': 'codex_desktop', 'thread_id': thread, 'marker': marker})
+        live = codex_ipc.start_turn(thread, task, approval_policy="never",
+                                    model=entry["model"], effort=entry["effort"])
         if live.get("status") != "not_live":
             status = "delivered_live" if live.get("status") == "delivered" else live.get("status")
-            return {"resumed": True, **live, "status": status, "thread_id": thread}
+            return {"resumed": True, **live, "status": status, "thread_id": thread,
+                    "termination_confirmed": False}
+        if on_executor:
+            on_executor({'kind': 'no_launch', 'thread_id': thread, 'marker': marker,
+                         'reason': 'desktop_not_live'})
     with tempfile.TemporaryDirectory(prefix="hermes-codex-") as tmp:
         last = Path(tmp) / "last-message.txt"
         argv = ["codex", "exec"]
@@ -245,6 +307,8 @@ def _to_codex(
         # does not validate real argument parsing, so this never surfaced
         # until a genuine second call hit the real binary.
         if not thread:
+            if entry.get('checkout_workspace'):
+                argv.append('--skip-git-repo-check')
             argv += ["-C", entry.get("cwd") or str(Path.cwd())]
             if entry.get("sandbox"):
                 argv += ["-s", entry["sandbox"]]
@@ -253,6 +317,8 @@ def _to_codex(
         if thread:
             argv.append(thread)
         argv.append(task)
+        process_options = ({'cwd': entry['checkout_workspace']}
+                           if not thread and entry.get('checkout_workspace') else {})
 
         try:
             # stdin=DEVNULL is load-bearing: `codex exec` reads stdin when it
@@ -260,17 +326,21 @@ def _to_codex(
             # pipe makes the run hang or swallow whatever the caller was fed.
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
-            if stream_output:
-                proc = _run_codex_streamed(argv, env or os.environ.copy(), limit_s)
+            if on_executor or stream_output:
+                proc = _run_codex_process(argv, env or os.environ.copy(), limit_s,
+                                          on_executor, stream_output, **process_options)
             else:
                 proc = subprocess.run(
                     argv, env=env or os.environ.copy(), capture_output=True,
                     text=True, timeout=limit_s, stdin=subprocess.DEVNULL,
+                    **process_options,
                 )
         except FileNotFoundError:
-            return {"status": "failed", "detail": "codex is not on PATH"}
-        except subprocess.TimeoutExpired:
-            return {"status": "timed_out", "detail": f"no answer in {limit_s:.0f}s"}
+            return {"status": "failed", "detail": "codex is not on PATH", 'termination_confirmed': True}
+        except subprocess.TimeoutExpired as exc:
+            return {"status": "timed_out", "detail": f"no answer in {limit_s:.0f}s",
+                    **({'termination_confirmed': exc.termination_confirmed}
+                       if hasattr(exc, 'termination_confirmed') else {})}
 
         events = _codex_events(proc.stdout or "")
         started = next((e for e in events if e.get("type") == "thread.started"), None)
@@ -280,7 +350,9 @@ def _to_codex(
         )
         result = last.read_text(encoding="utf-8").strip() if last.exists() else ""
 
-        base = {"thread_id": thread_id, "resumed": bool(thread)}
+        base = {"thread_id": thread_id, "resumed": bool(thread),
+                **({'termination_confirmed': proc.termination_confirmed}
+                   if hasattr(proc, 'termination_confirmed') else {})}
 
         # A seat that is out of credit is not a broken seat, and a router needs
         # to tell those apart: the first means send this task somewhere else
@@ -318,64 +390,23 @@ def _to_codex(
         return {**base, "status": "completed", "result": result}
 
 
-def dispatch(
-    name: str,
-    task: str,
-    registry: Registry | None = None,
-    results_path: Path | None = None,
-    env: dict | None = None,
-    fresh: bool = False,
-    config_overrides: tuple[str, ...] = (),
-    cwd: str | None = None,
-    live_desktop: bool = False,
-    stream_output: bool = False,
-    retrieval: bool = False,
-    codex_timeout_s: float | None = None,
-) -> dict:
-    """Send one task to one desk. Raises DeskError when the desk is not usable.
-
-    `live_desktop` (codex-session desks only) lets a thread Codex Desktop holds
-    open take the turn in its own window, returning status "delivered_live".
-    Only a caller that expects no result back may set it; see _to_codex.
-
-    `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
-    thread and leaves the desk's standing thread untouched: flash-run's escalation gives
-    the Sol fixer desk a throwaway copy per task (2026-09-24)."""
-    registry = registry or Registry()
-    results_path = Path(results_path or DEFAULT_RESULTS)
-    if name == "flash" and registry.entries().get(name, {}).get("kind") == "claude-session":
-        try:
-            flashlib.ensure_desk(lambda: desks.is_live(registry.entries()[name].get("socket", "")))
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            raise DeskError("desk_not_live", str(exc)) from exc
-    entry = registry.resolve(name)          # every refusal happens here
-    if retrieval and entry["kind"] != "grok-cli":
-        raise DeskError("unsupported_retrieval", "explicit source retrieval requires a Grok desk")
-    if stream_output and entry["kind"] not in ("codex-session", "codex-exec"):
-        raise DeskError("unsupported_stream", "stream output requires a headless Codex desk")
-    stream_options = {"stream_output": True} if stream_output else {}
-    original_task = task
-    # The background wire validates the original task before adding its own
-    # instruction. Prepending here would turn a blank task into valid work.
-    if entry["kind"] != "claude-desktop":
-        task = desks.desk_prompt(task)
-    msg_id = str(uuid.uuid4())
-    if entry["kind"] in ("claude-desktop", "claude-remote", "codex-session", "codex-live", "flash-local", "grok-cli"):
-        if not entry.get("model") or not str(entry.get("model")).strip():
-            raise DeskError(
-                "unnamed_model_or_effort",
-                "dispatch refused: a delegation names its specific model and reasoning "
-                "effort (cheapest qualified, stated explicitly). Re-register this desk "
-                "with --model and --effort.",
-            )
-        if not entry.get("effort") or not str(entry.get("effort")).strip():
-            raise DeskError(
-                "unnamed_model_or_effort",
-                "dispatch refused: a delegation names its specific model and reasoning "
-                "effort (cheapest qualified, stated explicitly). Re-register this desk "
-                "with --model and --effort.",
-            )
-
+def _execute(request: dict, *, on_executor=None) -> dict:
+    """Invoke one adapter; owned jobs reach this only inside the launch gate."""
+    entry, task, msg_id = request['entry'], request['task'], request['msg_id']
+    name = entry.get('name')
+    env = request.get('env')
+    fresh = request.get('fresh', False)
+    cwd = request.get('cwd')
+    retrieval = request.get('retrieval', False)
+    live_desktop = request.get('live_desktop', False)
+    codex_timeout_s = request.get('codex_timeout_s')
+    config_overrides = tuple(request.get('config_overrides', ()))
+    stream_options: dict = {'stream_output': True} if request.get('stream_output') else {}
+    def executor_started(identity):
+        on_executor({**identity, **({'socket': entry['socket']}
+                                    if identity.get('kind') in ('codex_turn', 'no_launch') and entry.get('socket') else {})})
+    executor_options: dict = {'on_executor': executor_started} if on_executor else {}
+    codex_options: dict = {**executor_options, 'claim_id': request.get('claim_id')} if on_executor else {}
     if entry["kind"] == "claude-session":
         if name == "flash":
             with flashlib.activity_scope():
@@ -394,33 +425,159 @@ def dispatch(
         outcome = codex_wire.run_turn(
             entry["socket"], task,
             thread_id=None if fresh else entry.get("thread_id"),
-            cwd=entry.get("cwd"), model=entry.get("model"),
+            cwd=entry.get("cwd"), model=entry.get("model"), effort=entry["effort"],
             deadline_s=codex_timeout_s,
+            **executor_options,
         )
-        if outcome.get("thread_id"):
-            registry.remember_thread(name, outcome["thread_id"])
     elif cwd:
         outcome = _to_codex(
             {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
             timeout_s=codex_timeout_s, **stream_options,
+            **codex_options,
         )
     else:
         outcome = _to_codex(
             entry, task, env, fresh=fresh, config_overrides=config_overrides,
             live_desktop=live_desktop, timeout_s=codex_timeout_s,
             **stream_options,
+            **codex_options,
         )
-        # pin the desk to its thread so the next task lands in the same one
-        if outcome.get("thread_id"):
-            registry.remember_thread(name, outcome["thread_id"])
+    return outcome
+
+
+def dispatch(
+    name: str,
+    task: str,
+    registry: Registry | None = None,
+    results_path: Path | None = None,
+    env: dict | None = None,
+    fresh: bool = False,
+    config_overrides: tuple[str, ...] = (),
+    cwd: str | None = None,
+    live_desktop: bool = False,
+    stream_output: bool = False,
+    retrieval: bool = False,
+    codex_timeout_s: float | None = None,
+    family: str | None = None,
+    effort: str | None = None,
+    writes: list[str] | None = None,
+    checkout: str | None = None,
+) -> dict:
+    """Send one task to one desk. Raises DeskError when the desk is not usable.
+
+    `live_desktop` (codex-session desks only) lets a thread Codex Desktop holds
+    open take the turn in its own window, returning status "delivered_live".
+    Only a caller that expects no result back may set it; see _to_codex.
+
+    `cwd` (codex-session desks only) runs this one task in that directory on a FRESH
+    thread and leaves the desk's standing thread untouched: flash-run's escalation gives
+    the Sol fixer desk a throwaway copy per task (2026-09-24)."""
+    registry = registry or Registry()
+    results_path = Path(results_path or DEFAULT_RESULTS)
+    if name == "flash" and registry.entries().get(name, {}).get("kind") == "claude-session":
+        try:
+            flashlib.ensure_desk(lambda: desks.is_live(registry.entries()[name].get("socket", "")))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise DeskError("desk_not_live", str(exc)) from exc
+    entry = registry.resolve(name)
+    if checkout is not None and entry['kind'] not in codex_models.CODEX_KINDS:
+        raise DeskError('unsupported_checkout', '--checkout requires a Codex desk')
+    if entry["kind"] in codex_models.CODEX_KINDS:
+        entry = {**entry, "family": codex_models.family_default(family or entry.get("family"), entry.get("model")),
+                 "effort": desks._normalize_effort(entry["kind"], effort or entry.get("effort"))}
+        entry["model"] = codex_models.resolve_model(entry["family"], env)
+    elif family is not None or effort is not None:
+        raise DeskError("unsupported_model_override", "job family and effort overrides require a Codex desk")
+    if retrieval and entry["kind"] != "grok-cli":
+        raise DeskError("unsupported_retrieval", "explicit source retrieval requires a Grok desk")
+    if stream_output and entry["kind"] not in ("codex-session", "codex-exec"):
+        raise DeskError("unsupported_stream", "stream output requires a headless Codex desk")
+    original_task = task
+    # The background wire validates the original task before adding its own
+    # instruction. Prepending here would turn a blank task into valid work.
+    if entry["kind"] != "claude-desktop":
+        task = desks.desk_prompt(task)
+    msg_id = str(uuid.uuid4())
+    if entry["kind"] in ("claude-desktop", "claude-remote", "codex-session", "codex-live", "flash-local", "grok-cli"):
+        if not entry.get("model") or not str(entry.get("model")).strip():
+            raise DeskError(
+                "unnamed_model_or_effort",
+                "dispatch refused: a delegation names its specific model and reasoning "
+                "effort (cheapest qualified, stated explicitly). Register a model or Codex family "
+                "and a reasoning effort, or pass --family and --effort for this job.",
+            )
+        if not entry.get("effort") or not str(entry.get("effort")).strip():
+            raise DeskError(
+                "unnamed_model_or_effort",
+                "dispatch refused: a delegation names its specific model and reasoning "
+                "effort (cheapest qualified, stated explicitly). Register a model or Codex family "
+                "and a reasoning effort, or pass --family and --effort for this job.",
+            )
+
+    base = {"msg_id": msg_id, "desk": name, "kind": entry["kind"],
+            "task": original_task, "dispatched_at": _now(),
+            **({key: entry[key] for key in ("family", "model", "effort")}
+               if entry["kind"] in codex_models.CODEX_KINDS else {})}
+    declared_writes = write_ownership.declaration(original_task, writes)
+    ownership = {}
+    if results_path.resolve() in (write_ownership.LEDGER.resolve(),
+                                 Path(str(write_ownership.LEDGER) + '.lock').resolve()):
+        raise DeskError('bad_results_path', 'results cannot overwrite the ownership authority')
+    if declared_writes:
+        if entry['kind'] not in codex_models.CODEX_KINDS:
+            raise DeskError('unsupported_owned_adapter',
+                            'owned dispatch requires a Codex adapter with verifiable termination recovery')
+        ownership = write_ownership.reserve(base,
+                                             cwd or entry.get("cwd") or str(Path.cwd()), declared_writes)
+        _record(results_path, ownership)
+    else:
+        print("warning: no write set declared; pass --writes or add Writes: to the brief",
+              file=sys.stderr, flush=True)
+
+    if entry["kind"] in codex_models.CODEX_KINDS:
+        print(f"executor: {entry['model']} / {entry['effort']} (family {entry['family']}, desk {name})",
+              file=sys.stderr, flush=True)
+
+    def executor_bound(bound):
+        ownership.update(bound)
+        _record(results_path, {**base, **ownership, 'status': 'running'})
+
+    try:
+        if checkout is not None:
+            prepared = codex_checkout.prepare(checkout, cwd or entry.get('cwd') or str(Path.cwd()), env)
+            env = scrubbed_env(env)
+            base.update(prepared)
+            task = codex_checkout.instruction(prepared) + task
+            if fresh or cwd or not entry.get('thread_id'):
+                entry = {**entry, **prepared, 'cwd': prepared['checkout_workspace']}
+                if cwd:
+                    cwd = prepared['checkout_workspace']
+        request = {'entry': entry, 'task': task, 'msg_id': msg_id, 'env': env,
+                   'fresh': fresh, 'cwd': cwd, 'retrieval': retrieval,
+                   'live_desktop': live_desktop, 'codex_timeout_s': codex_timeout_s,
+                   'config_overrides': config_overrides, 'stream_output': stream_output,
+                   'claim_id': msg_id if ownership else None}
+        if ownership:
+            outcome = write_ownership.launch(msg_id, request, on_bound=executor_bound)
+        else:
+            outcome = _execute(request)
+        if outcome.get('thread_id') and (entry['kind'] == 'codex-live'
+                or entry['kind'] in codex_models.CODEX_KINDS and not cwd):
+            registry.remember_thread(name, outcome['thread_id'])
+    except BaseException:
+        if ownership:
+            ownership.update(write_ownership.release(msg_id, reason='executor raised'))
+            _record(results_path, {**base, **ownership, 'status': 'failed', 'detail': 'executor raised'})
+        raise
+
+    if ownership:
+        ownership.update(write_ownership.release(msg_id, reason=outcome.get('detail') or outcome['status']))
 
     row = {
-        "msg_id": msg_id,
-        "desk": name,
-        "kind": entry["kind"],
-        "task": original_task,
-        "dispatched_at": _now(),
+        **base,
         **outcome,
+        **ownership,
+        'status': outcome['status'],
     }
     _record(results_path, row)
     return row
@@ -733,6 +890,7 @@ def main(argv: list[str]) -> int:
     r.add_argument("--kind", default=None, choices=list(desks.KINDS))
     r.add_argument("--socket", default=None)
     r.add_argument("--model", default=None)
+    r.add_argument("--family", choices=codex_models.FAMILIES)
     r.add_argument("--effort", default=None, choices=[*desks.EFFORT_CHOICES, "max"])
     r.add_argument("--cwd", default=None)
     r.add_argument("--host", default=None, help="SSH destination for a claude-remote desk")
@@ -756,10 +914,22 @@ def main(argv: list[str]) -> int:
     sp = sub.add_parser("stop", help="take a desk down")
     sp.add_argument("name")
     sub.add_parser("where", help="print how to find and name THIS session's socket")
+    rc = sub.add_parser('reconcile', help='verify and recover held ownership claims; unknown writers stay stuck')
+    rc.add_argument('--claim', help='one job msg_id; otherwise examine held claims')
+    rc.add_argument('--limit', type=int, default=20, help='maximum claims per call (1..100)')
 
     s = sub.add_parser("send", help="dispatch one task to one desk")
     s.add_argument("name")
     s.add_argument("task")
+    s.add_argument("--family", choices=codex_models.FAMILIES)
+    s.add_argument("--effort", choices=desks.EFFORT_CHOICES)
+    s.add_argument("--writes", action="append", help="repository-relative write glob (repeatable)")
+    s.add_argument('--checkout', metavar='BRANCH|new:NAME',
+                   help='clone origin before launch into a retained /private/tmp job folder; '
+                        'BRANCH uses that branch, new:NAME branches from origin default HEAD. '
+                        'Fresh jobs start in its parent workspace with the nested checkout named '
+                        'in the task; resumed desks keep cwd and receive the checkout path. '
+                        'Uses the canonical noreply author without changing sandbox permissions')
     s.add_argument("--fresh", action="store_true",
                    help="start a new Codex thread instead of resuming the desk's")
     s.add_argument("--stream-output", action="store_true",
@@ -772,6 +942,10 @@ def main(argv: list[str]) -> int:
     results = Path(a.results) if a.results else DEFAULT_RESULTS
 
     try:
+        if a.cmd == 'reconcile':
+            claims = write_ownership.reconcile(a.claim, limit=a.limit)
+            print(json.dumps({'ledger': str(write_ownership.LEDGER), 'claims': claims}, indent=2))
+            return 1 if any(row['ownership_state'] == 'held' for row in claims) else 0
         if a.cmd == "where":
             return _cmd_where()
 
@@ -793,7 +967,7 @@ def main(argv: list[str]) -> int:
         if a.cmd == "register":
             kind = a.kind or ("claude-session" if a.socket else "codex-exec")
             entry = reg.register(a.name, kind, socket=a.socket, model=a.model, cwd=a.cwd,
-                                 effort=a.effort,
+                                 effort=a.effort, family=a.family,
                                  sandbox=getattr(a, "sandbox", None),
                                  add_dirs=getattr(a, "add_dirs", None), host=a.host, timeout_s=a.timeout)
             print(json.dumps({a.name: entry}, indent=2))
@@ -813,12 +987,14 @@ def main(argv: list[str]) -> int:
                 kind = e.get("kind", "?")
                 thread = e.get("thread_id")
                 where = "new thread on first task" if not thread else f"thread {thread}"
-                if kind == "claude-session":
+                if kind in codex_models.CODEX_KINDS:
+                    family = e.get("family")
+                    model = codex_models.resolve_model(family) if family else "job family required"
+                    live = f"live={desks.is_live(e.get('socket', ''))}" if kind == "codex-live" else where
+                    print(f"{name:20} {kind:15} family={family} model={model} effort={e.get('effort')} [{live}]")
+                elif kind == "claude-session":
                     live = "live" if desks.is_live(e.get("socket", "")) else "not live"
                     print(f"{name:20} {kind:15} {e.get('socket')}  [{live}]")
-                elif kind == "codex-live":
-                    live = "live" if desks.is_live(e.get("socket", "")) else "app-server down"
-                    print(f"{name:20} {kind:15} {e.get('socket')}  [{live}, {where}]")
                 else:
                     print(f"{name:20} {kind:15} {e.get('model')}  in {e.get('cwd')}  [{where}]")
             return 0
@@ -828,7 +1004,8 @@ def main(argv: list[str]) -> int:
             raise DeskError("empty_task", "dispatch requires a non-empty task")
         row = dispatch(a.name, task, registry=reg, results_path=results,
                        fresh=getattr(a, "fresh", False), stream_output=a.stream_output,
-                       retrieval=a.retrieve)
+                       retrieval=a.retrieve, family=a.family, effort=a.effort, writes=a.writes,
+                       checkout=a.checkout)
         print(json.dumps(row, indent=2))
         return 0 if row["status"] in ("delivered", "completed") else 1
 
