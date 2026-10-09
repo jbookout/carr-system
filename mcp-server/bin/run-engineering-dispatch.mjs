@@ -208,7 +208,7 @@ async function main() {
       issuer_credential: null, child_credentials: [] }));
     return;
   }
-  // Prove the exact unseated, model-pinned desk before opening the jobs pool.
+  // Prove the exact unseated family desk before opening the jobs pool.
   // A missing or altered desk therefore cannot claim a live lease.
   await preflightDedicatedDesk();
   // Authenticate the isolated Worker controller before claiming a live job.
