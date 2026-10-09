@@ -1440,9 +1440,9 @@ DELEGATION_RULE_IDS = {"2b66211d", "5e89c211", "6cfb67f5", "d7f74c93", "fb110a39
 for command in DISPATCH_COMMANDS:
     if "dispatch.py" not in command:
         continue
-    hits = set(routed_for("Bash", {"command": command}))
+    delegation_hits = set(routed_for("Bash", {"command": command}))
     check(f"dispatcher command delivers delegation rules: {command}",
-          DELEGATION_RULE_IDS <= hits, sorted(hits))
+          DELEGATION_RULE_IDS <= delegation_hits, sorted(delegation_hits))
 for command in NON_DISPATCH_COMMANDS + (
         "grep dispatch.py send docs.txt",
         "cat dispatch.py send docs.txt",
@@ -1451,9 +1451,9 @@ for command in NON_DISPATCH_COMMANDS + (
         "echo '/Users/booko/carr-system/tools/room-bridge/dispatch.py send report'",
         "grep 'dispatch.py send' docs.txt",
         "cat docs.txt; echo 'dispatch.py send report'"):
-    hits = set(routed_for("Bash", {"command": command}))
+    delegation_hits = set(routed_for("Bash", {"command": command}))
     check(f"non-dispatch command excludes delegation rules: {command}",
-          not (DELEGATION_RULE_IDS & hits), sorted(hits))
+          not (DELEGATION_RULE_IDS & delegation_hits), sorted(delegation_hits))
 
 with tempfile.TemporaryDirectory() as dispatch_tmp:
     saved_env = dict(os.environ)
