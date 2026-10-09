@@ -33,6 +33,11 @@ def emit(x):
 failure=d.get('api_failure')
 if a[0]=='api' and failure and a[1].split('?')[0]==failure['path']:
  save();print(f"gh: Read failed (HTTP {failure['status']})",file=sys.stderr);sys.exit(1)
+failure=d.get('gh_failure')
+if failure and a[:len(failure['prefix'])]==failure['prefix'] and all(x in a for x in failure.get('contains',[])):
+ if 'response' in failure: emit(failure['response']);sys.exit()
+ if failure.get('malformed'): save();print('{broken');sys.exit()
+ save();print(f"gh: Forbidden (HTTP {failure.get('status',403)})",file=sys.stderr);sys.exit(1)
 if a[:2]==['label','create']: emit({'name':'do_not_merge'});sys.exit()
 if a[:2]==['api','graphql']:
  repo=next(x[5:] for x in a if x.startswith('repo='));owner=next(x[6:] for x in a if x.startswith('owner='));n=next(x[2:] for x in a if x.startswith('n='));p=d['prs'][owner+'/'+repo+'#'+n]
@@ -398,6 +403,174 @@ class QueueTests(unittest.TestCase):
             self.restart()
         self.assertEqual(self.q.db.execute('SELECT phase,outcome FROM entries').fetchone()[:],
                          ('exhausted', 'retry_exhausted'))
+
+    def test_every_github_call_site_has_a_persisted_failure_budget(self):
+        repo = module.REPOS[0]
+        path = f'repos/{repo}'
+        cases = (
+            ('PR read (queue, action, refresh, dispatch, reconcile, migration, archive)',
+             ('api', path+'/pulls/1'), (), lambda q: q.pr(repo, 1)),
+            ('approval comments', ('api', path+'/issues/1/comments?per_page=100&page=1'), (),
+             lambda q: q.approval(repo, 1)),
+            ('check runs', ('api', path+f'/commits/{self.approved}/check-runs?per_page=100&page=1'), (),
+             lambda q: q.green(repo, 1, self.approved)),
+            ('commit statuses', ('api', path+f'/commits/{self.approved}/statuses?per_page=100&page=1'), (),
+             lambda q: q.green(repo, 1, self.approved)),
+            ('required checks', ('pr', 'checks', '1'), (), lambda q: q.green(repo, 1, self.approved)),
+            ('update branch', ('api', path+'/pulls/1/update-branch'), (),
+             lambda q: q.api(path+'/pulls/1/update-branch', '-X', 'PUT', '-f', 'expected_head_sha='+self.approved)),
+            ('retarget', ('pr', 'edit', '1'), (), lambda q: q.gh('pr', 'edit', '1', '-R', repo, '--base', 'main')),
+            ('approval stamp', ('api', path+'/issues/1/comments'), ('body=stamp',),
+             lambda q: q.api(path+'/issues/1/comments', '-f', 'body=stamp')),
+            ('draft ready', ('pr', 'ready', '1'), (), lambda q: q.gh('pr', 'ready', '1', '-R', repo)),
+            ('guarded merge', ('pr', 'merge', '1'), (),
+             lambda q: q.gh('pr', 'merge', '1', '-R', repo, '--squash', '--match-head-commit', self.approved)),
+            ('merge intent GraphQL (queue and reconcile)', ('api', 'graphql'), ('n=1',),
+             lambda q: q.merge_pending(repo, 1, self.approved)),
+            ('open PRs (discovery, refresh, hold migration)', ('api', path+'/pulls?state=open&per_page=100&page=1'), (),
+             lambda q: q.pages(path+'/pulls?state=open&per_page=100')),
+            ('changed files for hold migration', ('api', path+'/pulls/1/files?per_page=100&page=1'), (),
+             lambda q: q.pages(path+'/pulls/1/files?per_page=100')),
+            ('create hold label', ('label', 'create', module.HOLD), (),
+             lambda q: q.gh('label', 'create', module.HOLD, '-R', repo, '--force')),
+            ('apply hold label', ('api', path+'/issues/1/labels'), (),
+             lambda q: q.api(path+'/issues/1/labels', '-X', 'POST', '-f', 'labels[]='+module.HOLD)),
+        )
+        for name, prefix, contains, invoke in cases:
+            with self.subTest(site=name):
+                fixture = QueueTests()
+                fixture.setUp()
+                try:
+                    fixture.pr(1)
+                    fixture.pr(2, head=fixture.updated)
+                    fixture.data['gh_failure'] = dict(prefix=prefix, contains=contains)
+                    fixture.save()
+                    for _ in range(8):
+                        with self.assertRaises((RuntimeError, OSError, subprocess.TimeoutExpired)):
+                            invoke(fixture.q)
+                        fixture.restart()
+                    calls = fixture.load()['calls']
+                    rejected = lambda a: a[:len(prefix)]==list(prefix) and all(x in a for x in contains)
+                    self.assertEqual(sum(rejected(a) for a in calls), 4)
+                    fixture.q.enqueue(repo, 2, fixture.approved)
+                    fixture.q.tick()
+                    self.assertEqual([a[2] for a in fixture.calls('merge') if a[2]=='2'], ['2'])
+                    self.assertTrue(fixture.load()['prs'][repo+'#2']['merged'])
+                    self.assertEqual(sum(rejected(a) for a in fixture.load()['calls']), 4)
+                finally:
+                    fixture.doCleanups()
+
+    def test_rejected_stamp_blocks_entry_and_releases_next_pr(self):
+        repo = module.REPOS[0]
+        self.pr(1); self.pr(2, head=self.updated)
+        prefix = ['api', f'repos/{repo}/issues/1/comments']
+        marker = f'body=APPROVE\nReviewed-SHA: {self.approved}\n\nOrchestrator merge queue: independent approval of {self.approved}; patch unchanged; hosted checks green.'
+        self.data['gh_failure'] = dict(prefix=prefix, contains=[marker])
+        self.save()
+        first = self.q.enqueue(repo, 1, self.approved)
+        self.q.enqueue(repo, 2, self.approved)
+        for _ in range(8):
+            self.q.tick(); self.restart()
+        entry = self.q.db.execute('SELECT phase,outcome,merge_attempts FROM entries WHERE id=?', (first,)).fetchone()
+        self.assertEqual(entry[0], 'blocked')
+        self.assertEqual(entry[2], 0)
+        self.assertEqual(sum(a[:2]==prefix and marker in a for a in self.load()['calls']), 4)
+        self.assertEqual([a[2] for a in self.calls('merge')], ['2'])
+        reason = self.q.db.execute('SELECT detail FROM events WHERE entry_id=? ORDER BY id DESC LIMIT 1', (first,)).fetchone()[0]
+        self.assertIn('403', reason)
+        self.assertIn('4', reason)
+
+    def test_response_errors_and_transient_failures_share_the_github_budget(self):
+        repo = module.REPOS[0]
+        path = f'repos/{repo}'
+        cases = (
+            ('HTTP500', dict(prefix=['api', path+'/pulls/1'], status=500), lambda q: q.pr(repo, 1)),
+            ('malformed JSON', dict(prefix=['api', path+'/pulls/1'], malformed=True), lambda q: q.pr(repo, 1)),
+            ('invalid page list', dict(prefix=['api', path+'/pulls?state=open&per_page=100&page=1'], response={}),
+             lambda q: q.pages(path+'/pulls?state=open&per_page=100')),
+            ('GraphQL error envelope', dict(prefix=['api', 'graphql'], response={'errors':[{'message':'unavailable'}]}),
+             lambda q: q.merge_pending(repo, 1, self.approved)),
+            ('missing PR fields', dict(prefix=['api', path+'/pulls/1'], response={}), lambda q: q.pr(repo, 1)),
+            ('invalid required checks', dict(prefix=['pr', 'checks', '1'], response=[{}]),
+             lambda q: q.green(repo, 1, self.approved)),
+        )
+        for name, failure, invoke in cases:
+            with self.subTest(error=name):
+                fixture = QueueTests(); fixture.setUp()
+                try:
+                    fixture.pr(1); fixture.pr(2, head=fixture.updated)
+                    fixture.data['gh_failure'] = failure; fixture.save()
+                    for _ in range(8):
+                        with self.assertRaises((RuntimeError, ValueError, KeyError, TypeError)):
+                            invoke(fixture.q)
+                        fixture.restart()
+                    prefix = failure['prefix']
+                    self.assertEqual(sum(a[:len(prefix)]==prefix for a in fixture.load()['calls']), 4)
+                    fixture.q.enqueue(repo, 2, fixture.approved); fixture.q.tick()
+                    self.assertEqual([a[2] for a in fixture.calls('merge')], ['2'])
+                finally:
+                    fixture.doCleanups()
+
+    def test_rejected_ready_and_merge_release_the_queue_after_provider_readback(self):
+        repo = module.REPOS[0]
+        for verb in ('ready', 'merge'):
+            with self.subTest(verb=verb):
+                fixture = QueueTests(); fixture.setUp()
+                try:
+                    fixture.pr(1, draft=True); fixture.pr(2, head=fixture.updated)
+                    fixture.data['gh_failure'] = dict(prefix=['pr', verb, '1']); fixture.save()
+                    fixture.q.enqueue(repo, 1, fixture.approved)
+                    fixture.q.enqueue(repo, 2, fixture.approved)
+                    for _ in range(12):
+                        fixture.q.tick(); fixture.restart()
+                    self.assertEqual(len([a for a in fixture.calls(verb) if a[2]=='1']), 4)
+                    self.assertIn(fixture.q.db.execute('SELECT phase FROM entries WHERE pr=1').fetchone()[0], ('blocked', 'exhausted'))
+                    self.assertEqual([a[2] for a in fixture.calls('merge') if a[2]=='2'], ['2'])
+                finally:
+                    fixture.doCleanups()
+
+    def test_reconcile_unmerged_intent_resets_only_its_exhausted_read_budget(self):
+        repo = module.REPOS[0]
+        self.pr(1)
+        self.pr(2, head=self.updated)
+        self.data['gh_failure'] = dict(prefix=['api', f'repos/{repo}/pulls/2']); self.save()
+        for _ in range(4):
+            with self.assertRaises(module.ReadRejected):
+                self.q.pr(repo, 2)
+            self.restart()
+        self.load()
+        entry = self.q.enqueue(repo, 1, self.approved)
+        with self.q.db:
+            self.q.db.execute("UPDATE entries SET phase='merging',tested=?,merge_attempts=1 WHERE id=?", (self.approved, entry))
+        self.data['gh_failure'] = dict(prefix=['api', f'repos/{repo}/pulls/1'])
+        self.save()
+        for _ in range(4):
+            self.q.tick(); self.restart()
+        self.assertEqual(self.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], 'blocked')
+        self.load(); del self.data['gh_failure']; self.save()
+        self.q.reconcile(entry, retry=True)
+        self.restart(); self.q.tick()
+        self.assertEqual([a[2] for a in self.calls('merge')], ['1'])
+        self.assertEqual(self.q.db.execute('SELECT merge_attempts FROM entries WHERE id=?', (entry,)).fetchone()[0], 2)
+        with self.assertRaises(module.GitHubExhausted):
+            self.q.pr(repo, 2)
+        self.assertEqual(sum(a[:2]==['api', f'repos/{repo}/pulls/2'] for a in self.load()['calls']), 4)
+
+    def test_mixed_failures_and_changing_heads_do_not_replenish_entry_budget(self):
+        repo = module.REPOS[0]
+        self.pr(1); self.pr(2, head=self.updated)
+        first = self.q.enqueue(repo, 1, self.approved)
+        self.q.enqueue(repo, 2, self.approved)
+        for attempt in range(4):
+            self.load()
+            path = f'repos/{repo}/pulls/1' if attempt % 2 == 0 else f'repos/{repo}/issues/1/comments'
+            self.data['gh_failure'] = dict(prefix=['api', path])
+            if attempt == 3:
+                self.data['prs'][repo+'#1']['head']['sha'] = self.updated
+            self.save(); self.q.tick(); self.restart()
+        self.assertEqual(self.q.db.execute('SELECT phase,github_attempts,read_attempts,transient_attempts FROM entries WHERE id=?', (first,)).fetchone()[:],
+                         ('blocked', 4, 2, 2))
+        self.assertEqual([a[2] for a in self.calls('merge')], ['2'])
 
     def assert_rejected_read_is_bounded(self, path, status):
         self.pr(1)
