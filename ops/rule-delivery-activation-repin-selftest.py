@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the sizing-rule repin against PostgreSQL and the current overlay."""
+"""Exercise the sizing-rule and burst-control repins against PostgreSQL and the current overlay."""
 import importlib.util
 import os
 from pathlib import Path
@@ -36,7 +36,8 @@ def main():
     prior = (ROOT / "migrations/0837_repin_rule_delivery_activation_after_control_retirement.sql").read_text()
     old_digest = re.search(r"v_new constant text := '([0-9a-f]{64})'", prior)[1]
     _, overlay = load_validated()
-    new_digest = overlay["base_map_sha256"]
+    new_digest = re.search(r"v_new constant text := '([0-9a-f]{64})'", repin)[1]
+    burst_repin = (ROOT / "migrations/0863_repin_rule_delivery_activation_after_github_burst_guard_control.sql").read_text()
     spec = importlib.util.spec_from_file_location("local_pg_ci", ROOT / "ops/local-pg-ci.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -72,62 +73,67 @@ def main():
             def rows():
                 return conn.execute("select * from ops.rule_delivery_activation_target order by short_id").fetchall()
 
-            baseline = rows()
-            conn.execute(repin, prepare=False)
-            assert rows() == [(*row[:-1], new_digest) for row in baseline], "repin must change only the digest"
-            assert conn.execute("select mode from ops.rule_delivery_policy").fetchone() == ('enforced',)
-            print("PASS exact activation ids reach the current map without changing contracts or mode")
+            def exercise_repin(repin, old_digest, new_digest, guard_contract):
+                baseline = rows()
+                conn.execute(repin, prepare=False)
+                assert rows() == [(*row[:-1], new_digest) for row in baseline], "repin must change only the digest"
+                assert conn.execute("select mode from ops.rule_delivery_policy").fetchone() == ('enforced',)
+                print("PASS exact activation ids reach the current map without changing contracts or mode")
 
-            for label, mutation in (
-                ("mixed digest", "update ops.rule_delivery_activation_target set map_digest='" + '0' * 64 + "' where short_id='25fcddee'"),
-                ("missing target", "delete from ops.rule_delivery_activation_target where short_id='25fcddee'"),
-                ("extra target", "insert into ops.rule_delivery_activation_target select '00000000',expected_scope,expected_pack,from_control,from_enforcement_class,from_implementation_ref,from_test_ref,to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest from ops.rule_delivery_activation_target limit 1"),
-                ("wrong id at matching cardinality", "update ops.rule_delivery_activation_target set short_id='00000000' where short_id='25fcddee'"),
-            ):
-                with conn.transaction(force_rollback=True):
-                    conn.execute("update ops.rule_delivery_activation_target set map_digest=%s", (old_digest,))
-                    conn.execute(mutation)
-                    before = rows()
-                    try:
-                        with conn.transaction():
-                            conn.execute(repin, prepare=False)
-                    except psycopg.errors.RaiseException as error:
-                        assert "REFUSED" in str(error), str(error)
-                    else:
-                        raise AssertionError(f"repin accepted {label}")
-                    assert rows() == before, f"refused {label} changed a target"
-                print(f"PASS {label} refuses atomically")
+                for label, mutation in (
+                    ("mixed digest", "update ops.rule_delivery_activation_target set map_digest='" + '0' * 64 + "' where short_id='25fcddee'"),
+                    ("missing target", "delete from ops.rule_delivery_activation_target where short_id='25fcddee'"),
+                    ("extra target", "insert into ops.rule_delivery_activation_target select '00000000',expected_scope,expected_pack,from_control,from_enforcement_class,from_implementation_ref,from_test_ref,to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest from ops.rule_delivery_activation_target limit 1"),
+                    ("wrong id at matching cardinality", "update ops.rule_delivery_activation_target set short_id='00000000' where short_id='25fcddee'"),
+                ):
+                    with conn.transaction(force_rollback=True):
+                        conn.execute("update ops.rule_delivery_activation_target set map_digest=%s", (old_digest,))
+                        conn.execute(mutation)
+                        before = rows()
+                        try:
+                            with conn.transaction():
+                                conn.execute(repin, prepare=False)
+                        except psycopg.errors.RaiseException as error:
+                            assert "REFUSED" in str(error), str(error)
+                        else:
+                            raise AssertionError(f"repin accepted {label}")
+                        assert rows() == before, f"refused {label} changed a target"
+                    print(f"PASS {label} refuses atomically")
 
-            contract_mutations = (
-                ("expected_scope", "dell"),
-                ("expected_pack", "wrong-pack"),
-                ("from_control", "wrong-from-control"),
-                ("from_enforcement_class", "wrong-from-class"),
-                ("from_implementation_ref", "wrong-from-implementation"),
-                ("from_test_ref", "wrong-from-test"),
-                ("to_control", "wrong-to-control"),
-                ("to_enforcement_class", "wrong-to-class"),
-                ("to_implementation_ref", "wrong-to-implementation"),
-                ("to_test_ref", "wrong-to-test"),
-            )
-            for column, wrong_value in contract_mutations:
-                with conn.transaction(force_rollback=True):
-                    conn.execute("update ops.rule_delivery_activation_target set map_digest=%s", (old_digest,))
-                    conn.execute(
-                        f"update ops.rule_delivery_activation_target set {column}=%s where short_id='25fcddee'",
-                        (wrong_value,),
+                if guard_contract:
+                    contract_mutations = (
+                        ("expected_scope", "dell"),
+                        ("expected_pack", "wrong-pack"),
+                        ("from_control", "wrong-from-control"),
+                        ("from_enforcement_class", "wrong-from-class"),
+                        ("from_implementation_ref", "wrong-from-implementation"),
+                        ("from_test_ref", "wrong-from-test"),
+                        ("to_control", "wrong-to-control"),
+                        ("to_enforcement_class", "wrong-to-class"),
+                        ("to_implementation_ref", "wrong-to-implementation"),
+                        ("to_test_ref", "wrong-to-test"),
                     )
-                    before = rows()
-                    try:
-                        with conn.transaction():
-                            conn.execute(repin, prepare=False)
-                    except psycopg.errors.RaiseException as error:
-                        assert "REFUSED" in str(error), str(error)
-                    else:
-                        raise AssertionError(f"repin accepted changed {column}")
-                    assert rows() == before, f"refused changed {column} changed a target"
-                print(f"PASS changed {column} refuses atomically")
-            assert set(row[0] for row in rows()) == EXPECTED_IDS
+                    for column, wrong_value in contract_mutations:
+                        with conn.transaction(force_rollback=True):
+                            conn.execute("update ops.rule_delivery_activation_target set map_digest=%s", (old_digest,))
+                            conn.execute(
+                                f"update ops.rule_delivery_activation_target set {column}=%s where short_id='25fcddee'",
+                                (wrong_value,),
+                            )
+                            before = rows()
+                            try:
+                                with conn.transaction():
+                                    conn.execute(repin, prepare=False)
+                            except psycopg.errors.RaiseException as error:
+                                assert "REFUSED" in str(error), str(error)
+                            else:
+                                raise AssertionError(f"repin accepted changed {column}")
+                            assert rows() == before, f"refused changed {column} changed a target"
+                        print(f"PASS changed {column} refuses atomically")
+                assert set(row[0] for row in rows()) == EXPECTED_IDS
+            exercise_repin(repin, old_digest, new_digest, True)
+            exercise_repin(burst_repin, new_digest, overlay["base_map_sha256"], False)
+            print("PASS sizing-rule output feeds the burst-control repin without changing contracts or mode")
     return 0
 
 

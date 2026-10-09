@@ -38,6 +38,8 @@ CONTROL_RETIREMENT_REPIN_MIGRATION = "0837_repin_rule_delivery_activation_after_
 CONTROL_RETIREMENT_REPIN_MIGRATION_SOURCE = (
     ROOT / "migrations" / CONTROL_RETIREMENT_REPIN_MIGRATION
 ).read_text(encoding="utf-8")
+BURST_CONTROL_REPIN_MIGRATION = "0863_repin_rule_delivery_activation_after_github_burst_guard_control.sql"
+BURST_CONTROL_REPIN_MIGRATION_SOURCE = (ROOT / "migrations" / BURST_CONTROL_REPIN_MIGRATION).read_text(encoding="utf-8")
 SIZING_REPIN_MIGRATION = "0851_repin_rule_delivery_activation_after_sizing_rule.sql"
 SIZING_REPIN_MIGRATION_SOURCE = (
     ROOT / "migrations" / SIZING_REPIN_MIGRATION
@@ -80,6 +82,7 @@ FINAL_REPIN_DIGEST = "784e05273341f5f7c16f96d1f0fb1516d8c605cb3287dec32aa37a1211
 CUTOVER_READY_DIGEST = "c6e89d64de575b9c6e39c8c88cd6a32e97e494b381a7ac4433026c4a3fe63c2a"
 MODEL_CHOICE_REPIN_DIGEST = "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada"
 CONTROL_RETIREMENT_REPIN_DIGEST = "b4e0d6689df3d96be24fb0cb888587f545bef8ffeba79c3ee6757b447f3fb308"
+BURST_CONTROL_REPIN_DIGEST = "c7b9c8a4e2d4f7b3a6a161a1959f346501746d49d15c74a57272df307bc72842"
 SIZING_REPIN_DIGEST = "2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4"
 EXPECTED_TARGETS = [
     "25fcddee", "3fa17fa0", "72e06bdf", "581cb3fe", "113b3833",
@@ -175,6 +178,9 @@ model_choice_repin_ledger_applied = bool(
 control_retirement_repin_ledger_applied = bool(
     re.search(rf"^{re.escape(CONTROL_RETIREMENT_REPIN_MIGRATION)}\t", SNAPSHOT, re.M)
 )
+burst_control_repin_ledger_applied = bool(
+    re.search(rf"^{re.escape(BURST_CONTROL_REPIN_MIGRATION)}\t", SNAPSHOT, re.M)
+)
 sizing_repin_ledger_applied = bool(
     re.search(rf"^{re.escape(SIZING_REPIN_MIGRATION)}\t", SNAPSHOT, re.M)
 )
@@ -229,7 +235,8 @@ expected_snapshot_targets = (
 )
 assert [row[0] for row in snapshot_targets] == expected_snapshot_targets
 expected_snapshot_digest = (
-    SIZING_REPIN_DIGEST if sizing_repin_ledger_applied
+    BURST_CONTROL_REPIN_DIGEST if burst_control_repin_ledger_applied
+    else SIZING_REPIN_DIGEST if sizing_repin_ledger_applied
     else CONTROL_RETIREMENT_REPIN_DIGEST if control_retirement_repin_ledger_applied
     else MODEL_CHOICE_REPIN_DIGEST if model_choice_repin_ledger_applied
     else CUTOVER_READY_DIGEST if cutover_ready_ledger_applied
@@ -248,6 +255,9 @@ assert re.findall(r"^\s*\('([0-9a-f]{8})'", MIGRATION_SOURCE, re.M)[:9] == EXPEC
 assert CONTROL_RETIREMENT_REPIN_DIGEST in CONTROL_RETIREMENT_REPIN_MIGRATION_SOURCE
 assert MODEL_CHOICE_REPIN_DIGEST in CONTROL_RETIREMENT_REPIN_MIGRATION_SOURCE
 assert all(short_id in CONTROL_RETIREMENT_REPIN_MIGRATION_SOURCE for short_id in CURRENT_EXPECTED_TARGETS)
+assert BURST_CONTROL_REPIN_DIGEST in BURST_CONTROL_REPIN_MIGRATION_SOURCE
+assert SIZING_REPIN_DIGEST in BURST_CONTROL_REPIN_MIGRATION_SOURCE
+assert all(short_id in BURST_CONTROL_REPIN_MIGRATION_SOURCE for short_id in CURRENT_EXPECTED_TARGETS)
 assert SIZING_REPIN_DIGEST in SIZING_REPIN_MIGRATION_SOURCE
 assert CONTROL_RETIREMENT_REPIN_DIGEST in SIZING_REPIN_MIGRATION_SOURCE
 assert all(short_id in SIZING_REPIN_MIGRATION_SOURCE for short_id in CURRENT_EXPECTED_TARGETS)
