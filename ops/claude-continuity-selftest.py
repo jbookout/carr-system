@@ -141,10 +141,34 @@ else:
         self.assertIn('"transcript_path_digest":', context)
         self.assertIn('"project_affinity":', context)
         self.assertIn("current_checkpoint_version=0", context)
-        self.assertIn("call mcp__carr-continuity__claude-checkpoint", context)
-        self.assertIn("expected_version=current_checkpoint_version", context)
+        self.assertIn("mcp__carr-continuity__claude-checkpoint", context)
+        arguments = json.loads(context.split("arguments=", 1)[1].split("\n", 1)[0])
+        self.assertEqual(arguments["expected_version"], 0)
         self.assertIn("must never be replayed automatically", context)
         self.assertLessEqual(len(context.encode()), 4800)
+
+    def test_checkpoint_arguments_preserve_recovered_version_and_generation(self):
+        hook = load_hook()
+        identity = {"runtime": "claude", "session_id": "session-1",
+                    "transcript_path_digest": "a" * 64, "project_affinity": "repo:origin"}
+        response = {"ok": True, "found": True,
+                    "checkpoint": {"checkpoint_version": "3", "compaction_generation": "4"}}
+        for prompt in (hook.checkpoint_request, hook._activation_envelope):
+            context = prompt(identity, {"byte_offset": 1234}, response)
+            args = json.loads(context.split("arguments=", 1)[1].split("\n", 1)[0])
+            self.assertEqual(args["expected_version"], 3)
+            self.assertEqual(args["compaction_generation"], 4)
+            self.assertEqual(args["state"]["source_cursor"], {"byte_offset": 1234})
+            self.assertNotIn("binding", args)
+
+    def test_unavailable_recovery_does_not_guess_a_checkpoint_version(self):
+        hook = load_hook()
+        for prompt in (hook.checkpoint_request, hook._activation_envelope):
+            context = prompt({}, {"byte_offset": 1234}, None)
+            args = json.loads(context.split("arguments=", 1)[1].split("\n", 1)[0])
+            self.assertIsNone(args["expected_version"])
+            self.assertIn("read", context)
+            self.assertIn("recovery first", context)
 
     def test_startup_before_transcript_creation_emits_verified_pending_cursor(self):
         self.set_mode("checkpoint")
@@ -159,7 +183,8 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("current_checkpoint_version=3", context)
-        cursor = json.loads(context.split("source_cursor=", 1)[1].split("\n", 1)[0])
+        arguments = json.loads(context.split("arguments=", 1)[1].split("\n", 1)[0])
+        cursor = arguments["state"]["source_cursor"]
         self.assertEqual(cursor["byte_offset"], 0)
         self.assertEqual(cursor["mtime_ns"], 0)
         self.assertTrue(cursor["startup_pending"])
@@ -339,7 +364,8 @@ class ClaudeContinuityDeliversTest(ClaudeContinuityHookTest):
         self.assertIn("claude-checkpoint", body)
         self.assertIn("expected_version=3", body)
         self.assertIn('"session_id":"session-1"', body)
-        offset = json.loads(body.split("state.source_cursor=")[1].split("\n")[0])["byte_offset"]
+        arguments = json.loads(body.split("arguments=", 1)[1].split("\n", 1)[0])
+        offset = arguments["state"]["source_cursor"]["byte_offset"]
         self.assertEqual(offset, self.transcript.stat().st_size,
                          "the ask must carry the cursor as of this prompt, not session start")
 

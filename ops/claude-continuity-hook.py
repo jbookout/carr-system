@@ -498,14 +498,13 @@ def _activation_envelope(identity: dict, cursor: dict, response: dict | None) ->
     current_version = _checkpoint_version(response)
     version_text = str(current_version) if current_version is not None else "unavailable"
     lines = [
-        "CARR Claude continuity activation (trusted native controller binding).",
-        "binding=" + json.dumps(_binding(identity), sort_keys=True, separators=(",", ":")),
-        f"current_checkpoint_version={version_text}; source_cursor="
-        + json.dumps(_source(cursor), sort_keys=True, separators=(",", ":")),
-        "At a meaningful semantic milestone, call mcp__carr-continuity__claude-checkpoint with this exact binding, "
-        "expected_version=current_checkpoint_version, compaction_generation nondecreasing, and state.source_cursor/source_observed_at. "
-        "Do not infer completion from tool telemetry.",
-        "Pending external effects must be verified and must never be replayed automatically.",
+        "Claude continuity.",
+        _checkpoint_arguments(identity, cursor, response),
+        f"current_checkpoint_version={version_text}",
+        "Call mcp__carr-continuity__claude-checkpoint at milestones. Fill state; refresh cursor/time. "
+        "Keep generation nondecreasing. Fresh key per milestone; reuse on retry. "
+        "If version unavailable, read recovery first.",
+        "Never infer completion from telemetry. Pending effects must never be replayed automatically.",
     ]
     unsent = unsent_receipts()
     if unsent:
@@ -525,6 +524,17 @@ def _source(cursor: dict) -> dict:
         "byte_offset", "mtime_ns", "source_digest", "startup_pending") if key in cursor}
 
 
+def _checkpoint_arguments(identity: dict, cursor: dict, response: dict | None) -> str:
+    checkpoint = (response or {}).get("checkpoint") or {}
+    args = {**_binding(identity), "idempotency_key": secrets.token_hex(16),
+            "expected_version": _checkpoint_version(response),
+            "compaction_generation": int(checkpoint.get("compaction_generation", 0)),
+            "state": {"objective": "<objective>", "next_action": "<next action>",
+                      "source_cursor": _source(cursor),
+                      "source_observed_at": datetime.now(timezone.utc).isoformat()}}
+    return "arguments=" + json.dumps(args, sort_keys=True, separators=(",", ":"))
+
+
 def checkpoint_request(identity: dict, cursor: dict, response: dict | None) -> str:
     """The ask that actually fires, carrying a cursor fresh as of this prompt.
 
@@ -537,11 +547,11 @@ def checkpoint_request(identity: dict, cursor: dict, response: dict | None) -> s
     version_text = str(current_version) if current_version is not None else "unavailable"
     return "\n".join([
         "CARR Claude continuity: this session is now deep enough that losing it would cost real work.",
-        "Save a checkpoint with mcp__carr-continuity__claude-checkpoint before continuing, using exactly:",
-        "binding=" + json.dumps(_binding(identity), sort_keys=True, separators=(",", ":")),
+        "Save a checkpoint with mcp__carr-continuity__claude-checkpoint before continuing. "
+        "Use these flat top-level arguments; fill objective and next_action and add the needed state fields. "
+        "Reuse the idempotency_key only for retries. If the version is unavailable, read claude-read-recovery first.",
+        _checkpoint_arguments(identity, cursor, response),
         f"expected_version={version_text}; compaction_generation nondecreasing",
-        "state.source_cursor=" + json.dumps(_source(cursor), sort_keys=True, separators=(",", ":")),
-        f"state.source_observed_at={datetime.now(timezone.utc).isoformat()}",
         "Write what a session with no memory of this one would need to carry on: the objective, the "
         "decisions with their reasons and refs, unresolved defects, pending external effects (to be "
         "verified, never replayed), and the single next action. Do not infer completion from tool telemetry.",
