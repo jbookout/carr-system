@@ -389,7 +389,7 @@ class ReportTests(unittest.TestCase):
                "subject": "canonical", "reason": "behind", "next_action": "repair fleet-sync",
                "owner": "orchestrator", "needs_joe": None, "first_seen": "episode-one"}
         responses = [json.dumps({"ok": True, "loop_id": "fixture-loop"}),
-                     json.dumps({"loop_id": "fixture-loop", "status": "open", "version": 4}),
+                     json.dumps({"ok": True, "loop": {"loop_id": "fixture-loop", "status": "open", "version": 4}}),
                      json.dumps({"ok": True, "status": "done"}),
                      json.dumps({"ok": True, "loop_id": "fixture-loop-two"})]
         with tempfile.TemporaryDirectory() as raw:

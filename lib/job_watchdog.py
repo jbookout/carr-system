@@ -1092,8 +1092,11 @@ class Effects:
         if f["kind"] == "scheduled_job_drift" and f.get("loop_id"):
             result = command([str(SOURCE / "run.sh"), "call", "read-loop",
                               json.dumps({"loop_id": f["loop_id"]})], self.config)
-            current = json.loads(result[result.find("{"):])
-            if current.get("loop_id") != f["loop_id"] or not isinstance(current.get("version"), int):
+            response = json.loads(result[result.find("{"):])
+            current = response.get("loop") if isinstance(response, dict) else None
+            if (not isinstance(current, dict) or current.get("loop_id") != f["loop_id"]
+                    or type(current.get("version")) is not int or current["version"] < 1
+                    or current.get("status") not in {"open", "done", "dropped"}):
                 raise RuntimeError("scheduled-job loop readback failed")
             if current["status"] == "open":
                 payload = {"loop_id": f["loop_id"], "base_version": current["version"],
