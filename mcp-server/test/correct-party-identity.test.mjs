@@ -330,3 +330,48 @@ test("update-party-contact still resolves through the shared resolver and refuse
     fields: { name: "Alex Morgan" }, source: "practice website" }),
   e => e.payload.error === "no_updatable_fields" && /correct-party-identity/.test(e.payload.hint));
 });
+
+
+test("an org used by a client and vendor with no people cannot be renamed", async () => {
+  const refs = [{ source: "client.party_id", n: "1" }, { source: "vendor.party_id", n: "1" }];
+  const fake = new Fake(basePlan({ kind: "org", name: "Harbr Point Legal", org: null, refs }));
+  await assert.rejects(call(fake, { fields: { name: "Harbor Point Legal LLC" } }),
+    e => e.payload.error === "shared_org_rename" &&
+      JSON.stringify(e.payload.references) === JSON.stringify(refs.map(r => ({ ...r, n: Number(r.n) }))));
+  assert.equal(fake.writes("update party set").length, 0);
+  assert.equal(fake.events().length, 0);
+});
+
+test("a person on an org used by a client and vendor moves alone to the corrected org", async () => {
+  const refs = [{ source: "client.party_id", n: "1" }, { source: "vendor.party_id", n: "1" }];
+  const fake = new Fake(basePlan({ refs, refsAfter: refs }));
+  const out = await call(fake, { fields: { org: "Harbor Point Legal LLC" } });
+  assert.equal(out.org.mode, "mint_and_repoint");
+  assert.equal(fake.writes("update party set name=").length, 0);
+  assert.deepEqual(fake.writes("update party set org_id=")[0][1], [NEW_ORG, joe.id, TARGET]);
+  assert.deepEqual(out.org.references_before, refs.map(r => ({ ...r, n: Number(r.n) })));
+  assert.equal(out.org.old_org_left_empty, undefined);
+});
+
+test("a concurrent org creator wins without a false name creation event", async () => {
+  const plan = basePlan({ org: null });
+  plan["select org_party_id($1,$2) as id"] = [{ id: EXISTING_ORG }];
+  plan["and org_identity_key(name)=$1"] = (_, db) =>
+    db.writes("lock table party in share row exclusive mode").length
+      ? [{ id: EXISTING_ORG, name: "HARBOR Point Legal LLC" }] : [];
+  const fake = new Fake(plan);
+  const out = await call(fake, { fields: { org: "Harbor Point Legal LLC" } });
+  assert.equal(out.org.mode, "repoint_existing");
+  const lock = fake.calls.findIndex(([sql]) => sql === "lock table party in share row exclusive mode");
+  const rowLock = fake.calls.findIndex(([sql]) => sql === "select version from party where id=$1 for update");
+  assert.ok(lock >= 0 && lock < rowLock, "take the table lock before a party row lock to avoid lock upgrades");
+  assert.equal(fake.writes("org_party_id").length, 0);
+  assert.deepEqual(fake.writes("update party set org_id=")[0][1], [EXISTING_ORG, joe.id, TARGET]);
+  const events = fake.events().map(([, p]) => p);
+  assert.equal(events.length, 1);
+  assert.equal(events[0][4], TARGET);
+  assert.equal(events[0][5], "org_id");
+  assert.deepEqual(JSON.parse(events[0][6]), { org_id: null, org_name: null });
+  assert.deepEqual(JSON.parse(events[0][7]), {
+    org_id: EXISTING_ORG, org_name: "HARBOR Point Legal LLC", mode: "repoint_existing" });
+});
