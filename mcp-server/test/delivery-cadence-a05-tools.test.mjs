@@ -305,8 +305,8 @@ test("V5A05-READER-ROUTE-DB: cadence-status is refused on the carr_reader route 
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
   const client = await connect(pg);
-  await setActivationAge(t, pg, client, 0);
   t.after(() => client.end().catch(() => {}));
+  await setActivationAge(t, pg, client, 1);
   const { joe } = await joeAndDell(client);
   const subject = { subject_type: "engineering_program", subject_ref: `v5a05-route-${randomUUID()}` };
   const verb = a05()["cadence-status"];
@@ -330,8 +330,8 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
   const client = await connect(pg);
-  await setActivationAge(t, pg, client, 0);
   t.after(() => client.end().catch(() => {}));
+  await setActivationAge(t, pg, client, 1);
   const { joe } = await joeAndDell(client);
 
   const verbs = a05();
@@ -370,20 +370,24 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   assert.equal(replanned.replan_of, recorded.receipt_id);
 });
 
-test("V5A05-ACTIVATION-WINDOW: no receipt after the activation interval is a missed cadence", async t => {
+test("V5A05-ACTIVATION-EXPIRED: no receipt after the activation interval reads missed for partner and system seats", async t => {
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
   const client = await connect(pg);
   t.after(() => client.end().catch(() => {}));
-  await setActivationAge(t, pg, client, 20);
+  await setActivationAge(t, pg, client, 21);
   const { joe } = await joeAndDell(client);
-  const subject = { subject_type: "engineering_program", subject_ref: `v5a05-aged-${randomUUID()}` };
-  const status = await onRoute(client, "writer_read_only", () =>
-    a05()["cadence-status"].handler(wrap(client), PARTNER_ACTOR(joe.id), subject));
-  assert.equal(status.status, "missed");
-  assert.equal(status.reason_id, "cadence_interval_exceeded_since_activation");
-  assert.equal(status.last_receipt_issued_at, null);
-  assert.equal(status.requires_replan, true);
+  for (const actor of [PARTNER_ACTOR(joe.id), SYSTEM_ACTOR(joe.id)]) {
+    const subject = { subject_type: "engineering_program", subject_ref: `v5a05-activation-${randomUUID()}` };
+    const status = await onRoute(client, "writer_read_only", () =>
+      a05()["cadence-status"].handler(wrap(client), actor, subject));
+    assert.equal(status.status, "missed");
+    assert.equal(status.reason_id, "cadence_interval_exceeded_since_activation");
+    assert.equal(status.requires_replan, true);
+    assert.equal(status.last_receipt_issued_at, null);
+    assert.equal(status.receipts_in_window, 0);
+    assert.ok(status.expires_at);
+  }
 });
 
 test("V5A05-CADENCE-MISS-VERIFIED: the server re-reads the cadence status; a miss the server cannot see is refused", async t => {
