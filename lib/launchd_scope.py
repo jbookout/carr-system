@@ -39,6 +39,8 @@
 # com.carr.fetch-allowlist.plist exists as its own job rather than being
 # inherited from the nightly chain.
 PRIMARY_ONLY = {
+    "com.carr.build-duration-check.plist",
+    "com.carr.expert-reply-watch.plist",
     "com.carr.job-watchdog.plist",
     "com.carr.videopipeline.plist",
     # com.carr.preflight-watch.plist was listed here until 2026-08-22. It watched
@@ -69,6 +71,7 @@ PRIMARY_ONLY = {
     # keymap, local servers, spool flush, fleet sync) stay on every machine.
     "com.carr.room-bridge.plist",
     "com.carr.release-pipeline.plist",
+    "com.carr.merge-queue.plist",
     "com.carr.control-plane-tick.plist",
     "com.carr.delivery-cadence-a05-sweep.plist",
     "com.carr.nightly-exports-daytime-retry.plist",

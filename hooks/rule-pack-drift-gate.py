@@ -57,7 +57,6 @@ from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-from lib.transcript_read import load_transcript  # noqa:E402
 from lib.rule_delivery_preuse import (  # noqa:E402
     contains_receipt_marker, has_background_tool_call, preuse_delivery,
 )
@@ -1010,10 +1009,40 @@ def block_reason(result):
             "what you DID rather than on what you said you would do.")
 
 
-def main():
-    payload = {}
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _handle_error(payload, exc):
+    # FAIL OPEN, DELIBERATELY, AND SAY SO IN THE LOG. Its siblings fail
+    # closed because they guard a claim that would otherwise go out wrong.
+    # This one guards DELIVERY: a bug here that blocked every turn would
+    # stop all work over a check that has not cut a single rule yet, and the
+    # first fix anyone reached for would be to uninstall it.
+    raw_session = payload.get("session_id") or payload.get("sessionId")
+    session = raw_session if isinstance(raw_session, str) and raw_session.strip() \
+        else "unavailable"
+    category = {"JSONDecodeError": "invalid-transcript-json",
+                "FileNotFoundError": "transcript-or-source-absent",
+                "PermissionError": "transcript-or-source-unreadable",
+                "ValueError": "invalid-shadow-observation"}.get(
+                    type(exc).__name__, "unexpected-gate-error")
     try:
-        payload = json.load(sys.stdin)
+        map_digest = file_sha256(Path(MAP))
+        source_digest = source_sha256(Path(REPO))
+    except Exception:
+        map_digest = "0" * 64
+        source_digest = "0" * 64
+    row = make_error_observation(
+        session=session, error=category, detail="rule-pack-drift-gate-failed-open",
+        map_digest=map_digest, source_digest=source_digest)
+    audit(row)
+    return 0
+
+
+@decision(failure="raise")
+def decide(payload):
+    try:
         if payload.get("stop_hook_active") or not payload_is_carr(payload):
             return 0
         path = payload.get("transcript_path") or payload.get("transcriptPath")
@@ -1024,9 +1053,8 @@ def main():
         # and records a transcript_tamper event instead of raising.
         # Logged beside the other gates' tamper events rather than into this
         # gate's own schema-bound rule-delivery-shadow.jsonl.
-        records = load_transcript(
-            path, hook="rule-pack-drift-gate",
-            session=payload.get("session_id") or payload.get("sessionId"),
+        records = payload.transcript(
+            hook="rule-pack-drift-gate",
             log_path=os.path.join(REPO, "out", "jev-required-actions-gate.jsonl"))
         triggers, members, local_map_digest = load_packs()
         result = evaluate(records, triggers, members)
@@ -1045,30 +1073,11 @@ def main():
         print(json.dumps({"decision": "block", "reason": block_reason(result)}))
         return 0
     except Exception as exc:
-        # FAIL OPEN, DELIBERATELY, AND SAY SO IN THE LOG. Its siblings fail
-        # closed because they guard a claim that would otherwise go out wrong.
-        # This one guards DELIVERY: a bug here that blocked every turn would
-        # stop all work over a check that has not cut a single rule yet, and the
-        # first fix anyone reached for would be to uninstall it.
-        raw_session = payload.get("session_id") or payload.get("sessionId")
-        session = raw_session if isinstance(raw_session, str) and raw_session.strip() \
-            else "unavailable"
-        category = {"JSONDecodeError": "invalid-transcript-json",
-                    "FileNotFoundError": "transcript-or-source-absent",
-                    "PermissionError": "transcript-or-source-unreadable",
-                    "ValueError": "invalid-shadow-observation"}.get(
-                        type(exc).__name__, "unexpected-gate-error")
-        try:
-            map_digest = file_sha256(Path(MAP))
-            source_digest = source_sha256(Path(REPO))
-        except Exception:
-            map_digest = "0" * 64
-            source_digest = "0" * 64
-        row = make_error_observation(
-            session=session, error=category, detail="rule-pack-drift-gate-failed-open",
-            map_digest=map_digest, source_digest=source_digest)
-        audit(row)
-        return 0
+        return _handle_error(payload, exc)
+
+
+def main():
+    return run(decide, parse_error=lambda exc: _handle_error({}, exc))
 
 
 if __name__ == "__main__":

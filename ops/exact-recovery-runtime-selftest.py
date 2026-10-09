@@ -58,9 +58,14 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False,
                 ) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
     holder = tempfile.TemporaryDirectory(prefix="exact-recovery-source-")
     root = Path(holder.name)
-    shutil.copytree(ROOT / "mcp-server", root / "mcp-server",
-                    ignore=shutil.ignore_patterns("node_modules"))
-    shutil.copytree(ROOT / "dealroom", root / "dealroom")
+    tracked = subprocess.check_output(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--", "mcp-server", "dealroom"],
+        env=FIXTURE_GIT_ENV,
+    ).decode().split("\0")
+    for relative in filter(None, tracked):
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, destination, follow_symlinks=False)
     assert not (root / "mcp-server" / "node_modules").exists()
     if mismatch:
         lock = root / "mcp-server" / "package-lock.json"
@@ -348,7 +353,21 @@ def test_declared_candidate_stamp_contract_requires_sealer(source: str) -> None:
         assert result.returncode != 0
         assert "candidate sealer is missing" in result.stderr
 
+def test_source_fixture_excludes_ignored_runtime_inputs() -> None:
+    runtime = ROOT / "mcp-server" / ".wrangler"
+    runtime.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="exact-fixture-", dir=runtime) as raw:
+        ignored = Path(raw) / "runtime.json"
+        ignored.write_text('{}\n', encoding="utf-8")
+        holder, root, _sha = make_source()
+        try:
+            assert not (root / ignored.relative_to(ROOT)).exists(), "runtime state entered the exact source fixture"
+        finally:
+            holder.cleanup()
+
+
 def main() -> int:
+    test_source_fixture_excludes_ignored_runtime_inputs()
     source = DEPLOY.read_text(encoding="utf-8")
     assert 'cmp -s "$CURRENT_PACKAGE_LOCK" "$EXACT_PACKAGE_LOCK"' in source
     assert source.index("validate-exact-recovery-source.py") < source.index("cmp -s")

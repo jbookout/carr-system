@@ -91,12 +91,25 @@ import copy
 import json
 import tempfile
 import unittest
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HEALTH_CHECK_PATH = Path(__file__).resolve().parent / "health-check.py"
 SOURCE = HEALTH_CHECK_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE, filename=str(HEALTH_CHECK_PATH))
+sys.path.insert(0, str(HEALTH_CHECK_PATH.parent.parent / "lib"))
+
+
+def setUpModule():
+    from unittest.mock import patch
+    global scheduled_machine
+    scheduled_machine = patch("scheduled_jobs.check", return_value=[])
+    scheduled_machine.start()
+
+
+def tearDownModule():
+    scheduled_machine.stop()
 
 # The two names a finding-recording call inside tools/health-check.py may
 # appear under: the low-level `_canonical_finding` itself (still called
@@ -119,8 +132,9 @@ STRUCTURAL_KEYS = {
     "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
+    "storage_health_unavailable",
 }
-ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity"}
+ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity", "scheduled_jobs_evidence_unavailable"}
 
 
 def _find_function(name: str) -> ast.FunctionDef:
@@ -578,11 +592,14 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         mod = ast.Module(body=[_find_function("_canonical_health"),
                                _find_function("_jev_paid_cap_row")], type_ignores=[])
         ns.update(os=os, re=re, sys=sys, time=time, REPO_ROOT=str(HEALTH_CHECK_PATH.parent.parent),
+                  _uptime=Mock(row=Mock(return_value=("OK production uptime fixture", False))),
                   CANONICAL_SECTION="credentials", CANONICAL_FIXTURE=None, timedelta=timedelta,
                   _HEALTH_COMPLETION_MARKER="HEALTH_COMPLETE", importlib=__import__("importlib"),
+                  _system_cost_row=lambda: ({"state": "ready", "alerts": []}, "OK fixture costs"),
                   _canonical_snapshot=lambda: {}, _jev_spend_row=lambda: (None, "OK spend"),
                   _jev_site_spend_row=lambda: "OK jev spend by site — fixture",
                   _grok_session_row=lambda: ("OK fixture Grok session", 0),
+                  flashlib=Mock(health_row=Mock(return_value="OK Flash stopped")),
                   subprocess=Mock(run=Mock(return_value=subprocess.CompletedProcess([], 0, "SKIP fixture", ""))))
         exec(compile(mod, str(HEALTH_CHECK_PATH), "exec"), ns)
         return ns
@@ -673,15 +690,33 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         self.assertEqual(ns["_canonical_health"](), 1)
         self.assertEqual([row["key"] for row in ns["_FINDINGS"]], ["grok_session"])
 
+    def test_storage_section_does_not_read_unrelated_canonical_snapshot(self):
+        import contextlib, io
+        ns = self.namespace()
+
+        def unrelated_snapshot():
+            raise AssertionError("storage-only health read the canonical snapshot")
+
+        ns.update(CANONICAL_SECTION="storage", _canonical_snapshot=unrelated_snapshot,
+                  _storage_hygiene_row=lambda: ("OK storage hygiene fixture", False))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ns["_canonical_health"](), 0)
+        self.assertIn("OK storage hygiene fixture", out.getvalue())
+        self.assertEqual(ns["_FINDINGS"], [])
+
     def all_namespace(self):
         from unittest.mock import Mock
         ns = self.namespace()
         snap = {"exports": {}, "jobs": [], "job_definitions": [], "controls": {}}
         ns.update(CANONICAL_SECTION="all", _canonical_snapshot=lambda: snap,
+                  _seat_health_rows=lambda: ["PASS seat fixture"],
+                  _branch_janitor_row=lambda: ("OK branch janitor fixture", False),
+                  _storage_hygiene_row=lambda: ("OK storage hygiene fixture", False),
                   _canonical_now=lambda snap: datetime.now(timezone.utc),
                   _canonical_contradiction_alarm=lambda: 0,
                   _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
                   _tailscale_row=lambda: ("OK fixture node", False),
+                  _build_duration_row=lambda: ("OK fixture build duration", 0),
                   _health_sub=Mock(classify_loose_status=Mock(return_value={
                       "actionable_tracked": [], "actionable_untracked": [],
                       "expected_patched_submodules": [], "managed_artifacts": []}),
@@ -692,6 +727,21 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
                      "_legacy_scheduled_definitions", "_calendar_prebrief_standing", "_calendar_prebrief_unknowns"):
             ns[name] = lambda *args: []
         return ns
+
+    def test_builds_health_records_failure_and_prints_marker_last(self):
+        import contextlib, io
+        for line, expected in (("OK build duration", 0), ("WARN build duration", 1),
+                               ("UNAVAILABLE build duration", 1)):
+            ns = self.all_namespace()
+            ns.update(CANONICAL_SECTION="builds", _build_duration_row=lambda: (line, expected))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(ns["_canonical_health"](), expected)
+            self.assertEqual(output.getvalue().splitlines()[-1], "HEALTH_COMPLETE")
+            self.assertEqual(len(ns["_FINDINGS"]), expected)
+            if expected:
+                self.assertEqual(ns["_FINDINGS"][0]["key"], "build_duration")
+                self.assertEqual(ns["_FINDINGS"][0]["hard_error"], line.startswith("UNAVAILABLE"))
 
     def test_all_health_sections_report_cap_failure_with_other_checks_clean(self):
         import io, contextlib
@@ -996,6 +1046,22 @@ class RcAssignedOnlyViaRed(unittest.TestCase):
         overlap = business_keys & hard_error_keys
         self.assertEqual(overlap, set(),
                          f"business-count key(s) wrongly marked hard_error=True: {overlap}")
+
+
+class ProvisioningPendingIsNamedAndTemporary(unittest.TestCase):
+    """production_uptime left ALWAYS_HARD_ERROR_KEYS on 2026-10-06: its "monitor unreachable"
+    state is WARN while carr-uptime is unprovisioned (Joe: unprovisioned monitors must not block
+    releases). This pins the exemption to exactly the named keys, so widening it fails here.
+    When PROVISIONING_PENDING loses production_uptime, put it back in ALWAYS_HARD_ERROR_KEYS."""
+
+    def test_pending_set_is_exactly_the_two_named_monitors(self):
+        source = (ROOT / "tools/health-check.py").read_text() if "ROOT" in globals() else \
+            Path(__file__).resolve().parents[1].joinpath("tools/health-check.py").read_text()
+        tree = ast.parse(source)
+        pending = next(node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(getattr(t, "id", None) == "PROVISIONING_PENDING" for t in node.targets))
+        keys = {k.value for k in pending.value.keys}
+        self.assertEqual(keys, {"production_uptime", "system_costs"})
 
 
 class CanonicalHealthReturnsAreAllowlisted(unittest.TestCase):

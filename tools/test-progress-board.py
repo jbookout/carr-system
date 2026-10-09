@@ -7,6 +7,8 @@ commands and publishes the JSON data contract that page renders.
 """
 
 import copy
+import functools
+import itertools
 import io
 import json
 import importlib.util
@@ -14,6 +16,7 @@ import os
 # These tests assert per-render GitHub sync; the production reuse window is covered in test-progress-board-rest.py.
 os.environ["PROGRESS_BOARD_PR_FRESH_SECONDS"] = "0"
 import plistlib
+import runpy
 import shutil
 import subprocess
 import sys
@@ -32,6 +35,12 @@ SPEC = importlib.util.spec_from_file_location("progress_board", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 BOARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BOARD)
+
+def fixture_budget(fixture):
+    return BOARD.repo_lib("github_rate_limit").GitHubReadBudget(
+        {"GH_LIMITER_DIR": str(fixture.parent / "fake-gh-limiter")},
+        path=fixture.parent / f"github-budget-{os.getpid()}.json",
+        clock=itertools.count(step=2).__next__)
 
 # One dispatcher for every gh call the board makes. The fixture file says what
 # each call returns; tests rewrite it between runs.
@@ -171,13 +180,21 @@ class BoardCase(unittest.TestCase):
         self.env["PROGRESS_BOARD_LOCAL_ONLY"] = "1"
         self.fixture = self.root / "gh.json"
         self.gh_log = self.root / "gh.log"
+        door = patch.object(BOARD, "call_verb", side_effect=AssertionError("unit test reached the live verb door"))
+        self.live_door = door.start()
+        self.addCleanup(door.stop)
+        self.addCleanup(self.live_door.assert_not_called)
 
     def tearDown(self):
         self.tempdir.cleanup()
 
     def run_board(self, *args, input_text=None, check=True):
+        command = [sys.executable, str(SCRIPT), *args]
+        if "BOARD_GH_FIXTURE" in self.env:
+            command = [sys.executable, str(Path(__file__).resolve()),
+                       "--fixture-board", str(SCRIPT), *args]
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            command,
             cwd=REPO,
             env=self.env,
             input=input_text,
@@ -203,6 +220,17 @@ class BoardCase(unittest.TestCase):
         self.env["BOARD_GH_FIXTURE"] = str(self.fixture)
         self.env["BOARD_GH_LOG"] = str(self.gh_log)
         self.fixture.write_text(json.dumps(fixture))
+        if not hasattr(self, "fixture_reader"):
+            budget = fixture_budget(self.fixture)
+            @functools.lru_cache(maxsize=None)
+            def fixture_reader(binary, timeout):
+                return BOARD.repo_lib("github_reader").GitHubReader(
+                    gh=binary, timeout=timeout, retry_delays=BOARD.GH_RETRY_DELAYS,
+                    budget=budget)
+            self.fixture_reader = fixture_reader
+            reader_patch = patch.object(BOARD, "gh_reader", fixture_reader)
+            reader_patch.start()
+            self.addCleanup(reader_patch.stop)
         return gh
 
     def set_fixture(self, fixture):
@@ -350,7 +378,9 @@ board.main(["task", "demo", "work", "--status", "done", "--note", "Recovered",
         self.assertEqual(snapshot["kind"], "project")
         self.assertEqual(set(snapshot), {"schema", "kind", "project", "title", "tasks", "deliverables",
                                          "notes", "decisions", "ledger", "repos", "history", "updated_at",
-                                         "github_sync", "omitted"})
+                                         "github_sync", "omitted", "costs"})
+        self.assertIn(snapshot["costs"]["state"], ("ready", "partial", "unavailable"))
+        self.assertIn("action", snapshot["costs"])
         self.assertEqual(snapshot["tasks"]["a"]["provider"], "Codex")
         self.assertEqual(snapshot["tasks"]["a"]["model"], "gpt-6-sol")
         self.assertEqual(snapshot["tasks"]["a"]["effort"], "high")
@@ -519,6 +549,26 @@ board.main(["task", "demo", "work", "--status", "done", "--note", "Recovered",
         self.assertEqual((task["provider"], task["model"], task["effort"], task["summary"]),
                          ("Codex", "gpt-6-sol", "xhigh", "Check the route."))
         self.assertEqual(task["stage_history"][0]["stage"], "queued")
+
+    def test_creation_defaults_preserve_metadata_but_allow_explicit_reassignment(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        assigned = {"title": "Assigned task", "executor": "Codex", "provider": "OpenAI",
+                    "model": "fixture", "effort": "high"}
+        defaults = {"title": "Queue card", "executor": "Merge queue", "provider": "Unknown",
+                    "model": "unknown", "effort": "unknown"}
+        fields = lambda values: [item for key, value in values.items() for item in ("--" + key, value)]
+        self.run_board("task", "demo", "existing", *fields(assigned), "--status", "running", "--pr", "42")
+        for card in ("existing", "new"):
+            self.run_board("task", "demo", card, *fields(defaults), "--creation-defaults",
+                           "--status", "review", "--pr", "42", "--stage", "ci", "--note", "Checks pending")
+        tasks = self.read_state("demo")["tasks"]
+        for card, expected in (("existing", assigned), ("new", defaults)):
+            self.assertEqual({key: tasks[card][key] for key in expected}, expected)
+            self.assertEqual((tasks[card]["status"], tasks[card]["stage"], tasks[card]["note"]),
+                             ("review", "ci", "Checks pending"))
+        self.run_board("task", "demo", "existing", *fields(defaults))
+        task = self.read_state("demo")["tasks"]["existing"]
+        self.assertEqual({key: task[key] for key in defaults}, defaults)
 
     def test_backfill_uses_pr_title_and_retains_existing_task_history(self):
         state = {"tasks": {
@@ -1036,16 +1086,7 @@ class GitHubSync(BoardCase):
         self.run_board("render", "demo")
         self.assertEqual(self.read_state("demo")["github_sync"]["failed"], [])
 
-    def test_gh_is_found_outside_a_launchd_path(self):
-        fallback = self.root / "homebrew" / "gh"
-        fallback.parent.mkdir()
-        fallback.write_text("#!/bin/sh\n")
-        fallback.chmod(0o755)
-        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=False), \
-             patch.object(BOARD.shutil, "which", lambda name: None), \
-             patch.object(BOARD, "GH_FALLBACKS", (str(self.root / "missing" / "gh"), str(fallback))):
-            os.environ.pop("PROGRESS_BOARD_SKIP_GH", None)
-            self.assertEqual(BOARD.gh_binary(), str(fallback))
+    def test_the_launchd_job_puts_homebrew_on_path(self):
         self.assertIn("/opt/homebrew/bin", LAUNCHD_SCRIPT.read_text())
 
 
@@ -1360,9 +1401,10 @@ class PublishAndAnswers(BoardCase):
         with patch.object(BOARD, "render", lambda project: events.append(("render", project))), \
              patch.object(BOARD, "publish_board", lambda project: events.append(("publish", project))), \
              patch.object(BOARD, "poll_board_answers", lambda project: events.append(("poll", project))), \
-             patch.object(BOARD, "build_all_repos", lambda: events.append(("build", "all-repos"))):
+             patch.object(BOARD, "build_all_repos", lambda: events.append(("build", "all-repos"))), \
+             patch.object(BOARD, "publish_needs_joe_local", lambda: events.append(("local", "needs-joe"))):
             BOARD.command_render(args)
-        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"),
+        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"), ("local", "needs-joe"),
                                   ("build", "all-repos"), ("publish", "all-repos")])
 
     def test_system_board_failure_is_logged_and_last_known_state_published(self):
@@ -1378,11 +1420,63 @@ class PublishAndAnswers(BoardCase):
              patch.object(BOARD, "publish_board", lambda project: events.append(("publish", project))), \
              patch.object(BOARD, "poll_board_answers", lambda project: events.append(("poll", project))), \
              patch.object(BOARD, "build_all_repos", broken), \
+             patch.object(BOARD, "publish_needs_joe_local"), \
              patch("sys.stderr", new_callable=io.StringIO) as err:
             BOARD.command_render(args)
         self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"),
                                   ("publish", "all-repos")])
         self.assertIn("gh unavailable", err.getvalue())
+
+
+class NeedsJoePublication(unittest.TestCase):
+    def test_local_publication_failures_do_not_interrupt_other_boards(self):
+        import needs_joe_local
+        from argparse import Namespace
+        failures = [RuntimeError("verb unavailable"), subprocess.TimeoutExpired("run.sh", 30),
+                    OSError("filesystem unavailable"), FileNotFoundError("zsh"),
+                    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"), KeyError("version")]
+        for location in ("read_source", "call_verb"):
+            for failure in failures:
+                with self.subTest(location=location, failure=type(failure).__name__):
+                    events = []
+                    read_effect = failure if location == "read_source" else None
+                    call_effect = failure if location == "call_verb" else None
+                    with patch.object(BOARD, "render", lambda p: events.append(("render", p))), \
+                         patch.object(BOARD, "publish_board", lambda p: events.append(("publish", p))), \
+                         patch.object(BOARD, "poll_board_answers", lambda p: events.append(("poll", p))), \
+                         patch.object(BOARD, "build_all_repos", lambda: events.append(("build", "all-repos"))), \
+                         patch.object(needs_joe_local, "read_source", return_value="", side_effect=read_effect), \
+                         patch.object(BOARD, "call_verb", side_effect=call_effect) as call, \
+                         patch("sys.stderr", new_callable=io.StringIO) as err:
+                        BOARD.command_render(Namespace(project=BOARD.LAUNCHD_BOARD, publish=False))
+                    self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"),
+                        ("poll", "carr-v5"), ("build", "all-repos"), ("publish", "all-repos")])
+                    self.assertIn("needs-joe local page not published", err.getvalue())
+                    self.assertEqual(call.call_count, 0 if location == "read_source" else 1)
+
+    def test_local_publication_uses_remote_version_and_reads_back(self):
+        import needs_joe_local
+        from argparse import Namespace
+        events = []
+        remote = {"version": 7, "snapshot_json": {}}
+        def call(verb, args):
+            events.append((verb, args["board_id"]))
+            if verb == "read-progress-board":
+                return {"snapshot": remote}
+            self.assertEqual(verb, "publish-board-snapshot")
+            self.assertEqual(args["base_version"], 7)
+            remote["snapshot_json"] = args["snapshot"]
+            return {"ok": True}
+        with patch.object(BOARD, "render", lambda p: events.append(("render", p))), \
+             patch.object(BOARD, "publish_board", lambda p: events.append(("publish", p))), \
+             patch.object(BOARD, "poll_board_answers", lambda p: events.append(("poll", p))), \
+             patch.object(BOARD, "build_all_repos", lambda: events.append(("build", "all-repos"))), \
+             patch.object(needs_joe_local, "read_source", return_value=""), \
+             patch.object(BOARD, "call_verb", call), patch("sys.stderr", new_callable=io.StringIO):
+            BOARD.command_render(Namespace(project=BOARD.LAUNCHD_BOARD, publish=False))
+        self.assertEqual(events, [("render", "carr-v5"), ("publish", "carr-v5"), ("poll", "carr-v5"),
+            ("read-progress-board", "needs-joe-local"), ("publish-board-snapshot", "needs-joe-local"),
+            ("read-progress-board", "needs-joe-local"), ("build", "all-repos"), ("publish", "all-repos")])
 
 class CardColumns(unittest.TestCase):
     """Addition 14: finished cards never sit in Building; retired cards leave the pipeline."""
@@ -1754,6 +1848,7 @@ class ReviewRound1420(BoardCase):
                "StartInterval": 120, "RunAtLoad": True, "StandardOutPath": "board.log"}
         dest.write_bytes(plistlib.dumps(old))
         calls = []
+        real_run = subprocess.run
         def install(filename, path, body, matches):
             calls.append((filename, path, matches))
             Path(path).write_text(body)
@@ -1762,7 +1857,7 @@ class ReviewRound1420(BoardCase):
         registered = subprocess.CompletedProcess([], 0, "arguments = {\n" + "\n".join(desired) + "\n}\n")
         with patch.object(installer, "REPO", str(repo)), patch.object(installer, "HOME", str(self.root)), \
              patch.object(installer, "install_launchd_plist", side_effect=install), \
-             patch.object(installer.subprocess, "run", return_value=registered):
+             patch.object(installer.subprocess, "run", side_effect=lambda argv, **kwargs: real_run(argv, **kwargs) if argv[0] == "git" else registered) as run:
             self.assertEqual(installer.cmd_install_progress_board(False), 1)
             self.assertEqual(plistlib.loads(dest.read_bytes()), old)
             self.assertEqual(installer.cmd_install_progress_board(True), 0)
@@ -1773,52 +1868,23 @@ class ReviewRound1420(BoardCase):
             self.assertEqual(actual["StandardOutPath"], old["StandardOutPath"])
             self.assertEqual(len(calls), 1)
             self.assertEqual(installer.cmd_install_progress_board(False), 0)
-            installer.subprocess.run.return_value = subprocess.CompletedProcess([], 0, "arguments = {\n/bin/zsh\nold/render.sh\n}\n")
+            stale = subprocess.CompletedProcess([], 0, "arguments = {\n/bin/zsh\nold/render.sh\n}\n")
+            run.side_effect = lambda argv, **kwargs: real_run(argv, **kwargs) if argv[0] == "git" else stale
             self.assertEqual(installer.cmd_install_progress_board(False), 1)
             # Matching disk bytes cannot hide a stale registered definition.
-            installer.subprocess.run.side_effect = [installer.subprocess.run.return_value, registered]
+            observations = iter([stale, registered])
+            run.side_effect = lambda argv, **kwargs: real_run(argv, **kwargs) if argv[0] == "git" else next(observations)
             self.assertEqual(installer.cmd_install_progress_board(True), 0)
             self.assertFalse(calls[-1][2])
 
-    def test_5_premerge_checkout_migration_preserves_shared_board_state(self):
+    def test_5_feature_checkout_migration_is_refused_before_install(self):
         spec = importlib.util.spec_from_file_location("board_installer_premerge", REPO / "ops/config-as-code.py")
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
-        canonical = self.root / "canonical"
-        checkout = self.root / "reviewed-checkout"
-        (checkout / "ops").mkdir(parents=True)
-        (checkout / "ops/progress-board-render.sh").write_text(LAUNCHD_SCRIPT.read_text())
-        (checkout / ".venv/bin").mkdir(parents=True)
-        python = checkout / ".venv/bin/python"
-        python.write_text("#!/bin/sh\nexit 0\n")
-        python.chmod(0o755)
-        agents = self.root / "Library/LaunchAgents"
-        agents.mkdir(parents=True)
-        dest = agents / "local.carr-progress-board.plist"
-        old = {"Label": "local.carr-progress-board", "ProgramArguments": ["/bin/zsh", "old/render.sh"],
-               "StartInterval": 120, "RunAtLoad": True,
-               "EnvironmentVariables": {"EXISTING": "keep"}}
-        dest.write_bytes(plistlib.dumps(old))
-        desired = ["/bin/bash", str(checkout / "ops/progress-board-render.sh")]
-        registered = subprocess.CompletedProcess([], 0, "arguments = {\n" + "\n".join(desired) + "\n}\n")
-        def install(filename, path, body, matches):
-            Path(path).write_text(body)
-            return "loaded"
-        with patch.object(installer, "REPO", str(canonical)), patch.object(installer, "HOME", str(self.root)), \
-             patch.object(installer, "install_launchd_plist", side_effect=install), \
-             patch.object(installer.subprocess, "run", return_value=registered):
-            self.assertEqual(installer.cmd_install_progress_board(True, repo=str(checkout)), 0)
-            actual = plistlib.loads(dest.read_bytes())
-            self.assertEqual(actual["ProgramArguments"], desired)
-            self.assertEqual(actual["WorkingDirectory"], str(checkout))
-            self.assertEqual(actual["EnvironmentVariables"], {
-                "EXISTING": "keep", "PROGRESS_BOARD_ROOT": str(canonical / "out")})
-            self.assertEqual(actual["StartInterval"], 120)
-            self.assertEqual(installer.cmd_install_progress_board(False, repo=str(checkout)), 0)
-            with patch.object(installer, "cmd_install_progress_board", return_value=0) as command, \
-                 patch.object(sys, "argv", ["config-as-code.py", "verify-progress-board", "--repo", str(checkout)]):
-                self.assertEqual(installer.main(), 0)
-                command.assert_called_once_with(False, repo=str(checkout))
+        with patch.object(installer, "REPO", str(self.root / "canonical")), \
+             patch.object(installer, "install_launchd_plist") as install:
+            self.assertEqual(installer.cmd_install_progress_board(True, repo=str(self.root / "feature")), 1)
+            install.assert_not_called()
 
     def test_5_migration_refuses_missing_checkout_wrapper_without_writing(self):
         spec = importlib.util.spec_from_file_location("board_installer_missing", REPO / "ops/config-as-code.py")
@@ -2003,6 +2069,38 @@ class ReviewRound1420(BoardCase):
         result = self.run_board("note", "demo", "--text", "x")
         self.assertIn("not published", result.stderr)
 
+    def test_11_b_deferred_mutation_does_not_refresh_or_publish(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        with self.in_process(PROGRESS_BOARD_LOCAL_ONLY="1"), \
+             patch.object(BOARD, "render", side_effect=AssertionError("local mutation refreshed the whole board")), \
+             patch.object(BOARD, "publish_board", side_effect=AssertionError("local mutation published")):
+            BOARD.main(["task", "demo", "a", "--title", "A", "--status", "running", "--executor", "Codex",
+                        "--defer-refresh"])
+        self.assertEqual(self.read_state("demo")["tasks"]["a"]["status"], "running")
+
+    def test_11_c_task_receipt_captures_locked_before_state_and_cas_noop(self):
+        self.run_board("init", "demo", "--title", "Demo")
+        self.run_board("task", "demo", "a", "--title", "A", "--status", "running",
+                       "--executor", "Codex", "--note", "Original evidence")
+        before = self.read_state("demo")["tasks"]["a"]
+
+        applied = self.run_board("task", "demo", "a", "--status", "blocked", "--health", "blocked",
+                                 "--reason", "Synthetic failure", "--next-action", "Recover",
+                                 "--note", "Watchdog overlay", "--receipt")
+        receipt = json.loads(applied.stdout)
+        self.assertTrue(receipt["applied"])
+        self.assertEqual(receipt["before"], before)
+        self.assertEqual(receipt["after"], self.read_state("demo")["tasks"]["a"])
+
+        current = receipt["after"]
+        refused = self.run_board("task", "demo", "a", "--status", "done", "--note", "stale restore",
+                                 "--expected-task", json.dumps({"status": "running"}), "--receipt")
+        receipt = json.loads(refused.stdout)
+        self.assertFalse(receipt["applied"])
+        self.assertEqual(receipt["before"], current)
+        self.assertEqual(receipt["after"], current)
+        self.assertEqual(self.read_state("demo")["tasks"]["a"], current)
+
 
 def merged_view(oid):
     """A complete merged PR as gh reports it, merged at `oid`."""
@@ -2034,11 +2132,13 @@ class DeliveryTargetRelease(BoardCase):
                     with patch.object(BOARD, "urlopen", **kwargs), \
                          patch.object(BOARD, "fetch_pr", return_value=(merged_view("a" * 40), None)), \
                          patch.object(BOARD, "publish_board") as publish, \
-                         patch.object(BOARD, "poll_board_answers") as poll:
+                         patch.object(BOARD, "poll_board_answers") as poll, \
+                         patch.object(BOARD, "publish_needs_joe_local") as local:
                         BOARD.command_render(Namespace(project=BOARD.LAUNCHD_BOARD, publish=True))
                         self.assertEqual(publish.call_args_list,
                                          [unittest.mock.call(BOARD.LAUNCHD_BOARD), unittest.mock.call(BOARD.ALL_REPOS_BOARD)])
                         poll.assert_called_once_with(BOARD.LAUNCHD_BOARD)
+                        local.assert_called_once_with()
                     task = BOARD.read_state(BOARD.LAUNCHD_BOARD)["tasks"]["fix"]
                     self.assertEqual(task["stage"], "merged")
                     self.assertNotIn("completed_at", task)
@@ -2237,4 +2337,13 @@ class DeliveryTargetRelease(BoardCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    if sys.argv[1:2] == ["--fixture-board"]:
+        assert "BOARD_GH_FIXTURE" in os.environ, "fixture runner requires fake gh"
+        budget = fixture_budget(Path(os.environ["BOARD_GH_FIXTURE"]))
+        github_reader = BOARD.repo_lib("github_reader")
+        github_reader.GitHubReader = functools.partial(
+            github_reader.GitHubReader, budget=budget)
+        sys.argv = sys.argv[2:]
+        runpy.run_path(sys.argv[0], run_name="__main__")
+    else:
+        unittest.main(verbosity=2)

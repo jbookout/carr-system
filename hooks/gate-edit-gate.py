@@ -373,80 +373,88 @@ def admission_refusal(stem, gaps):
 
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    dlog(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    dlog(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    if tool not in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        sys.exit(0)
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    path = ti.get("file_path") or ti.get("filePath") or "" if isinstance(ti, dict) else ""
+
+    if not is_protected(path):
+        sys.exit(0)
+
+    # THE ADMISSION CARD comes FIRST, ahead of the PR-review route below
+    # too. A reviewer approving a PR answers whether the CHANGE is wanted;
+    # the card asks whether the system can account for a new power to
+    # refuse — a PR could merge a new blocking gate without anyone having
+    # been told that is what it does. That is precisely the gap the
+    # 2026-08-23 audit named.
+    needs_card = new_blocker(path, tool, ti)
+    if needs_card:
+        stem, gaps = needs_card
+        audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_admission"],
+               "patterns": [f"gate_admission:{stem}"],
+               "session": payload.get("session_id"), "path": path,
+               "decision": "deny", "gaps": gaps})
+        dlog(f"DENY(no admission card) {path} :: {gaps}")
+        # Exit 2 with the text on stderr, not structured JSON: on a build
+        # that does not parse the structured contract, exit 0 reads as ALLOW
+        # and this would fail open silently. Same reasoning the retired block
+        # path below carries.
+        print(admission_refusal(stem, gaps), file=sys.stderr)
+        sys.exit(2)
+
+    name = os.path.basename(path)
+
+    # ANNOUNCE-ONLY, END TO END — WR-000019 slice S3, 2026-08-27. This file
+    # no longer reads the transcript for an in-session sign-off (the
+    # `joe_approved()` channel this comment used to describe is gone) and no
+    # longer carries a retired-but-kept BLOCK path either. Both existed only
+    # to gate an edit that PR review now gates instead: CODEOWNERS
+    # auto-requests Joe on any PR touching hooks/ or ops/config/, and the
+    # PR-only ruleset with required CI means a canonical-tree edit cannot
+    # reach main any other way. That is stronger than an in-session
+    # approval channel ever was — it does not depend on the session
+    # surviving to report, and it cannot be talked around by how the
+    # session described the change beforehand.
+    #
+    # ONE WORDING, shared with the Bash door, so a session gets the same
+    # answer whichever way it reaches the file (hooks/gate_paths.py).
+    announcement_text = announcement(path, f"{tool.lower()}")
+
+    audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_edit"],
+           "patterns": [f"gate_edit:{name}"], "session": payload.get("session_id"),
+           "path": path, "decision": "announce"})
+    dlog(f"ANNOUNCE {path}")
+    print(json.dumps({
+        "systemMessage": announcement_text,
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": announcement_text,
+        },
+    }))
+    sys.exit(0)
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        dlog(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
-
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        if tool not in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
-            sys.exit(0)
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        path = ti.get("file_path") or ti.get("filePath") or "" if isinstance(ti, dict) else ""
-
-        if not is_protected(path):
-            sys.exit(0)
-
-        # THE ADMISSION CARD comes FIRST, ahead of the PR-review route below
-        # too. A reviewer approving a PR answers whether the CHANGE is wanted;
-        # the card asks whether the system can account for a new power to
-        # refuse — a PR could merge a new blocking gate without anyone having
-        # been told that is what it does. That is precisely the gap the
-        # 2026-08-23 audit named.
-        needs_card = new_blocker(path, tool, ti)
-        if needs_card:
-            stem, gaps = needs_card
-            audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_admission"],
-                   "patterns": [f"gate_admission:{stem}"],
-                   "session": payload.get("session_id"), "path": path,
-                   "decision": "deny", "gaps": gaps})
-            dlog(f"DENY(no admission card) {path} :: {gaps}")
-            # Exit 2 with the text on stderr, not structured JSON: on a build
-            # that does not parse the structured contract, exit 0 reads as ALLOW
-            # and this would fail open silently. Same reasoning the retired block
-            # path below carries.
-            print(admission_refusal(stem, gaps), file=sys.stderr)
-            sys.exit(2)
-
-        name = os.path.basename(path)
-
-        # ANNOUNCE-ONLY, END TO END — WR-000019 slice S3, 2026-08-27. This file
-        # no longer reads the transcript for an in-session sign-off (the
-        # `joe_approved()` channel this comment used to describe is gone) and no
-        # longer carries a retired-but-kept BLOCK path either. Both existed only
-        # to gate an edit that PR review now gates instead: CODEOWNERS
-        # auto-requests Joe on any PR touching hooks/ or ops/config/, and the
-        # PR-only ruleset with required CI means a canonical-tree edit cannot
-        # reach main any other way. That is stronger than an in-session
-        # approval channel ever was — it does not depend on the session
-        # surviving to report, and it cannot be talked around by how the
-        # session described the change beforehand.
-        #
-        # ONE WORDING, shared with the Bash door, so a session gets the same
-        # answer whichever way it reaches the file (hooks/gate_paths.py).
-        announcement_text = announcement(path, f"{tool.lower()}")
-
-        audit({"ts": now(), "hook": "gate-edit-gate", "classes": ["gate_edit"],
-               "patterns": [f"gate_edit:{name}"], "session": payload.get("session_id"),
-               "path": path, "decision": "announce"})
-        dlog(f"ANNOUNCE {path}")
-        print(json.dumps({
-            "systemMessage": announcement_text,
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": announcement_text,
-            },
-        }))
-        sys.exit(0)
-
-    except Exception as exc:
-        dlog(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

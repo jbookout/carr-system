@@ -118,7 +118,6 @@ sys.path.insert(0, REPO)
 # orchestrator's 2026-10-02 PR 1407 ruling replaces generated prompt-facet
 # Stop obligations with hooks/jev-supervisor.py's batched boundary checks.
 # Deterministic completion evidence and requirement checks remain here.
-from lib.transcript_read import load_transcript  # noqa: E402
 
 
 LOG = os.path.join(REPO, "out", "completion-evidence-gate.jsonl")
@@ -165,8 +164,13 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "undo-invoice-close",
+    "undo-lead-move",
     "advance-leads",  # evidence-driven stages and approval-only drafts
     "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
+    "remove-research-site",  # soft-removes a research-site index row (removed_at, who, why).
+                              # EXACT rather than a "remove" prefix: it is the only remove-
+                              # verb, and a prefix would capture any future read named so.
     "acknowledge-board-answer",  # durable Received receipt for a board answer
     "answer-board-question",      # human partner records a durable answer
     "ask-board-question",         # opens a named question on the board
@@ -320,6 +324,8 @@ WRITE_ACTION_EXACT = {
                                     # is a write for the same reason review-deal is
     "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
     "correct-memory",  # immutable successor write; exact transition
+    "correct-party-identity",  # writes party name, org and state; exact for the same
+                                # reason as correct-memory: "correct" is not a prefix
     "forget-memory",   # reversible suppression write; exact transition
     "issue-execution-envelope",  # persists one immutable governed execution envelope
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write
@@ -363,11 +369,7 @@ CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity
 NESTED_CARR_CALL = re.compile(
     r"(?:tools\.)?(mcp__carr(?:_records|-continuity)?__([A-Za-z0-9_-]+))")
 CALL_VERB = re.compile(r"\b(?:verb|name)\s*[:=]\s*['\"]([A-Za-z0-9_-]+)['\"]", re.I)
-SYNTHETIC_CODEX_USER_PREFIXES = (
-    "The following is the Codex agent history",
-    "<environment_context>",
-    "<app-context>",
-)
+CODEX_HISTORY_PREFIX = "The following is the Codex agent history"
 CARR_PATH_MARKERS = (
     "/carr-system/", "/carr-system", "my drive/carr ai", "my\\ drive/carr\\ ai",
 )
@@ -408,30 +410,6 @@ def text(rec, roles):
                          if isinstance(block, dict) and block.get("type") in
                          {"text", "input_text", "output_text"})
     return ""
-
-
-def is_synthetic_user_record(rec):
-    """Exclude a Codex history/environment wrapper from task-window selection.
-
-    The first eligible text block is decisive: a genuine user instruction may
-    legitimately be followed by injected environment context, so a later
-    synthetic block must not erase that instruction.
-    """
-    msg = message(rec)
-    if (msg.get("role") or rec.get("type")) not in {"user", "human"}:
-        return False
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content.lstrip().startswith(SYNTHETIC_CODEX_USER_PREFIXES)
-    if not isinstance(content, list):
-        return False
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") not in {"text", "input_text", "output_text"}:
-            continue
-        value = block.get("text")
-        if isinstance(value, str):
-            return value.lstrip().startswith(SYNTHETIC_CODEX_USER_PREFIXES)
-    return False
 
 
 def has_carr_path_marker(value):
@@ -579,13 +557,6 @@ def verification(name, value):
         return not write_verb(name, value)
     return name == "functions.exec" and any(not is_write_action(action)
                                               for action in nested_carr_actions(value))
-
-
-def last_human_index(recs):
-    for idx in range(len(recs) - 1, -1, -1):
-        if not is_synthetic_user_record(recs[idx]) and text(recs[idx], {"user", "human"}).strip():
-            return idx
-    return -1
 
 
 def valid_disclosure(final):
@@ -737,13 +708,47 @@ MACHINE_LINE = re.compile(
 
 
 CODE_SPAN = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]+`", re.S)
+AGENTS_ENVELOPE = re.compile(
+    r"^[ \t]*# AGENTS\.md instructions for [^\n]*\n\s*<INSTRUCTIONS>"
+    r".*?(?:</INSTRUCTIONS>|\Z)", re.I | re.M | re.S)
+
+
+def machine_free_text(value):
+    """Remove bounded injected envelopes from an assembled message."""
+    value = AGENTS_ENVELOPE.sub(" ", value or "")
+    return MACHINE_LINE.sub(" ", MACHINE_TAG.sub(" ", value))
 
 
 def order_text(value):
-    """What the human actually typed, with injected machine text removed."""
-    value = MACHINE_TAG.sub(" ", value or "")
-    value = CODE_SPAN.sub(" ", value)
-    return MACHINE_LINE.sub(" ", value)
+    """Human prose eligible for clause extraction, excluding quoted code."""
+    return CODE_SPAN.sub(" ", machine_free_text(value))
+
+
+def human_text(rec):
+    """Human-turn content, including code, with injected machine text removed."""
+    msg = message(rec)
+    if (msg.get("role") or rec.get("type")) not in {"user", "human"}:
+        return ""
+    content = msg.get("content")
+    if isinstance(content, list):
+        parts = [block["text"] for block in content
+                 if isinstance(block, dict)
+                 and block.get("type") in {"text", "input_text", "output_text"}
+                 and isinstance(block.get("text"), str)]
+        # A leading history banner owns the record; later history blocks own
+        # only their block. Assemble the remaining text before parsing markup.
+        if parts and parts[0].lstrip().startswith(CODEX_HISTORY_PREFIX):
+            return ""
+        content = "\n".join(part for part in parts
+                            if not part.lstrip().startswith(CODEX_HISTORY_PREFIX))
+    if not isinstance(content, str) or content.lstrip().startswith(CODEX_HISTORY_PREFIX):
+        return ""
+    return machine_free_text(content)
+
+
+def human_order_text(rec):
+    """Clause text; code-only human turns still count for task-window selection."""
+    return CODE_SPAN.sub(" ", human_text(rec))
 
 
 class Clause:
@@ -962,7 +967,7 @@ def order_clauses(value, turn=0):
 def human_turns(recs):
     """Absolute indices of genuine human turns, oldest first."""
     return [idx for idx, rec in enumerate(recs)
-            if not is_synthetic_user_record(rec) and text(rec, {"user", "human"}).strip()]
+            if human_text(rec).strip()]
 
 
 def receipt_index(recs):
@@ -1059,7 +1064,7 @@ def standing_clauses(recs, turns):
     """
     if not turns:
         return [], {}
-    said = [order_text(text(recs[idx], {"user", "human"})) for idx in turns]
+    said = [human_order_text(recs[idx]) for idx in turns]
     bounds, clauses = {}, []
     for position, idx in enumerate(turns):
         end = (turns[position + 1] - 1) if position + 1 < len(turns) else len(recs) - 1
@@ -1374,106 +1379,108 @@ def jev_requirements_advisory(payload, recs):
         return None
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import Verdict, decision, run
+
+
+@decision
+def decide(payload):
+    if payload.get("stop_hook_active"):
+        return 0
+    path = payload.get("transcript_path") or payload.get("transcriptPath")
+    if not path or not os.path.exists(path):
+        return 0
+    # One bad line in the session's own transcript must not switch the
+    # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
+    # and records a transcript_tamper event instead of raising.
+    recs = payload.transcript(hook="completion-evidence-gate", log_path=JEV_LOG)
+    if not payload_is_carr(payload, recs):
+        return 0
+    session = payload.get("session_id") or payload.get("sessionId")
+    ledger = {}
+    blocked, reason = evaluate(recs, ledger)
+    jev = jev_requirements_advisory(payload, recs)
+
+    # Failed explicit criteria reopen only when the clause layer has not
+    # already done so. Naming the residual uses the same predicate.
+    jev_identity = None
+    if not blocked and isinstance(jev, dict):
+        final = ledger.get("final", "")
+        for item in jev.get("unmet") or []:
+            if RESIDUAL.search(final) and terms_match(terms_of(item["text"]), final):
+                continue
+            candidate = claim_identity(
+                "completion-evidence-gate", JEV_REQUIREMENT_REASON, [item["text"]])
+            if candidate and latched(session, candidate):
+                continue
+            jev_identity = candidate
+            blocked = True
+            reason = (f'explicit acceptance criterion unmet: '
+                      f'"{item["text"]}" ({item.get("reason", "receipt missing")}) — the close does not say '
+                      "it is not done")
+            break
+
+    # THE CLAIM-SET LATCH (2026-08-23, Joe's Stop-gate rationing).
+    #
+    # WHAT IT FIXES, measured twice and independently. The gates-audit
+    # council's labeled ledger caught this gate firing a SECOND time on a
+    # summary whose claims already carried receipts one message earlier. A
+    # replay over seven days, 127 transcripts and 916 Stop points found the
+    # rate behind that anecdote: one session hit at FIVE consecutive stops
+    # on the same claim and the same reason class.
+    #
+    # THE PRECEDENT, and it is why this is a memory and not a narrower
+    # matcher. Joe, 2026-08-15: "WHEN A REFUSAL CAN BE ROUTED AROUND,
+    # REMEMBER WHAT WAS REFUSED RATHER THAN WIDENING THE BAN." The first
+    # ruling in that same record is why the duplicate could not simply be
+    # tolerated — a gate that punishes the honest interim state gets
+    # deleted, and a session that verified its work, reported it, and then
+    # summarised it is exactly that state.
+    #
+    # SATISFACTION IS BANKED FIRST, and before the `blocked` check, because
+    # a turn can receipt one clause while firing on its neighbour. Bank the
+    # receipted clause anyway or fixing the neighbour re-fires the settled
+    # one, which is this same defect one layer down.
+    for reason_class, tokens in ledger.get("satisfied", []):
+        record_satisfied(session, claim_identity(
+            "completion-evidence-gate", reason_class, tokens))
+
+    if not blocked:
+        if isinstance(jev, dict) and jev.get("advisory"):
+            print(json.dumps({"systemMessage": jev["advisory"]}))
+        return 0
+
+    # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked
+    # check and fires on a session that has mutated nothing; a close that
+    # calls landed work unbuilt is worth refusing every time it is uttered,
+    # and its identity is the artifact rather than a claim-set anyway.
+    identity = None
+    if jev_identity:
+        identity = jev_identity
+        record_fire(session, identity)
+    elif ledger.get("identity"):
+        reason_class, tokens = ledger["identity"]
+        identity = claim_identity("completion-evidence-gate", reason_class, tokens)
+        if latched(session, identity):
+            return 0
+        record_fire(session, identity)
+
+    audit({"ts": now(), "hook": "completion-evidence-gate",
+           "session": session, "reason": reason,
+           "claim_identity": identity})
+    return Verdict.block(
+        "COMPLETION EVIDENCE GATE — " + reason + ".\n"
+        "A close binds to the ORDER, not to the slice you finished. Every ordered "
+        "clause needs one of: a fresh receipt read from the surface that was "
+        "supposed to change (production probe, live-store readback, the runtime "
+        "that invokes it, the loaded scheduler, a named recipient, real first use), "
+        "or a sentence naming that clause as not done. Rewording the close does not "
+        "help — silence blocks the same as \"done\". If your own record already shows "
+        "the work landed, do not close by calling it unbuilt.")
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-        if payload.get("stop_hook_active"):
-            return 0
-        path = payload.get("transcript_path") or payload.get("transcriptPath")
-        if not path or not os.path.exists(path):
-            return 0
-        # One bad line in the session's own transcript must not switch the
-        # gate off (bypass hunt, PR #1224): lib/transcript_read.py skips it
-        # and records a transcript_tamper event instead of raising.
-        recs = load_transcript(path, hook="completion-evidence-gate",
-                               session=payload.get("session_id") or payload.get("sessionId"),
-                               log_path=JEV_LOG)
-        if not payload_is_carr(payload, recs):
-            return 0
-        session = payload.get("session_id") or payload.get("sessionId")
-        ledger = {}
-        blocked, reason = evaluate(recs, ledger)
-        jev = jev_requirements_advisory(payload, recs)
-
-        # Failed explicit criteria reopen only when the clause layer has not
-        # already done so. Naming the residual uses the same predicate.
-        jev_identity = None
-        if not blocked and isinstance(jev, dict):
-            final = ledger.get("final", "")
-            for item in jev.get("unmet") or []:
-                if RESIDUAL.search(final) and terms_match(terms_of(item["text"]), final):
-                    continue
-                candidate = claim_identity(
-                    "completion-evidence-gate", JEV_REQUIREMENT_REASON, [item["text"]])
-                if candidate and latched(session, candidate):
-                    continue
-                jev_identity = candidate
-                blocked = True
-                reason = (f'explicit acceptance criterion unmet: '
-                          f'"{item["text"]}" ({item.get("reason", "receipt missing")}) — the close does not say '
-                          "it is not done")
-                break
-
-        # THE CLAIM-SET LATCH (2026-08-23, Joe's Stop-gate rationing).
-        #
-        # WHAT IT FIXES, measured twice and independently. The gates-audit
-        # council's labeled ledger caught this gate firing a SECOND time on a
-        # summary whose claims already carried receipts one message earlier. A
-        # replay over seven days, 127 transcripts and 916 Stop points found the
-        # rate behind that anecdote: one session hit at FIVE consecutive stops
-        # on the same claim and the same reason class.
-        #
-        # THE PRECEDENT, and it is why this is a memory and not a narrower
-        # matcher. Joe, 2026-08-15: "WHEN A REFUSAL CAN BE ROUTED AROUND,
-        # REMEMBER WHAT WAS REFUSED RATHER THAN WIDENING THE BAN." The first
-        # ruling in that same record is why the duplicate could not simply be
-        # tolerated — a gate that punishes the honest interim state gets
-        # deleted, and a session that verified its work, reported it, and then
-        # summarised it is exactly that state.
-        #
-        # SATISFACTION IS BANKED FIRST, and before the `blocked` check, because
-        # a turn can receipt one clause while firing on its neighbour. Bank the
-        # receipted clause anyway or fixing the neighbour re-fires the settled
-        # one, which is this same defect one layer down.
-        for reason_class, tokens in ledger.get("satisfied", []):
-            record_satisfied(session, claim_identity(
-                "completion-evidence-gate", reason_class, tokens))
-
-        if not blocked:
-            if isinstance(jev, dict) and jev.get("advisory"):
-                print(json.dumps({"systemMessage": jev["advisory"]}))
-            return 0
-
-        # THE DUAL IS NEVER LATCHED. dual_block() returns before the tracked
-        # check and fires on a session that has mutated nothing; a close that
-        # calls landed work unbuilt is worth refusing every time it is uttered,
-        # and its identity is the artifact rather than a claim-set anyway.
-        identity = None
-        if jev_identity:
-            identity = jev_identity
-            record_fire(session, identity)
-        elif ledger.get("identity"):
-            reason_class, tokens = ledger["identity"]
-            identity = claim_identity("completion-evidence-gate", reason_class, tokens)
-            if latched(session, identity):
-                return 0
-            record_fire(session, identity)
-
-        audit({"ts": now(), "hook": "completion-evidence-gate",
-               "session": session, "reason": reason,
-               "claim_identity": identity})
-        print(json.dumps({"decision": "block", "reason": (
-            "COMPLETION EVIDENCE GATE — " + reason + ".\n"
-            "A close binds to the ORDER, not to the slice you finished. Every ordered "
-            "clause needs one of: a fresh receipt read from the surface that was "
-            "supposed to change (production probe, live-store readback, the runtime "
-            "that invokes it, the loaded scheduler, a named recipient, real first use), "
-            "or a sentence naming that clause as not done. Rewording the close does not "
-            "help — silence blocks the same as \"done\". If your own record already shows "
-            "the work landed, do not close by calling it unbuilt.")}))
-        return 0
-    except Exception:
-        return 0
+    return run(decide)
 
 
 if __name__ == "__main__":
