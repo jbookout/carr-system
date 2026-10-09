@@ -1495,7 +1495,8 @@ def test_hosted_zsh_setup_does_not_refresh_working_indexes():
     download, refresh, unpack = [int(grace) + int(limit) for grace, limit in
                                 re.findall(r"timeout --kill-after=(\d+)s (\d+)s", installer_source)]
     verification = int(re.search(r"signal\.alarm\((\d+)\)", installer_source).group(1))
-    budget_seconds = attempts * download + refresh + unpack + sum(range(1, attempts)) * backoff + verification + 30
+    # One verification before each download and one immediately before install.
+    budget_seconds = attempts * download + refresh + unpack + sum(range(1, attempts)) * backoff + (attempts + 1) * verification + 30
     deadline_minutes = (budget_seconds + 59) // 60
     check("zsh setup deadline equals its retry budget plus bounded overhead",
           setup.get("timeout-minutes") == deadline_minutes,
@@ -1515,6 +1516,8 @@ def test_hosted_zsh_setup_does_not_refresh_working_indexes():
         sudo = fixture / "sudo"
         sudo.write_text("#!" + sys.executable + "\n" + '''
 import json, os, pathlib, sys, time
+if sys.argv[1] == "rm":
+    os.execvp("rm", sys.argv[1:])
 log = pathlib.Path(os.environ["CI_SETUP_CALLS"])
 calls = json.loads(log.read_text()) if log.exists() else []
 calls.append(sys.argv[1:])
@@ -1605,8 +1608,9 @@ except subprocess.TimeoutExpired:
                           "DPkg::Lock::Timeout=30"))
                       for args in calls), calls)
             check(f"zsh setup {mode} uses cached archives without recommends",
-                  all("Dir::Cache::archives=" + str(fixture / "archives") in args
-                      and "--no-install-recommends" in args
+                  all(any(option.startswith("Dir::Cache::archives=")
+                          and option != "Dir::Cache::archives=" + str(fixture / "archives")
+                          for option in args) and "--no-install-recommends" in args
                       for args in calls if "update" not in args), calls)
             check(f"zsh setup {mode} requires the zsh package when installing",
                   all("zsh" in args for args in calls if "update" not in args), calls)
@@ -1625,8 +1629,9 @@ def test_hosted_zsh_cache_requires_authenticated_bytes():
             "timeout": '#!/bin/sh\nshift 2\nexec "$@"\n',
             "sudo": '#!/bin/sh\nexec "$@"\n',
             "apt-cache": "#!" + sys.executable + "\n" + '''
-import hashlib, os, sys
-if os.environ["CI_CACHE_MODE"] == "missing-metadata":
+import hashlib, os, pathlib, sys
+if (os.environ["CI_CACHE_MODE"] == "missing-metadata"
+        and not pathlib.Path(os.environ["CI_CACHE_LOG"]).exists()):
     sys.exit(0)
 if os.environ["CI_CACHE_MODE"] == "metadata-error":
     sys.exit(2)
@@ -1634,18 +1639,33 @@ print("Package: zsh\\nVersion: 1\\nArchitecture: amd64\\nSHA256: " +
       hashlib.sha256(b"trusted-zsh-package").hexdigest())
 ''',
             "apt-get": "#!" + sys.executable + "\n" + '''
-import json, os, pathlib, sys
-root = pathlib.Path(os.environ["ZSH_ARCHIVE_DIR"])
+import json, os, pathlib, stat, sys
+root = pathlib.Path(next(arg.split("=", 1)[1] for arg in sys.argv
+                         if arg.startswith("Dir::Cache::archives=")))
 archive = root / "zsh_1_amd64.deb"
 log = pathlib.Path(os.environ["CI_CACHE_LOG"])
 state = json.loads(log.read_text()) if log.exists() else {}
 if "--download-only" in sys.argv:
     state["restored"] = {p.name: p.read_text() for p in root.glob("*.deb")}
+    state.setdefault("download_archives", []).append(state["restored"])
     # Model apt's filename+size shortcut instead of repairing a bad cache.
     if not archive.exists():
         archive.write_bytes(b"trusted-zsh-package")
+    mode = os.environ["CI_CACHE_MODE"]
+    if mode in ("replace-after-verification", "replace-during-retries"):
+        original = pathlib.Path(os.environ["ZSH_ARCHIVE_DIR"]) / archive.name
+        original.write_bytes(b"altered-zsh-package")
+    if mode == "replace-during-retries" and len(state["download_archives"]) < 3:
+        log.write_text(json.dumps(state))
+        sys.exit(100)
+    if mode == "replace-downloaded-archive":
+        archive.chmod(0o600)
+        archive.write_bytes(b"altered-zsh-package")
 elif "--no-download" in sys.argv:
     state["installed"] = archive.read_text()
+    state["install_directory"] = str(root)
+    state["directory_mode"] = stat.S_IMODE(root.stat().st_mode)
+    state["archive_mode"] = stat.S_IMODE(archive.stat().st_mode)
 log.write_text(json.dumps(state))
 ''',
         }.items():
@@ -1653,11 +1673,14 @@ log.write_text(json.dumps(state))
             path.write_text(source)
             path.chmod(0o755)
         for mode in ("valid", "same-size-tampered", "other-version", "old-version-filename",
-                     "missing-metadata", "metadata-error"):
+                     "missing-metadata", "metadata-error", "replace-after-verification",
+                     "replace-during-retries", "replace-downloaded-archive"):
             archives = fixture / mode
             archives.mkdir()
             archive = archives / ("zsh_2_amd64.deb" if mode == "old-version-filename" else "zsh_1_amd64.deb")
-            restored = (b"trusted-zsh-package" if mode in ("valid", "old-version-filename") else
+            restored = (b"trusted-zsh-package" if mode in ("valid", "old-version-filename",
+                        "replace-after-verification", "replace-during-retries",
+                        "replace-downloaded-archive") else
                         b"older-zsh-package!!" if mode == "other-version" else b"altered-zsh-package")
             archive.write_bytes(restored)
             log = fixture / (mode + ".json")
@@ -1672,13 +1695,27 @@ log.write_text(json.dumps(state))
                 check("zsh cache verification error stops before apt can consume archives",
                       ran.returncode != 0 and not state, {"rc": ran.returncode, "state": state})
                 continue
+            if mode == "replace-downloaded-archive":
+                check("zsh refuses a same-size replacement of downloaded bytes before install",
+                      ran.returncode != 0 and "installed" not in state, state)
+                continue
             check(f"zsh cache {mode} installs authenticated package bytes",
                   ran.returncode == 0 and state.get("installed") == "trusted-zsh-package",
                   {"rc": ran.returncode, "state": state, "stderr": ran.stderr})
-            expected = {"zsh_1_amd64.deb": "trusted-zsh-package"} if mode == "valid" else {}
+            expected = {"zsh_1_amd64.deb": "trusted-zsh-package"} if mode in (
+                "valid", "replace-after-verification", "replace-during-retries") else {}
             check(f"zsh cache {mode} exposes only verified restored archives to apt",
                   state.get("restored") == expected, state)
-            if mode != "valid":
+            if mode in ("replace-after-verification", "replace-during-retries"):
+                check(f"zsh cache {mode} isolates every retry from restored archive replacement",
+                      all(archives == expected for archives in state.get("download_archives", [])), state)
+                check(f"zsh cache {mode} installs from a private read-only archive set",
+                      state.get("install_directory") != str(archives)
+                      and state.get("directory_mode") == 0o700
+                      and state.get("archive_mode") == 0o444, state)
+                check(f"zsh cache {mode} removes the private installation directory",
+                      not pathlib.Path(state.get("install_directory", str(archives))).exists(), state)
+            elif mode != "valid":
                 quarantined = archives / "quarantine" / archive.name
                 check(f"zsh cache {mode} preserves rejected bytes in quarantine",
                       quarantined.is_file() and quarantined.read_bytes() == restored)
