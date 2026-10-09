@@ -415,8 +415,10 @@ def main():
     # procedure 77 -> 78 on 2026-09-29: rule ede4b241 (cloud model choice) is a
     # judgment_ambient rule and owes a manifest row (procedure); one whole rule
     # ENTERING the active set, nothing reclassified.
+    # procedure 78 -> 79 on 2026-10-08: rule 8400cd3d (new-work sizing) is a
+    # judgment_ambient rule and owes one procedure row. Nothing was reclassified.
     reviewed_counts = {
-        "constraint": 70, "procedure": 78, "doctrine": 12, "rubric": 35,
+        "constraint": 70, "procedure": 79, "doctrine": 12, "rubric": 35,
         "preference": 12, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -454,7 +456,7 @@ def main():
         "source_manifest_provenance": {
             "path": "audits/guidance-migration-manifest.v1.tsv", "sha256": "a" * 64,
             "manifest": "carr-guidance-migration", "schema_version": "1.0.0",
-            "source_classification": "judgment_ambient", "entry_count": 94,
+            "source_classification": "judgment_ambient", "entry_count": 95,
         },
         "base_inventory": {
             "path": "ops/config/rule-enforcement-map.json", "sha256": "b" * 64,
