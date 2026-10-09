@@ -502,7 +502,7 @@ with tempfile.TemporaryDirectory(prefix="malformed-receipt-stop-") as stop_tmp:
             "type": "tool_result", "tool_use_id": "standing-exact", "content": value,
         }]}, "sessionId": "session-exact"}
 
-    for malformed_schema in ({}, []):
+    for malformed_schema in ({}, []):  # type: object
         malformed_receipt = receipt(output)
         malformed_receipt["schema"] = malformed_schema
         for label, malformed_record in (
@@ -511,7 +511,7 @@ with tempfile.TemporaryDirectory(prefix="malformed-receipt-stop-") as stop_tmp:
             stop_records = [standing_call, standing_result(standing_value),
                             claude_tool_call(), malformed_record]
             stop_transcript.write_text("".join(json.dumps(record) + "\n" for record in stop_records))
-            audits = []
+            audits: list[dict] = []
             saved_audit, saved_stdin = drift.audit, sys.stdin
             drift.audit = audits.append
             sys.stdin = io.StringIO(json.dumps({
@@ -1448,7 +1448,7 @@ with tempfile.TemporaryDirectory() as dispatch_tmp:
                                        session=f"dispatch-{index}-{client}-{background}",
                                        tool_input={"command": command,
                                                    "run_in_background": background})
-                    calls = []
+                    calls: list[object] = []
 
                     def selector_runner(argv, **kwargs):
                         args = json.loads(argv[-1])
@@ -1757,20 +1757,20 @@ with tempfile.TemporaryDirectory() as route_tmp:
         big_out = rail.process(big, runner=Runner(route_result(union, statement=long_text)))
         big_text = context(big_out)
         big_row = json.loads(big_text)
-        delivered = [r["id"] for r in big_row["rules"]]
+        delivered_ids = [r["id"] for r in big_row["rules"]]
         overflowed = [o["id"] for o in big_row["overflow"]]
         check("overflow: the injected context still fits under the 10,000-character cap",
               routes_lib.context_chars(big_text) <= routes_lib.CONTEXT_CAP_CHARS,
               routes_lib.context_chars(big_text))
         check("overflow: no routed rule is dropped — each is full text or listed",
-              sorted(delivered + overflowed) == union, (delivered, overflowed))
+              sorted(delivered_ids + overflowed) == union, (delivered_ids, overflowed))
         check("overflow: some rules overflowed and each carries a one-line summary",
               bool(overflowed and all(o["summary"].startswith("RULE ")
                                       for o in big_row["overflow"])),
               big_row["overflow"][:2])
         check("overflow: rules not in the always-on file are delivered before those that are",
-              bool(delivered and (not set(delivered) & set(always_on)
-                                  or set(union) - set(always_on) <= set(delivered))), delivered)
+              bool(delivered_ids and (not set(delivered_ids) & set(always_on)
+                                  or set(union) - set(always_on) <= set(delivered_ids))), delivered_ids)
         check("overflow: the receipt still validates",
               routes_lib.validate_route_receipt(big_row, repo=REPO))
         check("overflow: only fully delivered rules are recorded for dedupe",
