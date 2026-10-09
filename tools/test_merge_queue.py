@@ -364,6 +364,72 @@ class QueueTests(unittest.TestCase):
             q.api('repos/example/repo')
         self.assertGreaterEqual(starts[0] - peer_start, 2.0)
 
+    def test_reservation_suite_runs_as_script_without_pythonpath(self):
+        env = os.environ.copy()
+        env.pop('PYTHONPATH', None)
+        result = subprocess.run([sys.executable, str(ROOT / 'tools/test_github_rate_limit.py')],
+                                cwd=ROOT, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_forward_clock_step_before_reserve_returns_preserves_peer_gap(self):
+        q = module.Queue(self.state, self.root)
+        self.addCleanup(q.db.close)
+        wall, monotonic, starts = [100.0], [100.0], []
+        q.budget.clock = lambda: wall[0]
+        peer = module.GitHubReadBudget({}, path=q.budget.path, clock=lambda: wall[0])
+        self.assertEqual(peer.reserve('core'), 0.0)
+        peer_start = monotonic[0]
+        original_reserve = q.budget.reserve
+        def reserve(*args, **kwargs):
+            reservation = original_reserve(*args, **kwargs)
+            wall[0] += 1.9
+            return reservation
+        def sleep(seconds):
+            monotonic[0] += seconds
+            wall[0] += seconds
+        def command(argv, **kwargs):
+            starts.append(monotonic[0])
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(q.budget, 'reserve', side_effect=reserve), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+        self.assertGreaterEqual(starts[0] - peer_start, 2.0)
+
+    def test_successful_budget_check_crossing_spacing_deadline_prevents_dispatch(self):
+        for bound, rollback in ((3, .8), (30, 27.8), (3, 0)):
+            with self.subTest(bound=bound, rollback=rollback):
+                q = module.Queue(self.root / f'late-check-{bound}-{rollback}', self.root)
+                self.addCleanup(q.db.close)
+                wall, monotonic, checks = [100.0], [100.0], []
+                q.budget.clock = lambda: wall[0]
+                with q.budget.state() as data:
+                    data[q.budget.shared] = {'next_start': 102.0}
+                original_reserve, original_check = q.budget.reserve, q.budget.check
+                def reserve(*args, **kwargs):
+                    reservation = original_reserve(*args, **kwargs)
+                    wall[0] -= rollback
+                    return reservation
+                def sleep(seconds):
+                    monotonic[0] += seconds
+                    wall[0] += seconds
+                def check(resource):
+                    original_check(resource)
+                    checks.append(monotonic[0])
+                    sleep(1)
+                with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                        patch.object(module.time, 'sleep', side_effect=sleep), \
+                        patch.dict(module.BOUNDS['spacing'], seconds=bound), \
+                        patch.object(q.budget, 'reserve', side_effect=reserve), \
+                        patch.object(q.budget, 'check', side_effect=check), \
+                        patch.object(module, 'command', return_value='{}') as command:
+                    with self.assertRaises(module.WaitExpired):
+                        q.api('repos/example/repo')
+                command.assert_not_called()
+                self.assertEqual(len(checks), 1)
+                self.assertGreaterEqual(monotonic[0], 100 + bound)
+
     def test_reserved_slot_is_rechecked_after_provider_budget_check(self):
         q = module.Queue(self.state, self.root)
         self.addCleanup(q.db.close)

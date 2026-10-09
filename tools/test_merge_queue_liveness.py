@@ -974,7 +974,8 @@ class LivenessTests(unittest.TestCase):
                     f.q.enqueue(mq.REPOS[0], 9, f.approved)
             finally: connection.close()
             record_fault('sqlite_contention')
-            with patch.object(f.q.budget, 'reserve', return_value=f.q.budget.clock() + mq.BOUNDS['spacing']['seconds'] + 1):
+            delay = mq.BOUNDS['spacing']['seconds'] + 1
+            with patch.object(f.q.budget, 'reserve', return_value=(f.q.budget.clock() + delay, delay)):
                 with self.assertRaises(mq.WaitExpired): f.q.pr(mq.REPOS[0], 1)
             record_fault('spacing_pause')
             pacing = Path(str(f.q.budget.path) + '.call.lock')

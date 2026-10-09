@@ -334,9 +334,9 @@ class Queue:
         with self.budget.call_slot(timeout=BOUNDS['pacing_lock']['seconds']) as mark_started:
             read = gh_api_read(['gh', *args]) if args[0] == 'api' else args[:2] == ('pr', 'checks')
             resource = resource_for(list(args))
-            slot = self.budget.reserve(resource, absolute=True)
+            slot, reserved_delay = self.budget.reserve(resource, with_slot=True)
             clock = self.budget.clock
-            slot_deadline = time.monotonic() + max(0, slot - clock())
+            slot_deadline = time.monotonic() + reserved_delay
             end = time.monotonic() + BOUNDS['spacing']['seconds']
             delay = max(slot - clock(), slot_deadline - time.monotonic(), self.last_gh + self.gap - time.monotonic())
             if delay > BOUNDS['spacing']['seconds']:
@@ -348,6 +348,8 @@ class Queue:
                     continue
                 self.budget.check(resource)
                 self.check_cancelled()
+                if time.monotonic() >= end:
+                    raise WaitExpired('Shared pacing wait exceeded spacing deadline; entry stopped')
                 if clock() >= slot and time.monotonic() >= max(slot_deadline, self.last_gh + self.gap):
                     break
             else:
