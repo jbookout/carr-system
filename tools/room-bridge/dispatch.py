@@ -196,6 +196,7 @@ def _to_codex(
     stream_output: bool = False,
     timeout_s: float | None = None,
     on_executor=None,
+    claim_id: str | None = None,
 ) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
@@ -225,8 +226,11 @@ def _to_codex(
     # Desktop thread on every retry (PR #1345 review). "delivered_live" says the
     # answer arrives in the session's own window and nowhere a caller can wait on.
     if live_desktop and thread and codex_ipc.thread_owner(thread) is not None:
+        marker = f'Room write owner: {claim_id}' if claim_id else None
+        if marker:
+            task += '\n\n' + marker
         if on_executor:
-            on_executor({'kind': 'codex_desktop', 'thread_id': thread})
+            on_executor({'kind': 'codex_desktop', 'thread_id': thread, 'marker': marker})
         live = codex_ipc.start_turn(thread, task, approval_policy="never",
                                     model=entry["model"], effort=entry["effort"])
         if live.get("status") != "not_live":
@@ -499,6 +503,7 @@ def dispatch(
                 {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
                 timeout_s=codex_timeout_s, **stream_options,
                 **executor_options,
+                claim_id=msg_id if ownership else None,
             )
         else:
             outcome = _to_codex(
@@ -506,6 +511,7 @@ def dispatch(
                 live_desktop=live_desktop, timeout_s=codex_timeout_s,
                 **stream_options,
                 **executor_options,
+                claim_id=msg_id if ownership else None,
             )
             # pin the desk to its thread so the next task lands in the same one
             if outcome.get("thread_id"):

@@ -413,6 +413,47 @@ def main() -> int:
     check('terminal notification queued before the start response still confirms termination',
           terminal_notification_can_precede_start_response)
 
+    def desktop_recovery_reads_only_the_marked_terminal_turn():
+        binary = root / 'bin'
+        binary.mkdir()
+        codex = binary / 'codex'
+        trace = root / 'stdio-requests.json'
+        marker = 'Room write owner: unique-job'
+        user_item = {'type': 'userMessage', 'content': [{'type': 'text', 'text': marker}]}
+        cases = [
+            ('desktop-thread', 'completed', user_item, True),
+            ('desktop-thread', 'inProgress', user_item, False),
+            ('desktop-thread', 'completed', {'type': 'userMessage', 'content': [
+                {'type': 'text', 'text': 'Room write owner: different-job'}]}, False),
+            ('desktop-thread', 'completed', {'type': 'agentMessage', 'content': [
+                {'type': 'text', 'text': marker}]}, False),
+            ('other-thread', 'completed', user_item, False),
+        ]
+        for tid, status, item, expected in cases:
+            reply = {'thread': {'id': tid, 'turns': [
+                {'id': 'desktop-turn', 'status': status, 'items': [item]}]}}
+            codex.write_text(f'''#!{sys.executable}
+import json, sys
+from pathlib import Path
+methods = []
+for line in sys.stdin:
+ msg = json.loads(line)
+ methods.append(msg['method'])
+ if msg['method'] == 'initialize':
+  print(json.dumps({{'id':msg['id'], 'result':{{}}}}), flush=True)
+ elif msg['method'] == 'thread/read':
+  print(json.dumps({{'id':msg['id'], 'result':{reply!r}}}), flush=True)
+Path({str(trace)!r}).write_text(json.dumps(methods))
+''')
+            codex.chmod(0o755)
+            with patch.dict(os.environ, {'PATH': str(binary)}):
+                got = dispatch.codex_wire.desktop_turn_terminated('desktop-thread', marker)
+            assert got is expected, (tid, status, item, got)
+            assert json.loads(trace.read_text()) == ['initialize', 'initialized', 'thread/read']
+
+    check('Desktop reconciliation reads marked terminal history without starting or resuming a turn',
+          desktop_recovery_reads_only_the_marked_terminal_turn)
+
     tmp.cleanup()
     print()
     if FAILURES:

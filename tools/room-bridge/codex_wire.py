@@ -35,6 +35,8 @@ import json
 import os
 import socket
 import struct
+import selectors
+import subprocess
 import time
 import uuid
 
@@ -154,7 +156,51 @@ class Wire:
                 return json.loads(payload)
 
 
-def wait_response(wire: Wire, request_id: str, transcript: list[dict]) -> dict:
+class _StdioWire:
+    """Read persisted Desktop turns through the supported app-server protocol."""
+    def __init__(self, timeout: float):
+        self.proc = subprocess.Popen(['codex', 'app-server'], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        assert self.proc.stdin is not None and self.proc.stdout is not None
+        self.input = self.proc.stdin
+        self.output = self.proc.stdout
+        self.deadline = time.monotonic() + timeout
+        self.buf = bytearray()
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.output, selectors.EVENT_READ)
+
+    def upgrade(self) -> None:
+        pass
+
+    def send_json(self, value: dict) -> None:
+        self.input.write((json.dumps(value) + '\n').encode())
+        self.input.flush()
+
+    def receive_json(self) -> dict:
+        while b'\n' not in self.buf:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0 or not self.selector.select(remaining):
+                raise TimeoutError('thread history read timed out')
+            chunk = os.read(self.output.fileno(), 65536)
+            if not chunk:
+                raise EOFError('app-server exited during thread history read')
+            self.buf.extend(chunk)
+        line, _, remainder = self.buf.partition(b'\n')
+        self.buf = remainder
+        return json.loads(line)
+
+    def close(self) -> None:
+        self.selector.close()
+        self.input.close()
+        self.output.close()
+        try:
+            self.proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=2)
+
+
+def wait_response(wire: Wire | _StdioWire, request_id: str, transcript: list[dict]) -> dict:
     while True:
         message = wire.receive_json()
         transcript.append(message)
@@ -164,13 +210,43 @@ def wait_response(wire: Wire, request_id: str, transcript: list[dict]) -> dict:
             return message["result"]
 
 
-def _initialize(wire: Wire) -> None:
+def _initialize(wire: Wire | _StdioWire) -> None:
     wire.upgrade()
     wire.send_json({'id': 'initialize', 'method': 'initialize', 'params': {
         'clientInfo': {'name': 'hermes-dispatch', 'version': '0.1.0'},
         'capabilities': {'experimentalApi': False}}})
     wait_response(wire, 'initialize', [])
     wire.send_json({'method': 'initialized'})
+
+
+def desktop_turn_terminated(thread_id: str, marker: str, timeout: float = 5.0) -> bool:
+    """A terminal turn containing this job's unique user-input marker is proof.
+
+    A different completed turn, an absent marker or unreadable history retains
+    the claim. This reader sends no thread/resume or turn/start request.
+    """
+    wire = None
+    try:
+        wire = _StdioWire(timeout)
+        _initialize(wire)
+        wire.send_json({'id': 'thread-read', 'method': 'thread/read',
+                        'params': {'threadId': thread_id, 'includeTurns': True}})
+        thread = wait_response(wire, 'thread-read', []).get('thread') or {}
+        return bool(marker) and thread.get('id') == thread_id and any(
+            turn.get('status') in TERMINAL and any(
+                item.get('type') == 'userMessage' and any(
+                    content.get('type') == 'text' and marker in content.get('text', '')
+                    for content in item.get('content', []))
+                for item in turn.get('items', []))
+            for turn in thread.get('turns', []))
+    except (OSError, EOFError, RuntimeError, ValueError, KeyError, TypeError):
+        return False
+    finally:
+        if wire is not None:
+            try:
+                wire.close()
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
 
 def _terminal(message: dict, thread_id: str, turn_id: str | None) -> bool:

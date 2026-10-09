@@ -253,6 +253,29 @@ os._exit(17)
             self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
         self.assertEqual(server.methods().count('thread/read'), 2)
 
+    def test_desktop_delivery_binds_marker_and_reconciles_terminal_history(self):
+        self.reg.remember_thread('sol', 'desktop-thread')
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch.codex_ipc, 'thread_owner', return_value='desktop-owner'), \
+             patch.object(dispatch.codex_ipc, 'start_turn', return_value={'status': 'delivered'}) as start:
+            row = self.send(writes=['src/*'], live_desktop=True)
+        self.assertEqual(row['status'], 'delivered_live')
+        self.assertEqual(row['ownership_state'], 'held')
+        marker = row['executor']['marker']
+        self.assertIn(row['msg_id'], marker)
+        self.assertIn(marker, start.call_args.args[1])
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch('codex_wire.desktop_turn_terminated', return_value=False) as probe, \
+             patch.object(dispatch, '_to_codex') as run:
+            with self.assertRaises(desks.DeskError):
+                self.send(writes=['src/*'])
+            run.assert_not_called()
+            probe.assert_called_once_with('desktop-thread', marker)
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch('codex_wire.desktop_turn_terminated', return_value=True), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
+            self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
+
     def test_pid_probe_denied_or_from_another_host_keeps_claim(self):
         identity = write_ownership.process_owner()
         self.active(writes=['src/*'], ownership_state='held', owner_process=identity,

@@ -51,6 +51,10 @@ def termination_evidence(row: dict) -> str | None:
         import codex_wire
         if codex_wire.turn_terminated(executor['socket'], executor['thread_id'], executor['turn_id']):
             return 'Codex turn terminated (thread/read)'
+    if kind == 'codex_desktop' and executor.get('thread_id') and executor.get('marker'):
+        import codex_wire
+        if codex_wire.desktop_turn_terminated(executor['thread_id'], executor['marker']):
+            return 'Codex Desktop turn terminated (marked thread/read)'
     return None
 
 
