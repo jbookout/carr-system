@@ -8,18 +8,9 @@ Runs the real hook as a subprocess against a throwaway state directory
 driven the way Claude Code drives it: PreToolUse, then PostToolUse with the
 answer (or PostToolUseFailure with the error).
 
-THE LOCKOUT CASES come first, in the risk order Jev gave on 2026-09-26 for
-the PR #1328 review round (out/jev-judge.jsonl, kind
-rule-boot-gate-lockout-test-risk-r3, second review round): deny cap 0.77,
-outage after a good arm 0.75, out-of-range page is not an outage 0.65,
-mid-session digest change 0.62, foreign MCP prefix 0.54, tool-less subagent
-0.52, Worker not deployed 0.49, state folder unwritable (armed) 0.48, disk
-full (armed) 0.48, a failure is not sticky 0.48, state folder unwritable
-(never armed) 0.44, disk full (never armed) 0.40, short repeat notices 0.25. Then the first round's order (kind rule-boot-gate-test-risk):
-unreachable-no-deadlock 0.79, fetch-never-denied 0.77, deny-before/allow-after
-0.74, digest-change re-arms 0.69, re-arm on compact 0.68, subagent path 0.65.
-Pages-complete and no-sponsor-leak are properties of the verb and are proven
-in mcp-server/test/rule-boot.test.mjs.
+The recovery cases verify that ordinary effects remain held until complete boot,
+while fetches remain available through outage and state failures.
+Pages-complete and sponsor scoping are checked in mcp-server/test/rule-boot.test.mjs.
 
 DISK FULL is simulated with a sitecustomize module on the hook's PYTHONPATH
 that makes every write under the state directory raise ENOSPC; UNWRITABLE is
@@ -35,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -76,7 +68,8 @@ class Case:
 
     def boot(self, page, digest=None, pages=None):
         body = {"schema": "carr-rule-boot/v1", "digest": f"sha256:{(digest or self.digest) * 8}",
-                "page": page, "pages_total": pages or self.pages, "text": "x"}
+                "page": page, "pages_total": pages or self.pages, "text": "x",
+                "total_chars": pages or self.pages}
         if getattr(self, "sized", False):
             total = pages or self.pages
             body["text"] = self.page_text(page)
@@ -119,13 +112,18 @@ class Case:
         interpreter loads, so those cases keep a real process per call."""
         return "PYTHONPATH" in self.env
 
-    def arm(self, source="startup"):
+    def arm(self, source="startup", agent=None):
+        """SessionStart as the host sends it. A subagent's own SessionStart
+        (its start, its compaction) carries the PARENT's session_id plus the
+        subagent's agent_id (Claude Code 2.1.288: compaction calls the
+        SessionStart hooks with the compacting context's agentContext)."""
         if not self.subprocess_only():
             with InProcess(self) as (_hook, lib):
-                return lib.arm_session(SESSION, source) + "\n"
+                return lib.arm_session(SESSION, source, **({"agent_id": agent} if agent else {})) + "\n"
         code = ("import sys; sys.path.insert(0, sys.argv[1]); "
-                "from lib.rule_boot_gate import arm_session; print(arm_session(sys.argv[2], sys.argv[3]))")
-        return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source],
+                "from lib.rule_boot_gate import arm_session; "
+                "print(arm_session(sys.argv[2], sys.argv[3], **({'agent_id': sys.argv[4]} if sys.argv[4] else {})))")
+        return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source, agent or ""],
                               capture_output=True, text=True, env=self.env, timeout=30).stdout
 
     def hook(self, payload):
@@ -216,7 +214,9 @@ def _load(tree):
         hspec = importlib.util.spec_from_file_location(f"{tag}_hook", os.path.join(tree, "hooks", "rule-boot-gate.py"))
         hook = importlib.util.module_from_spec(hspec)
         hspec.loader.exec_module(hook)
-        _LOADED[tree] = (hook, lib, types.ModuleType("lib"))
+        pkg = types.ModuleType("lib")
+        pkg.__path__ = [os.path.join(tree, "lib")]
+        _LOADED[tree] = (hook, lib, pkg)
     return _LOADED[tree]
 
 
@@ -318,42 +318,29 @@ def never_denied(c, n=6, **kw):
 def case_deny_cap(c):
     c.stub("a", pages=3)
     c.arm()
-    for i in range(3):
-        assert denied(c.call(*READ)), f"hold {i + 1} of 3 must deny"
-    r = c.call(*READ)
-    assert not denied(r) and "RULES UNREAD" in notice(r), f"the 4th call must pass with RULES UNREAD: {r}"
-    never_denied(c)
-    # Progress resets the count: after a confirmed page the context is held again, up to the cap.
-    c.fetch(1)
-    assert denied(c.call(*READ)), "a confirmed page resets the cap: held again"
-    # A subagent is capped on its own count.
-    for _ in range(3):
+    for _ in range(10):
+        assert denied(c.call(*READ)), "repeated holds never authorize unread work"
+    assert len(c.holds()) == 3, "diagnostic writes stay bounded"
+    for page in (1, 2, 3):
+        c.fetch(page)
+    assert c.call(*READ) is None
+    for _ in range(10):
         assert denied(c.call(*READ, agent="sub-9"))
-    assert not denied(c.call(*READ, agent="sub-9"))
 
 
 def case_outage_after_good_arm(c):
     c.stub("a", pages=7)
     c.arm()
     pre, post = c.fetch(1, answer="error")
-    assert not denied(pre) and "RULES UNAVAILABLE" in notice(post), post
-    r = c.call(*READ)
-    assert not denied(r) and "RULES UNAVAILABLE" in notice(r), f"one failed attempt must unlock: {r}"
-    # Same for a subagent over the Bash form.
+    assert not denied(pre) and "RULES UNAVAILABLE" in notice(post)
+    assert denied(c.call(*READ)), "outage is not delivery"
     c.fetch(1, agent="sub-2", form="bash", answer="error")
-    r = c.call(*READ, agent="sub-2")
-    assert not denied(r) and "RULES UNAVAILABLE" in notice(r), r
-    # A fetch that never answered at all (no Post hook) counts as failed after the grace.
-    c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
-    c2.stub("a", pages=7)
-    c2.arm()
-    c2.fetch(1, answer=None)
-    folder = os.path.join(c2.state, SESSION, "fetched", "main")
-    for root, _dirs, files in os.walk(folder):
+    assert denied(c.call(*READ, agent="sub-2"))
+    c.fetch(1, answer=None)
+    for root, _dirs, files in os.walk(c.state):
         for name in files:
             os.utime(os.path.join(root, name), (1, 1))
-    r = c2.call(*READ)
-    assert not denied(r) and "RULES UNAVAILABLE" in notice(r), f"unanswered fetch past grace: {r}"
+    assert denied(c.call(*READ)), "unanswered fetch does not unlock"
 
 
 def case_mid_session_digest_change(c):
@@ -390,42 +377,32 @@ def case_disk_full_armed(c):
     c.stub("a", pages=3)
     c.arm()
     c.disk_full()
-    r = never_denied(c)
-    assert "UNWRITABLE" in notice(r), r
-    pre, _ = c.fetch(1)
-    assert not denied(pre), pre
-    never_denied(c)
-    never_denied(c, agent="sub-3")
+    r = c.call(*READ)
+    assert denied(r) and "UNWRITABLE" in r["permissionDecisionReason"]
+    assert not denied(c.fetch(1)[0]), "recovery fetch remains available"
+    assert denied(c.call(*READ, agent="sub-3"))
 
 
 def case_toolless_subagent(c):
     c.stub("a", pages=3)
     c.arm()
-    r = c.call(*READ, agent="sl-1", agent_type="statusline-setup")
-    assert not denied(r) and "RULES UNREAD" in notice(r), r
-    never_denied(c, agent="sl-1", agent_type="statusline-setup")
-    # A custom Read-only type is not known in advance: the cap unlocks it.
-    for _ in range(3):
-        c.call(*READ, agent="ro-1", agent_type="reader-only")
-    never_denied(c, agent="ro-1", agent_type="reader-only")
+    for kind in ("statusline-setup", "reader-only"):
+        for _ in range(6):
+            assert denied(c.call(*READ, agent=kind, agent_type=kind))
 
 
 def case_not_deployed_distinct(c):
     c.stub("not_deployed")
     text = c.arm()
-    assert "NOT DEPLOYED" in text and "UNAVAILABLE" not in text, text
-    assert "stop" not in text.lower(), f"the not-deployed notice must not tell a session to stop: {text}"
-    r = c.call(*READ)
-    assert not denied(r) and "NOT DEPLOYED" in notice(r), f"shown once, nothing held: {r}"
-    assert c.call(*READ) is None, "shown once per context"
-    never_denied(c, agent="sub-4")
-    # Armed, then the fetch is rejected as unsupported (Worker rolled back).
+    assert "NOT DEPLOYED" in text and "UNAVAILABLE" not in text
+    assert denied(c.call(*READ)), "missing deployment does not prove delivery"
+    assert not denied(c.fetch(1, answer="unsupported")[0])
     c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
     c2.stub("a", pages=3)
     c2.arm()
     _, post = c2.fetch(1, answer="unsupported")
-    assert "NOT DEPLOYED" in notice(post), post
-    never_denied(c2)
+    assert "NOT DEPLOYED" in notice(post)
+    assert denied(c2.call(*READ))
 
 
 def case_state_unwritable_armed(c):
@@ -433,14 +410,9 @@ def case_state_unwritable_armed(c):
     c.arm()
     os.chmod(os.path.join(c.state, SESSION), 0o555)
     try:
-        r = never_denied(c)
-        assert "UNWRITABLE" in notice(r), r
-        pre, _ = c.fetch(1)
-        assert not denied(pre)
-        for _ in range(3):
-            c.fetch(2)
-        never_denied(c)
-        never_denied(c, agent="sub-5")
+        assert denied(c.call(*READ))
+        assert not denied(c.fetch(1)[0])
+        assert denied(c.call(*READ, agent="sub-5"))
     finally:
         os.chmod(os.path.join(c.state, SESSION), 0o755)
 
@@ -449,18 +421,18 @@ def case_state_unwritable_never_armed(c):
     os.makedirs(c.state)
     os.chmod(c.state, 0o555)
     try:
-        c.fetch(1, answer=None)
-        never_denied(c)
-        never_denied(c, agent="sub-6")
+        assert not denied(c.fetch(1, answer=None)[0])
+        assert denied(c.call(*READ))
+        assert denied(c.call(*READ, agent="sub-6"))
     finally:
         os.chmod(c.state, 0o755)
 
 
 def case_disk_full_never_armed(c):
     c.disk_full()
-    c.fetch(1, answer=None)
-    never_denied(c)
-    never_denied(c, agent="sub-7")
+    assert not denied(c.fetch(1, answer=None)[0])
+    assert denied(c.call(*READ))
+    assert denied(c.call(*READ, agent="sub-7"))
 
 
 def case_out_of_range_not_outage(c):
@@ -489,48 +461,35 @@ def case_failure_not_sticky(c):
     c.stub("a", pages=3)
     c.arm()
     c.fetch(1, answer="error")
-    assert "UNAVAILABLE" in notice(c.call(*READ))
+    r = c.call(*READ)
+    assert denied(r) and "UNAVAILABLE" in r["permissionDecisionReason"]
     for p in (1, 2, 3):
         c.fetch(p)
     assert c.call(*READ) is None, "every page confirmed after the outage: silent"
 
 
-def case_notice_short_after_first(c):
+def case_diagnostics_bounded_enforcement_continues(c):
     c.stub("a", pages=3)
     c.arm()
-    for _ in range(3):
-        c.call(*READ)
-    first = notice(c.call(*READ))
-    second = notice(c.call(*READ))
-    assert "RULES UNREAD" in first and len(first) > 200, first
-    assert second.startswith("RULES UNREAD") and len(second) < 200, second
-    folder = os.path.join(c.state, SESSION, "fetched", "main")
-    holds = [n for _r, _d, files in os.walk(folder) for n in files if n.startswith("d")]
-    assert len(holds) == 3, f"no marker is written past the cap: {holds}"
+    for _ in range(10):
+        r = c.call(*READ)
+        assert denied(r) and "page" in r["permissionDecisionReason"]
+    assert len(c.holds()) == 3, "diagnostic writes stay bounded"
 
 
 # --- first-round cases
 
-def case_unreachable_no_deadlock(c):
+def case_outage_keeps_effects_held(c):
     c.stub(None)
-    text = c.arm()
-    assert "RULES UNAVAILABLE" in text, text
-    assert denied(c.call(*READ)), "before any attempt an ordinary tool is held"
-    pre, _ = c.fetch(1, form="bash", answer="error")
-    assert not denied(pre), f"the fetch attempt itself must run: {pre}"
-    r = c.call(*READ)
-    assert not denied(r), f"after one attempt the context must be unlocked: {r}"
-    assert "RULES UNAVAILABLE" in notice(r), r
-    # A subagent is unlocked the same way: one attempt, never a deadlock.
-    assert denied(c.call(*READ, agent="sub-1"))
-    assert not denied(c.fetch(1, agent="sub-1", answer=None)[0])
-    assert not denied(c.call(*READ, agent="sub-1"))
-    # Unarmed session: same shape, its own notice.
-    shutil.rmtree(c.state)
+    assert "RULES UNAVAILABLE" in c.arm()
     assert denied(c.call(*READ))
-    assert not denied(c.fetch(1, answer=None)[0])
-    r = c.call(*READ)
-    assert not denied(r) and "NOT ARMED" in notice(r), r
+    assert not denied(c.fetch(1, form="bash", answer="error")[0])
+    assert denied(c.call(*READ))
+    assert not denied(c.fetch(1, agent="sub-1", answer=None)[0])
+    assert denied(c.call(*READ, agent="sub-1"))
+    c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    assert not denied(c2.fetch(1, answer=None)[0])
+    assert denied(c2.call(*READ)), "unarmed attempt is not delivery"
 
 
 def case_fetch_never_denied(c):
@@ -693,7 +652,7 @@ def case_piped_formatter(c):
     c.arm()
     pipes = [(f"{abs_cmd(1)} | {PY_FORMAT}", indent2),
              (f"{abs_cmd(2)} 2>&1 | jq .", indent2),
-             (f"{abs_cmd(3)} | jq -r .rule_boot", lambda b: json.dumps(json.loads(b)["rule_boot"], indent=2)),
+             (f"{abs_cmd(3)} | jq -c '{{ok: .ok, rule_boot: .rule_boot}}'", indent2),
              (f"{abs_cmd(4)} | head -n 4000", None),
              (f"{abs_cmd(5)} </dev/null | python3 -m json.tool", indent2)]
     for p, (cmd, out) in enumerate(pipes, start=1):
@@ -727,25 +686,27 @@ def case_piped_formatter(c):
                f"{abs_cmd(1)} | python3 -c 'import os; os.system(\"id\")'",
                f"{abs_cmd(1)} | python3 -c 'print(open(\"/etc/hosts\").read())'",
                f"{abs_cmd(1)} | python3 -c '__import__(\"os\")'",
-               f"{abs_cmd(1)} | python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"rule_boot\"][\"page\"]=2; print(json.dumps(d))'",
-               f"{abs_cmd(1)} | python3 -c 'print(\"{{\\\"rule_boot\\\": 1}}\")'",
                f"{abs_cmd(1)} | python3 /tmp/evil.py",
-               # Rewriting the text while keeping the JSON (review of #1343, nit 2).
-               f"{abs_cmd(1)} | python3 -c 'import sys; print(\"maybe\".join(sys.stdin.read().split(\"NEVER\")))'",
-               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read().lower())'",
-               # A character loop can rewrite text without a string method and keep
-               # the boot page's JSON, digest, and length intact.
-               f"{abs_cmd(1)} | python3 -c 'import sys\nfor ch in sys.stdin.read(): print(\"X\" if ch == \"N\" else ch, end=\"\")'",
-               # Even straight-line reads can replace one byte while preserving
-               # the boot page's length and claimed digest.
-               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read(169), end=\"\"); sys.stdin.read(1); print(\"X\", end=\"\"); print(sys.stdin.read(), end=\"\")'",
-               f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'",
+               f"{abs_cmd(1)} | jq env",
                f"{abs_cmd(1)} | jq -n '\"x\"'", f"{abs_cmd(1)} | jq . /etc/hosts",
                f"{abs_cmd(1)} | head -n 5 /etc/hosts", f"{abs_cmd(1)} | cat /etc/hosts",
                f"{abs_cmd(1)} | jq . $(id)", f"{abs_cmd(1)} | jq `id`",
                f"{RUN_SH} call standing-context \"$(id)\""]
     for i, cmd in enumerate(refused):
         assert denied(c.call("Bash", {"command": cmd}, agent=f"pipe-{i}")), f"not a harmless pipe: {cmd}"
+    # Filters that only compute over what the fetch printed are fetches:
+    # they cannot run, write or read anything else. Whether the page
+    # then counts is decided by the digest in what they printed, not by trusting
+    # the filter to have kept every byte.
+    pure = [f"{abs_cmd(1)} | python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"rule_boot\"][\"page\"]=2; print(json.dumps(d))'",
+            f"{abs_cmd(1)} | python3 -c 'print(\"{{\\\"rule_boot\\\": 1}}\")'",
+            f"{abs_cmd(1)} | python3 -c 'import sys; print(\"maybe\".join(sys.stdin.read().split(\"NEVER\")))'",
+            f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read().lower())'",
+            f"{abs_cmd(1)} | python3 -c 'import sys\nfor ch in sys.stdin.read(): print(\"X\" if ch == \"N\" else ch, end=\"\")'",
+            f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.stdin.read(169), end=\"\"); sys.stdin.read(1); print(\"X\", end=\"\"); print(sys.stdin.read(), end=\"\")'",
+            f"{abs_cmd(1)} | jq '{{rule_boot:{{digest:\"sha256:x\"}}}}'"]
+    for i, cmd in enumerate(pure):
+        assert not denied(c.call("Bash", {"command": cmd}, agent=f"pure-{i}")), f"a pure filter is a fetch: {cmd}"
     # A Python filter imports json from its working directory, so it runs only
     # from a checkout root of this repo (review of #1343, nit 1).
     for i, (cmd, cwd) in enumerate([(f"{abs_cmd(1)} | {PY_FORMAT}", "/tmp"),
@@ -786,7 +747,7 @@ def case_all_pages_clear_advisory(c):
     c.arm()
     for _ in range(3):
         assert denied(c.call(*READ))
-    assert "RULES UNREAD" in notice(c.call(*READ))
+    assert denied(c.call(*READ)), "the cap cannot authorize unread work"
     for p in range(1, 8):
         c.fetch_cmd(f"{abs_cmd(p)} | {PY_FORMAT}", p, stdout=indent2)
     for _ in range(3):
@@ -846,7 +807,6 @@ def case_connector_after_compaction(c):
 
 def case_confirm_needs_the_real_page(c):
     """Loopholes in what counts as read."""
-    # Without total_chars (an older Worker) the page check stands alone.
     c0 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
     c0.stub("a", pages=2)
     c0.arm()
@@ -905,18 +865,327 @@ def case_same_checkout_worktree(c):
     assert json.loads(out.stdout or "null") == ["fetch", "fetch", "fetch", "other", "other"], out.stdout + out.stderr
 
 
-CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
+# The gate follows the server's page count independently of renderer policy.
+
+def case_gate_requires_only_the_served_pages(c):
+    """The gate asks for exactly the pages the armed boot has, no more."""
+    c.stub_sized("a", pages=4)
+    text = c.arm()
+    assert "4 page(s)" in text and "(1, 2, 3, 4)" in text, text
+    r = c.call(*READ)
+    assert denied(r) and "(1, 2, 3, 4)" in r["permissionDecisionReason"], r
+    for p in (1, 2, 3, 4):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None, "four of four pages read: allowed"
+    _, post = c.fetch_cmd(abs_cmd(5), 5, answer="boom", boot=None)
+    assert c.call(*READ) is None, "a page beyond the boot is never demanded"
+
+
+def case_confirmed_page_stays_counted(c):
+    """A page confirmed for the current digest stays counted in that
+    context; no later answer for it, and no detour through another digest,
+    turns it back into a missing page."""
+    c.stub_sized("a", pages=3)
+    c.arm()
+    for p in (1, 2, 3):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None
+    # A re-read of page 2 that keeps only part of the answer, then one that fails.
+    c.fetch_cmd(f"{abs_cmd(2)} | jq -c .rule_boot.page", 2, stdout=lambda b: "2")
+    assert c.call(*READ) is None, "an inconclusive re-read never un-counts a confirmed page"
+    c.fetch_cmd(abs_cmd(2), 2, answer="could not reach the deployed Worker: fetch failed")
+    assert c.call(*READ) is None, "a failed re-read never un-counts a confirmed page"
+    # Another door serves another digest for one page (e.g. a different sponsor
+    # scope); the context must read that digest, and pages of the first digest
+    # count again as soon as the arm returns to it.
+    c.fetch_cmd(abs_cmd(1), 1, boot=c.boot(1, digest="b"))
+    assert denied(c.call(*READ)), "a different digest must be read in full"
+    c.fetch_cmd(abs_cmd(1), 1)
+    assert c.call(*READ) is None, "back on digest a: its three confirmed pages still count"
+
+
+def case_parallel_first_fetch_without_arm(c):
+    """With no SessionStart arm, parallel fetches each create the arm.
+    Their epochs must agree, or the later write strands the earlier pages."""
+    c.stub_sized("a", pages=3)
+    arm_path = os.path.join(c.state, SESSION, "arm.json")
+    for p in (1, 2, 3):
+        if os.path.exists(arm_path):
+            os.unlink(arm_path)  # each PostToolUse saw no arm, as in a parallel batch
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None, "three pages confirmed by three racing arm writes: allowed"
+
+
+def case_compact_rearms_the_served_set(c):
+    """A compaction re-arms the served pages and nothing
+    else, and nothing short of reading them stands in: not a digest-only
+    call, not an unpaged standing-context, not a summary's memory."""
+    c.stub_sized("a", pages=4)
+    c.arm()
+    for p in (1, 2, 3, 4):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None
+    text = c.arm("compact")
+    assert "4 page(s)" in text, text
+    r = c.call(*READ)
+    assert denied(r) and "compact" in r["permissionDecisionReason"], r
+    assert "(1, 2, 3, 4)" in r["permissionDecisionReason"], r
+    c.call("mcp__carr__standing-context", {})
+    c.call("mcp__carr__standing-context", {"rule_ids": ["015183f5"]})
+    assert denied(c.call(*READ)), "a digest-confirm or gist call does not stand in for the pages"
+    for p in (1, 2, 3, 4):
+        c.fetch_cmd(abs_cmd(p), p)
+    assert c.call(*READ) is None, "the served set re-read after compaction: allowed"
+
+
+def case_filtered_fetch_counts_with_digest(c):
+    """A fetch piped through jq or Python counts when the call
+    preserves the upstream success envelope and boot digest."""
+    c.stub_sized("a", pages=4)
+    c.arm()
+    dig = c.boot(1)["digest"]
+    forms = [
+        f"{abs_cmd(1)} | jq -c '{{ok: .ok, rule_boot: {{digest: .rule_boot.digest}}}}'",
+        f"{abs_cmd(2)} | jq -c '{{ok: .ok, rule_boot: .rule_boot}}'",
+        f"{abs_cmd(3)} | python3 -m json.tool",
+        f"{abs_cmd(4)} | jq -c '{{ok: .ok, rule_boot: {{digest: .rule_boot.digest}}}}' | cat",
+    ]
+    for p, cmd in enumerate(forms, start=1):
+        filters = cmd.split(" | ", 1)[1]
+        result = subprocess.run(filters, input=json.dumps({"ok": True, "rule_boot": c.boot(p)}),
+                                shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result
+        pre, post = c.fetch_cmd(cmd, p, stdout=lambda b: result.stdout)
+        assert not denied(pre), f"a jq or Python filter keeps it a fetch: {cmd}: {pre}"
+        assert not notice(post), f"success and digest preserved: counted silently: {cmd}: {post}"
+    assert c.call(*READ) is None, "four filtered pages preserving upstream success: allowed"
+    # Without the digest, or with another digest, the page does not count.
+    c2 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c2.stub_sized("a", pages=1)
+    c2.arm()
+    for cmd, out in ((f"{abs_cmd(1)} | jq -r .rule_boot.digest", lambda b: dig + "\n"),
+                     (f"{abs_cmd(1)} | jq -c '{{p: .rule_boot.page, t: .rule_boot.text}}'",
+                      lambda b: json.dumps(dict(p=1, t=json.loads(b)["rule_boot"]["text"]))),
+                     (f"{abs_cmd(1)} | jq -c '{{rule_boot: {{digest: \"sha256:x\"}}}}'",
+                      lambda b: '{"rule_boot": {"digest": "sha256:x"}}'),
+                     (f"{abs_cmd(1)} | jq -r .rule_boot.digest",
+                      lambda b: "sha256:" + "b" * 8 + "\n")):
+        pre, post = c2.fetch_cmd(cmd, 1, stdout=out)
+        assert not denied(pre), f"still a fetch: {cmd}"
+        assert "digest" in notice(post), f"not counted, and the notice names the digest: {post}"
+        assert denied(c2.call(*READ)), f"not counted: {cmd}"
+    # A filtered call that failed is not a read, whatever it printed.
+    c2.fetch_cmd(f"{abs_cmd(1)} | jq -r .rule_boot.digest", 1, answer="Exit code 1\n" + dig)
+    assert denied(c2.call(*READ)), "a failed call never counts"
+    failed_command = f"{abs_cmd(1)} | jq -c '{{ok: .ok, rule_boot: {{digest: .rule_boot.digest}}}}'"
+    c2.fetch_cmd(failed_command, 1, answer=json.dumps({"ok": True, "rule_boot": {"digest": dig}}))
+    assert denied(c2.call(*READ)), "a failure-hook event cannot confirm even a success-shaped receipt"
+    # The digest check needs an armed digest to compare against.
+    c3 = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    c3.stub_sized("a", pages=1)
+    c3.fetch_cmd(f"{abs_cmd(1)} | jq -r .rule_boot.digest", 1, stdout=lambda b: dig + "\n")
+    assert denied(c3.call(*READ)), "with nothing armed, a printed digest proves nothing"
+    # Filters still may not run, write or read anything else.
+    refused = [f"{abs_cmd(1)} | python3 -c 'import os; os.system(\"id\")'",
+               f"{abs_cmd(1)} | python3 -c 'print(open(\"/etc/hosts\").read())'",
+               f"{abs_cmd(1)} | python3 -c '__import__(\"os\").system(\"id\")'",
+               f"{abs_cmd(1)} | python3 -c 'import json,sys; json.__builtins__'",
+               f"{abs_cmd(1)} | python3 -c 'import subprocess'",
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(sys.modules)'",
+               f"{abs_cmd(1)} | python3 -c 'import sys; print(1, file=sys.stderr)'",
+               f"{abs_cmd(1)} | python3 -c 'exec(\"1\")'",
+               f"{abs_cmd(1)} | python3 -c 'import json; json.dump(1, open(\"x\", \"w\"))'",
+               f"{abs_cmd(1)} | python3 -c '\"{{0.__class__}}\".format(1)'",
+               f"{abs_cmd(1)} | jq env", f"{abs_cmd(1)} | jq '$ENV'", f"{abs_cmd(1)} | jq -n 1",
+               f"{abs_cmd(1)} | jq 'input_filename'", f"{abs_cmd(1)} | jq -f /tmp/x.jq",
+               f"{abs_cmd(1)} | jq --rawfile x /etc/hosts .", f"{abs_cmd(1)} | jq 'import \"x\" as x; .'"]
+    for i, cmd in enumerate(refused):
+        assert denied(c.call("Bash", {"command": cmd}, agent=f"filter-{i}")), f"not a harmless filter: {cmd}"
+
+
+def case_failed_upstream_filter_cannot_confirm(c):
+    c.stub_sized("a", pages=1)
+    c.arm()
+    digest = c.boot(1)["digest"]
+    upstream = os.path.join(c.work, "refused-fetch.py")
+    with open(upstream, "w", encoding="utf-8") as fh:
+        fh.write("import sys; print('{\"ok\": false, \"error\": \"unregistered_operation_fields\"}'); sys.exit(1)")
+    filters = [
+        "python3 -c " + shlex.quote(f'print({digest!r})'),
+        "python3 -c " + shlex.quote(f'import sys; sys.stdin.read(); print({digest!r})'),
+        "python3 -c " + shlex.quote('import json,sys; d=json.load(sys.stdin); print(json.dumps(' + repr({"ok": True, "rule_boot": c.boot(1)}) + '))'),
+        "jq " + shlex.quote(json.dumps(digest)),
+        "jq " + shlex.quote('{rule_boot: ' + json.dumps(c.boot(1)) + '}'),
+        "jq " + shlex.quote('. | ' + json.dumps(digest)),
+    ]
+    for flt in filters:
+        command = f"{abs_cmd(1)} | {flt}"
+        pre = c.call("Bash", {"command": command})
+        assert not denied(pre), pre
+        result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " | " + flt,
+                                shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0 and digest in result.stdout, result
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_response": {"stdout": result.stdout, "stderr": result.stderr, "interrupted": False}})
+        assert denied(c.call(*READ)), f"upstream refusal masked by {flt} counted as a read"
+
+
+    numeric = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    numeric.stub_sized("1111", pages=1)
+    numeric.arm()
+    command = f"{abs_cmd(1)} | jq " + "1" * 32
+    result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " | jq " + "1" * 32,
+                            shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and "1" * 32 in result.stdout, result
+    numeric.call("Bash", {"command": command})
+    numeric.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                  "tool_name": "Bash", "tool_input": {"command": command},
+                  "tool_response": {"stdout": result.stdout, "stderr": "", "interrupted": False}})
+    assert denied(numeric.call(*READ)), "a numeric jq constant cannot prove digest provenance"
+
+
+def case_error_echo_filter_cannot_confirm(c):
+    c.stub_sized("aaaaaaaa", pages=1)
+    c.arm()
+    hexpart = c.boot(1)["digest"][7:]
+    args = json.dumps({"detail": "boot", "page": 1, hexpart: True})
+    command = shlex.quote(RUN_SH) + " call standing-context " + shlex.quote(args)
+    error = {"ok": False, "error": "unregistered_operation_fields", "fields": [hexpart]}
+    upstream = os.path.join(c.work, "error-echo.py")
+    with open(upstream, "w", encoding="utf-8") as fh:
+        fh.write("import sys; print(" + repr(json.dumps(error)) + ", file=sys.stderr); sys.exit(1)")
+    flt = "python3 -c " + shlex.quote("import sys; print(sys.stdin.read())")
+    result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " 2>&1 | " + flt,
+                            shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and hexpart in result.stdout, result
+    command += " 2>&1 | " + flt
+    assert not denied(c.call("Bash", {"command": command}))
+    c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+            "tool_name": "Bash", "tool_input": {"command": command},
+            "tool_response": {"stdout": result.stdout, "stderr": result.stderr, "interrupted": False}})
+    assert denied(c.call(*READ)), "upstream error echo counted as a successful page read"
+
+    for flt, source in (
+        ("python3 -c " + shlex.quote('import json,sys; d=json.load(sys.stdin); print(d["fields"][0])'),
+         {"ok": False, "fields": [json.dumps({"ok": True, "rule_boot": c.boot(1)})]}),
+        ("jq -c '{ok: .ok, rule_boot: {digest: .rule_boot.digest}}'", error),
+        ("jq -c '{ok: .ok, rule_boot: {digest: .rule_boot.digest}}'",
+         {"ok": False, "rule_boot": {"digest": c.boot(1)["digest"]}}),
+        ("jq -c '{ok: .allowed, rule_boot: {digest: .received}}'",
+         {"ok": False, "allowed": True, "received": c.boot(1)["digest"]}),
+    ):
+        with open(upstream, "w", encoding="utf-8") as fh:
+            fh.write("import sys; print(" + repr(json.dumps(source)) + "); sys.exit(1)")
+        result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " | " + flt,
+                                shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result
+        command = abs_cmd(1) + " | " + flt
+        c.call("Bash", {"command": command})
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_response": {"stdout": result.stdout, "stderr": result.stderr, "interrupted": False}})
+        assert denied(c.call(*READ)), f"failed upstream confirmed through {flt}"
+    c.fetch_cmd(abs_cmd(1), 1, stdout=lambda b: json.dumps({"ok": True, "rule_boot": {"digest": c.boot(1)["digest"]}}))
+    assert denied(c.call(*READ)), "a direct incomplete envelope cannot confirm a page"
+
+
+
+def case_interrupted_result_cannot_confirm(c):
+    c.stub_sized("a", pages=1)
+    c.arm()
+    for command, stdout in ((f"{abs_cmd(1)} | jq -r .rule_boot.digest", c.boot(1)["digest"]),
+                            (abs_cmd(1), json.dumps({"ok": True, "rule_boot": c.boot(1)}))):
+        c.call("Bash", {"command": command})
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_response": {"stdout": stdout, "stderr": "", "interrupted": True}})
+        assert denied(c.call(*READ)), "an interrupted success-hook result counted as a page read"
+
+
+def case_unreadable_input_holds_effects(c):
+    """Input the adapter could not parse cannot establish delivery."""
+    for raw in ("not json", "[1]"):
+        out = subprocess.run([sys.executable, os.path.join(c.tree, "hooks", "rule-boot-gate.py")],
+                             input=raw, capture_output=True, text=True, env=c.env, timeout=30)
+        verdict = json.loads(out.stdout or "null")
+        assert denied((verdict or {}).get("hookSpecificOutput")), f"{raw!r} -> {out.stdout}{out.stderr}"
+
+
+def _booted_parent_and_child(c, child="sub-a"):
+    c.stub("a", pages=2)
+    c.arm()
+    for page in (1, 2):
+        c.fetch(page)
+        c.fetch(page, agent=child)
+    assert c.call(*READ) is None and c.call(*READ, agent=child) is None, "both contexts booted"
+
+
+def case_child_start_keeps_parent_boot(c):
+    """A subagent starting (its own SessionStart) must not re-arm its parent."""
+    _booted_parent_and_child(c)
+    c.arm("startup", agent="sub-b")
+    assert c.call(*READ) is None, "parent's completed boot survives a child starting"
+    assert c.call(*READ, agent="sub-a") is None, "a sibling's completed boot survives too"
+    assert denied(c.call(*READ, agent="sub-b")), "the new child still reads its own boot"
+
+
+def case_child_compaction_rearms_only_that_child(c):
+    """2026-10-08: subagent compactions at 08:25:30, 09:02:38 and 09:09:58
+    re-armed main within a second each time (main re-read 6 times for 2 real
+    compactions). A child's compaction re-arms that child and nothing else."""
+    _booted_parent_and_child(c)
+    c.arm("compact", agent="sub-a")
+    assert c.call(*READ) is None, "parent's completed boot survives a child compacting"
+    assert denied(c.call(*READ, agent="sub-a")), "the compacted child has lost its rules: re-fetch"
+    c.fetch(1, agent="sub-a")
+    c.fetch(2, agent="sub-a")
+    assert c.call(*READ, agent="sub-a") is None, "the child re-read every page"
+    c.arm("compact", agent="sub-a")
+    assert denied(c.call(*READ, agent="sub-a")), "every compaction of the child re-arms it"
+    assert c.call(*READ) is None, "and the parent stays booted throughout"
+    c.arm("compact")
+    assert denied(c.call(*READ)), "the parent's own compaction still re-arms the parent"
+
+
+def case_child_rearm_digest_change_regates_all(c):
+    """A child's SessionStart that sees a new digest is a digest change:
+    every context of the session reads the new boot."""
+    _booted_parent_and_child(c)
+    c.stub("b", pages=2)
+    c.arm("compact", agent="sub-a")
+    assert denied(c.call(*READ)), "a new digest re-gates the parent"
+    assert denied(c.call(*READ, agent="sub-a")), "and the child"
+
+
+def case_child_rearm_outage_keeps_parent(c):
+    """A child's SessionStart during a store outage holds the child, never
+    the parent that already read the current boot."""
+    _booted_parent_and_child(c)
+    c.stub(None)
+    c.arm("compact", agent="sub-a")
+    assert c.call(*READ) is None, "the parent's boot stands through a child's outage"
+    assert denied(c.call(*READ, agent="sub-a")), "the compacted child is held"
+
+
+CASES = [case_error_echo_filter_cannot_confirm, case_failed_upstream_filter_cannot_confirm, case_interrupted_result_cannot_confirm,
+         case_child_start_keeps_parent_boot, case_child_compaction_rearms_only_that_child,
+         case_child_rearm_digest_change_regates_all, case_child_rearm_outage_keeps_parent,
+         case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
          case_failure_not_sticky, case_state_unwritable_never_armed, case_disk_full_never_armed,
-         case_notice_short_after_first,
-         case_unreachable_no_deadlock, case_fetch_never_denied, case_deny_before_allow_after,
+         case_diagnostics_bounded_enforcement_continues,
+         case_outage_keeps_effects_held, case_fetch_never_denied, case_deny_before_allow_after,
          case_digest_change_rearms, case_rearm_on_compact, case_subagent_path,
          case_answer_parsing,
          case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
          case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
          case_confirm_needs_the_real_page,
-         case_same_checkout_worktree]
+         case_same_checkout_worktree,
+         case_gate_requires_only_the_served_pages, case_confirmed_page_stays_counted,
+         case_parallel_first_fetch_without_arm, case_compact_rearms_the_served_set,
+         case_filtered_fetch_counts_with_digest, case_unreadable_input_holds_effects]
 
 
 def run_all(tree):
@@ -948,6 +1217,16 @@ def check_gate_integrity_rearms():
         with open(os.path.join(c.state, SESSION, "arm.json"), encoding="utf-8") as fh:
             arm = json.load(fh)
         assert arm["status"] == "armed" and arm["source"] == "compact", arm
+        # A subagent's compaction: same session_id, plus agent_id. The hook must
+        # hand the agent through, so the session arm (and main's epoch) stand.
+        child = {**payload, "agent_id": "sub-gi"}
+        out = subprocess.run([sys.executable, os.path.join(REPO, "hooks", "gate-integrity.py")],
+                             input=json.dumps(child), capture_output=True, text=True,
+                             env=c.env, timeout=60).stdout
+        assert "RULE BOOT" in out, out[-800:]
+        with open(os.path.join(c.state, SESSION, "arm.json"), encoding="utf-8") as fh:
+            after = json.load(fh)
+        assert after["epoch"] == arm["epoch"], ("a child's SessionStart re-armed the session", arm, after)
         # A flagged (CI) run never arms and never reads stdin.
         out = subprocess.run([sys.executable, os.path.join(REPO, "hooks", "gate-integrity.py"), "--strict"],
                              input=json.dumps({**payload, "session_id": "other"}),
@@ -986,27 +1265,21 @@ def check_pending_install():
 
 MUTANTS = {
     # First round (the coordinator's three, plus two).
-    "never-denies": [('    return "deny", reason', '    return "allow", reason')],
+    "never-denies": [('\n    return "deny", reason\n', '\n    return "allow", reason\n')],
     "denies-the-fetch-itself": [('    if kind == "fetch":\n        if page is not None:',
                                  '    if False:\n        if page is not None:')],
     "no-re-arm-after-compact": [('"epoch": secrets.token_hex(6)}',
                                  '"epoch": (read_arm(session_id) or {}).get("epoch") or secrets.token_hex(6)}')],
     "digest-change-ignored": [('    digest = safe_key(str(arm.get("digest") or "").replace("sha256:", ""), "none")[:24]',
                                '    digest = "same"')],
-    "deadlock-after-unreachable-attempt": [('        if attempted or "failed" in names:\n            return "allow", _notice(',
-                                            '        if False:\n            return "allow", _notice(')],
-    # PR #1328 review round.
-    "deny-on-unwritten-state": [('    if why:\n        return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)\n    return "deny", reason',
-                                 '    if False:\n        return "allow", STATE_UNWRITABLE_NOTICE.format(why=why)\n    return "deny", reason')],
-    "no-deny-cap": [('    if held >= DENY_CAP:', '    if False:')],
+    "escape-after-cap": [('\n        return "deny", reason\n', '\n        return "allow", reason\n')],
+    "escape-after-unwritten-state": [('        return "deny", reason + "\\n"', '        return "allow", reason + "\\n"')],
     "out-of-range-read-as-outage": [('        if _OUT_OF_RANGE in text:', '        if False:')],
     "failed-sticky": [('        if not _short_text(folder, arm):\n            return "allow", None',
                        '        if not _short_text(folder, arm) and "failed" not in names:\n            return "allow", None'),
-                      ('        for stale in ("failed", "unsupported", f"u{page}"):', '        for stale in ():')],
-    "notice-every-call": [('    if f"shown-{name}" in _markers(folder):', '    if False:')],
-    "toolless-denied": [('    if _toolless(payload):', '    if False:')],
-    "outage-needs-every-page": [('    if "failed" in names:\n        return "allow", _notice(folder, "unavailable"',
-                                 '    if False:\n        return "allow", _notice(folder, "unavailable"')],
+                      ('    for stale in ("failed", "unsupported", f"u{page}"):', '    for stale in ():')],
+    "escape-after-outage": [('\n        return _hold(folder, len(confirmed), UNAVAILABLE_NOTICE',
+                             '\n        return "allow", UNAVAILABLE_NOTICE #')],
     "not-deployed-read-as-unreachable": [('    if str(reason or "").startswith("not_deployed"):',
                                           '    if False:')],
     "mid-session-digest-ignored": [('        if total >= 1 and digest and (', '        if False and (')],
@@ -1018,10 +1291,31 @@ MUTANTS = {
                                      '    if False:\n        answer = "inconclusive"')],
     "any-answer-confirms-the-page": [('    if answer == "boot" and not _is_page(boot, page):',
                                       '    if False:')],
-    "no-length-check": [('    if want < 1:\n        return False', '    if True:\n        return False')],
+    "no-length-check": [('    if want < 1:\n        return True', '    if True:\n        return False')],
     "any-filter-harmless": [('def _harmless_filter(stage):\n', 'def _harmless_filter(stage):\n    return True\n')],
-    "any-python-code": [('            return args[1] == _PY_JSON_PRETTY', '            return True')],
-    "any-jq-filter": [('    if flt is None:\n        return True\n    pos = 0', '    if True:\n        return True\n    pos = 0')],
+    "any-python-code": [('            return _py_pure(args[1])', '            return True')],
+    "any-jq-filter": [('    return isinstance(flt, str) and bool(flt.strip()) and not _JQ_REFUSED.search(flt)', '    return True')],
+    # Digest-confirmed filtered pages and agreeing epochs.
+    "digest-not-checked": [('            and _filtered_success(response, arm.get("digest"))):', '            ):')],
+    "digest-confirms-direct-answers": [('    if (not direct and answer == "inconclusive" and succeeded',
+                                        '    if (answer == "inconclusive" and succeeded'),
+                                       ('    preserves_success = not direct and _bash_preserves_success((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))',
+                                        '    preserves_success = True')],
+    "digest-confirms-failed-calls": [('    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse" and not interrupted',
+                                      '    succeeded = True')],
+    "interrupted-confirms": [('    interrupted = isinstance(response, dict) and response.get("interrupted")',
+                               '    interrupted = False')],
+    "success-envelope-ignored": [('            and _filtered_success(response, arm.get("digest"))):',
+                                   '            and True):')],
+    "success-provenance-ignored": [('    preserves_success = not direct and _bash_preserves_success((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))',
+                                     '    preserves_success = True')],
+    "racing-epochs": [('            arm.setdefault("epoch", "fetch-" + safe_key(digest.replace("sha256:", ""), "none")[:12])',
+                       '            arm.setdefault("epoch", secrets.token_hex(6))')],
+    "python-unsafe-builtins": [('            elif node.id in _PY_UNSAFE_BUILTINS:\n                return False',
+                                '            elif False:\n                return False')],
+    "python-any-attribute": [('            if node.attr.startswith("_") or not _py_attr_ok(node):',
+                              '            if False:')],
+
     "lookalike-worktree": [('    if os.path.realpath(os.path.join(gitdir, back)) != os.path.realpath(dotgit):\n        return None',
                             '    if False:\n        return None')],
     "worktree-refuses-main-checkout": [('        return bool(mine) and _git_common_dir(os.path.dirname(real)) == mine',
@@ -1038,7 +1332,10 @@ def mutant_tree(root, replacements):
     tree = os.path.join(root, "tree")
     os.makedirs(os.path.join(tree, "hooks"))
     os.makedirs(os.path.join(tree, "lib"))
+    os.makedirs(os.path.join(tree, "lib"), exist_ok=True)
+    shutil.copyfile(os.path.join(REPO, "lib", "hook_runtime.py"), os.path.join(tree, "lib", "hook_runtime.py"))
     shutil.copy2(os.path.join(REPO, "hooks", "rule-boot-gate.py"), os.path.join(tree, "hooks"))
+    shutil.copy2(os.path.join(REPO, "lib", "rule_recall.py"), os.path.join(tree, "lib"))
     with open(os.path.join(REPO, "lib", "rule_boot_gate.py"), encoding="utf-8") as fh:
         source = fh.read()
     for before, after in replacements:

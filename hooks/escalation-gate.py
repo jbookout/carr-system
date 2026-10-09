@@ -13,8 +13,9 @@ RULE aa411351 (taught 2026-08-09) draws the gate BY AUDIENCE, NOT BY DIFFICULTY:
     System decides everything internal — schema, records, renders, jobs, config,
                   rules, refactors, agent/skill design, its own procedure
 
-So a question whose subject is internal is not a question. It is a decision the
-session was supposed to make. This hook refuses it and says so.
+Internal implementation choices are the session's to make. Direct approval of
+a named rule, build or plan is Joe's (rule a3da3d39, 2026-10-04), even when its
+subject is internal; that AskUserQuestion must reach him in the same turn.
 
 ═══════════════════════════════════════════════════════════════════════════════
 THE THING THAT NEARLY BROKE A WORKING SKILL, AND WHY THIS IS NOT A BLANKET DENY
@@ -37,7 +38,7 @@ be switched off within a week, which is the same outcome as never building it.
     ASKING JOE TO DECIDE SOMETHING INTERNAL   -> refuse; he delegated that
     ASKING JOE WHAT HE ALONE KNOWS            -> allow; research cannot reach it
 
-FOUR ALLOW CLASSES, all narrow, none self-granted by the session:
+ALLOW CLASSES, all narrow, none self-granted by the session:
   1. FACT CAPTURE — what happened, what they said, who was there, how it went,
      a grade or verdict on a real-world event. Detected by past-tense/event
      vocabulary about the world rather than about the system.
@@ -49,6 +50,9 @@ FOUR ALLOW CLASSES, all narrow, none self-granted by the session:
   4. BOUNDARY CHANGE — anything that weakens a gate, widens permissions, edits
      hooks, or expands what the system may do unattended. See below; this is
      the one place the council overruled Joe's own framing, on purpose.
+  5. DIRECT APPROVAL — a named rule, restoration/retirement, build or plan,
+     asked explicitly with approve/not approve or approve/do not approve
+     option labels. Applies per AskUserQuestion item, never to parked loops.
 
 THE CONSTITUTIONAL CARVE-OUT. Joe's instruction was "internal is yours". Both
 council chairs independently, without being asked, refused that at exactly one
@@ -92,6 +96,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from conduct_patterns import (  # noqa: E402
     PROTECTED, HUMAN_WANTS_CHOICE, HUMAN_WANTS_COMMAND, FENCE, BARE_FENCE_CMD,
     INLINE_CMD, HANDOFF_PROSE, denied_commands, handoff_was_denied,
+    handoff_needs_review, HANDOFF_REVIEW_MESSAGE,
 )
 
 # ── (1) FACT CAPTURE — only Joe was in the room. Research cannot reach it. ────
@@ -140,6 +145,84 @@ INTERNAL = re.compile(
     r"|configs?|settings?|flags?|env|variables?|caches?|logs?|formats?|layouts?"
     r"|sort order|sort by|ordering|sorting)\b",
     re.I)
+
+# Read approval intent only from the question stem and option LABELS. A word
+# buried in a header/description must not turn an approach choice into consent.
+APPROVAL_REQUEST = re.compile(
+    r"^(?:joe[, :]\s*)?(?:(?:do|would|will|can) you|should (?:you|joe)) "
+    r"(?:not )?approve\s+|^(?:approve|do not approve|don't approve)\s+", re.I)
+# A name is a noun phrase, not a question, a method or an unnamed action.
+# Apply the same grammar inside quotes and to scope qualifiers. Every -ing
+# word is a method except the listed nouns; base-form verbs are enumerated.
+ING_NOUNS = r"onboarding"
+NAME_START = (
+    r"(?!(?:the|a|an|proposed|new|this|that|it|them|these|those|"
+    r"use|choose|pick|select|run|schedule|build|add|insert|create|configure|"
+    r"edit|change|remove|replace|modify|refactor|migrate|install|rename|"
+    r"delete|drop|update|implement|(?!(?:" + ING_NOUNS + r")\b)\w+ing)\b)"
+)
+NAME_WORD = r"(?!(?:for|in|with|at|by|on|to|as)\b)[\w-]+"
+NAME_PHRASE = NAME_START + NAME_WORD + r"(?:\s+" + NAME_WORD + r"){0,7}"
+ARTIFACT_NAME = rf'''(?:{NAME_PHRASE}|"{NAME_PHRASE}"|'{NAME_PHRASE}')'''
+APPROVAL_CHOICE = re.compile(
+    r"\b(which|what|when|where|why|how|should|could|would|can|may|must|"
+    r"whether|or|instead|versus)\b", re.I)
+APPROVAL_ARTIFACT = re.compile(
+    r"(?:(?:restor(?:e|ing)|retir(?:e|ing)|(?:restoration|retirement) of)\s+"
+    r"(?:the\s+)?" + ARTIFACT_NAME + r"\s+rule"
+    r"|(?:the\s+)?(?:proposed\s+)?" + ARTIFACT_NAME + r"\s+rule"
+    r"|build(?:ing)?\s+(?:all\s+|the\s+)?" + ARTIFACT_NAME +
+    r"|(?:the\s+)?" + ARTIFACT_NAME + r"\s+(?:build|plan))"
+    r"(?:\s+for\s+(?:the\s+)?" + ARTIFACT_NAME + r")?"
+    r"(?:\s+as written)?", re.I)
+# A rule with no short name yet is named by what it says: "the new rule: X".
+# That form would let any approach choice through, so it must also cite the
+# stored rule's 8-hex id somewhere in the item, and neither the stem nor any
+# option description may carry choice wording.
+DESCRIBED_RULE = re.compile(
+    r"(?:the\s+)?(?:new\s+|proposed\s+)?rule(?:\s*\([0-9a-f]{8}\))?"
+    r"\s*(?::|—|–|\s-)\s*\S.*", re.I | re.S)
+DESCRIBED_CHOICE = re.compile(
+    r"\b(which|whichever|what|when|where|why|how|should|could|would|can|may|"
+    r"must|whether|or|else|otherwise|instead|versus|vs|rather than|than|"
+    r"between|either|pick|choose|go with|prefer\w*|default\w*|alt|"
+    r"alternatives?|alternatively|options?|if|unless)\b", re.I)
+# A stored rule id has a hex letter and a digit, so a date or loop number
+# ("20261008", "12345678") is not one.
+RULE_ID = re.compile(r"\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{8}\b", re.I)
+DESCRIBED_LABELS = ({"approve"}, {"don't approve", "do not approve"})
+# Alternatives laid side by side: "env/file", "(1) … (2) …", "a) … b)".
+ENUMERATED_CHOICE = re.compile(r"[A-Za-z]/[A-Za-z]|\(\s*(?:2|ii|b)\s*\)|\b(?:2|b)\)", re.I)
+
+
+def direct_approval(question):
+    """A consent request for a named rule/build/plan, not an approach choice."""
+    stem = str(question.get("question", "")).strip().rstrip("?").strip()
+    request = APPROVAL_REQUEST.match(stem)
+    if request:
+        stem = stem[request.end():]
+    else:
+        labels = {re.sub(r"\s*\(recommended\)$", "", str(o.get("label", "")),
+                         flags=re.I).strip().lower()
+                  for o in (question.get("options") or []) if isinstance(o, dict)}
+        if "approve" not in labels or not labels.intersection({"don't approve", "do not approve"}):
+            return False
+    if DESCRIBED_RULE.fullmatch(stem):
+        # Exactly Approve / Don't approve, so no label can carry an alternative.
+        options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
+        labels = [re.sub(r"\s*\(recommended\)$", "", str(o.get("label", "")),
+                         flags=re.I).strip().lower() for o in options]
+        if (len(labels) != 2 or labels[0] not in DESCRIBED_LABELS[0]
+                or labels[1] not in DESCRIBED_LABELS[1]):
+            return False
+        descriptions = " ".join(str(o.get("description", "")) for o in options)
+        header = str(question.get("header", ""))
+        scanned = " ".join([stem, header, descriptions])
+        return (RULE_ID.search(" ".join([str(question.get("question", "")), scanned]))
+                is not None and not DESCRIBED_CHOICE.search(scanned)
+                and not ENUMERATED_CHOICE.search(scanned))
+    return (not APPROVAL_CHOICE.search(stem)
+            and APPROVAL_ARTIFACT.fullmatch(stem) is not None)
 
 
 def now():
@@ -231,7 +314,8 @@ def classify_per_item(tool_input, human_last):
                 parts.append(str(o.get("label", "")))
                 parts.append(str(o.get("description", "")))
         blob = "\n".join(p for p in parts if p)
-        allow, why = classify(blob, human_last)
+        allow, why = ((True, "direct_approval_is_joes") if direct_approval(q)
+                      else classify(blob, human_last))
         if not allow:
             return False, why      # one internal item refuses the whole call
         if blob.strip():
@@ -280,7 +364,8 @@ REASON = (
     "This gate does NOT block: asking him what only he knows (what happened in "
     "a meeting, what someone said, a vendor grade), anything client-facing, "
     "public-facing, money or irreversible, or anything that would widen the "
-    "system's own authority. Those still reach him."
+    "system's own authority, or direct approval of a named rule, build or plan "
+    "(rule a3da3d39). Those still reach him."
 )
 
 LOOP_REASON = (
@@ -317,41 +402,21 @@ ATTEMPT_FIRST_REASON = (
     "yourself you should do that before you ever ask me.\"")
 
 
-def _jev_hands_off():
-    """ops/jev_handoff.hands_off, or None when it cannot load (fail open to
-    the keyword patterns)."""
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "jev_handoff", os.path.join(REPO, "ops", "jev_handoff.py"))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.hands_off
-    except Exception:
-        return None
-
-
-def hands_off_unattempted(blob, human_last, denied, jev=None):
+def hands_off_unattempted(blob, human_last, denied):
     """Return the finding name when the question hands Joe an untried command,
-    else None. Keyword patterns first; Jev reads the prose they miss."""
+    else None; unresolved prose action cues return handoff_review (nonblocking)."""
     if not blob.strip():
         return None
     if human_last and HUMAN_WANTS_COMMAND.search(human_last):
         return None
     if denied and handoff_was_denied(blob, denied):
         return None
-    keyword = None
     if FENCE.search(blob) or BARE_FENCE_CMD.search(blob) or INLINE_CMD.search(blob):
-        keyword = "command"
-    else:
-        for name, pat in HANDOFF_PROSE:
-            if pat.search(blob):
-                keyword = name
-                break
-    if jev is not None:
-        if jev(blob, surface="ask", existing_decision=keyword is not None) and not keyword:
-            return "jev"
-    return keyword
+        return "command"
+    for name, pat in HANDOFF_PROSE:
+        if pat.search(blob):
+            return name
+    return "handoff_review" if handoff_needs_review(blob, human_last, denied) else None
 
 
 def read_turn(path, limit=400):
@@ -384,85 +449,99 @@ def read_turn(path, limit=400):
     return recs, 0, ""
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    dlog(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    dlog(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    is_ask = tool == "AskUserQuestion"
+    is_loop = tool.startswith("mcp__") and tool.endswith("__add-loop")
+    if not (is_ask or is_loop):
+        sys.exit(0)
+
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+
+    # The human's own last turn, for the "he asked" exemption. Best-effort:
+    # if the transcript is unreadable we simply lose one exemption and the
+    # other three still apply.
+    human_last, recs, start = "", [], 0
+    path = payload.get("transcript_path")
+    if path and os.path.exists(path):
+        try:
+            recs, start, human_last = read_turn(path)
+        except Exception:
+            pass
+
+    if is_ask:
+        blob = question_text(ti)
+        finding = hands_off_unattempted(
+            blob, human_last, denied_commands(recs, start))
+        if finding == "handoff_review":
+            audit({"ts": now(), "hook": "escalation-gate", "classes": ["handoff_review"],
+                   "patterns": ["needs_review"], "session": payload.get("session_id")})
+            print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE,
+                "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                       "additionalContext": HANDOFF_REVIEW_MESSAGE}}))
+        elif finding:
+            audit({
+                "ts": now(),
+                "hook": "escalation-gate",
+                "classes": ["command_handoff"],
+                "patterns": [f"attempt_first:{finding}"],
+                "session": payload.get("session_id"),
+                "excerpt": " ".join(blob.split())[:400],
+            })
+            dlog(f"DENY(attempt_first:{finding}) :: {' '.join(blob.split())[:200]}")
+            print(ATTEMPT_FIRST_REASON, file=sys.stderr)
+            sys.exit(2)
+
+    if is_ask:
+        # Per-item classification: one fact-capture question must not
+        # exempt an internal question riding in the same interview.
+        allow, why = classify_per_item(ti, human_last)
+        blob = question_text(ti)
+    else:
+        if not parks_a_decision(ti):
+            sys.exit(0)
+        blob = loop_text(ti)
+        allow, why = classify(blob, human_last)
+
+    if allow:
+        dlog(f"ALLOW({why}) :: {' '.join(blob.split())[:160]}")
+        sys.exit(0)
+
+    audit({
+        "ts": now(),
+        "hook": "escalation-gate",
+        "classes": ["internal_ask" if is_ask else "internal_loop_parked"],
+        "patterns": [f"escalation:{why}"],
+        "session": payload.get("session_id"),
+        "excerpt": " ".join(blob.split())[:400],
+    })
+    dlog(f"DENY({why}) :: {' '.join(blob.split())[:200]}")
+    # Exit 2, not JSON. Same reasoning as guard-unattended.py: on any build
+    # that does not parse the structured contract, exit 0 reads as ALLOW and
+    # the gate fails open silently. Exit 2 blocks everywhere and hands
+    # stderr back as the reason.
+    print(REASON if is_ask else LOOP_REASON, file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        dlog(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
-
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        is_ask = tool == "AskUserQuestion"
-        is_loop = tool.startswith("mcp__") and tool.endswith("__add-loop")
-        if not (is_ask or is_loop):
-            sys.exit(0)
-
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
-
-        # The human's own last turn, for the "he asked" exemption. Best-effort:
-        # if the transcript is unreadable we simply lose one exemption and the
-        # other three still apply.
-        human_last, recs, start = "", [], 0
-        path = payload.get("transcript_path")
-        if path and os.path.exists(path):
-            try:
-                recs, start, human_last = read_turn(path)
-            except Exception:
-                pass
-
-        if is_ask:
-            blob = question_text(ti)
-            finding = hands_off_unattempted(
-                blob, human_last, denied_commands(recs, start), jev=None if payload.get("session_id") == "selftest" else _jev_hands_off())
-            if finding:
-                audit({
-                    "ts": now(),
-                    "hook": "escalation-gate",
-                    "classes": ["command_handoff"],
-                    "patterns": [f"attempt_first:{finding}"],
-                    "session": payload.get("session_id"),
-                    "excerpt": " ".join(blob.split())[:400],
-                })
-                dlog(f"DENY(attempt_first:{finding}) :: {' '.join(blob.split())[:200]}")
-                print(ATTEMPT_FIRST_REASON, file=sys.stderr)
-                sys.exit(2)
-
-        if is_ask:
-            # Per-item classification: one fact-capture question must not
-            # exempt an internal question riding in the same interview.
-            allow, why = classify_per_item(ti, human_last)
-            blob = question_text(ti)
-        else:
-            if not parks_a_decision(ti):
-                sys.exit(0)
-            blob = loop_text(ti)
-            allow, why = classify(blob, human_last)
-
-        if allow:
-            dlog(f"ALLOW({why}) :: {' '.join(blob.split())[:160]}")
-            sys.exit(0)
-
-        audit({
-            "ts": now(),
-            "hook": "escalation-gate",
-            "classes": ["internal_ask" if is_ask else "internal_loop_parked"],
-            "patterns": [f"escalation:{why}"],
-            "session": payload.get("session_id"),
-            "excerpt": " ".join(blob.split())[:400],
-        })
-        dlog(f"DENY({why}) :: {' '.join(blob.split())[:200]}")
-        # Exit 2, not JSON. Same reasoning as guard-unattended.py: on any build
-        # that does not parse the structured contract, exit 0 reads as ALLOW and
-        # the gate fails open silently. Exit 2 blocks everywhere and hands
-        # stderr back as the reason.
-        print(REASON if is_ask else LOOP_REASON, file=sys.stderr)
-        sys.exit(2)
-
-    except Exception as exc:
-        dlog(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

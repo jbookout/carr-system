@@ -60,6 +60,11 @@ from urllib import request as _urllib_request
 from urllib.error import HTTPError, URLError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from lib.credential_file import read_env_file  # noqa: E402
+from lib.credential_shape import valid_claude_token  # noqa: E402
+from lib.record_call import call_verb  # noqa: E402
+
 INVENTORY_PATH = REPO_ROOT / "ops" / "config" / "credential-inventory.v1.json"
 OUT_JSONL = REPO_ROOT / "out" / "credential-health.jsonl"
 DEDUP_PATH = REPO_ROOT / "out" / "credential-health-loop-dedup.json"
@@ -236,16 +241,11 @@ def _read_token_from_env_file(path, key):
         return None, None, "token_file_missing"
     mode = stat.S_IMODE(st.st_mode)
     try:
-        with open(path) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                name, _, value = line.partition("=")
-                if name.strip() == key:
-                    return value.strip().strip('"').strip("'"), mode, None
+        values = read_env_file(path)
     except OSError:
         return None, mode, "token_file_unreadable"
+    if key in values:
+        return values[key], mode, None
     return None, mode, "token_key_missing"
 
 
@@ -293,10 +293,6 @@ def _probe_cloudflare_token_file(cred, timeout_s):
     return ProbeResult("ok", "active", expires_at)
 
 
-CLAUDE_TOKEN_PREFIX = "sk-ant-oat"
-CLAUDE_TOKEN_LENGTH = 108
-
-
 def _sha256_hex(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -321,7 +317,7 @@ def _probe_claude_cli_token_age(cred, timeout_s):
     Joe's spec:
 
     1. PRESENT AND CORRECTLY SHAPED — read from its dotenv file (never
-       printed), checked only for length and prefix, never inspected further.
+       printed), checked against the complete inventory-owned token syntax.
     2. A CHEAP AUTH READBACK — `claude -p "Reply with exactly: PONG"
        --max-turns 1`, run from a throwaway temp cwd with ONLY
        CLAUDE_CODE_OAUTH_TOKEN in its environment (no ambient PATH, no
@@ -346,9 +342,7 @@ def _probe_claude_cli_token_age(cred, timeout_s):
     if err:
         return ProbeResult("unknown" if err == "token_file_missing" else "failed", err)
 
-    expected_prefix = spec.get("expected_prefix", CLAUDE_TOKEN_PREFIX)
-    expected_length = spec.get("expected_length", CLAUDE_TOKEN_LENGTH)
-    if len(token) != expected_length or not token.startswith(expected_prefix):
+    if not valid_claude_token(token):
         token = None
         return ProbeResult("failed", "token_malformed")
 
@@ -761,12 +755,7 @@ def file_loop_if_needed(cred, bucket, dedup_state, dry_run=False, timeout_s=30):
         "blocker_detail": f"{name} credential-health probe",
         "body": _loop_body(cred, bucket),
     }
-    try:
-        p = SUBPROCESS_RUN(["./run.sh", "call", "add-loop", json.dumps(payload)],
-                            cwd=str(REPO_ROOT), capture_output=True, timeout=timeout_s)
-        filed_ok = (p.returncode == 0)
-    except Exception:
-        filed_ok = False
+    filed_ok = call_verb("add-loop", payload, timeout=timeout_s, runner=SUBPROCESS_RUN).ok
     dedup_state[name] = {
         "bucket": bucket,
         "filed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

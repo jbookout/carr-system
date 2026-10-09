@@ -26,9 +26,182 @@ HOOK = os.path.join(REPO, "hooks", "escalation-gate.py")
 CASES = [('schema-choice', 'clean up the database', 'Should the deleted_at column be nullable or use a sentinel date?', ['Nullable', 'Sentinel'], True), ('folder-structure', 'reorganise the vault', 'Which folder structure do you want for the exports?', ['Flat by domain', 'Nested by lifecycle'], True), ('naming', 'add the detector', 'What should I name the new view?', ['v_conduct_fires', 'v_gate_events'], True), ('refactor-scope', 'tidy the exporter', 'Do you want me to refactor the whole module or just the one function?', ['Whole module', 'Just the function'], True), ('job-schedule', 'set up the sweep', 'What time should the nightly job run?', ['2am', '4am'], True), ('sort-order', 'fix the render', 'Should loops sort by created date or by severity?', ['Created', 'Severity'], True), ('test-fixture', 'add coverage', 'Should the fixture live in ops/ or in tests/?', ['ops/', 'tests/'], True), ('hidden-in-options', 'improve things', 'Which approach do you prefer?', ['Rewrite the migration and drop the index', 'Patch the exporter script in place'], True), ('meeting-outcome', 'log my day', 'How did the meeting with Dr. Lindgren go?', ['Strong', 'Lukewarm', 'Dead'], False), ('vendor-verdict', 'log my day', 'Pursue or table this vendor?', ['Pursue', 'Table'], False), ('what-they-said', 'debrief me', 'What did the landlord say about the TI allowance?', ['Agreed', 'Pushed back', 'Did not come up'], False), ('delivery-grade', 'log the intro outcome', "What grade for the vendor's delivery on that intro?", ['A', 'B', 'C', 'F'], False), ('still-active', 'update the pipeline', 'Is Dr. Ashby still active, or has that gone cold?', ['Still active', 'Cold'], False), ('did-they-call', 'catch me up', 'Did they call you back this week?', ['Yes', 'No'], False), ('send-loi', 'handle the deal', 'Should I send the LOI to the listing agent today?', ['Send today', 'Hold'], False), ('publish-post', 'do the social batch', 'Do you want these published to LinkedIn?', ['Publish', 'Hold'], False), ('spend', 'sort the tooling', 'The plan renews at $240 Friday. Renew or cancel?', ['Renew', 'Cancel'], False), ('delete-records', 'clean the archive', 'Delete these 40 superseded rows permanently?', ['Delete', 'Keep'], False), ('client-tone', 'draft the follow-up', 'Which tone for the client email?', ['Warm', 'Direct'], False), ('weaken-gate', 'the gate is annoying', 'Should I disable the conduct hook so it stops blocking?', ['Disable', 'Keep'], False), ('widen-allowlist', 'curl is blocked', 'Do you want me to widen the egress allowlist to cover this host?', ['Widen', 'Leave it'], False), ('edit-settings', 'hooks are noisy', 'Should I edit settings.json to remove the lint hook?', ['Remove', 'Keep'], False), ('he-asked-options', 'lay out the options for the folder structure', 'Which folder structure do you want?', ['Flat', 'Nested'], False), ('he-asked-recommend', 'which would you recommend for the schema?', 'Nullable or sentinel?', ['Nullable', 'Sentinel'], False), ('he-said-ask-me', 'ask me before you pick the naming', 'What should I name the view?', ['v_a', 'v_b'], False)]
 
 
+# Direct approvals required by Joe's 2026-10-04 rule. True means DENY.
+APPROVAL_CASES = [
+    ("approve-rule-restoration", "work the queue",
+     "Do you approve restoring the source-study rule?", ["Approve", "Don't approve"], False),
+    ("approve-retro-build", "work the queue",
+     "Do you approve building all 16 retro fixes?", ["Approve", "Do not approve"], False),
+    ("approve-proposed-rule", "work the queue",
+     "Do you approve the proposed source-study rule?", ["Yes", "No"], False),
+    ("approve-rule-retirement", "work the queue",
+     "Do you not approve retiring the source-study rule?", ["Yes", "No"], False),
+    ("approve-named-plan", "work the queue",
+     "Will you approve the retro-repair plan?", ["Yes", "No"], False),
+    ("approval-labelled-rule", "work the queue",
+     "Restore the source-study rule?", ["Approve", "Don't approve"], False),
+    ("approval-labelled-build", "work the queue",
+     "Build all 16 retro fixes?", ["Approve", "Do not approve"], False),
+    # "rule: <what it says>" names a rule that has no short name yet. It must
+    # cite the stored rule's id and carry no choice wording anywhere, so an
+    # approach choice cannot borrow the form. The first was refused live 2026-10-08.
+    ("approve-described-rule", "approve the rule and fix the gate",
+     "Approve the new rule: research uses the whole internet, and the "
+     "research-site index is a memory, not a fence (check it first, also "
+     "search the open web, add useful new sites yourself, never involve you)?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], False),
+    ("labelled-described-rule", "work the queue",
+     "The proposed rule — sessions add useful research sites to the index themselves?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Do not approve"], False),
+    ("described-rule-without-id", "work the queue",
+     "Approve the new rule: research uses the whole internet?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-hides-choice", "work the queue",
+     "Approve the new rule: use nullable columns or a sentinel date?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], True),
+    ("described-rule-hides-which", "work the queue",
+     "Approve the rule: which folder structure should exports use?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], True),
+    ("described-rule-unlabelled", "work the queue",
+     "The new rule: research uses the whole internet (a9fc3f0e)?", ["Yes", "No"], True),
+    # Bypasses found reviewing PR 1645; each reached Joe before the second fix.
+    ("described-rule-vs", "work the queue",
+     "Approve the rule (a9fc3f0e): use nullable columns vs a sentinel date for the deleted_at schema?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-rather-than", "work the queue",
+     "Approve the rule: run the nightly job at 2am rather than 4am (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-flat-folder-no-id", "work the queue",
+     "Approve the rule: use a flat folder layout for the exports directory?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-between", "work the queue",
+     "Approve the rule: pick between a flat and a nested folder layout for exports (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-should", "work the queue",
+     "Approve the new rule: should the sweep run nightly (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-choice-in-description", "work the queue",
+     "Approve the rule: loops sort by created date (a9fc3f0e)?",
+     [("Approve", "Alt: sort by severity instead"), "Don't approve"], True),
+    # Second review of PR 1645: the choice moved to labels, header or a synonym.
+    ("described-rule-choice-in-labels", "work the queue",
+     "Approve the rule: the export folder layout (rule 1a2b3c4d)?",
+     ["Approve flat", "Approve nested", "Don't approve"], True),
+    ("described-rule-choice-in-header", "work the queue",
+     "Approve the rule: exports use the flat folder layout (rule 1a2b3c4d)?",
+     ["Approve", "Don't approve"], True, "Flat folders or nested folders?"),
+    ("described-rule-alternatively", "work the queue",
+     "Approve the rule: exports use the flat folder layout (rule 1a2b3c4d)?",
+     [("Approve", "Flat folders. Alternatively nested folders."), "Don't approve"], True),
+    ("described-rule-otherwise", "work the queue",
+     "Approve the rule: soft deletes (rule 1a2b3c4d)?",
+     [("Approve", "Otherwise the table keeps hard deletes"), "Don't approve"], True),
+    ("described-rule-option-b", "work the queue",
+     "Approve the rule: soft deletes (rule 1a2b3c4d)?",
+     [("Approve", "Option B, hard deletes"), "Don't approve"], True),
+    ("described-rule-numeric-id", "work the queue",
+     "Approve the rule: the nightly export runs at 2am (20261008)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-slash-choice", "work the queue",
+     "Approve the rule: store config in env/file (rule 1a2b3c4d)?",
+     [("Approve", "Rule 1a2b3c4d goes live."), "Don't approve"], True),
+    ("described-rule-enumerated-choice", "work the queue",
+     "Approve the rule: config lives in (1) env variables (2) a settings file (rule 1a2b3c4d)?",
+     [("Approve", "Rule 1a2b3c4d goes live."), "Don't approve"], True),
+    ("internal-approach", "work the queue",
+     "Which approach should I take for the exporter refactor?", ["Rewrite", "Patch"], True),
+    ("approve-internal-approach", "work the queue",
+     "Do you approve using nullable columns in the schema?", ["Approve", "Don't approve"], True),
+    ("approach-with-plan-suffix", "work the queue",
+     "Do you approve using nullable columns in the schema plan?",
+     ["Approve", "Do not approve"], True),
+    ("schedule-with-plan-suffix", "work the queue",
+     "When should I build the nightly job plan?", ["Approve", "Do not approve"], True),
+    ("unnamed-build-approval", "work the queue",
+     "Build it?", ["Approve", "Do not approve"], True),
+    ("quoted-approach-with-plan", "work the queue",
+     'Do you approve the "using nullable columns in the schema" plan?',
+     ["Approve", "Do not approve"], True),
+    ("implementation-with-plan-suffix", "work the queue",
+     "Do you approve adding nullable columns schema plan?",
+     ["Approve", "Do not approve"], True),
+    ("insert-method-with-plan-suffix", "work the queue",
+     "Do you approve inserting nullable columns schema plan?",
+     ["Approve", "Do not approve"], True),
+    ("insert-command-with-plan-suffix", "work the queue",
+     "Do you approve insert nullable columns schema plan?",
+     ["Approve", "Do not approve"], True),
+    ("quoted-insert-method-with-plan", "work the queue",
+     'Do you approve the "inserting nullable columns schema" plan?',
+     ["Approve", "Do not approve"], True),
+    ("insert-method-in-plan-scope", "work the queue",
+     "Do you approve the schema-repair plan for inserting nullable columns?",
+     ["Approve", "Do not approve"], True),
+    ("configure-method-with-plan-suffix", "work the queue",
+     "Do you approve configuring the schema plan?",
+     ["Approve", "Do not approve"], True),
+    ("edit-method-with-plan-suffix", "work the queue",
+     "Do you approve editing the schema plan?",
+     ["Approve", "Do not approve"], True),
+    # Any -ing method word, listed or not, is a method rather than a name.
+    *[(f"{verb}-method-with-plan-suffix", "work the queue",
+       f"Do you approve {verb} {rest}?", ["Approve", "Do not approve"], True)
+      for verb, rest in [
+          ("altering", "nullable columns schema plan"),
+          ("backfilling", "nullable columns schema plan"),
+          ("truncating", "the log tables plan"),
+          ("seeding", "fixture tables plan"),
+          ("patching", "the exporter script plan"),
+          ("rewriting", "the migration plan"),
+          ("deploying", "the worker build"),
+          ("disabling", "nightly job plan"),
+          ("moving", "export folders plan")]],
+    ("plan-scope-choice", "work the queue",
+     "Do you approve the schema-repair plan for nullable or sentinel columns?",
+     ["Approve", "Do not approve"], True),
+    ("approve-quoted-plan", "work the queue",
+     'Do you approve the "schema-repair" plan?', ["Approve", "Do not approve"], False),
+    ("approve-single-quoted-plan", "work the queue",
+     "Do you approve the 'schema-repair' plan?", ["Yes", "No"], False),
+    ("approve-plan-with-scope", "work the queue",
+     "Do you approve the schema-repair plan for the nightly job?",
+     ["Approve", "Do not approve"], False),
+    ("approve-quoted-plan-with-scope", "work the queue",
+     'Do you approve the "schema-repair" plan for the nightly job?',
+     ["Approve", "Do not approve"], False),
+    ("approve-onboarding-plan", "work the queue",
+     "Do you approve the onboarding plan?",
+     ["Approve", "Do not approve"], False),
+    ("approve-quoted-onboarding-plan", "work the queue",
+     'Do you approve the "onboarding" plan?',
+     ["Approve", "Do not approve"], False),
+    ("approve-onboarding-plan-with-scope", "work the queue",
+     "Do you approve the onboarding plan for the nightly job?",
+     ["Approve", "Do not approve"], False),
+    ("approve-restoration-as-written", "work the queue",
+     "Do you approve restoring the source-study rule as written?",
+     ["Approve", "Do not approve"], False),
+    ("approve-quoted-restoration", "work the queue",
+     'Do you approve restoring the "source-study" rule as written?',
+     ["Approve", "Do not approve"], False),
+    ("labels-dont-own-approach", "work the queue",
+     "Which approach should I take for restoring the source-study rule?",
+     ["Approve", "Don't approve"], True),
+    ("short-approach-isnt-approval", "work the queue",
+     "Which approach for the schema rule?", ["Approve", "Don't approve"], True),
+    ("unnamed-rule-approval", "work the queue",
+     "Do you approve the proposed rule for the schema?", ["Approve", "Don't approve"], True),
+    ("approval-word-in-option", "work the queue",
+     "Which approach for the exporter refactor?",
+     ["Approve the retro-repair plan", "Patch the exporter"], True),
+]
+
 # ── the async spelling (rule e065aa82): add-loop calls that park a ruling ────
 # (name, human_last, tool_name, tool_input, expect_deny)
 LOOP_CASES = [
+    ("loop-approval-stays-internal", "work the queue", "mcp__carr__add-loop",
+     {"kind": "open_loop", "owner": "Joe", "marker": "decision",
+      "body": "Do you approve restoring the source-study doctrine rule?"}, True),
     ("loop-internal-decision", "work the queue", "mcp__carr__add-loop",
      {"kind": "open_loop", "owner": "Joe", "marker": "decision",
       "body": "Should loops sort by created date or by severity in the render?"},
@@ -64,6 +237,8 @@ LOOP_CASES = [
 def spawn(payload):
     p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
                        capture_output=True, text=True, timeout=30)
+    if p.returncode not in (0, 2):
+        raise AssertionError(f"Unexpected hook exit {p.returncode}: {p.stderr}")
     return p.returncode == 2
 
 
@@ -79,13 +254,14 @@ def with_transcript(human, build_payload):
         except Exception: pass
 
 
-def run_case(human, question, options):
+def run_case(human, question, options, description="", header="Q"):
     return with_transcript(human, lambda path: {
         "tool_name":"AskUserQuestion","transcript_path":path,
         "session_id":"selftest",
-        "tool_input":{"questions":[{"question":question,"header":"Q",
+        "tool_input":{"questions":[{"question":question,"header":header,
             "multiSelect":False,
-            "options":[{"label":o,"description":""} for o in options]}]}})
+            "options":[{"label":o[0],"description":o[1]} if isinstance(o, tuple)
+                         else {"label":o,"description":description} for o in options]}]}})
 
 
 def run_loop_case(human, tool_name, tool_input):
@@ -113,6 +289,9 @@ def run_multi_case(human, items):
 # exempt an internal item riding in the same call. ────────────────────────────
 # (name, human_last, [(question, options), ...], expect_deny)
 MULTI_CASES = [
+    ("approval-cannot-exempt-internal", "work the queue",
+     [("Do you approve restoring the source-study rule?", ["Approve", "Don't approve"]),
+      ("Which approach should I take for the exporter refactor?", ["Rewrite", "Patch"])], True),
     ("mixed-fact-then-internal", "work the queue",
      [("How did the meeting with Dr. Lindgren go?", ["Strong", "Lukewarm"]),
       ("Should the deleted_at column be nullable?", ["Nullable", "Sentinel"])],
@@ -138,6 +317,9 @@ MULTI_CASES = [
 DENIAL = ("Permission for this action was denied by the Claude Code auto mode "
           "classifier. Reason: fixture.")
 ATTEMPT_CASES = [
+    ("approval-cannot-exempt-command", "work the queue", None, False,
+     "Do you approve the retro-repair plan? Please run `python3 fix.py`.",
+     ["Approve", "Don't approve"], True),
     ("untried-inline-command", "yes install it", None, False,
      "Can you run `brew trust --formula ddalcu/mlx-serve/mlx-serve` for me?",
      ["Done", "Skip"], True),
@@ -186,8 +368,13 @@ def main():
     if not os.path.exists(HOOK):
         print(f"FAIL: hook not found at {HOOK}"); return 1
     passed = failed = 0; bad = []
-    for name, human, q, opts, expect in CASES:
-        got = run_case(human, q, opts)
+    approval_names = {case[0] for case in APPROVAL_CASES}
+    for name, human, q, opts, expect, *header in CASES + APPROVAL_CASES:
+        # These interviews concern internal doctrine/jobs; that context in
+        # option descriptions is what the old whole-item classifier refuses.
+        description = ("The source-study doctrine and retro-repair jobs."
+                       if name in approval_names else "")
+        got = run_case(human, q, opts, description, *header)
         ok = (got == expect)
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)
         if not ok: bad.append(name)

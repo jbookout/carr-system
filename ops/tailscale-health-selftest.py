@@ -285,7 +285,7 @@ if PLIST.exists():
     check("plist is not KeepAlive (one-shot at login)", not d.get("KeepAlive"))
 check("agent is primary-only (the Studio is the hub)", "com.carr.tailscale-up.plist" in cac.PRIMARY_ONLY)
 check("agent is not definition-only (the normal install path loads it)",
-      "com.carr.tailscale-up.plist" not in cac.DEFINITION_ONLY)
+      "com.carr.tailscale-up.plist" not in cac.launchd_hold.DEFINITION_ONLY)
 services = json.loads((REPO / "ops/config/services.json").read_text())["services"]
 owners = [s for s in services if any(e.get("deploy_mechanism") ==
     "ops/launchd/com.carr.tailscale-up.plist" for e in s.get("environments", []))]
