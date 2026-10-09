@@ -17,6 +17,8 @@ STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
     <session>/arm.json                    status (armed | unavailable |
                                           not_deployed), digest, pages_total,
                                           epoch
+    <session>/agents/<agent>.epoch        one epoch per child context; a child
+                                          SessionStart rotates only this file
     <session>/fetched/<agent>/<key>/      one directory per context and digest
         p<N>        page N's fetch was ATTEMPTED (PreToolUse)
         c<N>        page N came back as a real boot page (PostToolUse); holds
@@ -28,9 +30,11 @@ STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
         d<H>-<rnd>  one deny, made when H pages were confirmed
 Marker files, not a read-modify-write JSON, because a model often fetches the
 pages in parallel and parallel hooks would otherwise lose each other's pages.
-<key> is the digest for a subagent and digest+epoch for the main context, so
-a SessionStart re-arm (startup, resume, clear, compact, fork) makes the main
-context fetch again, and a digest change re-gates every context.
+<key> is digest+the child's own epoch when its epoch file exists, digest alone
+for a child that has not emitted SessionStart, and digest+the session epoch for
+the main context. A child SessionStart therefore re-gates only that child. A
+main SessionStart re-gates the main context, and a digest change re-gates every
+context.
 
 WHEN THE DIGEST MOVES MID-SESSION. Every boot page carries the corpus digest
 and page count. When a fetch in any context returns a digest or page count
@@ -204,6 +208,30 @@ def write_arm(session_id, arm):
     os.replace(tmp, os.path.join(folder, "arm.json"))
 
 
+def _agent_epoch_path(session_id, agent_id):
+    return os.path.join(_session_dir(session_id), "agents",
+                        safe_key(agent_id, "agent") + ".epoch")
+
+
+def _read_agent_epoch(session_id, agent_id):
+    try:
+        with open(_agent_epoch_path(session_id, agent_id), encoding="utf-8") as fh:
+            return safe_key(fh.read().strip(), "invalid")
+    except FileNotFoundError:
+        return None
+
+
+def _write_agent_epoch(session_id, agent_id):
+    path = _agent_epoch_path(session_id, agent_id)
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    epoch = secrets.token_hex(6)
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(epoch)
+    os.replace(tmp, path)
+
+
 def _stand_in(arm):
     """The keying arm for a context whose session has no usable page count."""
     return arm if arm and arm.get("status") == "armed" else {
@@ -214,7 +242,11 @@ def _stand_in(arm):
 def _fetch_dir(session_id, agent_id, arm):
     agent = safe_key(agent_id, "main")
     digest = safe_key(str(arm.get("digest") or "").replace("sha256:", ""), "none")[:24]
-    key = digest if agent_id else f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
+    if agent_id:
+        epoch = _read_agent_epoch(session_id, agent_id)
+        key = f"{digest}-{epoch}" if epoch else digest
+    else:
+        key = f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
     return os.path.join(_session_dir(session_id), "fetched", agent, key)
 
 
@@ -371,9 +403,8 @@ def _expand(word, quoted, base):
     return os.path.join(base, word) if base and os.path.isabs(base) else None
 
 
-def _jq_ok(args):
-    """jq with display options and at most one filter, no files, and none of
-    the builtins that read the environment, other files or modules."""
+def _jq_filter(args):
+    """The optional filter, or False when options or file arguments are invalid."""
     flt, i = None, 0
     while i < len(args):
         a = args[i]
@@ -385,9 +416,14 @@ def _jq_ok(args):
             flt, i = a, i + 1
         else:
             return False
+    return flt
+
+
+def _jq_ok(args):
+    flt = _jq_filter(args)
     if flt is None:
         return True
-    return bool(flt.strip()) and not _JQ_REFUSED.search(flt)
+    return isinstance(flt, str) and bool(flt.strip()) and not _JQ_REFUSED.search(flt)
 
 
 def _py_pure(code):
@@ -464,6 +500,126 @@ def _harmless_filter(stage):
     if prog == "cat":
         return not args
     return False
+
+
+def _jq_projection(flt):
+    """Only paths, compositions and objects of paths can prove input provenance."""
+    tokens = re.findall(r"\.[A-Za-z_][A-Za-z0-9_.]*|\.|[A-Za-z_][A-Za-z0-9_]*|[{}:,|]", flt)
+    if "".join(tokens) != re.sub(r"\s+", "", flt):
+        return False
+    i = 0
+
+    def expression():
+        nonlocal i
+        if i >= len(tokens):
+            return False
+        if tokens[i].startswith("."):
+            path = tokens[i]
+            i += 1
+            return path == "." or all(part for part in path[1:].split("."))
+        if tokens[i] != "{":
+            return False
+        i += 1
+        while i < len(tokens):
+            key = tokens[i]
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,29}", key):
+                return False
+            i += 1
+            if i >= len(tokens) or tokens[i] != ":":
+                return False
+            i += 1
+            if not expression() or i >= len(tokens):
+                return False
+            end = tokens[i]
+            i += 1
+            if end == "}":
+                return True
+            if end != ",":
+                return False
+        return False
+
+    if not expression():
+        return False
+    while i < len(tokens):
+        if tokens[i] not in ("|", ","):
+            return False
+        i += 1
+        if not expression():
+            return False
+    return True
+
+
+def _py_projection(code):
+    """Prove every printed value derives from stdin without data mutation."""
+    tree = ast.parse(code)
+    variables = set()
+
+    def data(node):
+        if isinstance(node, ast.Name):
+            return node.id in variables
+        if isinstance(node, ast.Subscript):
+            return data(node.value) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, (str, int))
+        if isinstance(node, ast.Dict):
+            return bool(node.keys) and all(isinstance(k, ast.Constant) and isinstance(k.value, str)
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,29}", k.value) and data(v)
+                for k, v in zip(node.keys, node.values))
+        if not isinstance(node, ast.Call):
+            return False
+        chain = _py_chain(node.func)
+        if chain == ("sys", "stdin", "read"):
+            return not node.args and not node.keywords
+        if chain == ("json", "load"):
+            return len(node.args) == 1 and _py_chain(node.args[0]) == ("sys", "stdin") and not node.keywords
+        if chain == ("json", "loads"):
+            return len(node.args) == 1 and isinstance(node.args[0], ast.Call) and data(node.args[0]) and not node.keywords
+        if chain == ("json", "dumps"):
+            return len(node.args) == 1 and data(node.args[0]) and all(
+                k.arg in ("indent", "sort_keys", "ensure_ascii") and isinstance(k.value, ast.Constant)
+                and isinstance(k.value.value, (int, bool, type(None))) for k in node.keywords)
+        return False
+
+    printed = False
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            continue  # capability validation has already limited imports to json/sys
+        if isinstance(statement, ast.Assign):
+            if len(statement.targets) != 1 or not isinstance(statement.targets[0], ast.Name) or not data(statement.value):
+                return False
+            variables.add(statement.targets[0].id)
+        elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            call = statement.value
+            if not (isinstance(call.func, ast.Name) and call.func.id == "print"
+                    or _py_chain(call.func) == ("sys", "stdout", "write")):
+                return False
+            if not call.args or not all(data(arg) for arg in call.args) or any(
+                    k.arg not in ("end", "sep") or not isinstance(k.value, ast.Constant)
+                    or not isinstance(k.value.value, str) or k.value.value.strip() for k in call.keywords):
+                return False
+            printed = True
+        else:
+            return False
+    return printed
+
+
+def _bash_projects_input(command):
+    """Capability-safe filters may run, but only projections can confirm a page."""
+    tokens = _lex(str(command or "").strip())
+    stages = []
+    for token in tokens or []:
+        if token[:2] == ("op", "|"):
+            stages.append([])
+        elif stages:
+            stages[-1].append(token[1])
+    for stage in stages:
+        prog, args = stage[0], stage[1:]
+        if prog == "jq":
+            flt = _jq_filter(args)
+            if flt is not None and not _jq_projection(flt):
+                return False
+        elif prog in ("python", "python3") and args[:1] == ["-c"]:
+            if not _py_projection(args[1]):
+                return False
+    return True
 
 
 def parse_bash_fetch(command, cwd):
@@ -681,18 +837,32 @@ def _live_page_one(timeout=10):
     return None, f"unreachable (exit {proc.returncode})"
 
 
-def arm_session(session_id, source, now=None):
+def arm_session(session_id, source, now=None, *, agent_id=None):
     """Arm the gate for a session at SessionStart and return the context text
     (always under 10k characters: SessionStart context is capped there)."""
+    stored = read_arm(session_id)
     response, reason = _live_page_one()
     boot = response.get("rule_boot") if isinstance(response, dict) else None
+    live_armed = (isinstance(boot, dict) and boot.get("digest")
+                  and int(boot.get("pages_total") or 0) >= 1)
+    stored_armed = stored and stored.get("status") == "armed"
+    same_corpus = (live_armed and stored_armed
+                   and stored.get("digest") == boot.get("digest")
+                   and int(stored.get("pages_total") or 0) == int(boot.get("pages_total") or 0))
+    if agent_id and stored_armed and (same_corpus or not live_armed):
+        _write_agent_epoch(session_id, agent_id)
+        return fetch_instructions(list(range(1, int(stored["pages_total"]) + 1)),
+                                  stored["digest"], int(stored["pages_total"]))
+
     arm = {"schema": SCHEMA, "source": str(source or ""), "armed_at": int(now or time.time()),
            "epoch": secrets.token_hex(6)}
-    if isinstance(boot, dict) and boot.get("digest") and int(boot.get("pages_total") or 0) >= 1:
+    if live_armed:
         arm.update(status="armed", digest=boot["digest"], pages_total=int(boot["pages_total"]))
         if int(boot.get("total_chars") or 0) >= 1:
             arm["total_chars"] = int(boot["total_chars"])
         write_arm(session_id, arm)
+        if agent_id:
+            _write_agent_epoch(session_id, agent_id)
         return fetch_instructions(list(range(1, arm["pages_total"] + 1)), arm["digest"], arm["pages_total"])
     if str(reason or "").startswith("not_deployed"):
         arm.update(status="not_deployed", reason=reason)
@@ -933,17 +1103,21 @@ def observe(payload):
         response = payload.get("toolResponse")
     if response is None:
         response = payload.get("error")
+    interrupted = isinstance(response, dict) and response.get("interrupted")
+    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse" and not interrupted
+    projects_input = direct or _bash_projects_input((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))
     answer, boot = read_answer(response)
+    if interrupted or not projects_input or (not succeeded and answer == "boot"):
+        answer = "inconclusive"
     if answer == "boot" and not _is_page(boot, page):
         answer = "inconclusive"
     if not direct and answer != "boot":
         answer = "inconclusive"
     arm = read_arm(session_id)
-    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse"
     # Only a FILTERED fetch can be confirmed by its digest alone: an unfiltered
     # answer printed everything, so a wrong page or a missing text is just that.
-    if (not direct and answer == "inconclusive" and succeeded and arm and arm.get("status") == "armed"
-            and _carries_digest(response, arm.get("digest"))):
+    if (not direct and answer == "inconclusive" and succeeded and projects_input and arm and arm.get("status") == "armed"
+            and _carries_digest(response.get("stdout", "") if isinstance(response, dict) else response, arm.get("digest"))):
         # Filtered, succeeded, and printed the armed digest: the page is read.
         folder = _fetch_dir(session_id, agent_id, arm)
         _touch(folder, f"p{page}")

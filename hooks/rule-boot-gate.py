@@ -73,13 +73,18 @@ def emit(decision, text, event="PreToolUse"):
     print(json.dumps({"hookSpecificOutput": out}))
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        log(f"DENY(parse-error) {type(exc).__name__}")
-        emit("deny", "RULE BOOT UNVERIFIED: invalid hook input; repair the adapter before an ordinary effect.")
-        return 0
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    log(f"DENY(parse-error) {type(exc).__name__}")
+    emit("deny", "RULE BOOT UNVERIFIED: invalid hook input; repair the adapter before an ordinary effect.")
+    return 0
+
+
+@decision(failure="raise")
+def decide(payload):
     if not isinstance(payload, dict):
         emit("deny", "RULE BOOT UNVERIFIED: hook input must be an object; repair the adapter.")
         return 0
@@ -99,6 +104,10 @@ def main():
         emit("allow" if event in ("PostToolUse", "PostToolUseFailure") else "deny",
              "RULE BOOT UNVERIFIED: the delivery check failed; repair it and fetch the missing pages.", event)
     return 0
+
+
+def main():
+    return run(decide, parse_error=_parse_error)
 
 
 if __name__ == "__main__":

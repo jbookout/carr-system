@@ -55,6 +55,8 @@ import os
 import re
 import subprocess
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run, Event
 from collections import Counter
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -108,6 +110,7 @@ INSTALL_REPO = install_repo()
 HOOKS = os.path.join(REPO, "hooks")
 BASELINE = os.path.join(REPO, "ops", "config", "gate-baseline.json")
 REPO_HOOKS_JSON = os.path.join(REPO, "ops", "config", "hooks.json")
+GATE_DECLARATIONS = os.path.join(REPO, "ops", "config", "gate-declarations.json")
 DELEGATION_HOOK_CONFIG = os.path.join(
     REPO, "ops", "config", "delegation-gate-hook.json"
 )
@@ -125,6 +128,10 @@ MODEL_FLOORS = os.path.join(REPO, "ops", "config", "model-floors.json")
 SESSION_CONTEXT_LIFECYCLE = os.path.join(
     REPO, "ops", "config", "session-context-lifecycle.v2.json")
 CONTRACTS = {
+    "hook_runtime.py": os.path.join(REPO, "lib", "hook_runtime.py"),
+    "hook_execution.py": os.path.join(REPO, "lib", "hook_execution.py"),
+    "gate_declarations.py": os.path.join(REPO, "lib", "gate_declarations.py"),
+    "gate-declarations.json": GATE_DECLARATIONS,
     "delegation-gate-hook.json": DELEGATION_HOOK_CONFIG,
     "hooks.json": REPO_HOOKS_JSON,
     "codex-hooks.json": CODEX_HOOKS_REPO,
@@ -362,7 +369,11 @@ def bless(only=None):
 
 def render_config(path):
     """Load one portable hooks config with this machine's concrete paths."""
-    raw = open(path).read()
+    if os.path.abspath(path) == REPO_HOOKS_JSON:
+        from lib.gate_declarations import render_hooks
+        raw = json.dumps({"hooks": render_hooks(GATE_DECLARATIONS)})
+    else:
+        raw = open(path).read()
     # {{REPO}} renders the command the INSTALLED adapter must be invoking, which
     # is always the main worktree — see install_repo(). Identical to REPO in the
     # canonical checkout.
@@ -750,7 +761,7 @@ def delegation_wiring_selftest():
     return 0 if all(outcomes) else 1
 
 
-def main():
+def check_integrity():
     if "--selftest" in sys.argv:
         return delegation_wiring_selftest()
     if "--bless" in sys.argv:
@@ -990,20 +1001,29 @@ def arm_rule_boot(payload):
         sys.path.insert(0, REPO)
         from lib.rule_boot_gate import arm_session
         return arm_session(payload.get("session_id") or payload.get("sessionId"),
-                           payload.get("source"))
+                           payload.get("source"),
+                           agent_id=payload.get("agent_id") or payload.get("agentId"))
     except Exception as exc:
         return f"RULE BOOT: could not arm the rule gate ({exc}); read the rules with standing-context detail=boot before acting."
 
 
-if __name__ == "__main__":
-    hook_payload = _session_start_payload()
+@decision(failure="raise")
+def decide(payload):
     try:
-        rc = main()
+        rc = check_integrity()
     except Exception as exc:
-        # Fail OPEN and SILENT-ish: a broken attestation must never block a
-        # session, but it must not claim everything is fine either.
         print(f"GATE INTEGRITY: check could not run ({exc}) — treat gates as UNVERIFIED.")
         rc = 0
-    if hook_payload is not None:
-        print(arm_rule_boot(hook_payload))
-    sys.exit(rc)
+    if payload is not None:
+        print(arm_rule_boot(payload))
+    return rc
+
+
+def main():
+    if len(sys.argv) > 1:
+        return check_integrity()
+    return decide(_session_start_payload()).emit(sys.stdout, sys.stderr)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -111,13 +112,18 @@ class Case:
         interpreter loads, so those cases keep a real process per call."""
         return "PYTHONPATH" in self.env
 
-    def arm(self, source="startup"):
+    def arm(self, source="startup", agent=None):
+        """SessionStart as the host sends it. A subagent's own SessionStart
+        (its start, its compaction) carries the PARENT's session_id plus the
+        subagent's agent_id (Claude Code 2.1.288: compaction calls the
+        SessionStart hooks with the compacting context's agentContext)."""
         if not self.subprocess_only():
             with InProcess(self) as (_hook, lib):
-                return lib.arm_session(SESSION, source) + "\n"
+                return lib.arm_session(SESSION, source, **({"agent_id": agent} if agent else {})) + "\n"
         code = ("import sys; sys.path.insert(0, sys.argv[1]); "
-                "from lib.rule_boot_gate import arm_session; print(arm_session(sys.argv[2], sys.argv[3]))")
-        return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source],
+                "from lib.rule_boot_gate import arm_session; "
+                "print(arm_session(sys.argv[2], sys.argv[3], **({'agent_id': sys.argv[4]} if sys.argv[4] else {})))")
+        return subprocess.run([sys.executable, "-c", code, self.tree, SESSION, source, agent or ""],
                               capture_output=True, text=True, env=self.env, timeout=30).stdout
 
     def hook(self, payload):
@@ -992,7 +998,129 @@ def case_filtered_fetch_counts_with_digest(c):
         assert denied(c.call("Bash", {"command": cmd}, agent=f"filter-{i}")), f"not a harmless filter: {cmd}"
 
 
-CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
+def case_failed_upstream_filter_cannot_confirm(c):
+    c.stub_sized("a", pages=1)
+    c.arm()
+    digest = c.boot(1)["digest"]
+    upstream = os.path.join(c.work, "refused-fetch.py")
+    with open(upstream, "w", encoding="utf-8") as fh:
+        fh.write("import sys; print('{\"ok\": false, \"error\": \"unregistered_operation_fields\"}'); sys.exit(1)")
+    filters = [
+        "python3 -c " + shlex.quote(f'print({digest!r})'),
+        "python3 -c " + shlex.quote(f'import sys; sys.stdin.read(); print({digest!r})'),
+        "python3 -c " + shlex.quote('import json,sys; d=json.load(sys.stdin); print(json.dumps(' + repr({"ok": True, "rule_boot": c.boot(1)}) + '))'),
+        "jq " + shlex.quote(json.dumps(digest)),
+        "jq " + shlex.quote('{rule_boot: ' + json.dumps(c.boot(1)) + '}'),
+        "jq " + shlex.quote('. | ' + json.dumps(digest)),
+    ]
+    for flt in filters:
+        command = f"{abs_cmd(1)} | {flt}"
+        pre = c.call("Bash", {"command": command})
+        assert not denied(pre), pre
+        result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " | " + flt,
+                                shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0 and digest in result.stdout, result
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_response": {"stdout": result.stdout, "stderr": result.stderr, "interrupted": False}})
+        assert denied(c.call(*READ)), f"upstream refusal masked by {flt} counted as a read"
+
+
+    numeric = Case(c.tree, tempfile.mkdtemp(dir=c.work))
+    numeric.stub_sized("1111", pages=1)
+    numeric.arm()
+    command = f"{abs_cmd(1)} | jq " + "1" * 32
+    result = subprocess.run(shlex.quote(sys.executable) + " " + shlex.quote(upstream) + " | jq " + "1" * 32,
+                            shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and "1" * 32 in result.stdout, result
+    numeric.call("Bash", {"command": command})
+    numeric.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                  "tool_name": "Bash", "tool_input": {"command": command},
+                  "tool_response": {"stdout": result.stdout, "stderr": "", "interrupted": False}})
+    assert denied(numeric.call(*READ)), "a numeric jq constant cannot prove digest provenance"
+
+
+def case_interrupted_result_cannot_confirm(c):
+    c.stub_sized("a", pages=1)
+    c.arm()
+    for command, stdout in ((f"{abs_cmd(1)} | jq -r .rule_boot.digest", c.boot(1)["digest"]),
+                            (abs_cmd(1), json.dumps({"ok": True, "rule_boot": c.boot(1)}))):
+        c.call("Bash", {"command": command})
+        c.hook({"hook_event_name": "PostToolUse", "session_id": SESSION, "cwd": REPO,
+                "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_response": {"stdout": stdout, "stderr": "", "interrupted": True}})
+        assert denied(c.call(*READ)), "an interrupted success-hook result counted as a page read"
+
+
+def case_unreadable_input_holds_effects(c):
+    """Input the adapter could not parse cannot establish delivery."""
+    for raw in ("not json", "[1]"):
+        out = subprocess.run([sys.executable, os.path.join(c.tree, "hooks", "rule-boot-gate.py")],
+                             input=raw, capture_output=True, text=True, env=c.env, timeout=30)
+        verdict = json.loads(out.stdout or "null")
+        assert denied((verdict or {}).get("hookSpecificOutput")), f"{raw!r} -> {out.stdout}{out.stderr}"
+
+
+def _booted_parent_and_child(c, child="sub-a"):
+    c.stub("a", pages=2)
+    c.arm()
+    for page in (1, 2):
+        c.fetch(page)
+        c.fetch(page, agent=child)
+    assert c.call(*READ) is None and c.call(*READ, agent=child) is None, "both contexts booted"
+
+
+def case_child_start_keeps_parent_boot(c):
+    """A subagent starting (its own SessionStart) must not re-arm its parent."""
+    _booted_parent_and_child(c)
+    c.arm("startup", agent="sub-b")
+    assert c.call(*READ) is None, "parent's completed boot survives a child starting"
+    assert c.call(*READ, agent="sub-a") is None, "a sibling's completed boot survives too"
+    assert denied(c.call(*READ, agent="sub-b")), "the new child still reads its own boot"
+
+
+def case_child_compaction_rearms_only_that_child(c):
+    """2026-10-08: subagent compactions at 08:25:30, 09:02:38 and 09:09:58
+    re-armed main within a second each time (main re-read 6 times for 2 real
+    compactions). A child's compaction re-arms that child and nothing else."""
+    _booted_parent_and_child(c)
+    c.arm("compact", agent="sub-a")
+    assert c.call(*READ) is None, "parent's completed boot survives a child compacting"
+    assert denied(c.call(*READ, agent="sub-a")), "the compacted child has lost its rules: re-fetch"
+    c.fetch(1, agent="sub-a")
+    c.fetch(2, agent="sub-a")
+    assert c.call(*READ, agent="sub-a") is None, "the child re-read every page"
+    c.arm("compact", agent="sub-a")
+    assert denied(c.call(*READ, agent="sub-a")), "every compaction of the child re-arms it"
+    assert c.call(*READ) is None, "and the parent stays booted throughout"
+    c.arm("compact")
+    assert denied(c.call(*READ)), "the parent's own compaction still re-arms the parent"
+
+
+def case_child_rearm_digest_change_regates_all(c):
+    """A child's SessionStart that sees a new digest is a digest change:
+    every context of the session reads the new boot."""
+    _booted_parent_and_child(c)
+    c.stub("b", pages=2)
+    c.arm("compact", agent="sub-a")
+    assert denied(c.call(*READ)), "a new digest re-gates the parent"
+    assert denied(c.call(*READ, agent="sub-a")), "and the child"
+
+
+def case_child_rearm_outage_keeps_parent(c):
+    """A child's SessionStart during a store outage holds the child, never
+    the parent that already read the current boot."""
+    _booted_parent_and_child(c)
+    c.stub(None)
+    c.arm("compact", agent="sub-a")
+    assert c.call(*READ) is None, "the parent's boot stands through a child's outage"
+    assert denied(c.call(*READ, agent="sub-a")), "the compacted child is held"
+
+
+CASES = [case_failed_upstream_filter_cannot_confirm, case_interrupted_result_cannot_confirm,
+         case_child_start_keeps_parent_boot, case_child_compaction_rearms_only_that_child,
+         case_child_rearm_digest_change_regates_all, case_child_rearm_outage_keeps_parent,
+         case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage,
          case_mid_session_digest_change, case_foreign_mcp_prefix, case_toolless_subagent,
          case_not_deployed_distinct, case_state_unwritable_armed, case_disk_full_armed,
          case_failure_not_sticky, case_state_unwritable_never_armed, case_disk_full_never_armed,
@@ -1006,7 +1134,7 @@ CASES = [case_deny_cap, case_outage_after_good_arm, case_out_of_range_not_outage
          case_same_checkout_worktree,
          case_gate_requires_only_the_served_pages, case_confirmed_page_stays_counted,
          case_parallel_first_fetch_without_arm, case_compact_rearms_the_served_set,
-         case_filtered_fetch_counts_with_digest]
+         case_filtered_fetch_counts_with_digest, case_unreadable_input_holds_effects]
 
 
 def run_all(tree):
@@ -1038,6 +1166,16 @@ def check_gate_integrity_rearms():
         with open(os.path.join(c.state, SESSION, "arm.json"), encoding="utf-8") as fh:
             arm = json.load(fh)
         assert arm["status"] == "armed" and arm["source"] == "compact", arm
+        # A subagent's compaction: same session_id, plus agent_id. The hook must
+        # hand the agent through, so the session arm (and main's epoch) stand.
+        child = {**payload, "agent_id": "sub-gi"}
+        out = subprocess.run([sys.executable, os.path.join(REPO, "hooks", "gate-integrity.py")],
+                             input=json.dumps(child), capture_output=True, text=True,
+                             env=c.env, timeout=60).stdout
+        assert "RULE BOOT" in out, out[-800:]
+        with open(os.path.join(c.state, SESSION, "arm.json"), encoding="utf-8") as fh:
+            after = json.load(fh)
+        assert after["epoch"] == arm["epoch"], ("a child's SessionStart re-armed the session", arm, after)
         # A flagged (CI) run never arms and never reads stdin.
         out = subprocess.run([sys.executable, os.path.join(REPO, "hooks", "gate-integrity.py"), "--strict"],
                              input=json.dumps({**payload, "session_id": "other"}),
@@ -1105,13 +1243,17 @@ MUTANTS = {
     "no-length-check": [('    if want < 1:\n        return True', '    if True:\n        return False')],
     "any-filter-harmless": [('def _harmless_filter(stage):\n', 'def _harmless_filter(stage):\n    return True\n')],
     "any-python-code": [('            return _py_pure(args[1])', '            return True')],
-    "any-jq-filter": [('    return bool(flt.strip()) and not _JQ_REFUSED.search(flt)', '    return True')],
+    "any-jq-filter": [('    return isinstance(flt, str) and bool(flt.strip()) and not _JQ_REFUSED.search(flt)', '    return True')],
     # Digest-confirmed filtered pages and agreeing epochs.
-    "digest-not-checked": [('            and _carries_digest(response, arm.get("digest"))):', '            ):')],
+    "digest-not-checked": [('            and _carries_digest(response.get("stdout", "") if isinstance(response, dict) else response, arm.get("digest"))):', '            ):')],
     "digest-confirms-direct-answers": [('    if (not direct and answer == "inconclusive" and succeeded',
                                         '    if (answer == "inconclusive" and succeeded')],
-    "digest-confirms-failed-calls": [('    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse"',
+    "digest-confirms-failed-calls": [('    succeeded = (payload.get("hook_event_name") or "PostToolUse") == "PostToolUse" and not interrupted',
                                       '    succeeded = True')],
+    "interrupted-confirms": [('    interrupted = isinstance(response, dict) and response.get("interrupted")',
+                               '    interrupted = False')],
+    "filter-provenance-ignored": [('    projects_input = direct or _bash_projects_input((payload.get("tool_input") or payload.get("toolInput") or {}).get("command"))',
+                                    '    projects_input = True')],
     "racing-epochs": [('            arm.setdefault("epoch", "fetch-" + safe_key(digest.replace("sha256:", ""), "none")[:12])',
                        '            arm.setdefault("epoch", secrets.token_hex(6))')],
     "python-unsafe-builtins": [('            elif node.id in _PY_UNSAFE_BUILTINS:\n                return False',
@@ -1135,6 +1277,8 @@ def mutant_tree(root, replacements):
     tree = os.path.join(root, "tree")
     os.makedirs(os.path.join(tree, "hooks"))
     os.makedirs(os.path.join(tree, "lib"))
+    os.makedirs(os.path.join(tree, "lib"), exist_ok=True)
+    shutil.copyfile(os.path.join(REPO, "lib", "hook_runtime.py"), os.path.join(tree, "lib", "hook_runtime.py"))
     shutil.copy2(os.path.join(REPO, "hooks", "rule-boot-gate.py"), os.path.join(tree, "hooks"))
     shutil.copy2(os.path.join(REPO, "lib", "rule_recall.py"), os.path.join(tree, "lib"))
     with open(os.path.join(REPO, "lib", "rule_boot_gate.py"), encoding="utf-8") as fh:

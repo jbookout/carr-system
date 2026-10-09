@@ -254,34 +254,43 @@ def check(tool, ti, cwd):
     return None
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    log(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    log(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    cwd = payload.get("cwd") or os.getcwd()
+
+    # Only Write/Edit/MultiEdit/apply_patch are in this gate's lane
+    if tool not in ("Write", "Edit", "MultiEdit", "apply_patch",
+                     "functions.apply_patch"):
+        sys.exit(0)
+
+    reason = check(tool, ti, cwd)
+    if reason:
+        log(f"DENY {tool} :: {reason[:220]}")
+        print(f"BLOCKED by the CARR close-before-open gate: {reason}",
+              file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        log(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
-
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        cwd = payload.get("cwd") or os.getcwd()
-
-        # Only Write/Edit/MultiEdit/apply_patch are in this gate's lane
-        if tool not in ("Write", "Edit", "MultiEdit", "apply_patch",
-                         "functions.apply_patch"):
-            sys.exit(0)
-
-        reason = check(tool, ti, cwd)
-        if reason:
-            log(f"DENY {tool} :: {reason[:220]}")
-            print(f"BLOCKED by the CARR close-before-open gate: {reason}",
-                  file=sys.stderr)
-            sys.exit(2)
-        sys.exit(0)
-    except Exception as exc:
-        log(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
