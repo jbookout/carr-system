@@ -1,10 +1,11 @@
 {
  "counts": {
   "residual": 3,
-  "rules": 106,
-  "triggered": 103
+  "rules": 107,
+  "triggered": 104
  },
  "generated_note": "Written only by ops/rule-trigger-compile.py: one Jev request per pack-layer rule, keyed to the rule's statement digest. ops/rule-jit-compile.py turns these into rows of ops/config/rule-jit-triggers.v1.json. Never hand-edit.",
+ "proposals": {},
  "rules": {
   "015183f5": {
    "always_on_probability": 0.33,
@@ -1642,6 +1643,38 @@
      "caveat": 0.51,
      "confirm this pairing logic": 0.74,
      "suggest caveat": 0.7
+    },
+    "paths": {},
+    "tools": {},
+    "verbs": {}
+   }
+  },
+  "8400cd3d": {
+   "always_on_probability": 0.13,
+   "id": "8400cd3d",
+   "mode": "triggered",
+   "model": "jev-1.13.0",
+   "negatives": {
+    "visible step": 0.6
+   },
+   "no_cue_probability": 0.12,
+   "packs": [
+    "governance-rules"
+   ],
+   "statement_sha256": "8ae8c4068f67b109d5dba3fb8d8d2026afd863603bab0d0de9ac4ac2df4ef017",
+   "triggers": {
+    "commands": {},
+    "keywords": {
+     "grill-with-docs": 0.73,
+     "grill-with-docs work": 0.61,
+     "medium-to-large": 0.54,
+     "medium-to-large work": 0.54,
+     "moves wayfinder": 0.63,
+     "opens grill-with-docs": 0.71,
+     "outgrows": 0.55,
+     "sizing": 0.59,
+     "sizing step": 0.69,
+     "starts sizing": 0.67
     },
     "paths": {},
     "tools": {},

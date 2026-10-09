@@ -173,12 +173,12 @@ def unpushed_count(repo):
         return None
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except (ValueError, OSError):
-        return 0                     # never block on a malformed payload
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
+
+@decision(failure="raise")
+def decide(payload):
     # Already stopping: the other Stop gates use the same guard, and re-firing
     # would nag a session that is mid-way through answering the first nag.
     if payload.get("stop_hook_active"):
@@ -261,6 +261,10 @@ def main():
         "  GENUINELY PARKING THEM — handing the tree on, or stopping mid-investigation:\n\n"
         "      CARR_ALLOW_LOOSE_WORK=1\n\n"
         "  Say which it is, next time you speak.")
+
+
+def main():
+    return run(decide)
 
 
 if __name__ == "__main__":

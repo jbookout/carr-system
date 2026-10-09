@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { acquirePostgresFixtureGroup } from './helpers/disposable-postgres.mjs';
 
 const repo = resolve(import.meta.dirname, '../..');
 const migrations = join(repo, 'migrations');
@@ -48,7 +49,7 @@ insert into national_account_owner values
  ('2f7364a7-8167-421d-8492-79815307fba3','00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000002');
 `;
 
-test('the reviewed correction leaves Musicologie as the only national account and fails closed on linked work', (t) => {
+test('the reviewed correction leaves Musicologie as the only national account and fails closed on linked work', async (t) => {
   const unavailable = (reason) => {
     assert.notEqual(process.env.CARR_NATIONAL_ACCOUNT_TEST_REQUIRED, '1', reason);
     return t.skip(reason);
@@ -65,21 +66,34 @@ test('the reviewed correction leaves Musicologie as the only national account an
   const migration = join(migrations, name);
   assert.doesNotMatch(readFileSync(migration, 'utf8'), /^\s*(begin|commit)\s*;/im,
     'the migration runner owns the transaction');
-  const dir = mkdtempSync(join(tmpdir(), 'carr-na-test-'));
-  const data = join(dir, 'data');
+  const releaseBudget = await acquirePostgresFixtureGroup();
+  let dir, data, serverAttempted = false;
+  t.after(async () => {
+    try {
+      if (serverAttempted) {
+        const stopped = spawnSync(bin('pg_ctl'), ['-D', data, '-m', 'immediate', '-w', 'stop'], { encoding: 'utf8' });
+        if (stopped.status !== 0) {
+          const status = spawnSync(bin('pg_ctl'), ['-D', data, 'status'], { encoding: 'utf8' });
+          assert.equal(status.status, 3, `PostgreSQL shutdown not verified: ${stopped.stderr}`);
+        }
+      }
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    } finally {
+      await releaseBudget();
+    }
+  });
+  dir = mkdtempSync(join(tmpdir(), 'carr-na-test-'));
+  data = join(dir, 'data');
   const socket = join(dir, 'socket');
   const init = spawnSync(bin('initdb'), ['-D', data, '-A', 'trust', '-U', 'postgres'], { encoding: 'utf8' });
-  if (init.status !== 0) { rmSync(dir, { recursive: true, force: true }); return unavailable(init.stderr.trim()); }
+  if (init.status !== 0) return unavailable(init.stderr.trim());
   mkdirSync(socket);
   const port = String(54000 + Math.floor(Math.random() * 1000));
   const env = { ...process.env, PGHOST: socket, PGPORT: port, PGUSER: 'postgres', PGDATABASE: 'postgres' };
   const log = join(dir, 'postgres.log');
+  serverAttempted = true;
   const server = spawnSync(bin('pg_ctl'), ['-D', data, '-l', log, '-o', `-F -k ${socket} -p ${port}`, '-w', 'start'], { encoding: 'utf8' });
   assert.equal(server.status, 0, `${server.stderr}\n${readFileSync(log, 'utf8')}`);
-  t.after(() => {
-    spawnSync(bin('pg_ctl'), ['-D', data, '-m', 'immediate', '-w', 'stop'], { env });
-    rmSync(dir, { recursive: true, force: true });
-  });
   const sql = (statement, expectSuccess = true) => {
     const result = spawnSync(bin('psql'), ['-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-c', statement],
       { env, encoding: 'utf8' });

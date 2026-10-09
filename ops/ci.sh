@@ -527,6 +527,8 @@ tree_fingerprint() {
 # promotion gate in their own right rather than developer convenience.
 check_gates() {
   local failures="" count=0 skiplist="" gates_timed_out=0
+  run_quiet "$LOGDIR/gate-declarations.log" "$PY" lib/gate_declarations.py --check \
+    || { failures="$failures gate-declarations"; tail -15 "$LOGDIR/gate-declarations.log" >&2; }
 
   # EVERY GATE FIRED IN THIS CLASS IS A FIXTURE, and saying so once here is what
   # keeps the enforcement numbers honest. A selftest drives a real gate with an
@@ -1153,7 +1155,7 @@ check_pushfloor() {
     # guessing and buy the full class below.
     for touched_gate in $(printf '%s\n' "$gate_surface" | grep -E '^hooks/[^/]+\.py$' | grep -v -- '-selftest\.py$' || true); do
       base="$(basename "$touched_gate" .py)"
-      paired="ops/$base-selftest.py"
+      paired="$("$PY" lib/gate_declarations.py --paired "$touched_gate" 2>/dev/null || true)"
       if [ -f "$paired" ]; then
         run_quiet "$LOGDIR/pushfloor-$base-selftest.log" "$PY" "$paired" \
           || { tail -15 "$LOGDIR/pushfloor-$base-selftest.log" >&2
