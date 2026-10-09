@@ -648,3 +648,20 @@ test("a free-mail domain never counts as corroboration, even when it matches the
     e => e.payload.error === "identity_evidence_required", domain);
   }
 });
+
+test("a corrected name or org listing two candidates is still refused in any case or with a slash", async () => {
+  for (const fields of [{ name: "Smith OR Jones" }, { name: "Lee Or Kim" }, { name: "Dr Lee / Dr Kim" },
+    { org: "Acme / Beta Corp" }]) {
+    await assert.rejects(call(new Fake(basePlan()), { fields }),
+      e => e.payload.error === "unconfirmed_identity", JSON.stringify(fields));
+  }
+});
+
+test("regional ISP and other consumer mail domains never count as corroboration", async () => {
+  for (const domain of ["bellsouth.net", "att.net", "comcast.net", "sbcglobal.net", "cox.net", "charter.net",
+    "ymail.com", "mac.com", "protonmail.com", "proton.me"]) {
+    await assert.rejects(call(new Fake(basePlan({ email: `alex@${domain}` })), { fields: { name: "Alex Morgan" },
+      evidence: { ...confirmedEvidence, corroborating_field: "email_domain", corroborating_value: domain } }),
+    e => e.payload.error === "identity_evidence_required", domain);
+  }
+});

@@ -29,13 +29,17 @@ export const PARTY_IDENTITY_FIELDS = Object.freeze(["name", "org", "state"]);
 const CORROBORATING_FIELDS = Object.freeze(["firm", "email_domain", "city", "phone", "address", "npi"]);
 const UNCONFIRMED = /\b(?:unconfirmed|unverified|confirm|possible match|surname[- ]only|not (?:yet )?confirmed)\b/i;
 
-// One clean value, not a list: a separator or a lowercase " or " between words.
-// Case-sensitive so a capital OR state code ("Portland OR 97209") and a slash
-// inside one value (suite numbers) are not misread as alternatives.
+// Evidence values (addresses, cities) must be one value, not a list. Only a
+// separator or a lowercase " or " counts, so a capital OR state code
+// ("Portland OR 97209") and a slash in a suite number are not misread.
 const ALTERNATIVES = /[;\r\n]|\s+or\s+(?=\S)/;
-// A free-mail domain proves nothing about who someone works for.
-const FREE_MAIL_DOMAINS = new Set(["gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "icloud.com",
-  "me.com", "aol.com", "hotmail.com", "live.com", "msn.com"]);
+// The corrected name or org itself stays strict: "Smith OR Jones" or
+// "Dr Lee / Dr Kim" is two candidates, never one confirmed value.
+const FIELD_ALTERNATIVES = /[;\r\n]|\s(?:or|\/)\s/i;
+// A consumer mail domain proves nothing about who someone works for.
+const FREE_MAIL_DOMAINS = new Set(["gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com",
+  "icloud.com", "me.com", "mac.com", "aol.com", "hotmail.com", "live.com", "msn.com", "protonmail.com",
+  "proton.me", "bellsouth.net", "att.net", "comcast.net", "sbcglobal.net", "cox.net", "charter.net"]);
 const UUID = /\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/i;
 // "confirm" inside a URL path is not an unconfirmed marker.
 const withoutUrls = text => text.replace(/https?:\/\/\S+/gi, " ");
@@ -112,7 +116,7 @@ export function normalizeIdentityFields(fields) {
     hint: "identity fields only (name, org, state); contact facts go through update-party-contact" });
   const clean = {};
   for (const k of keys) {
-    if (typeof fields[k] === "string" && (UNCONFIRMED.test(fields[k]) || ALTERNATIVES.test(fields[k])))
+    if (typeof fields[k] === "string" && (UNCONFIRMED.test(fields[k]) || FIELD_ALTERNATIVES.test(fields[k])))
       throw new ToolError({ error: "unconfirmed_identity", field: k,
         hint: "apply only one clean, confirmed value; values marked unconfirmed or confirm, or listing alternatives, cannot be written" });
     const value = typeof fields[k] === "string" ? fields[k].trim().replace(/\s+/g, " ") : "";
