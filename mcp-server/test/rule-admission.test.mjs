@@ -21,6 +21,64 @@ function fakeClient(route) {
   };
 }
 
+for (const verb of ["teach", "amend-rule"]) {
+  const args = verb === "teach"
+    ? { idempotency_key: "scope-teach", statement: "fixture rule",
+        human_quote: "fixture quote", enforcement_home: "core" }
+    : { idempotency_key: "scope-amend", rule_id: RULE, base_version: 1,
+        statement: "corrected wording", reason: "fixture correction" };
+
+  for (const [shape, scope] of Object.entries({
+    string: "shared", array: [], null: null, boolean: false, number: 1,
+  })) {
+    test(`${verb} refuses a ${shape} scope before any database write`, async () => {
+      const c = fakeClient(sql => {
+        if (/select status, statement, human_quote, scope, version from rule/i.test(sql))
+          return { rows: [{ status: "proposed", statement: "old wording",
+            human_quote: null, scope: {}, version: 1 }] };
+        if (/select version from rule/i.test(sql)) return { rows: [{ version: 1 }] };
+        if (/insert into rule/i.test(sql)) return { rows: [{ id: RULE, personal_to: null }] };
+        return { rows: [] };
+      });
+      await assert.rejects(
+        () => TOOLS[verb].handler(c, ACTOR, { ...args, scope }),
+        e => {
+          assert.ok(e instanceof ToolError);
+          assert.equal(e.payload.error, "invalid_object");
+          assert.equal(e.payload.field, "scope");
+          assert.match(e.payload.hint, /scope.*object/i);
+          return true;
+        },
+      );
+      assert.equal(c.calls.some(x => /\b(insert|update|delete)\b/i.test(x.sql)), false);
+    });
+  }
+
+  for (const scope of [{}, { section: "fixture" }, undefined]) {
+    test(`${verb} accepts ${scope === undefined ? "omitted" : JSON.stringify(scope)} scope`, async () => {
+      const c = fakeClient(sql => {
+        if (/insert into rule/i.test(sql)) return { rows: [{ id: RULE, personal_to: null }] };
+        if (/select status, statement, human_quote, scope, version from rule/i.test(sql))
+          return { rows: [{ status: "proposed", statement: "old wording",
+            human_quote: null, scope: { section: "original" }, version: 1 }] };
+        if (/select version from rule where id=\$1 for update/i.test(sql))
+          return { rows: [{ version: 1 }] };
+        if (/select version from rule where id=\$1$/i.test(sql))
+          return { rows: [{ version: 2 }] };
+        return { rows: [] };
+      });
+      const out = await executeRegisteredTool(c, ACTOR, verb, {
+        ...args, ...(scope === undefined ? {} : { scope }),
+      });
+      assert.equal(out.ok, true);
+      const write = c.calls.find(x => verb === "teach"
+        ? /insert into rule/i.test(x.sql) : /update rule set statement=/i.test(x.sql));
+      const stored = JSON.parse(write.params[verb === "teach" ? 3 : 2]);
+      assert.deepEqual(stored, scope ?? (verb === "teach" ? {} : { section: "original" }));
+    });
+  }
+}
+
 test("admit-rule is an explicit human-only authority verb with all four D-04 dimensions", () => {
   const tool = TOOLS["admit-rule"];
   // humanOnly LABEL RETIRED (WR-000019 slice S1, 2026-08-27): dead since
