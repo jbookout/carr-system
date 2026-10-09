@@ -78,6 +78,34 @@ class FamilyDispatchTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort=low', seen[0])
         self.assertEqual(self.reg.entries()['cx']['family'], 'sol')
 
+    def test_priority_order_is_not_version_order_for_either_family(self):
+        self.reg.register('cx', 'codex-session', family='sol', effort='high')
+        for family in ('sol', 'luna'):
+            with self.subTest(family=family):
+                self.catalog.write_text(json.dumps({'models': [
+                    {'slug': f'gpt-{version}-{family}', 'priority': priority}
+                    for priority, version in enumerate(('6.9', '6.10', '5.6', '6.1'))]}))
+                self.assertEqual(self.send(family=family)[0]['model'], f'gpt-6.10-{family}')
+
+    def test_hidden_and_retired_versions_are_not_executors(self):
+        self.reg.register('cx', 'codex-session', family='sol', effort='high')
+        self.catalog.write_text(json.dumps({'models': [
+            {'slug': 'gpt-9-sol', 'visibility': 'hide'},
+            {'slug': 'gpt-8-sol', 'retired': True},
+            {'slug': 'gpt-7-sol', 'hidden': True},
+            {'slug': 'gpt-6.10-sol', 'visibility': 'list'},
+            {'slug': 'gpt-6.9-sol'}]}))
+        self.assertEqual(self.send()[0]['model'], 'gpt-6.10-sol')
+
+    def test_only_hidden_family_refuses_without_codex(self):
+        self.reg.register('cx', 'codex-session', family='luna', effort='low')
+        self.catalog.write_text(json.dumps({'models': [
+            {'slug': 'gpt-6-luna', 'visibility': 'hide'}]}))
+        with patch.object(dispatch.subprocess, 'run') as run:
+            with self.assertRaises(desks.DeskError):
+                dispatch.dispatch('cx', 'work', registry=self.reg, results_path=self.results)
+            run.assert_not_called()
+
     def test_catalog_refusal_starts_zero_processes(self):
         self.reg.register('cx', 'codex-session', family='sol', effort='high')
         for content in (None, '{broken', '{}', '{"models":[]}', '{"models":42}'):

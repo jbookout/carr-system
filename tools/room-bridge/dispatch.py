@@ -7,6 +7,7 @@ to route costs the tokens the routing was supposed to save.
 
     dispatch.py send claude-desk "reconcile the loop board"
     dispatch.py send codex-desk "rename this variable across the package" --family luna --effort low
+    dispatch.py send codex-desk "repair the build" --family sol --effort high --fresh --checkout new:repair-build
     dispatch.py send codex-desk "Own PR: #1667\nWrites: tools/room-bridge/*.py\nrepair dispatch" --effort high
     dispatch.py desks
     dispatch.py register claude-desk --socket /tmp/cc-socks/claude-desk.sock
@@ -46,6 +47,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import codex_models  # noqa: E402
+import codex_checkout  # noqa: E402
+from ops.git_env import scrubbed_env  # noqa: E402
 import write_ownership  # noqa: E402
 import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
@@ -131,9 +134,9 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
-def _run_codex_streamed(argv, env, timeout):
+def _run_codex_streamed(argv, env, timeout, **options):
     """Preserve result parsing while exposing actual executor output to its job log."""
-    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, **options,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     chunks = []
     def relay():
@@ -244,6 +247,8 @@ def _to_codex(
         # does not validate real argument parsing, so this never surfaced
         # until a genuine second call hit the real binary.
         if not thread:
+            if entry.get('checkout_workspace'):
+                argv.append('--skip-git-repo-check')
             argv += ["-C", entry.get("cwd") or str(Path.cwd())]
             if entry.get("sandbox"):
                 argv += ["-s", entry["sandbox"]]
@@ -252,6 +257,8 @@ def _to_codex(
         if thread:
             argv.append(thread)
         argv.append(task)
+        process_options = ({'cwd': entry['checkout_workspace']}
+                           if not thread and entry.get('checkout_workspace') else {})
 
         try:
             # stdin=DEVNULL is load-bearing: `codex exec` reads stdin when it
@@ -260,11 +267,12 @@ def _to_codex(
             # It is the same reason every command in CLAUDE.md carries
             # `</dev/null`.
             if stream_output:
-                proc = _run_codex_streamed(argv, env or os.environ.copy(), limit_s)
+                proc = _run_codex_streamed(argv, env or os.environ.copy(), limit_s, **process_options)
             else:
                 proc = subprocess.run(
                     argv, env=env or os.environ.copy(), capture_output=True,
                     text=True, timeout=limit_s, stdin=subprocess.DEVNULL,
+                    **process_options,
                 )
         except FileNotFoundError:
             return {"status": "failed", "detail": "codex is not on PATH"}
@@ -333,6 +341,7 @@ def dispatch(
     family: str | None = None,
     effort: str | None = None,
     writes: list[str] | None = None,
+    checkout: str | None = None,
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable.
 
@@ -351,6 +360,8 @@ def dispatch(
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
             raise DeskError("desk_not_live", str(exc)) from exc
     entry = registry.resolve(name)
+    if checkout is not None and entry['kind'] not in codex_models.CODEX_KINDS:
+        raise DeskError('unsupported_checkout', '--checkout requires a Codex desk')
     if entry["kind"] in codex_models.CODEX_KINDS:
         entry = {**entry, "family": codex_models.family_default(family or entry.get("family"), entry.get("model")),
                  "effort": desks._normalize_effort(entry["kind"], effort or entry.get("effort"))}
@@ -402,6 +413,15 @@ def dispatch(
               file=sys.stderr, flush=True)
 
     try:
+        if checkout is not None:
+            prepared = codex_checkout.prepare(checkout, cwd or entry.get('cwd') or str(Path.cwd()), env)
+            env = scrubbed_env(env)
+            base.update(prepared)
+            task = codex_checkout.instruction(prepared) + task
+            if fresh or cwd or not entry.get('thread_id'):
+                entry = {**entry, **prepared, 'cwd': prepared['checkout_workspace']}
+                if cwd:
+                    cwd = prepared['checkout_workspace']
         if entry["kind"] == "claude-session":
             if name == "flash":
                 with flashlib.activity_scope():
@@ -791,6 +811,12 @@ def main(argv: list[str]) -> int:
     s.add_argument("--family", choices=codex_models.FAMILIES)
     s.add_argument("--effort", choices=desks.EFFORT_CHOICES)
     s.add_argument("--writes", action="append", help="repository-relative write glob (repeatable)")
+    s.add_argument('--checkout', metavar='BRANCH|new:NAME',
+                   help='clone origin before launch into a retained /private/tmp job folder; '
+                        'BRANCH uses that branch, new:NAME branches from origin default HEAD. '
+                        'Fresh jobs start in its parent workspace with the nested checkout named '
+                        'in the task; resumed desks keep cwd and receive the checkout path. '
+                        'Uses the canonical noreply author without changing sandbox permissions')
     s.add_argument("--fresh", action="store_true",
                    help="start a new Codex thread instead of resuming the desk's")
     s.add_argument("--stream-output", action="store_true",
@@ -861,7 +887,8 @@ def main(argv: list[str]) -> int:
             raise DeskError("empty_task", "dispatch requires a non-empty task")
         row = dispatch(a.name, task, registry=reg, results_path=results,
                        fresh=getattr(a, "fresh", False), stream_output=a.stream_output,
-                       retrieval=a.retrieve, family=a.family, effort=a.effort, writes=a.writes)
+                       retrieval=a.retrieve, family=a.family, effort=a.effort, writes=a.writes,
+                       checkout=a.checkout)
         print(json.dumps(row, indent=2))
         return 0 if row["status"] in ("delivered", "completed") else 1
 

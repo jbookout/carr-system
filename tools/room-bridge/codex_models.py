@@ -37,7 +37,12 @@ def resolve_model(family: str | None, env: dict | None = None) -> str:
         raise DeskError('codex_catalog_unavailable', f'Codex model catalog missing or unreadable: {path}') from exc
     candidates: list[tuple[tuple[int, ...], str]] = []
     for entry in models:
-        slug = entry.get('slug') if isinstance(entry, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        if (entry.get('visibility', 'list') != 'list' or entry.get('hidden') is True
+                or entry.get('retired') is True or entry.get('status') in ('hidden', 'retired')):
+            continue
+        slug = entry.get('slug')
         if not isinstance(slug, str):
             continue
         match = VERSION.fullmatch(slug)
