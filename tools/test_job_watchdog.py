@@ -1014,6 +1014,44 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(state["tasks"]["credentials"]["lane"], "needs-joe")
                 self.assertEqual(state["tasks"]["credentials"]["status"], "blocked")
 
+    def test_every_filed_loop_names_an_owner_the_verb_accepts(self):
+        import job_watchdog as w
+        from unittest.mock import patch
+        accepted = set(json.loads(re.search(
+            r"LOOP_OWNERS = Object\.freeze\((\[[^\]]*\])\)",
+            (ROOT / "mcp-server/src/tools.js").read_text()).group(1)))
+        self.assertEqual(accepted, {"joe", "dell", "claude"})
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        cases = (("pr_ci_red", None, "claude"), ("job_hang", "credentials", "joe"),
+                 ("pr_blocked_review", "ruling", "joe"))
+        for kind, needs_joe, owner in cases:
+            with self.subTest(kind=kind, needs_joe=needs_joe):
+                f = w.finding(kind, "subject-" + kind, "reason", c)
+                f["needs_joe"] = needs_joe
+                self.assertEqual(f["owner"], "orchestrator", "the board seat keeps its own name")
+                payloads = []
+                def capture(argv, config, cwd=None):
+                    payloads.append(json.loads(argv[3]))
+                    return json.dumps({"ok": True, "loop_id": "synthetic-loop"})
+                with tempfile.TemporaryDirectory() as directory, \
+                        patch.object(w, "command", side_effect=capture):
+                    effects = w.Effects(Path(directory), c)
+                    effects._file_defect(f, "job-watchdog:probe")
+                    with patch.object(effects, "show_finding", return_value={}):
+                        effects.report({**f, "first_seen": "2026-10-08T00:00:00+00:00"})
+                self.assertEqual(len(payloads), 2, payloads)
+                for payload in payloads:
+                    self.assertIn(payload["owner"], accepted)
+                    self.assertEqual(payload["owner"], owner)
+
+    def test_record_error_next_step_does_not_claim_only_an_access_problem(self):
+        import job_watchdog as w
+        c = w.load_config(ROOT / "ops/config/job-watchdog.json")
+        step = w.finding("record_error", "x", "TOOL ERROR unknown_owner", c)["next_action"]
+        self.assertNotIn("Restore record-layer access", step)
+        self.assertIn("refused", step)
+        self.assertIn("unreachable", step)
+
     def test_credential_escalation_reaches_production_record_gate(self):
         import job_watchdog as w
         from unittest.mock import patch
@@ -1024,8 +1062,14 @@ class StateTests(unittest.TestCase):
           import fs from 'node:fs';
           const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
           let queried = false;
-          const client = {query: async () => {
-            queried = true; throw new Error('test database boundary');
+          // The handler asks the database two things before its ownership gate
+          // (idempotency replay, domain taxonomy). Answer those so the payload
+          // reaches the gate; any later query is the database boundary.
+          const client = {query: async (sql) => {
+            queried = true;
+            if (/tool_call/.test(sql)) return {rows: []};
+            if (/loop_domain/.test(sql)) return {rows: [{slug: 'system'}]};
+            throw new Error('test database boundary');
           }};
           try {
             await executeRegisteredTool(client,
@@ -1045,6 +1089,9 @@ class StateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             observed = json.loads(result.stdout)
             self.assertTrue(observed["queried"], observed)
+            # Only the database boundary may stop the payload: a verb-level
+            # refusal (unknown_owner, joint_ownership_refused) is a real defect.
+            self.assertEqual(observed["refusal"], "test database boundary", observed)
             payloads.append(payload)
             return json.dumps({"ok": True, "loop_id": "synthetic-loop"})
         with tempfile.TemporaryDirectory() as directory:
