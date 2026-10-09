@@ -23,7 +23,7 @@ REAL_RUN = subprocess.run
 
 class CheckoutDispatchTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir='/private/tmp')
+        self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.source = self.root / 'canonical'
@@ -50,6 +50,9 @@ class CheckoutDispatchTests(unittest.TestCase):
         canonical = patch('codex_checkout.CANONICAL_REPO', self.source)
         canonical.start()
         self.addCleanup(canonical.stop)
+        checkout_root = patch('codex_checkout.CHECKOUT_ROOT', self.root)
+        checkout_root.start()
+        self.addCleanup(checkout_root.stop)
 
     def git(self, *args, cwd=None):
         return REAL_RUN(['git', '-C', str(cwd or self.source), *args], check=True,
@@ -75,7 +78,7 @@ class CheckoutDispatchTests(unittest.TestCase):
         row = self.send(checkout='repair', fresh=True)
         repo = Path(row['checkout_path'])
         workspace = Path(row['checkout_workspace'])
-        self.assertTrue(repo.is_relative_to(Path('/private/tmp')))
+        self.assertTrue(repo.is_relative_to(self.root))
         self.assertEqual(repo.parent, workspace)
         self.assertTrue((repo / '.git').is_dir())
         self.assertFalse((workspace / '.git').exists())
@@ -142,6 +145,14 @@ class CheckoutDispatchTests(unittest.TestCase):
         self.git('config', 'user.email', 'author@example.com')
         with patch.object(dispatch.subprocess, 'run', side_effect=self.execute):
             with self.assertRaisesRegex(desks.DeskError, 'noreply'):
+                dispatch.dispatch('cx', 'repair', registry=self.reg, results_path=self.results,
+                                  env=self.env, checkout='repair')
+        self.assertEqual(self.codex_calls, [])
+
+    def test_workspace_allocation_failure_refuses_without_codex(self):
+        with patch.object(dispatch.subprocess, 'run', side_effect=self.execute), \
+             patch.object(dispatch.codex_checkout.tempfile, 'mkdtemp', side_effect=PermissionError):
+            with self.assertRaisesRegex(desks.DeskError, 'checkout.*workspace'):
                 dispatch.dispatch('cx', 'repair', registry=self.reg, results_path=self.results,
                                   env=self.env, checkout='repair')
         self.assertEqual(self.codex_calls, [])

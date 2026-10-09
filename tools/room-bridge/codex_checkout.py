@@ -12,6 +12,7 @@ from ops.git_env import scrubbed_env
 from desks import DeskError
 
 CANONICAL_REPO = Path.home() / 'carr-system'
+CHECKOUT_ROOT = Path('/private/tmp')
 
 
 def prepare(target: str, source: str, env: dict | None = None) -> dict[str, str]:
@@ -47,7 +48,10 @@ def prepare(target: str, source: str, env: dict | None = None) -> dict[str, str]
     email = git(['config', '--get', 'user.email'], canonical, 'canonical author lookup')
     if not author or not email.endswith('@users.noreply.github.com'):
         raise DeskError('codex_checkout_failed', 'checkout refused: canonical author needs a noreply email')
-    workspace = Path(tempfile.mkdtemp(prefix='room-codex-', dir='/private/tmp'))
+    try:
+        workspace = Path(tempfile.mkdtemp(prefix='room-codex-', dir=CHECKOUT_ROOT))
+    except OSError:
+        raise DeskError('codex_checkout_failed', 'checkout refused: job workspace unavailable') from None
     repo = workspace / 'checkout'
     try:
         args = ['clone', '--no-local']
