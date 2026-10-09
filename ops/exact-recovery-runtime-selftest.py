@@ -38,7 +38,7 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False,
     root = Path(holder.name)
     tracked = subprocess.check_output(
         ["git", "-C", str(ROOT), "ls-files", "-z", "--", "mcp-server", "dealroom"],
-        env=FIXTURE_GIT_ENV,
+        env=FIXTURE_ENV,
     ).decode().split("\0")
     for relative in filter(None, tracked):
         destination = root / relative
