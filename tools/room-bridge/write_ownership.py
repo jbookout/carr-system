@@ -11,6 +11,10 @@ import re
 import shlex
 import sys
 import socket
+import ctypes
+import pwd
+import time
+from datetime import datetime, timezone
 
 from desks import DeskError
 
@@ -19,20 +23,56 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from lib.github_reader import GitHubReader
 
-ACTIVE = {'running', 'started', 'pending', 'delivered', 'delivered_live', 'timed_out', 'stuck'}
+LEDGER = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.config' / 'carr' / 'hermes-write-ownership.jsonl'
+
+
+def process_start(pid: int) -> str | None:
+    """Read kernel start time; an unavailable identity never authorizes release."""
+    try:
+        if sys.platform == 'linux':
+            fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            return f'{boot}:{fields[19]}'
+        if sys.platform == 'darwin':
+            # PROC_PIDTBSDINFO: two uint64 start fields follow 120 bytes.
+            buf = ctypes.create_string_buffer(136)
+            lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+            size = lib.proc_pidinfo(pid, 3, 0, buf, len(buf))
+            if size == len(buf):
+                import struct
+                sec, usec = struct.unpack_from('=QQ', buf.raw, 120)
+                return f'{sec}:{usec}'
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
 
 
 def process_owner() -> dict:
-    return {'host': socket.gethostname(), 'pid': os.getpid()}
+    return {'host': socket.gethostname(), 'pid': os.getpid(),
+            'start_time': process_start(os.getpid())}
 
 
 def process_terminated(identity: dict, *, group: bool = False) -> bool:
-    """Only ESRCH proves termination. Reused IDs or denied probes retain ownership."""
-    number = identity.get('pgid' if group else 'pid')
-    if identity.get('host') != socket.gethostname() or type(number) is not int or number <= 0:
+    pid = identity.get('pid')
+    if (identity.get('host') != socket.gethostname() or type(pid) is not int or pid <= 0
+            or not identity.get('start_time')):
         return False
     try:
-        (os.killpg if group else os.kill)(number, 0)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        dead = True
+    except OSError:
+        return False
+    else:
+        current = process_start(pid)
+        dead = current is not None and current != identity['start_time']
+    if not dead or not group:
+        return dead
+    pgid = identity.get('pgid')
+    if type(pgid) is not int or pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
     except ProcessLookupError:
         return True
     except OSError:
@@ -42,11 +82,15 @@ def process_terminated(identity: dict, *, group: bool = False) -> bool:
 
 def termination_evidence(row: dict) -> str | None:
     executor = row.get('executor') or {}
+    if not row.get('launch_marker'):
+        if executor.get('kind') not in ('reservation', 'unconfirmed'):
+            return None
+        if process_terminated(row.get('owner_process') or {}):
+            return 'dispatcher terminated; no executor launch recorded'
+        return None
     kind = executor.get('kind')
-    if kind == 'reservation' and process_terminated(row.get('owner_process') or {}):
-        return 'reservation owner terminated before executor handoff'
     if kind == 'process_group' and process_terminated(executor, group=True):
-        return 'executor process group terminated'
+        return 'recorded executor identity terminated and process group absent'
     if kind == 'codex_turn' and executor.get('socket') and executor.get('turn_id'):
         import codex_wire
         if codex_wire.turn_terminated(executor['socket'], executor['thread_id'], executor['turn_id']):
@@ -182,7 +226,15 @@ def overlaps(left: str, right: str) -> bool:
 def _locked(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with Path(str(path) + '.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise DeskError('ownership_locked', 'ownership lock busy; retry reconcile')
+                time.sleep(0.01)
         try:
             yield
         finally:
@@ -192,62 +244,123 @@ def _locked(path: Path):
 def _append(path: Path, row: dict) -> None:
     with path.open('a', encoding='utf-8') as fh:
         fh.write(json.dumps(row, separators=(',', ':')) + '\n')
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def record(path: Path, row: dict) -> None:
+    """Result snapshots are never used to decide ownership."""
+    if path.resolve() in (LEDGER.resolve(), Path(str(LEDGER) + '.lock').resolve()):
+        raise DeskError('bad_results_path', 'results cannot overwrite the ownership authority')
     with _locked(path):
         _append(path, row)
 
 
-def reserve(path: Path, row: dict, cwd: str, writes: list[str]) -> dict:
+def _claims() -> dict[str, dict]:
+    claims = {}
+    try:
+        if LEDGER.exists():
+            for line in LEDGER.read_text(encoding='utf-8').splitlines():
+                row = json.loads(line)
+                if (not isinstance(row, dict) or not row.get('msg_id')
+                        or row.get('ownership_state') not in ('held', 'released')
+                        or not isinstance(row.get('repo'), str)
+                        or not re.fullmatch(r'[\w.-]+/[\w.-]+', row['repo'])
+                        or not isinstance(row.get('writes'), list) or not row['writes']
+                        or any(not isinstance(p, str) for p in row['writes'])
+                        or declaration('', row['writes']) != row['writes']):
+                    raise ValueError('invalid claim')
+                claims[row['msg_id']] = row
+    except (OSError, ValueError, TypeError) as exc:
+        raise DeskError('ownership_unreadable', 'cannot verify fixed ownership ledger') from exc
+    return claims
+
+
+def _persist(row: dict) -> dict:
+    row = {**row, 'ownership_updated_at': datetime.now(timezone.utc).isoformat()}
+    _append(LEDGER, row)
+    return row
+
+
+def _claim(msg_id: str) -> dict:
+    row = _claims().get(msg_id)
+    if not row:
+        raise DeskError('claim_missing', 'claim not found in ownership authority')
+    return row
+
+
+def reserve(row: dict, cwd: str, writes: list[str]) -> dict:
     repo, prs = open_prs(cwd)
     mine = own_pr(row['task'], repo)
-    metadata = {'repo': repo, 'writes': writes, 'own_pr': mine,
-                'owner_process': process_owner(), 'executor': {'kind': 'reservation'},
-                'ownership_state': 'held'}
-    with _locked(path):
+    with _locked(LEDGER):
+        claims = _claims()
+        if row['msg_id'] in claims:
+            raise DeskError('claim_exists', 'a job cannot reserve twice')
         for pr in prs:
             if pr['number'] != mine and any(fnmatchcase(file, pattern)
                     for file in pr['files'] for pattern in writes):
                 raise DeskError('write_set_overlap', f"write set owned by PR {pr['number']} "
                     f"({pr['title']}); build on top of PR {pr['number']}")
-        active: dict[str, dict] = {}
-        try:
-            if path.exists():
-                for line in path.read_text(encoding='utf-8').splitlines():
-                    previous = json.loads(line)
-                    if not isinstance(previous, dict):
-                        raise ValueError('result row is not an object')
-                    key = previous.get('msg_id')
-                    if key:
-                        active.setdefault(key, {}).update(previous)
-                    elif previous.get('writes') and previous.get('status') in ACTIVE:
-                        raise ValueError('active claim has no msg_id')
-        except (OSError, ValueError, TypeError) as exc:
-            raise DeskError('ownership_unreadable', 'cannot verify in-flight results ledger') from exc
-        for previous in active.values():
-            if previous.get('repo', '').lower() != repo.lower():
+        for previous in claims.values():
+            if previous['ownership_state'] == 'released' or previous.get('repo', '').lower() != repo.lower():
                 continue
-            held = previous.get('ownership_state') == 'held'
-            if previous.get('ownership_state') == 'released' or (not held and previous.get('status') not in ACTIVE):
-                continue
-            claimed = previous.get('writes', [])
-            if not isinstance(claimed, list) or any(not isinstance(p, str) for p in claimed):
-                raise DeskError('ownership_unreadable', 'invalid in-flight write set')
-            if any(overlaps(a, b) for a in writes for b in claimed):
-                evidence = termination_evidence(previous)
-                if evidence:
-                    _append(path, {'msg_id': previous['msg_id'], 'status': 'recovered',
-                                   'ownership_state': 'released', 'ownership_detail': evidence})
-                    continue
+            if any(overlaps(a, b) for a in writes for b in previous['writes']):
                 owner_pr = previous.get('own_pr')
                 advice = f'build on top of PR {owner_pr}' if owner_pr else "build on top of the owner's PR once it is opened"
-                stuck = ('; stuck: termination unconfirmed' if previous.get('status') in ('timed_out', 'stuck')
-                         or not previous.get('executor')
-                         or previous.get('executor', {}).get('kind') == 'unconfirmed'
-                         or 'stuck' in previous.get('ownership_detail', '')
-                         or process_terminated(previous.get('owner_process') or {}) else '')
                 raise DeskError('write_set_overlap', f"write set owned by in-flight job "
-                    f"{previous['msg_id']} (desk {previous.get('desk', '?')}){stuck}; {advice}")
-        _append(path, {**row, **metadata, 'status': 'running'})
-    return metadata
+                    f"{previous['msg_id']} (desk {previous.get('desk', '?')}); "
+                    f"stuck or running: claim held; run dispatch.py reconcile --claim {previous['msg_id']}; {advice}")
+        return _persist({**row, 'repo': repo, 'writes': writes, 'own_pr': mine,
+                         'owner_process': process_owner(), 'executor': {'kind': 'reservation'},
+                         'ownership_state': 'held', 'status': 'running'})
+
+
+def launch(msg_id: str) -> dict:
+    """Durably mark handoff BEFORE anything that could start a writer."""
+    with _locked(LEDGER):
+        row = _claim(msg_id)
+        if (row['ownership_state'] != 'held' or row.get('launch_marker')
+                or row['owner_process'] != process_owner()):
+            raise DeskError('claim_launch_conflict', 'claim is not awaiting its first launch')
+        return _persist({**row, 'launch_marker': datetime.now(timezone.utc).isoformat(),
+                         'executor': {'kind': 'unconfirmed'}})
+
+
+def bind_executor(msg_id: str, identity: dict) -> dict:
+    with _locked(LEDGER):
+        row = _claim(msg_id)
+        if (row['ownership_state'] != 'held' or not row.get('launch_marker')
+                or row['owner_process'] != process_owner()):
+            raise DeskError('claim_launch_conflict', 'executor needs a held launch claim')
+        old = row['executor']
+        if old.get('kind') != 'unconfirmed' and any(v is not None and identity.get(k) != v for k, v in old.items()):
+            raise DeskError('claim_identity_conflict', 'cannot replace an executor identity')
+        return _persist({**row, 'executor': dict(identity)})
+
+
+def release(msg_id: str, *, reason: str) -> dict:
+    """The ONLY release transition: reread identity and prove termination under lock."""
+    with _locked(LEDGER):
+        row = _claim(msg_id)
+        if row['ownership_state'] == 'released':
+            return row
+        evidence = termination_evidence(row)
+        if evidence:
+            return _persist({**row, 'ownership_state': 'released',
+                             'ownership_detail': evidence, 'release_reason': reason})
+        return _persist({**row, 'status': 'stuck',
+                         'ownership_detail': 'stuck: executor termination unconfirmed',
+                         'reconcile_reason': reason})
+
+
+def reconcile(msg_id: str | None = None, *, limit: int = 20) -> list[dict]:
+    """Bounded, idempotent, append-only recovery; never accepts caller-supplied proof."""
+    if not 1 <= limit <= 100:
+        raise DeskError('bad_reconcile_limit', 'reconcile limit must be 1..100')
+    with _locked(LEDGER):
+        claims = _claims()
+        if msg_id and msg_id not in claims:
+            raise DeskError('claim_missing', 'claim not found in ownership authority')
+        ids = [msg_id] if msg_id else [key for key, row in claims.items()
+                                      if row['ownership_state'] == 'held'][:limit]
+    return [release(key, reason='explicit reconcile') for key in ids]

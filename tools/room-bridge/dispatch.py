@@ -34,6 +34,7 @@ import os
 import re
 import shlex
 import signal
+import select
 import subprocess
 import sys
 import time
@@ -136,16 +137,34 @@ def _codex_events(stdout: str) -> list[dict]:
 
 def _run_codex_process(argv, env, timeout, on_executor, stream_output, **options):
     """Track a dedicated process group, including children surviving a CLI exit."""
-    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, **options,
-                            start_new_session=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT if stream_output else subprocess.PIPE, text=True)
-    identity = {**write_ownership.process_owner(), 'kind': 'process_group',
-                'pid': proc.pid, 'pgid': proc.pid}
+    receipt_read, receipt_write = os.pipe()
+    gate_read, gate_write = os.pipe()
+    try:
+        proc = subprocess.Popen([sys.executable, str(HERE / 'ownership_executor.py'),
+                                 str(receipt_write), str(gate_read), *argv],
+                                env=env, stdin=subprocess.DEVNULL, **options,
+                                start_new_session=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT if stream_output else subprocess.PIPE,
+                                text=True, pass_fds=(receipt_write, gate_read))
+    except BaseException:
+        os.close(receipt_read)
+        os.close(gate_write)
+        raise
+    finally:
+        os.close(receipt_write)
+        os.close(gate_read)
+    identity = {}
     chunks = []
     reader = None
     try:
+        if not select.select([receipt_read], [], [], 5)[0]:
+            raise RuntimeError('executor identity handshake timed out')
+        identity = json.loads(os.read(receipt_read, 4096))
+        if identity.get('pid') != proc.pid or identity.get('pgid') != proc.pid or not identity.get('start_time'):
+            raise RuntimeError('executor kernel identity unavailable')
         if on_executor:
             on_executor(identity)
+        os.write(gate_write, b'1')
         if stream_output:
             def relay():
                 with proc.stdout:
@@ -177,6 +196,8 @@ def _run_codex_process(argv, env, timeout, on_executor, stream_output, **options
             exc.termination_confirmed = write_ownership.process_terminated(identity, group=True)
         raise
     finally:
+        os.close(receipt_read)
+        os.close(gate_write)
         if reader is None or not reader.is_alive():
             proc.stdout.close()
         if proc.stderr is not None:
@@ -442,9 +463,13 @@ def dispatch(
                if entry["kind"] in codex_models.CODEX_KINDS else {})}
     declared_writes = write_ownership.declaration(original_task, writes)
     ownership = {}
+    if results_path.resolve() in (write_ownership.LEDGER.resolve(),
+                                 Path(str(write_ownership.LEDGER) + '.lock').resolve()):
+        raise DeskError('bad_results_path', 'results cannot overwrite the ownership authority')
     if declared_writes:
-        ownership = write_ownership.reserve(results_path, base,
+        ownership = write_ownership.reserve(base,
                                              cwd or entry.get("cwd") or str(Path.cwd()), declared_writes)
+        _record(results_path, ownership)
     else:
         print("warning: no write set declared; pass --writes or add Writes: to the brief",
               file=sys.stderr, flush=True)
@@ -455,8 +480,8 @@ def dispatch(
 
     def executor_started(identity):
         if ownership:
-            ownership['executor'] = {**identity,
-                **({'socket': entry['socket']} if identity.get('kind') == 'codex_turn' else {})}
+            ownership.update(write_ownership.bind_executor(msg_id, {**identity,
+                **({'socket': entry['socket']} if identity.get('kind') == 'codex_turn' else {})}))
             _record(results_path, {**base, **ownership, 'status': 'running'})
 
     executor_options: dict = {'on_executor': executor_started} if ownership else {}
@@ -472,9 +497,8 @@ def dispatch(
                 entry = {**entry, **prepared, 'cwd': prepared['checkout_workspace']}
                 if cwd:
                     cwd = prepared['checkout_workspace']
-        # A crash between handoff and identity readback is ambiguous, so it
-        # must never be recovered merely because the dispatcher PID is gone.
-        executor_started({'kind': 'unconfirmed'})
+        if ownership:
+            ownership.update(write_ownership.launch(msg_id))
         if entry["kind"] == "claude-session":
             if name == "flash":
                 with flashlib.activity_scope():
@@ -517,26 +541,18 @@ def dispatch(
                 registry.remember_thread(name, outcome["thread_id"])
     except BaseException:
         if ownership:
-            evidence = write_ownership.termination_evidence(ownership)
-            reserved = ownership['executor']['kind'] == 'reservation'
-            _record(results_path, {**base, **ownership, 'status': 'failed', 'detail': 'executor raised',
-                'ownership_state': 'released' if evidence or reserved else 'held',
-                'ownership_detail': evidence or ('executor not launched' if reserved else
-                                                'stuck: executor termination unconfirmed')})
+            ownership.update(write_ownership.release(msg_id, reason='executor raised'))
+            _record(results_path, {**base, **ownership, 'status': 'failed', 'detail': 'executor raised'})
         raise
 
     if ownership:
-        confirmed = outcome.get('termination_confirmed', entry['kind'] not in codex_models.CODEX_KINDS
-                                and outcome.get('status') in ('completed', 'failed', 'quota_exhausted'))
-        ownership.update(ownership_state='released' if confirmed else 'held',
-                         ownership_detail='executor terminated' if confirmed else
-                         'executor still owns the write set' if outcome.get('status') in write_ownership.ACTIVE
-                         and outcome.get('status') != 'timed_out' else 'stuck: executor termination unconfirmed')
+        ownership.update(write_ownership.release(msg_id, reason=outcome.get('detail') or outcome['status']))
 
     row = {
         **base,
-        **ownership,
         **outcome,
+        **ownership,
+        'status': outcome['status'],
     }
     _record(results_path, row)
     return row
@@ -873,6 +889,9 @@ def main(argv: list[str]) -> int:
     sp = sub.add_parser("stop", help="take a desk down")
     sp.add_argument("name")
     sub.add_parser("where", help="print how to find and name THIS session's socket")
+    rc = sub.add_parser('reconcile', help='verify and recover held ownership claims; unknown writers stay stuck')
+    rc.add_argument('--claim', help='one job msg_id; otherwise examine held claims')
+    rc.add_argument('--limit', type=int, default=20, help='maximum claims per call (1..100)')
 
     s = sub.add_parser("send", help="dispatch one task to one desk")
     s.add_argument("name")
@@ -898,6 +917,10 @@ def main(argv: list[str]) -> int:
     results = Path(a.results) if a.results else DEFAULT_RESULTS
 
     try:
+        if a.cmd == 'reconcile':
+            rows = write_ownership.reconcile(a.claim, limit=a.limit)
+            print(json.dumps({'ledger': str(write_ownership.LEDGER), 'claims': rows}, indent=2))
+            return 1 if any(row['ownership_state'] == 'held' for row in rows) else 0
         if a.cmd == "where":
             return _cmd_where()
 

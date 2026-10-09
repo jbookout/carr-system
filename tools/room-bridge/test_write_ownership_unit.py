@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Conflicting jobs stop before launch, including paths not created yet."""
+import ast
 import contextlib
 import io
 import json
@@ -28,16 +29,27 @@ class OwnershipTests(unittest.TestCase):
         self.reg = desks.Registry(self.root / 'desks.json')
         self.reg.register('sol', 'codex-session', family='sol', effort='high', cwd=str(self.root))
         self.results = self.root / 'results.jsonl'
+        self.ledger = self.root / 'claims.jsonl'
+        authority = patch.object(write_ownership, 'LEDGER', self.ledger)
+        authority.start()
+        self.addCleanup(authority.stop)
         self.catalog = catalog_fixture()
         self.catalog.__enter__()
         self.addCleanup(self.catalog.__exit__, None, None, None)
+
+    def completed(self, *args, **kwargs):
+        if kwargs.get('on_executor'):
+            kwargs['on_executor']({**write_ownership.process_owner(), 'kind': 'process_group',
+                               'pid': 2147483647, 'pgid': 2147483647, 'start_time': 'fixture'})
+        return {'status': 'completed', 'termination_confirmed': True}
 
     def send(self, brief='build', **kwargs):
         return dispatch.dispatch('sol', brief, registry=self.reg, results_path=self.results, **kwargs)
 
     def active(self, **kwargs):
-        self.results.write_text(json.dumps({'msg_id': 'other', 'repo': 'owner/repo',
+        self.ledger.write_text(json.dumps({'msg_id': 'other', 'repo': 'owner/repo',
             'desk': 'other-sol', 'status': 'running', 'writes': ['tools/*.py'], 'own_pr': 42,
+            'ownership_state': 'held', 'launch_marker': 'fixture', 'executor': {'kind': 'unconfirmed'},
             **kwargs}) + '\n')
 
     def test_open_pr_overlap_refuses_before_launch(self):
@@ -62,7 +74,7 @@ class OwnershipTests(unittest.TestCase):
             rows = [json.loads(line) for line in self.results.read_text().splitlines()]
             self.assertEqual(rows[-1]['status'], 'running')
             self.assertEqual(rows[-1]['writes'], ['tools/*.py'])
-            return {'status': 'completed', 'termination_confirmed': True}
+            return self.completed(*args, **kwargs)
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [
                 {'number': 42, 'title': 'mine', 'files': ['tools/new.py']}])), \
              patch.object(dispatch, '_to_codex', side_effect=run):
@@ -74,7 +86,7 @@ class OwnershipTests(unittest.TestCase):
         warning = io.StringIO()
         with contextlib.redirect_stderr(warning), \
              patch('dispatch.write_ownership.open_prs') as prs, \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
+             patch.object(dispatch, '_to_codex', side_effect=self.completed):
             self.assertEqual(self.send()['status'], 'completed')
         prs.assert_not_called()
         self.assertIn('no write set', warning.getvalue())
@@ -83,17 +95,22 @@ class OwnershipTests(unittest.TestCase):
     def test_completed_claim_released_but_async_delivery_stays_owned(self):
         self.active(status='delivered_live')
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
+             patch.object(dispatch, '_to_codex', side_effect=self.completed):
             with self.assertRaises(desks.DeskError):
                 self.send(writes=['tools/a.py'])
+            # A completion label alone cannot release a claim.
             with self.results.open('a') as fh:
                 fh.write(json.dumps({'msg_id': 'other', 'status': 'completed'}) + '\n')
+            with self.assertRaises(desks.DeskError):
+                self.send(writes=['tools/a.py'])
+            with patch.object(write_ownership, 'termination_evidence', return_value='verified fixture termination'):
+                write_ownership.reconcile('other')
             self.assertEqual(self.send(writes=['tools/a.py'])['status'], 'completed')
             self.assertEqual(self.send(writes=['tools/a.py'])['status'], 'completed')
 
     def test_cli_repeatable_writes_are_combined_with_brief(self):
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}), \
+             patch.object(dispatch, '_to_codex', side_effect=self.completed), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(dispatch.main(['--registry', str(self.reg.path), '--results', str(self.results),
                 'send', 'sol', 'Writes: src/*.py', '--writes', 'tests/*', '--writes', 'docs/*']), 0)
@@ -110,9 +127,9 @@ class OwnershipTests(unittest.TestCase):
     def test_other_repo_claim_does_not_block_and_invalid_ledger_refuses(self):
         self.active(repo='different/repo')
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}) as run:
+             patch.object(dispatch, '_to_codex', side_effect=self.completed) as run:
             self.send(writes=['tools/a.py'])
-            self.results.write_text('{broken\n')
+            self.ledger.write_text('{broken\n')
             run.reset_mock()
             with self.assertRaises(desks.DeskError):
                 self.send(writes=['tools/a.py'])
@@ -125,7 +142,7 @@ class OwnershipTests(unittest.TestCase):
         def execute(*args, **kwargs):
             entered.set()
             release.wait(5)
-            return {'status': 'completed', 'termination_confirmed': True}
+            return self.completed(*args, **kwargs)
         def first():
             try:
                 self.send(writes=['new/*.py'])
@@ -174,18 +191,20 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import write_ownership
 write_ownership.open_prs = lambda cwd: ('owner/repo', [])
-write_ownership.reserve(Path(sys.argv[2]),
+write_ownership.LEDGER = Path(sys.argv[2])
+write_ownership.reserve(
     {'msg_id': 'crashed', 'desk': 'sol', 'task': 'build'}, sys.argv[3], ['src/*'])
 os._exit(17)
 '''
         crashed = subprocess.run([sys.executable, '-c', code,
-            str(Path(dispatch.__file__).parent), str(self.results), str(self.root)],
+            str(Path(dispatch.__file__).parent), str(self.ledger), str(self.root)],
             capture_output=True, text=True)
         self.assertEqual(crashed.returncode, 17, crashed.stderr)
+        write_ownership.reconcile('crashed')
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
+             patch.object(dispatch, '_to_codex', side_effect=self.completed):
             self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
-        recovered = [json.loads(line) for line in self.results.read_text().splitlines()
+        recovered = [json.loads(line) for line in self.ledger.read_text().splitlines()
                      if json.loads(line).get('msg_id') == 'crashed'][-1]
         self.assertEqual(recovered['ownership_state'], 'released')
         self.assertIn('terminated', recovered['ownership_detail'])
@@ -211,7 +230,7 @@ os._exit(17)
 
     def test_a_live_reservation_is_not_recovered_even_if_old(self):
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])):
-            write_ownership.reserve(self.results, {'msg_id': 'alive', 'desk': 'sol',
+            write_ownership.reserve({'msg_id': 'alive', 'desk': 'sol',
                 'task': 'build', 'dispatched_at': '1999-01-01T00:00:00Z'}, str(self.root), ['src/*'])
             with patch.object(dispatch, '_to_codex') as run:
                 with self.assertRaises(desks.DeskError):
@@ -226,15 +245,16 @@ os._exit(17)
                 proc.kill()
             proc.wait()
         self.addCleanup(cleanup)
-        identity = {**write_ownership.process_owner(), 'pid': proc.pid, 'pgid': proc.pid,
+        identity = {**write_ownership.process_owner(), 'pid': proc.pid, 'pgid': proc.pid, 'start_time': write_ownership.process_start(proc.pid),
                     'kind': 'process_group'}
         self.active(writes=['src/*'], ownership_state='held', executor=identity)
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}) as run:
+             patch.object(dispatch, '_to_codex', side_effect=self.completed) as run:
             with self.assertRaises(desks.DeskError):
                 self.send(writes=['src/*'])
             run.assert_not_called()
             cleanup()
+            write_ownership.reconcile('other')
             self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
 
     def test_async_turn_reconciles_only_its_verified_terminal_status(self):
@@ -245,13 +265,14 @@ os._exit(17)
                     executor={'kind': 'codex_turn', 'socket': sock,
                               'thread_id': 'thread-live-0001', 'turn_id': 'turn-1'})
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}) as run:
+             patch.object(dispatch, '_to_codex', side_effect=self.completed) as run:
             with self.assertRaises(desks.DeskError):
                 self.send(writes=['src/*'])
             run.assert_not_called()
             server.silent_turn = False
+            write_ownership.reconcile('other')
             self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
-        self.assertEqual(server.methods().count('thread/read'), 2)
+        self.assertEqual(server.methods().count('thread/read'), 1)
 
     def test_desktop_delivery_binds_marker_and_reconciles_terminal_history(self):
         self.reg.remember_thread('sol', 'desktop-thread')
@@ -270,10 +291,12 @@ os._exit(17)
             with self.assertRaises(desks.DeskError):
                 self.send(writes=['src/*'])
             run.assert_not_called()
+            write_ownership.reconcile(row['msg_id'])
             probe.assert_called_once_with('desktop-thread', marker)
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
              patch('codex_wire.desktop_turn_terminated', return_value=True), \
-             patch.object(dispatch, '_to_codex', return_value={'status': 'completed', 'termination_confirmed': True}):
+             patch.object(dispatch, '_to_codex', side_effect=self.completed):
+            write_ownership.reconcile(row['msg_id'])
             self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
 
     def test_pid_probe_denied_or_from_another_host_keeps_claim(self):
@@ -313,6 +336,184 @@ print(json.dumps({{'type': 'turn.completed'}}))
             self.assertEqual(row['executor']['pgid'], process['pgid'])
             self.assertEqual(row['executor']['kind'], 'process_group')
             self.assertEqual(self.send(writes=['src/*'], env={**os.environ, 'PATH': str(binary)})['status'], 'completed')
+
+    def test_different_results_paths_cannot_split_authority(self):
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed',
+                                                            'termination_confirmed': True}) as run:
+            first = self.send(writes=['src/*'])
+            self.assertEqual(first['ownership_state'], 'held')
+            with self.assertRaisesRegex(desks.DeskError, 'write set owned'):
+                dispatch.dispatch('sol', 'build second', registry=self.reg,
+                    results_path=self.root / 'different.jsonl', writes=['src/a.py'])
+            self.assertEqual(run.call_count, 1)
+        self.assertFalse((self.root / 'different.jsonl').exists())
+
+    def test_receipt_mismatch_and_all_remote_errors_keep_unknown_writer(self):
+        self.reg.register('remote', 'claude-remote', host='host.test',
+                          model='claude-opus-5-5', effort='max')
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch.claude_remote_wire, 'run_task', return_value={
+                 'status': 'failed', 'detail': 'remote_receipt_mismatch',
+                 'termination_confirmed': True, 'ownership_state': 'released'}):
+            row = dispatch.dispatch('remote', 'repair', registry=self.reg,
+                                    results_path=self.results, writes=['src/*'])
+        self.assertEqual(row['ownership_state'], 'held')
+        self.assertIn('stuck', row['ownership_detail'])
+        self.assertEqual(write_ownership.reconcile(row['msg_id'])[0]['ownership_state'], 'held')
+
+    def test_crashed_unconfirmed_before_launch_reconciles_idempotently(self):
+        code = """
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import write_ownership as w
+w.LEDGER = Path(sys.argv[2])
+w.open_prs = lambda cwd: ('owner/repo', [])
+row = w.reserve({'msg_id': 'crashed', 'desk': 'sol', 'task': 'build'}, '.', ['src/*'])
+w._persist({**row, 'executor': {'kind': 'unconfirmed'}})
+os._exit(17)
+"""
+        crashed = subprocess.run([sys.executable, '-c', code,
+            str(Path(dispatch.__file__).parent), str(self.ledger)], capture_output=True, text=True)
+        self.assertEqual(crashed.returncode, 17, crashed.stderr)
+        row = write_ownership.reconcile('crashed')[0]
+        self.assertEqual(row['ownership_state'], 'released')
+        self.assertIn('no executor launch', row['ownership_detail'])
+        before = self.ledger.read_bytes()
+        self.assertEqual(write_ownership.reconcile('crashed')[0], row)
+        self.assertEqual(self.ledger.read_bytes(), before)
+
+    def test_crash_after_launch_marker_with_unknown_executor_keeps_claim(self):
+        self.active(writes=['src/*'], owner_process={**write_ownership.process_owner(),
+                     'pid': 2147483647, 'start_time': 'dead-dispatcher'})
+        row = write_ownership.reconcile('other')[0]
+        self.assertEqual(row['ownership_state'], 'held')
+        self.assertIn('stuck', row['ownership_detail'])
+
+    def test_pid_reuse_is_checked_but_live_process_group_still_blocks_release(self):
+        identity = {**write_ownership.process_owner(), 'start_time': 'old-start', 'pgid': 987}
+        with patch.object(write_ownership, 'process_start', return_value='new-start'), \
+             patch.object(write_ownership.os, 'kill', return_value=None), \
+             patch.object(write_ownership.os, 'killpg', return_value=None):
+            self.assertTrue(write_ownership.process_terminated(identity))
+            self.assertFalse(write_ownership.process_terminated(identity, group=True))
+        with patch.object(write_ownership, 'process_start', return_value='new-start'), \
+             patch.object(write_ownership.os, 'kill', return_value=None), \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertTrue(write_ownership.process_terminated(identity, group=True))
+        identity['start_time'] = None
+        with patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError):
+            self.assertFalse(write_ownership.process_terminated(identity, group=True))
+
+    def test_reconcile_cli_is_bounded_and_logs_held_claim(self):
+        self.active()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(dispatch.main(['reconcile', '--claim', 'other']), 1)
+        self.assertIn(str(self.ledger), output.getvalue())
+        row = json.loads(self.ledger.read_text().splitlines()[-1])
+        self.assertEqual(row['reconcile_reason'], 'explicit reconcile')
+        for limit in (0, 101):
+            with self.assertRaises(desks.DeskError):
+                write_ownership.reconcile(limit=limit)
+
+    def test_results_cannot_be_the_authority_or_its_lock(self):
+        for path in (self.ledger, Path(str(self.ledger) + '.lock')):
+            with self.assertRaisesRegex(desks.DeskError, 'results cannot'):
+                dispatch.dispatch('sol', 'build', registry=self.reg,
+                                  results_path=path, writes=['src/*'])
+        self.assertFalse(self.ledger.exists())
+
+    def test_home_environment_cannot_redirect_authority(self):
+        code = "import sys; sys.path.insert(0, sys.argv[1]); import write_ownership; print(write_ownership.LEDGER)"
+        proc = subprocess.run([sys.executable, '-c', code, str(Path(dispatch.__file__).parent)],
+                              capture_output=True, text=True, env={**os.environ, 'HOME': str(self.root)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        import pwd
+        expected = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.config/carr/hermes-write-ownership.jsonl'
+        self.assertEqual(proc.stdout.strip(), str(expected))
+
+    def test_denied_group_probe_keeps_recorded_dead_executor_held(self):
+        identity = {**write_ownership.process_owner(), 'kind': 'process_group',
+                    'pid': 2147483647, 'pgid': 2147483647, 'start_time': 'dead'}
+        self.active(executor=identity)
+        with patch.object(write_ownership.os, 'killpg', side_effect=PermissionError):
+            row = write_ownership.reconcile('other')[0]
+        self.assertEqual(row['ownership_state'], 'held')
+        self.assertIn('stuck', row['ownership_detail'])
+
+    def test_inconsistent_missing_marker_never_releases_a_bound_writer(self):
+        self.active(launch_marker=None, owner_process={**write_ownership.process_owner(),
+            'pid': 2147483647, 'start_time': 'dead'}, executor={**write_ownership.process_owner(),
+            'kind': 'process_group', 'pgid': os.getpgrp()})
+        self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'held')
+
+    def test_released_claim_cannot_be_rebound_or_launched(self):
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch, '_to_codex', side_effect=self.completed):
+            row = self.send(writes=['src/*'])
+        self.assertEqual(row['ownership_state'], 'released')
+        with self.assertRaises(desks.DeskError):
+            write_ownership.launch(row['msg_id'])
+        with self.assertRaises(desks.DeskError):
+            write_ownership.bind_executor(row['msg_id'], row['executor'])
+
+    def test_only_release_can_write_released_state_and_no_path_deletes_claims(self):
+        # Scan production source, including every ledger persistence call.
+        here = Path(dispatch.__file__).parent
+        writers = []
+        released_writes = []
+        for path in here.glob('*.py'):
+            if path.name.startswith('test_'):
+                continue
+            tree = ast.parse(path.read_text())
+            parents = {}
+            for parent in ast.walk(tree):
+                for child in ast.iter_child_nodes(parent):
+                    parents[child] = parent
+            def owner(node):
+                while node in parents:
+                    node = parents[node]
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        return node.name
+                return '<module>'
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Dict):
+                    for key, value in zip(node.keys, node.values):
+                        if (isinstance(key, ast.Constant) and key.value == 'ownership_state'
+                                and isinstance(value, ast.Constant) and value.value == 'released'):
+                            released_writes.append((path.name, owner(node)))
+                if isinstance(node, ast.keyword) and node.arg == 'ownership_state':
+                    if isinstance(node.value, ast.Constant) and node.value.value == 'released':
+                        released_writes.append((path.name, owner(node)))
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and node.value.value == 'released':
+                    released_writes.append((path.name, owner(node)))
+                if isinstance(node, ast.Call):
+                    name = ast.unparse(node.func)
+                    if name == '_persist':
+                        writers.append((path.name, owner(node)))
+                    if name == '_append' and node.args and ast.unparse(node.args[0]) == 'LEDGER':
+                        self.assertEqual((path.name, owner(node)), ('write_ownership.py', '_persist'))
+                if isinstance(node, ast.Delete):
+                    self.assertNotIn('claim', ast.unparse(node).lower())
+        self.assertEqual(released_writes, [('write_ownership.py', 'release')])
+        self.assertEqual(set(writers), {('write_ownership.py', name) for name in
+                                       ('reserve', 'launch', 'bind_executor', 'release')})
+        source = Path(write_ownership.__file__).read_text()
+        for forbidden in ('.unlink(', '.remove(', 'claims.pop(', 'row.pop(', '.write_text(', '.write_bytes('):
+            self.assertNotIn(forbidden, source)
+
+    def test_executor_cannot_write_before_durable_binding(self):
+        marker = self.root / 'executor-wrote'
+        code = f'from pathlib import Path; Path({str(marker)!r}).write_text("started")'
+        def reject(identity):
+            self.assertTrue(identity['start_time'])
+            self.assertEqual(identity['pid'], identity['pgid'])
+            self.assertFalse(marker.exists())
+            raise RuntimeError('durable identity recording failed')
+        with self.assertRaisesRegex(RuntimeError, 'durable identity'):
+            dispatch._run_codex_process([sys.executable, '-c', code], None, 2, reject, False)
+        self.assertFalse(marker.exists())
 
     def test_pr_reader_pages_files_and_preserves_renamed_path(self):
         reader = unittest.mock.Mock()
