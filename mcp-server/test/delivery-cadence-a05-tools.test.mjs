@@ -164,6 +164,29 @@ async function connect(pg, slug = "joe") {
 
 const wrap = client => ({ query: (text, values = []) => client.query(text, values) });
 
+async function setActivationAge(t, client, days) {
+  let original;
+  t.after(async () => {
+    try {
+      if (original !== undefined) {
+        await client.query(
+          "update public.schema_migrations set applied_at = $1::timestamptz where filename = '0617_delivery_cadence_a05.sql'",
+          [original]);
+      }
+    } finally {
+      await client.end();
+    }
+  });
+  // Preserve PostgreSQL's full timestamp precision; pg's Date would truncate it.
+  const { rows } = await client.query(
+    "select applied_at::text from public.schema_migrations where filename = '0617_delivery_cadence_a05.sql'");
+  assert.equal(rows.length, 1, "the disposable snapshot includes the cadence activation");
+  original = rows[0].applied_at;
+  await client.query(
+    "update public.schema_migrations set applied_at = clock_timestamp() - make_interval(days => $1::integer) where filename = '0617_delivery_cadence_a05.sql'",
+    [days]);
+}
+
 // The write route mcp.js gives a `write: true` verb: one transaction, as carr_writer.
 async function dispatched(client, fn) {
   await client.query("begin");
@@ -285,7 +308,7 @@ test("V5A05-READER-ROUTE-DB: cadence-status is refused on the carr_reader route 
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
   const client = await connect(pg);
-  t.after(() => client.end().catch(() => {}));
+  await setActivationAge(t, client, 1);
   const { joe } = await joeAndDell(client);
   const subject = { subject_type: "engineering_program", subject_ref: `v5a05-route-${randomUUID()}` };
   const verb = a05()["cadence-status"];
@@ -309,7 +332,7 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   const pg = await skipUnlessDatabase(t);
   if (!pg) return;
   const client = await connect(pg);
-  t.after(() => client.end().catch(() => {}));
+  await setActivationAge(t, client, 1);
   const { joe } = await joeAndDell(client);
 
   const verbs = a05();
@@ -346,6 +369,23 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
     verbs["record-cadence-receipt"].handler(wrap(client), PARTNER_ACTOR(joe.id),
       { idempotency_key: randomUUID(), ...subject }));
   assert.equal(replanned.replan_of, recorded.receipt_id);
+});
+
+test("V5A05-ACTIVATION-EXPIRED: no receipt after the activation interval reads missed", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  await setActivationAge(t, client, 21);
+  const { joe } = await joeAndDell(client);
+  const subject = { subject_type: "engineering_program", subject_ref: `v5a05-activation-${randomUUID()}` };
+  const status = await onRoute(client, "writer_read_only", () =>
+    a05()["cadence-status"].handler(wrap(client), SYSTEM_ACTOR(joe.id), subject));
+  assert.equal(status.status, "missed");
+  assert.equal(status.reason_id, "cadence_interval_exceeded_since_activation");
+  assert.equal(status.requires_replan, true);
+  assert.equal(status.last_receipt_issued_at, null);
+  assert.equal(status.receipts_in_window, 0);
+  assert.ok(status.expires_at);
 });
 
 test("V5A05-CADENCE-MISS-VERIFIED: the server re-reads the cadence status; a miss the server cannot see is refused", async t => {
