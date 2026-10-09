@@ -2282,6 +2282,10 @@ def command_task(args: argparse.Namespace) -> None:
 def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
     task_time = stamp()
     prior = state.setdefault("tasks", {}).get(args.task_id, {})
+    if prior and args.creation_defaults:
+        args = copy.copy(args)
+        for field in ("title", "executor", "provider", "model", "effort"):
+            setattr(args, field, None)
     if not prior and not all((args.title, args.status, args.executor)):
         raise SystemExit("new tasks require --title, --status, and --executor")
     stage = "live" if args.stage == "measured" else args.stage
@@ -2448,6 +2452,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--provider")
     task.add_argument("--model")
     task.add_argument("--effort")
+    task.add_argument("--creation-defaults", action="store_true",
+                      help="apply title and executor metadata only when creating a task")
     task.add_argument("--summary")
     task.add_argument("--pr", type=int)
     task.add_argument("--repo")
