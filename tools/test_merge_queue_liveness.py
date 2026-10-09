@@ -100,14 +100,17 @@ FAULT_SITES = {
     'persistent_effects': (
         'main.py:Queue.gh:call:1',
     ),
-    'budget_contention': (
+    'pacing_contention': (
         'main.py:Queue._gh_request:call:1',
-        'main.py:Queue._gh_request:call:3',
+    ),
+    'budget_contention': (
+        'main.py:Queue._gh_request:call:2',
+        'main.py:Queue._gh_request:call:4',
         'main.py:Queue._gh_request.observe:call:1',
     ),
     'spacing_pause': (
         'main.py:Queue._gh_request:while:1',
-        'main.py:Queue._gh_request:call:2',
+        'main.py:Queue._gh_request:call:3',
     ),
     'pagination_cap': (
         'main.py:Queue.api_pages:for:1',
@@ -132,7 +135,7 @@ FAULT_SITES = {
 }
 EFFECT_FAULT_SITES = {
     'pr_read': (
-        'main.py:Queue._gh_request:call:4',
+        'main.py:Queue._gh_request:call:5',
         'main.py:Queue.api:call:1',
         'main.py:Queue.pr:call:1',
         'main.py:Queue.archive_legacy:call:1',
@@ -318,6 +321,9 @@ def wait_sites(source, nodes=None):
             elif name in ('child.wait', 'child.terminate', 'child.kill'): policy = 'child_reap'
             elif name == 'sqlite3.connect': policy = 'sqlite'
             elif name == 'fcntl.flock': policy = 'runner_lock'
+            elif name == 'self.budget.call_slot':
+                policy = 'pacing_lock'
+                assert any(k.arg == 'timeout' and ast.unparse(k.value) == "BOUNDS['pacing_lock']['seconds']" for k in node.keywords)
             elif name.startswith('self.budget.'): policy = 'budget_lock'
             elif name == 'self.wait': policy = ast.literal_eval(node.args[1])
             elif name == 'self.bounded_operation': policy = 'retry'
@@ -932,6 +938,12 @@ class LivenessTests(unittest.TestCase):
             with patch.object(f.q.budget, 'reserve', return_value=mq.BOUNDS['spacing']['seconds'] + 1):
                 with self.assertRaises(mq.WaitExpired): f.q.pr(mq.REPOS[0], 1)
             record_fault('spacing_pause')
+            pacing = Path(str(f.q.budget.path) + '.call.lock')
+            with pacing.open('a') as lock, patch.dict(mq.BOUNDS['pacing_lock'], seconds=.02):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(mq.WaitExpired):
+                    f.q.api('repos/example/repo')
+            record_fault('pacing_contention')
             page = [{'id': i, 'body': '', 'author_association': 'OWNER'} for i in range(100)]
             def full_page(*args, validate):
                 validate(page)
