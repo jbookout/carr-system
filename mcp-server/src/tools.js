@@ -95,6 +95,8 @@ import { completeSetReviewA03StoreTools } from "./independent-review-cycle-store
 import { ruleContextRuntimeTools } from "./rule-context-runtime.v5.js";
 import { systemWorkTools } from "./system-work-census.v5.js";
 import { BOARD_ANSWER_WRITE_VERBS, boardAnswerTools } from "./board-answers.js";
+import { RESEARCH_SITE_WRITE_VERBS, researchSiteTools } from "./research-sites.js";
+import { partyIdentityTools } from "./party-identity.js";
 import { readNeedsJoe } from "./needs-joe.js";
 import { scheduleBoardTools } from "./schedule-board.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
@@ -347,7 +349,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "record-commission-receipt" || ["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move", "undo-lead-move", "record-deal-invoice", "undo-invoice-close"].includes(verb) || verb === "teach" || verb === "claim-lead" || verb === "link-lead-client" || (verb === "update-lead" && args.stage_review) || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
+  if (verb === "record-commission-receipt" || ["record-lead-contact", "advance-leads", "approve-lead-draft", "approve-lead-move", "undo-lead-move", "record-deal-invoice", "undo-invoice-close"].includes(verb) || verb === "teach" || verb === "claim-lead" || verb === "link-lead-client" || (verb === "update-lead" && args.stage_review) || verb === "whats-new" || verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "answer-work-request-for-joe" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-ready-plan-amendment" || verb === "accept-ready-plan-amendment" || verb === "acknowledge-ready-plan-amendment" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || verb === "codex-checkpoint" || verb === "codex-record-event" || verb === "ask-jev" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb) || BOARD_ANSWER_WRITE_VERBS.has(verb) || RESEARCH_SITE_WRITE_VERBS.has(verb) || MEETING_MODE_WRITE_VERBS.includes(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -1061,6 +1063,29 @@ function fmtPhoneUS(v) {
   const t = digits.length === 11 && digits[0] === "1" ? digits.slice(1) : digits;
   if (t.length !== 10) return String(v).trim() || null;
   return `(${t.slice(0, 3)}) ${t.slice(3, 6)}-${t.slice(6)}`;
+}
+
+// The party a party-field write lands on: a P- ref, a role ref (V-/C-/L-/T-,
+// resolved to the PERSON under it) or a name. A merged party is a pointer, so
+// the write hops to its survivor; writing to a tombstone strands the fact.
+// Shared by update-party-contact and correct-party-identity.
+async function resolvePartyForWrite(c, ref) {
+  const s = await resolveSubject(c, ref);
+  if (s.type === "deal")
+    throw new ToolError({ error: "not_a_party", hint: "a deal has no party fields; pass the person or their role ref" });
+  let partyId;
+  if (s.type === "party") partyId = s.id;
+  else {
+    const r = await c.query(
+      "select party_id from v_ref_index where subject_type=$1 and subject_id=$2", [s.type, s.id]);
+    if (!r.rows.length || !r.rows[0].party_id)
+      throw new ToolError({ error: "no_party_under_ref", resolved: s });
+    partyId = r.rows[0].party_id;
+  }
+  const hop = await c.query("select merged_into from party where id=$1", [partyId]);
+  if (!hop.rows.length) throw new ToolError({ error: "not_found", table: "party", id: partyId });
+  const hopped = hop.rows[0].merged_into !== null;
+  return { partyId: hopped ? hop.rows[0].merged_into : partyId, hopped };
 }
 
 async function resolveSubject(client, ref) {
@@ -1971,6 +1996,12 @@ const RULE_ENFORCEMENT_FALLBACK_REFUSALS = Object.freeze(new Set([
   "rule_enforcement_fallback_already_recorded",
   "rule_enforcement_fallback_receipts_append_only",
 ]));
+
+function validateRuleScope(scope) {
+  if (scope !== undefined && (scope === null || typeof scope !== "object" || Array.isArray(scope)))
+    throw new ToolError({ error: "invalid_object", field: "scope",
+      hint: "scope must be a JSON object, e.g. {} or {\"section\":\"...\"}; omit scope to use the existing default" });
+}
 
 async function resolveRuleId(c, value, field = "rule_id") {
   const raw = String(value || "").trim();
@@ -4984,7 +5015,7 @@ export const TOOLS = {
   // 8 verified facts stranded in record_flag.
   "update-party-contact": {
     write: true,
-    description: "Promote a VERIFIED contact fact onto a party: phone (office), cell (mobile), email, title, city, county — CONTACT FACTS ONLY. Identity fields (name, org, npi, specialty) are deliberately out of reach: a discrepancy there goes through record-finding's proposes_correction and is applied by the owning partner, never by this verb (rule 5d44d3f3). source is REQUIRED on every call — provenance is binding, and the usual value is the record-finding row or thread being promoted. Accepts any ref (P-####, V-/C-/L-/T-, or a name); a role ref resolves to the PERSON under it, and a merged party hops to its survivor (reported in the result). base_version is the PARTY's version, from a fresh read. Placeholder guard: a CARR agent's own number or any carr.us address in a client/vendor contact field is a placeholder, never data — refused, not stored.",
+    description: "Promote a VERIFIED contact fact onto a party: phone (office), cell (mobile), email, title, city, county — CONTACT FACTS ONLY. Identity fields are out of reach here: name, firm (org) and state are corrected through correct-party-identity, which records the prior value and never renames a shared org row. source is REQUIRED on every call — provenance is binding, and the usual value is the record-finding row or thread being promoted. Accepts any ref (P-####, V-/C-/L-/T-, or a name); a role ref resolves to the PERSON under it, and a merged party hops to its survivor (reported in the result). base_version is the PARTY's version, from a fresh read. Placeholder guard: a CARR agent's own number or any carr.us address in a client/vendor contact field is a placeholder, never data — refused, not stored.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       party: { type: "string", description: "P-#### ref, a role ref (V-/C-/L-/T-), or a name" },
@@ -4999,28 +5030,12 @@ export const TOOLS = {
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-party-contact", args, async () => {
       if (!args.source || !args.source.trim())
         throw new ToolError({ error: "missing_source", hint: "a contact fact without provenance is a rumour; say where it came from" });
-      const s = await resolveSubject(c, args.party);
-      if (s.type === "deal")
-        throw new ToolError({ error: "not_a_party", hint: "a deal has no contact fields; pass the person or their role ref" });
-      let partyId;
-      if (s.type === "party") partyId = s.id;
-      else {
-        const r = await c.query(
-          "select party_id from v_ref_index where subject_type=$1 and subject_id=$2", [s.type, s.id]);
-        if (!r.rows.length || !r.rows[0].party_id)
-          throw new ToolError({ error: "no_party_under_ref", resolved: s });
-        partyId = r.rows[0].party_id;
-      }
-      // A merged party is a pointer; writing to a tombstone strands the fact.
-      const hop = await c.query("select merged_into from party where id=$1", [partyId]);
-      if (!hop.rows.length) throw new ToolError({ error: "not_found", table: "party", id: partyId });
-      const hopped = hop.rows[0].merged_into !== null;
-      if (hopped) partyId = hop.rows[0].merged_into;
+      const { partyId, hopped } = await resolvePartyForWrite(c, args.party);
 
       const allowed = ["phone","cell","email","title","city","county"];
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed,
-        hint: "contact facts only; identity corrections go through record-finding proposes_correction" });
+        hint: "contact facts only; name, org and state corrections go through correct-party-identity" });
 
       // Placeholder rule 54e2bcb9: an agent's own details standing in for a contact
       // nobody had. Stored, they read as enriched while being emptier than a blank.
@@ -5837,7 +5852,7 @@ export const TOOLS = {
 
   "record-finding": {
     write: true,
-    description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is passed as proposes_correction, which is recorded as a proposal for the owning partner and applied by them, never by this verb. STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface. NOT ONLY PEOPLE SINCE 0066: subject_kind campaign / platform / pillar / format files a finding against a THING — a platform, a content pillar, a format, a campaign — which is how the marketing seat's measured conclusions finally get a home. Read them back through v_record_flag_subject, which resolves every branch to a name. AND NOT ONLY BUSINESS RECORDS SINCE 0101: a finding can be filed against CODE — pass 'commit:<sha>' (the one repo at that commit), 'owner/name@<sha>', or 'repo:owner/name' (the codebase itself) and the subject is minted on first use. That is how a code review's result — INCLUDING its failure finding, which is the one a reader most needs — becomes part of the record instead of surviving only in a local sidecar. Read code findings back through v_code_finding, which carries repo and commit_sha as their own columns.",
+    description: "Land ONE open-source research or enrichment finding as a record_flag row. This is the only path a verification result becomes part of the record — findings do not go into a markdown report (Joe, 2026-08-02: 'we dont write to markdown in the new system only the database'). IT NEVER EDITS AN IDENTITY FIELD. A finding is stored BESIDE the record with its source; a disagreement with name/phone/email/title/specialty is recorded here with proposes_correction carrying the prior and corrected values. This verb never applies it: when identity is confirmed (rule 578fdd91), apply the correction in the same run through correct-party-identity (name, org, state) or update-party-contact (contact facts). STORE NOTHING-FOUND TOO: pass found:false and the empty result becomes a real row, so a record nobody searched is distinguishable from one that was searched and came up dry — that difference is the whole meaning of a verified stamp. source is REQUIRED on every row; provenance is binding, and a finding without it is a rumour. Pass expires_on for anything volatile: title and company change with promotions and job moves, so an expired verification reads as unverified rather than as fact. Common kinds: verified (an identity pass, value lists what was checked), email, cell, office_phone, social, website, npi, license_status, title, entity_filing, address, discrepancy. A near-match on a similar name is contamination, not confirmation — record both candidates and pick neither. Also writes an event, so the finding shows up in catch-me-up without a second read surface. NOT ONLY PEOPLE SINCE 0066: subject_kind campaign / platform / pillar / format files a finding against a THING — a platform, a content pillar, a format, a campaign — which is how the marketing seat's measured conclusions finally get a home. Read them back through v_record_flag_subject, which resolves every branch to a name. AND NOT ONLY BUSINESS RECORDS SINCE 0101: a finding can be filed against CODE — pass 'commit:<sha>' (the one repo at that commit), 'owner/name@<sha>', or 'repo:owner/name' (the codebase itself) and the subject is minted on first use. That is how a code review's result — INCLUDING its failure finding, which is the one a reader most needs — becomes part of the record instead of surviving only in a local sidecar. Read code findings back through v_code_finding, which carries repo and commit_sha as their own columns.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       subject: { type: "string", description: "C-127 / L-204 / V-CPA-006 / P-0301, an exact deal name, or — when subject_kind is campaign/platform/pillar/format — a campaign name or a marketing_subject slug ('twitter', 'reel'). CODE (0101): 'commit:<sha>' files against the one repo at that commit, 'owner/name@<sha>' against another repo, 'repo:owner/name' against the codebase itself." },
@@ -6036,6 +6051,7 @@ export const TOOLS = {
       why_no_machine: { type: "string", description: "REQUIRED when enforcement_home is 'judgment_advisory'. One line: why no mechanical control can carry this rule." } },
       required: ["idempotency_key","statement","human_quote","enforcement_home"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "teach", args, async () => {
+      validateRuleScope(args.scope);
       // ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10). See the description
       // above: a clear, named refusal rather than a silent default, so an
       // existing caller that has not been told about this yet gets an error
@@ -6531,6 +6547,7 @@ export const TOOLS = {
       reason: { type: "string", description: "REQUIRED. Why the wording is being corrected — an unexplained edit to a binding rule is indistinguishable from drift." } },
       required: ["idempotency_key","rule_id","base_version","reason"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "amend-rule", args, async () => {
+      validateRuleScope(args.scope);
       const reason = String(args.reason || "").trim();
       if (!reason) throw new ToolError({ error: "reason_required",
         hint: "say in one line why the wording is wrong; a silent edit to a binding rule reads as drift later" });
@@ -8993,6 +9010,8 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "rule-context-runtime": "mcp-server/src/rule-context-runtime.v5.js",
   "system-work-census": "mcp-server/src/system-work-census.v5.js",
   "board-answers": "mcp-server/src/board-answers.js",
+  "research-sites": "mcp-server/src/research-sites.js",
+  "party-identity": "mcp-server/src/party-identity.js",
   "schedule-board": "mcp-server/src/schedule-board.js",
   "doc-suggestions": "mcp-server/src/doc-suggestions.js",
   "whats-new": "mcp-server/src/whats-new.js",
@@ -10010,6 +10029,8 @@ registerTools({
 registerTools(doctrineTools({ withEnvelope, writeEvent, ToolError }), "doctrine");
 registerTools(systemWorkTools(), "system-work-census");
 registerTools(boardAnswerTools({ withEnvelope, writeEvent }), "board-answers");
+registerTools(researchSiteTools({ withEnvelope, writeEvent }), "research-sites");
+registerTools(partyIdentityTools({ withEnvelope, writeEvent, versionGuard, resolvePartyForWrite }), "party-identity");
 registerTools(scheduleBoardTools(), "schedule-board");
 
 // WR-AI-006: curation proposals are machine-callable; approval and retirement

@@ -1691,12 +1691,12 @@ class HealthCompleteMarkerDoesNotDrift(unittest.TestCase):
                                 "— has it been renamed or reshaped?")
         health_check_marker = m.group(1) + m.group(2)
         self.assertEqual(rp.HEALTH_COMPLETE_MARKER, health_check_marker)
-        # And both print call sites in tools/health-check.py actually use
+        # And all print call sites in tools/health-check.py actually use
         # the constant, not a re-typed literal that could drift from it on
         # its own.
-        self.assertEqual(health_check_src.count("print(_HEALTH_COMPLETION_MARKER)"), 2,
+        self.assertEqual(health_check_src.count("print(_HEALTH_COMPLETION_MARKER)"), 3,
                          "tools/health-check.py should print the marker constant, by name, "
-                         "from exactly two places (the REFUSED early-return and the normal end)")
+                         "from exactly three places (the REFUSED and builds returns and the normal end)")
 
 
 class HealthGate(Base):

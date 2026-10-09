@@ -12,6 +12,50 @@
   "captured_at": "2026-10-05T17:56:20Z",
   "jobs": [
     {
+      "label": "com.carr.build-duration-check",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "build-duration-check",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/ops/build-duration-check.py",
+        "--record-loops"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": [
+          {
+            "Minute": 0
+          },
+          {
+            "Minute": 10
+          },
+          {
+            "Minute": 20
+          },
+          {
+            "Minute": 30
+          },
+          {
+            "Minute": 40
+          },
+          {
+            "Minute": 50
+          }
+        ],
+        "RunAtLoad": false
+      },
+      "expected_enabled": true,
+      "expected_installed": true,
+      "log_path": "~/carr-system/out/build-duration-check.log",
+      "log_max_age_seconds": 1800,
+      "owner": "orchestrator",
+      "done_signal": "out/build-duration-check.json receipt with scan cursor; deduplicated build-duration workflow loops; primary only",
+      "expectation_note": "Machine placement is derived at check time from lib/launchd_scope.py; these are the expectations where that policy places the job."
+    },
+    {
       "label": "com.carr.calendar-eventkit",
       "scheduler": "launchd",
       "program_arguments": [
@@ -1306,6 +1350,31 @@
       "expectation_note": "Live installed job retained after source and cadence review on 2026-10-05."
     },
     {
+      "label": "com.carr.merge-queue",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/merge_queue/main.py",
+        "run",
+        "--legacy",
+        "~/carr-system/out/orch"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "RunAtLoad": true,
+        "KeepAlive": true,
+        "ThrottleInterval": 60
+      },
+      "expected_enabled": false,
+      "expected_installed": false,
+      "log_path": "~/carr-system/out/merge-queue-launchd.log",
+      "owner": "orchestrator",
+      "done_signal": "Per-entry merge confirmation or explicit stopped reason in out/merge-queue/queue.sqlite3 and queue.log",
+      "expectation_note": "Activation follows merge, canonical-main installation and hold migration; this repair does not activate the service.",
+      "log_max_age_seconds": null,
+      "freshness_exception": "Resident KeepAlive queue; log age is not evidence of a missed firing. Registration, running state, last exit and persisted per-entry deadlines carry its health evidence."
+    },
+    {
       "label": "com.carr.nightly-exports-daytime-retry",
       "scheduler": "launchd",
       "program_arguments": [
@@ -2183,6 +2252,35 @@
       "done_signal": "ops.run session-trace-archive/launchd.run; local run-scheduled receipt ~/carr-system/out/run-scheduled-receipts/3d3be01d12de1d19.fbc9c66faebfd4b4db566c360b68b894.receipt",
       "activity_path": "~/carr-system/out/run-scheduled-receipts/3d3be01d12de1d19.fbc9c66faebfd4b4db566c360b68b894.receipt",
       "expectation_note": "Live installed job retained after source and cadence review on 2026-10-05."
+    },
+    {
+      "label": "com.carr.storage-hygiene",
+      "scheduler": "launchd",
+      "program_arguments": [
+        "/bin/zsh",
+        "~/carr-system/bin/run-scheduled.sh",
+        "storage-hygiene",
+        "launchd.run",
+        "~/carr-system/.venv/bin/python",
+        "~/carr-system/tools/storage_hygiene.py"
+      ],
+      "required_checkout": "~/carr-system",
+      "interval": {
+        "StartCalendarInterval": {
+          "Hour": 4,
+          "Minute": 10
+        },
+        "RunAtLoad": false,
+        "ThrottleInterval": 60
+      },
+      "expected_enabled": false,
+      "expected_installed": false,
+      "log_path": "~/carr-system/out/storage-hygiene.log",
+      "log_max_age_seconds": null,
+      "owner": "orchestrator",
+      "done_signal": "Inactive source definition; when reviewed and installed, ops.run storage-hygiene/launchd.run plus ~/carr-system/out/storage-hygiene.jsonl",
+      "expectation_note": "Definition only; held uninstalled and unloaded pending review.",
+      "freshness_exception": "Not expected to run; no freshness signal applies."
     },
     {
       "label": "com.carr.tailscale-up",

@@ -20,6 +20,10 @@ class GitHubReadPaused(RuntimeError):
         super().__init__(f"CARR_GITHUB_LOCAL_HOLD: {reason}; retry at {until:.3f}")
 
 
+class GitHubBudgetLockTimeout(RuntimeError):
+    pass
+
+
 def resource_for(args: list[str]) -> str:
     endpoint = args[1].lstrip('/') if len(args) > 1 and args[0] == 'api' else ''
     return ('graphql' if endpoint == 'graphql' else 'code_search' if endpoint.startswith('search/code')
@@ -92,7 +96,8 @@ def retry_deadline(headers: dict[str, str], diagnostic: str, observed_at: float)
 
 
 class GitHubReadBudget:
-    def __init__(self, env=None, *, path: Path | None = None, clock=time.time, spacing=2.0):
+    def __init__(self, env=None, *, path: Path | None = None, clock=time.time, spacing=2.0,
+                 lock_timeout=5.0, cancel=None):
         env = os.environ if env is None else env
         self.path = path or Path(env.get("CARR_GITHUB_READ_BUDGET", str(Path.home() / ".cache/carr/github-read-budget.json")))
         # Unidentified configured tokens share a conservative pool. No credential is read or logged.
@@ -100,6 +105,9 @@ class GitHubReadBudget:
         self.scope = f"{env.get('GH_HOST', 'github.com')}:{principal}"
         self.shared = f"{env.get('GH_HOST', 'github.com')}:shared"
         self.clock, self.spacing = clock, spacing
+        if not math.isfinite(lock_timeout) or lock_timeout <= 0:
+            raise ValueError('GitHub budget lock timeout must be positive and finite')
+        self.lock_timeout, self.cancel = lock_timeout, cancel or (lambda: None)
         legacy_dir = env.get('GH_LIMITER_DIR', str(Path(__file__).resolve().parents[1] / 'out/orch/gh-limiter'))
         self.legacy = Path(legacy_dir) / 'cooldown'
         self.legacy_cooldown = float(env.get('GH_LIMITER_COOLDOWN', 900))
@@ -108,7 +116,17 @@ class GitHubReadBudget:
     def state(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with os.fdopen(os.open(str(self.path) + ".lock", os.O_RDWR | os.O_CREAT, 0o600), "r+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            deadline = time.monotonic() + self.lock_timeout
+            while True:
+                self.cancel()
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise GitHubBudgetLockTimeout('GitHub budget lock deadline expired; calls stopped') from None
+                    time.sleep(min(.05, remaining))
             try:
                 data = json.loads(self.path.read_text()) if self.path.exists() else {}
                 if not isinstance(data, dict):
