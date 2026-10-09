@@ -138,6 +138,7 @@ def configure(frame, event, arg):
         def record_transport(argv, **kwargs):
             assert argv[1:3] == ['call', 'add-loop'], argv
             assert json.loads(argv[3])['kind'] == 'open_loop'
+            assert json.loads(argv[3])['owner'] in ('joe', 'dell', 'claude'), argv[3]
             return subprocess.CompletedProcess(argv, 0, '{"ok":true}', '')
         patch('subprocess.run', side_effect=record_transport).start()
         sys.settrace(None)

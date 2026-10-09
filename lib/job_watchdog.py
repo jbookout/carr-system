@@ -96,6 +96,19 @@ def stamp(now=None):
     return datetime.fromtimestamp(time.time() if now is None else now, timezone.utc).isoformat()
 
 
+def loop_owner(f):
+    """Record-layer owner for a loop filed from finding ``f``.
+
+    The finding's own ``owner`` ("orchestrator") names a machine seat on the
+    progress board. add-loop accepts only a single actor in joe/dell/claude
+    (LOOP_OWNERS in mcp-server/src/tools.js): "claude" when the system can
+    finish the work without a human, otherwise the human who must act. The
+    orchestrator is the Claude seat, so its work files as "claude"; a finding
+    that needs Joe files as "joe". The seat name stays in source_note/body.
+    """
+    return "joe" if f.get("needs_joe") else "claude"
+
+
 def finding(kind, subject, reason, config, **fields):
     key = f"{kind}:{subject}"
     needs_joe = next((k for k, patterns in config["needs_joe_patterns"].items()
@@ -1011,7 +1024,7 @@ class Effects:
             episode_key = f["key"] + (":" + f["first_seen"] if f["kind"] == "scheduled_job_drift" else "")
             digest_key = hashlib.sha256(episode_key.encode()).hexdigest()
             payload = {"idempotency_key": "job-watchdog:" + digest_key,
-                       "kind": "open_loop", "owner": "orchestrator", "domain": "system",
+                       "kind": "open_loop", "owner": loop_owner(f), "domain": "system",
                        "body": f["reason"] + "\nNext action: " + f["next_action"],
                        "source_note": "job watchdog: " + f["subject"],
                        "marker": "decision" if f.get("needs_joe") and f["needs_joe"] != "credentials" else "none",
@@ -1037,7 +1050,7 @@ class Effects:
 
     def _file_defect(self, f, key):
         payload = {"idempotency_key": key,
-                       "kind": "open_loop", "owner": "orchestrator", "domain": "system",
+                       "kind": "open_loop", "owner": loop_owner(f), "domain": "system",
                        "body": f["reason"] + "\nNext action: " + f["next_action"],
                        "source_note": "job watchdog: " + f["subject"],
                        "marker": "decision" if f.get("needs_joe") or f.get("board_status") == "question-for-orchestrator" else "none",
