@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
-const FILE = "tools.js";
+const FILE = "loop-tools.js";
 const WORK = mkdtempSync(join(tmpdir(), "amend-closed-loop-mutants-"));
 test.after(() => rmSync(WORK, { recursive: true, force: true }));
 
@@ -36,20 +36,23 @@ function relink(source) {
 
 function mutate(anchor, replacement) {
   const source = readFileSync(join(SRC, FILE), "utf8");
-  const count = source.split(anchor).length - 1;
+  const pattern = new RegExp(anchor.split('\n').map(line => line.trimStart().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\n[ \t]*'), 'g');
+  const count = [...source.matchAll(pattern)].length;
   assert.equal(count, 1, `mutant anchor must occur exactly once in ${FILE}: ${JSON.stringify(anchor)}`);
-  return relink(source.replace(anchor, replacement));
+  return relink(source.replace(pattern, () => replacement));
 }
 
 async function loadReal() {
-  return import(pathToFileURL(join(SRC, FILE)).href);
+  const mod = await import(pathToFileURL(join(SRC, FILE)).href);
+  return { TOOLS: mod.loopTools(), ToolError: (await import("../src/tool-error.js")).ToolError };
 }
 
 async function loadMutant(anchor, replacement) {
   serial += 1;
   const path = join(WORK, `${serial}-tools.mjs`);
   writeFileSync(path, mutate(anchor, replacement));
-  return import(pathToFileURL(path).href);
+  const mod = await import(pathToFileURL(path).href);
+  return mod.loopTools ? { TOOLS: mod.loopTools(), ToolError: (await import("../src/tool-error.js")).ToolError } : mod;
 }
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe",
@@ -160,21 +163,24 @@ test("MUTANT: insert and update order reversed — the projection is written bef
   const updateStatement =
     `      await c.query(\n        \`update loop_item set close_outcome=$1, outcome=$1, status=$2, updated_by=$3 where id=$4\`,\n        [newOutcome, resolution, actor.id, cur.id]);`;
   const source = readFileSync(join(SRC, FILE), "utf8");
-  assert.ok(source.includes(insertStatement), "insert anchor must be present verbatim");
-  assert.ok(source.includes(updateStatement), "update anchor must be present verbatim");
+  const patternFor = anchor => new RegExp(anchor.split('\n').map(line => line.trimStart().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\n[ \t]*'));
+  const insertPattern = patternFor(insertStatement), updatePattern = patternFor(updateStatement);
+  assert.ok(insertPattern.test(source), "insert anchor must be present");
+  assert.ok(updatePattern.test(source), "update anchor must be present");
   // Swap the two statements' bodies in place, leaving everything around and
   // between them (including the comment block that explains the ordering)
   // untouched — so this mutant differs from the real source ONLY in which
   // statement runs first.
   const mutated = source
-    .replace(insertStatement, "\u0000PLACEHOLDER_UPDATE\u0000")
-    .replace(updateStatement, insertStatement)
+    .replace(insertPattern, "\u0000PLACEHOLDER_UPDATE\u0000")
+    .replace(updatePattern, () => insertStatement)
     .replace("\u0000PLACEHOLDER_UPDATE\u0000", updateStatement);
   assert.notEqual(mutated, source, "the swap must actually change the source");
   serial += 1;
   const path = join(WORK, `${serial}-tools.mjs`);
   writeFileSync(path, relink(mutated));
-  const mutant = await import(pathToFileURL(path).href);
+  const loaded = await import(pathToFileURL(path).href);
+  const mutant = { TOOLS: loaded.loopTools(), ToolError: (await import("../src/tool-error.js")).ToolError };
   assert.equal(await appendPrecedesProjectionUpdate(mutant), false,
     "reversing the statement order must make the append-before-update probe fail");
 });

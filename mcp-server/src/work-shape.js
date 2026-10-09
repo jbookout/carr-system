@@ -207,7 +207,7 @@ export function workShapeTools({ withEnvelope, writeEvent, ToolError }) {
         };
       },
     },
-    "set-work-shape-disposition": {
+    "set-work-shape-disposition": { serialization: "idempotency-key",
       write: true,
       description: "Explicitly decide whether a Work Request needs shape analysis before implementation. required means a current work-shape revision must exist at claim time. not_required is allowed only when the implementation surface is already fixed and names that surface. Any qualified seat may record this operational disposition; it grants no human-only authority.",
       inputSchema: {
@@ -268,7 +268,7 @@ export function workShapeTools({ withEnvelope, writeEvent, ToolError }) {
         return { ok: true, work_request: { id: updated.id, ref: updated.ref, title: updated.title, state: updated.state, version: Number(updated.version), shape_disposition: updated.shape_disposition, shape_fixed_surface_ref: updated.shape_fixed_surface_ref, shape_rationale: updated.shape_rationale, shape_decided_by_actor_id: updated.shape_decided_by_actor_id, shape_decided_at: updated.shape_decided_at } };
       }),
     },
-    "write-work-shape": {
+    "write-work-shape": { serialization: "idempotency-key",
       write: true,
       description: "Append an evidence-backed implementation-shape decision to a canonical Work Request. Any qualified seat may write it. base_version is the current shape revision (0 for the first); work_request_base_version binds the exact request analyzed. Exactly three assumption-distinct archetypes, 2-3 searches, 5+ distinct maintained repositories, a falsifier, and an approximately 120-word builder brief are hard preconditions. This proposes form; it grants no human-only authority.",
       inputSchema: {

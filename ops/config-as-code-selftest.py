@@ -231,6 +231,8 @@ def main():
             json.dumps(hooks_source, indent=2) + "\n", encoding="utf-8"
         )
         mod.REPO = str(repo)
+        mod.TOKENS = [(token, mod.REPO if token == "{{REPO}}" else value)
+                      for token, value in mod.TOKENS]
         mod.SETTINGS = str(home / ".claude" / "settings.json")
         mod.CLAUDE_CONTINUITY_MODE_FILE = str(
             home / ".config/carr/claude-continuity-mode.json")
@@ -400,7 +402,7 @@ def main():
         for p in [token_comment_case_config, token_comment_case_launchd]:
             p.mkdir(parents=True, exist_ok=True)
         original_state = {name: getattr(mod, name) for name in [
-            "REPO", "SETTINGS", "TASKS_SRC", "TASKS_REPO", "TASKS_QUARANTINE",
+            "REPO", "TOKENS", "SETTINGS", "TASKS_SRC", "TASKS_REPO", "TASKS_QUARANTINE",
             "LAUNCHD_SRC", "LAUNCHD_REPO", "HOOKS_REPO", "CODEX_HOOKS_SRC",
             "CODEX_HOOKS_REPO", "CODEX_CONFIG", "CODEX_PERMISSIONS_REPO",
             "CLAUDE_CONTINUITY_MODE_FILE", "CLAUDE_MCP_CONFIG",
@@ -415,6 +417,8 @@ def main():
             json.dumps(hooks, indent=2) + "\n", encoding="utf-8"
         )
         mod.REPO = str(token_comment_case_repo)
+        mod.TOKENS = [(token, mod.REPO if token == "{{REPO}}" else value)
+                      for token, value in mod.TOKENS]
         mod.SETTINGS = str(token_comment_case_settings)
         mod.CLAUDE_CONTINUITY_MODE_FILE = str(
             token_comment_home / ".config/carr/claude-continuity-mode.json")

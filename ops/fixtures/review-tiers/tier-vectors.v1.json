@@ -2,7 +2,7 @@
  "schema_version": "review-tier-vectors.v1",
  "generated_by": "ops/sync-review-tiers.py",
  "source": "ops/config/review-tiers.v1.json",
- "map_digest": "sha256:731c9b99162294ba83c76c03cf9cfc095e6f3d3b45f39595ccfd5a96ad57fb6a",
+ "map_digest": "sha256:ed85f104fdf864dcdc4e0250aa519bcc7f6875903f1f49a5cba573b705556335",
  "vectors": [
   {
    "path": ".github/CODEOWNERS",
@@ -726,6 +726,366 @@
   },
   {
    "path": "x/mcp-server/src/tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/tool-execution.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/tool-execution.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/tool-execution.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/tool-registry.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/tool-registry.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/tool-registry.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/versioned-write.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/versioned-write.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/versioned-write.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/verb-support.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/verb-support.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/verb-support.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/activity-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/activity-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/activity-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/campaign-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/campaign-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/campaign-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/deal-room-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/deal-room-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/deal-room-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/deal-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/deal-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/deal-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/decision-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/decision-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/decision-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/document-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/document-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/document-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/gate-zero-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/gate-zero-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/gate-zero-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/industry-event-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/industry-event-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/industry-event-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/introspection-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/introspection-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/introspection-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/lead-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/lead-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/lead-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/loop-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/loop-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/loop-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/party-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/party-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/party-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/rule-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/rule-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/rule-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/search-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/search-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/search-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/workspace-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/workspace-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/workspace-tools.js",
+   "tier": 1,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/doc-outcome-cards-tools.js",
+   "tier": 3,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "mcp-server/src/doc-outcome-cards-tools.js.bak",
+   "tier": 2,
+   "noise": false,
+   "test": false
+  },
+  {
+   "path": "x/mcp-server/src/doc-outcome-cards-tools.js",
    "tier": 1,
    "noise": false,
    "test": false
@@ -1735,7 +2095,7 @@
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "policy_revision": "cccccccccccccccccccccccccccccccccccccccc",
     "diff_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852",
+    "policy_digest": "sha256:447306983dcd584fd6cbcf034127ebfad34d6d38edaf1407104fc63596e08ecb",
     "changed_paths": [
      "lib/example.py",
      "tests/test_example.py"
@@ -1779,7 +2139,7 @@
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "policy_revision": "cccccccccccccccccccccccccccccccccccccccc",
     "diff_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852",
+    "policy_digest": "sha256:447306983dcd584fd6cbcf034127ebfad34d6d38edaf1407104fc63596e08ecb",
     "changed_paths": [
      "tests/test_example.py"
     ],
@@ -1820,7 +2180,7 @@
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "policy_revision": "cccccccccccccccccccccccccccccccccccccccc",
     "diff_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852",
+    "policy_digest": "sha256:447306983dcd584fd6cbcf034127ebfad34d6d38edaf1407104fc63596e08ecb",
     "changed_paths": [
      "ops/example-selftest.py"
     ],
@@ -1838,5 +2198,5 @@
    }
   }
  ],
- "policy_digest": "sha256:beaec50e9926b73641f77a8e28e210e029a965c563682a96e9bed963fc6d3852"
+ "policy_digest": "sha256:447306983dcd584fd6cbcf034127ebfad34d6d38edaf1407104fc63596e08ecb"
 }

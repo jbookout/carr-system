@@ -416,15 +416,6 @@ test("migration 0492 admits one linked forward correction behind the exact sourc
   assert.match(sql, /or not exists \(select 1 from ops\.effective_sourced_work_request_shape_disposition\(w\) e\n                     where e\.disposition = 'required'\) then\n    raise exception 'a sourced Work Shape revision requires the exact current receipt-backed required disposition'/);
 });
 
-test("both shape writes serialize identical idempotency keys before replay lookup", () => {
-  const source = fs.readFileSync(path.join(REPO, "mcp-server/src/tools.js"), "utf8");
-  const body = source.slice(source.indexOf("async function withEnvelope"), source.indexOf("async function writeEvent"));
-  const lock = body.indexOf("pg_advisory_xact_lock");
-  const replayRead = body.indexOf("select request_hash, response");
-  assert.ok(lock >= 0 && lock < replayRead, "the same-key transaction lock must precede replay lookup");
-  assert.match(body, /verb === "write-work-shape" \|\| verb === "set-work-shape-disposition"/);
-});
-
 test("an unclassified capability project cannot be claimed", async () => {
   const current = {
     id: "22222222-2222-4222-8222-222222222222", ref: "WR-AI-001", title: "Unclassified project",

@@ -751,7 +751,7 @@ test("REACHABILITY: exactly two modules in src may import the record layer's con
   const importers = Object.entries(imports)
     .filter(([, specifiers]) => specifiers.some(one => one.endsWith(`/${STORE_FILE}`)))
     .map(([name]) => name).sort();
-  assert.deepEqual(importers, ["tools.js"],
+  assert.deepEqual(importers, ["gate-zero-tools.js", "tool-execution.js"],
     "a module other than the verb registry can reach the receipt contract");
   // AND THE CONTRACT REACHES NO TEST FILE, by the same parser.
   for (const specifier of imports[STORE_FILE])

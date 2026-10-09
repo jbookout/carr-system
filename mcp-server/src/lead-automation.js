@@ -177,7 +177,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
     return { ok: true, contract: LEAD_AUTOMATION_CONTRACT, moves, invoice_closes, drafts_prepared: draftsPrepared, sent: false };
   }
   return {
-    "record-lead-contact": {
+    "record-lead-contact": { serialization: "idempotency-key",
       write: true, description: "Record derived contact evidence from a local mail or calendar reader. Match the counterparty address against the lead's party; a domain-only match remains weak. No source body or credentials accepted. Never sends.",
       inputSchema: { ...schema({ idempotency_key:{type:"string"},lead:{type:"string"},native_ref:{type:"string",minLength:1,maxLength:500},
         counterparty_address:{type:"string"},kind:{type:"string",enum:["email_in","email_out","meeting","call","tour"]},
@@ -220,7 +220,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
         return { contract: LEAD_AUTOMATION_CONTRACT, dry_run: true, moves: planLeadMoves(s.leads,s.activities,s.drafts,s.now), invoice_closes: await invoices.preview(c) };
       },
     },
-    "advance-leads": {
+    "advance-leads": { serialization: "idempotency-key",
       write: true, description: "Run the lead stage job over captured local mail and calendar activities. Strong evidence advances one step with provenance; weak evidence becomes a proposal. Prepare approval-only first-contact drafts for 6 am local tomorrow. Never sends. dry_run performs the same planning without business writes.",
       inputSchema: { ...schema({ idempotency_key: { type: "string" }, dry_run: { type: "boolean" }, time_zone: { type: "string" } }), required: ["idempotency_key"] },
       handler: async (c, actor, args) => {
@@ -242,7 +242,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
           join lead l on l.id=m.lead_id join party p on p.id=l.party_id
           where m.status='proposed' and m.from_stage=l.stage and not l.suppressed and p.merged_into is null and p.deleted_at is null and p.contact_state='active' order by m.created_at,m.id`)).rows }),
     },
-    "approve-lead-draft": {
+    "approve-lead-draft": { serialization: "idempotency-key",
       write: true, humanOnly: true, description: "One-tap approval of the displayed first-contact draft. It remains a draft; this verb sends nothing and does not move the lead.",
       inputSchema: { ...schema({ idempotency_key: { type: "string" }, draft_id: { type: "string", format: "uuid" } }), required: ["idempotency_key","draft_id"] },
       handler: (c,actor,args) => withEnvelope(c,actor,"approve-lead-draft",args,async () => {
@@ -256,7 +256,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
         return { ok: true, draft_id: d.id, approved: true, sent: false };
       }),
     },
-    "approve-lead-move": {
+    "approve-lead-move": { serialization: "idempotency-key",
       write: true,humanOnly: true,description: "Apply a displayed weak-evidence lead stage proposal after a human confirms it. Preserve its activity reference and refuse a stale proposal.",
       inputSchema: { ...schema({ idempotency_key: { type: "string" }, move_id: { type: "string",format: "uuid" }, base_version: { type: "integer" } }), required: ["idempotency_key","move_id","base_version"] },
       handler: (c,actor,args) => withEnvelope(c,actor,"approve-lead-move",args,async () => {
@@ -271,7 +271,7 @@ export function leadAutomationTools({ withEnvelope, writeEvent, ToolError, invoi
         return { ok:true,stage:m.to_stage,evidence_ref:m.evidence_ref };
       }),
     },
-    "undo-lead-move": {
+    "undo-lead-move": { serialization: "idempotency-key",
       write: true, humanOnly: true, description: "Undo the latest applied lead stage move. Restore its prior stage and record who undid it; refuse newer stage work or a stale version.",
       inputSchema: { ...schema({idempotency_key:{type:"string"},move_id:{type:"string",format:"uuid"},base_version:{type:"integer"}}), required:["idempotency_key","move_id","base_version"] },
       handler:(c,actor,args) => withEnvelope(c,actor,"undo-lead-move",args,async()=>{

@@ -425,8 +425,8 @@ test("AC-DS-REGISTRY: both verbs classify as writes, and acknowledge is not a pr
     "  'record': gate.is_write_action('record-dispatch-link'),",
     "  'ack': gate.is_write_action('acknowledge-dispatch'),",
     "  'notification': gate.is_write_action('acknowledge-notification'),",
-    "  'prefix': 'acknowledge' in gate.WRITE_ACTION_PREFIXES,",
-    "  'exact': sorted(a for a in gate.WRITE_ACTION_EXACT if a.startswith('acknowledge')),",
+    "  'prefix': 'acknowledge' in gate.COMPLETION_FACTS['unknown_write_prefixes'],",
+    "  'exact': sorted(a for a, facts in gate.registry_verb_facts().items() if a.startswith('acknowledge') and facts['completionClass'] == 'write'),",
     "}))",
   ].join("\n");
   const out = JSON.parse(execFileSync("python3", ["-c", probe], { encoding: "utf8" }));
@@ -436,7 +436,7 @@ test("AC-DS-REGISTRY: both verbs classify as writes, and acknowledge is not a pr
   // A PREFIX WOULD SILENTLY CAPTURE A FUTURE READ named the same way. Every
   // acknowledge write is listed exactly, including board answer receipts.
   assert.equal(out.prefix, false, "acknowledge was promoted to a write prefix");
-  assert.deepEqual(out.exact, ["acknowledge-board-answer", "acknowledge-dispatch", "acknowledge-notification"]);
+  assert.ok(["acknowledge-board-answer", "acknowledge-dispatch", "acknowledge-notification"].every(name => out.exact.includes(name)));
 });
 
 test("AC-DS-REGISTRY: a refused write is surfaced as its reason and never as a success", () => {

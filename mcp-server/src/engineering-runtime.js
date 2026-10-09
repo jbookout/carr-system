@@ -2200,7 +2200,7 @@ export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError })
         };
       },
     },
-    "register-engineering-slice-plan": {
+    "register-engineering-slice-plan": { serialization: "idempotency-key",
       write: true,
       description: "Register one typed Engineering Slice Plan as an immutable projection of the exact accepted sourced plan. It does not accept, assign, dispatch, or grant authority.",
       inputSchema: { type: "object", additionalProperties: false, properties: { idempotency_key: { type: "string" }, work_request: { type: "string" }, plan: { type: "object" }, plan_digest: { type: "string" } }, required: ["idempotency_key", "work_request", "plan", "plan_digest"] },
@@ -2225,13 +2225,13 @@ export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError })
         return { ok: true, engineering_slice_plan_id: row.id, work_request_id: row.work_request_id, accepted_plan_id: row.accepted_plan_id, plan_digest: row.plan_digest };
       }); },
     },
-    "admit-engineering-slice": {
+    "admit-engineering-slice": { serialization: "idempotency-key",
       write: true,
       description: "Admit one eligible DAG slice from the exact accepted plan. The server creates the canonical ops.job, capability session, and immutable execution envelope; caller identity, authority, adapter, and native session continuity are never accepted as input.",
       inputSchema: { type: "object", additionalProperties: false, properties: { idempotency_key: { type: "string" }, work_request: { type: "string" }, slice_ref: { type: "string" } }, required: ["idempotency_key", "work_request", "slice_ref"] },
       handler: async (c, actor, args) => withEnvelope(c, actor, "admit-engineering-slice", args, () => admitEngineeringSlice(c, actor, args, ToolError, writeEvent)),
     },
-    "review-engineering-slice": {
+    "review-engineering-slice": { serialization: "idempotency-key",
       write: true,
       description: "Record one independent typed reviewer fact against a persisted Engineering Slice Receipt. The reviewer must be a different actor from the executor and must provide evidence for a pass.",
       inputSchema: { type: "object", additionalProperties: false, properties: { idempotency_key: { type: "string" }, receipt_id: { type: "string" }, fact: { type: "object" } }, required: ["idempotency_key", "receipt_id", "fact"] },

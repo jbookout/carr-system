@@ -2,6 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {registryChain} from '../../ops/registry-chain.mjs';
 import {checkRegistryChain} from '../../ops/registry-chain-check.mjs';
+import {SCAC_MUTATION_OPERATIONS} from '../src/scac-mutation-registry.current.generated.js';
+
+test('the current chain retains the sealed Worker declaration-source successor', () => {
+  const worker = registryChain.versions.find(row => row.migration === 'migrations/0855_architecture_worker_registration_scac_successor.sql');
+  assert.ok(worker, 'the Worker registration seal must survive the registry-chain integration');
+  assert.equal(registryChain.versions[113].migration, 'migrations/0850_research_site_scac_successor.sql');
+  assert.equal(registryChain.versions[114].migration, 'migrations/0853_party_identity_scac_successor.sql');
+  assert.equal(worker.predecessor, 'scac-mutation-registry.v115');
+  assert.equal(worker.migration, 'migrations/0855_architecture_worker_registration_scac_successor.sql');
+  assert.equal(SCAC_MUTATION_OPERATIONS['update-lead'].source_locator, 'mcp-server/src/lead-tools.js');
+  assert.equal(SCAC_MUTATION_OPERATIONS['find-rule'].source_locator, 'mcp-server/src/rule-tools.js');
+});
 
 test('the entire chain preserves continuity, digests, counts and atomic ordering', () => {
   const result = checkRegistryChain();
@@ -13,7 +25,7 @@ for (const [name, mutate, reason] of [
   ['predecessor', chain => chain.versions[20].predecessor=chain.versions[0].version, /continuity/],
   ['digest', chain => chain.versions[20].digest='sha256:'+'0'.repeat(64), /digest/],
   ['count', chain => chain.versions[20].entry_count++, /count/],
-  ['pair order', chain => chain.atomic_groups.at(-1).reverse(), /atomic.*order/],
+  ['pair order', chain => chain.atomic_groups.findLast(group => group.length > 1).reverse(), /atomic.*order/],
   ['history rewrite', chain => chain.versions[0].commit='0'.repeat(40), /history preservation/],
 ]) test(`a ${name} mutation is refused by the common invariant`, () => {
   const chain = structuredClone(registryChain);

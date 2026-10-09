@@ -49,6 +49,7 @@ import {
   V5_F01_OPERATIONS,
   recordSourceAuthorityStoreTools,
 } from "../src/record-source-authority-store.v5.js";
+import { createToolRegistry } from "../src/tool-registry.js";
 import { connectionRouteForTool } from "../src/mcp.js";
 
 const DSN = process.env.DATABASE_URL || "";
@@ -88,7 +89,13 @@ class ToolError extends Error {
 // The shared envelope's replay row is tools.js's concern and is proved there;
 // here the door runs its body exactly once inside the transaction we opened.
 const withEnvelope = async (_client, _actor, _verb, _args, fn) => fn();
-const TOOLS = recordSourceAuthorityStoreTools({ withEnvelope, ToolError });
+const { tools: TOOLS, registerTools } = createToolRegistry();
+registerTools(recordSourceAuthorityStoreTools({ withEnvelope, ToolError }),
+  "mcp-server/src/record-source-authority-store.v5.js");
+
+test('the role-bound factory fixture uses registered writer-read-only routing', () => {
+  assert.equal(connectionRouteForTool(TOOLS['read-record-source-authority']), 'writer_read_only');
+});
 
 const JOE = Object.freeze({ slug: "joe", display: "Joe", human: true, via: "oauth-google" });
 const AGENT = Object.freeze({

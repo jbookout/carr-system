@@ -96,7 +96,7 @@ const idempotency = { idempotency_key: { type: "string" } };
 
 export function tourArtifactTools({ withEnvelope, writeEvent, ToolError }) {
   return {
-    "request-tour-pdf-render": {
+    "request-tour-pdf-render": { serialization: "idempotency-key",
       write: true,
       description: "Request an immutable PDF render from a sealed facts-only projection and pinned render inputs. This does not render, approve, share, or publish.",
       inputSchema: schema({ ...idempotency,
@@ -152,7 +152,7 @@ export function tourArtifactTools({ withEnvelope, writeEvent, ToolError }) {
         return { ok: true, render };
       },
     },
-    "record-tour-pdf-render-result": {
+    "record-tour-pdf-render-result": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       description: "Authority-bound server renderer receipt after exact R2 readback and deterministic QC. This cannot approve, publish, or grant client download authority.",
@@ -186,7 +186,7 @@ export function tourArtifactTools({ withEnvelope, writeEvent, ToolError }) {
         });
       },
     },
-    "record-tour-pdf-human-review": {
+    "record-tour-pdf-human-review": { serialization: "idempotency-key",
       write: true,
       humanOnly: true,
       authorityOnly: true,

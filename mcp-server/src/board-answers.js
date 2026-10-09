@@ -5,10 +5,7 @@ import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 
 const REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const BOARD_ANSWER_WRITE_VERBS = new Set([
-  "publish-board-snapshot", "ask-board-question", "revise-board-question",
-  "answer-board-question", "acknowledge-board-answer", "record-board-answer-applied",
-]);
+
 const questionFields = {
   prompt: { type: "string" }, choices: { type: "array", items: { type: "string" } },
   allow_free_text: { type: "boolean" }, default_answer: { type: ["string", "null"] },
@@ -90,7 +87,7 @@ export function progressBoardSummary(row) {
 
 export function boardAnswerTools({ withEnvelope, writeEvent }) {
   return {
-    "publish-board-snapshot": {
+    "publish-board-snapshot": { serialization: "idempotency-key",
       write: true,
       description: "Publish the current progress board view for the signed-in app. Use base_version 0 to create it; stale versions refuse. The snapshot is display data and never grants authority.",
       inputSchema: { type: "object", properties: {
@@ -127,7 +124,7 @@ export function boardAnswerTools({ withEnvelope, writeEvent }) {
       },
     },
 
-    "ask-board-question": {
+    "ask-board-question": { serialization: "idempotency-key",
       write: true,
       description: "Ask one named board question. The asker reference routes later answers; choices or free text define the answer control.",
       inputSchema: { type: "object", properties: {
@@ -157,7 +154,7 @@ export function boardAnswerTools({ withEnvelope, writeEvent }) {
       },
     },
 
-    "revise-board-question": {
+    "revise-board-question": { serialization: "idempotency-key",
       write: true,
       description: "Revise an existing question by its current revision. Prior revisions and answers remain in the record.",
       inputSchema: { type: "object", properties: {
@@ -233,7 +230,7 @@ export function boardAnswerTools({ withEnvelope, writeEvent }) {
       },
     },
 
-    "answer-board-question": {
+    "answer-board-question": { serialization: "idempotency-key",
       write: true, humanOnly: true,
       description: "Partner answers the current revision. Sent means this answer row was durably written; answered_by comes from authenticated identity.",
       inputSchema: { type: "object", properties: {
@@ -301,7 +298,7 @@ export function boardAnswerTools({ withEnvelope, writeEvent }) {
       },
     },
 
-    "acknowledge-board-answer": {
+    "acknowledge-board-answer": { serialization: "idempotency-key",
       write: true,
       description: "Mark a sponsor-owned answer Received after the named asker or orchestrator has stored it in its inbox. Authenticated actor is recorded separately from the asker reference.",
       inputSchema: { type: "object", properties: {
@@ -329,7 +326,7 @@ export function boardAnswerTools({ withEnvelope, writeEvent }) {
       },
     },
 
-    "record-board-answer-applied": {
+    "record-board-answer-applied": { serialization: "idempotency-key",
       write: true,
       description: "Mark a Received answer Applied only with a concrete effect reference. The record names who applied it.",
       inputSchema: { type: "object", properties: {

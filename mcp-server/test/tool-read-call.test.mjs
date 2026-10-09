@@ -183,7 +183,7 @@ test("mcp.js: both read connection routes record metadata, while write verbs do 
     src.indexOf("export async function dispatch("));
   assert.match(src, /if \(connectionRouteForTool\(tool\) === "reader"\)[\s\S]*?waitUntil\?\.\(recordReadCall\(/,
     "ordinary reader calls must still be recorded");
-  assert.match(writerBranch, /const writerRead = tool\.writerConnection === true && !tool\.write/,
+  assert.match(writerBranch, /const writerRead = connectionRouteForTool\(tool\) === "writer_read_only"/,
     "only read-only writer calls are eligible for the second audit path");
   assert.match(writerBranch, /begin read only/,
     "audited writer reads must keep their read-only transaction");

@@ -30,7 +30,7 @@ import { TOOLS, ToolError } from "../src/tools.js";
 // `for update` is invisible to a single-threaded fake, and only shows up
 // against two REAL concurrent Postgres sessions racing the same row.
 const MUTANT_SRC = fileURLToPath(new URL("../src/", import.meta.url));
-const MUTANT_FILE = "tools.js";
+const MUTANT_FILE = "versioned-write.js";
 let mutantWork = null;
 function relinkMutant(source) {
   return source.replace(/from\s+"\.\/([^"]+)"/g, (_, file) =>
@@ -45,7 +45,12 @@ async function loadForUpdateRemovedMutant() {
   const mutated = relinkMutant(source.replace(anchor, "`, [id]);"));
   const path = join(mutantWork, `${Date.now()}-tools.mjs`);
   writeFileSync(path, mutated);
-  return import(pathToFileURL(path).href);
+  const loopSource = readFileSync(join(MUTANT_SRC, "loop-tools.js"), "utf8");
+  const loops = join(mutantWork, `${Date.now()}-loops.mjs`);
+  writeFileSync(loops, relinkMutant(loopSource).replace(
+    pathToFileURL(join(MUTANT_SRC, MUTANT_FILE)).href, pathToFileURL(path).href));
+  const { loopTools } = await import(pathToFileURL(loops).href);
+  return { TOOLS: loopTools() };
 }
 test.after(() => { if (mutantWork) rmSync(mutantWork, { recursive: true, force: true }); });
 

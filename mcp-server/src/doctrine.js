@@ -854,7 +854,7 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
       },
     },
 
-    "resolve-doctrine-rules": {
+    "resolve-doctrine-rules": { completionClass: "write",
       description: "Resolve which doctrine sections are OPERATIVE given the live edge graph (P3): live OVERRIDES/SUPERSEDES suppress their targets, EXCEPTION_TO reports as a scoped carve-out on its target, and the trace names why each suppressed section lost. Fail-closed posture: a cycle in the walked set errors rather than guessing. Scope with content_classes or seed_section_ids.",
       inputSchema: { type: "object", properties: {
         content_classes: { type: "array", items: { type: "string" } },

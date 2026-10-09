@@ -653,12 +653,13 @@ test("the two base statements hold together as written, since no test can run th
   // blank board. This is the cheapest guard against silent drift in the parts a
   // reader cannot check by eye: the correlation, the parameter count, and the
   // distinct-on/order-by agreement Postgres requires.
-  const tools = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
+  const tools = await readFile(new URL("../src/deal-room-tools.js", import.meta.url), "utf8");
   const dealRoomApi = await readFile(
     new URL("../../migrations/0079_deal_room_api.sql", import.meta.url), "utf8");
 
-  const board = tools.slice(tools.indexOf('"deal-room-board": {'),
-    tools.indexOf("dealroom:board-field-base") + 200);
+  const workspace = await readFile(new URL("../src/workspace-tools.js", import.meta.url), "utf8");
+  const board = workspace.slice(workspace.indexOf('"deal-room-board": {'),
+    workspace.indexOf("dealroom:board-field-base") + 200);
   assert.match(board, /from v_deal_room_board b\b/, "the outer relation is aliased, so b.id resolves");
   assert.match(board, /from v_deal_room_event e\b/,
     "the reader must use the granted deal-scoped event view");
@@ -1391,6 +1392,6 @@ test("deal timeline returns exact current lease dates and explicit absence witho
   assert.deepEqual(page.lease, db.currentLease);
   assert.equal(Object.hasOwn(page.lease, "rent_start_on"), false);
   assert.equal(Object.hasOwn(page.lease, "option_on"), false);
-  const source = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
+  const source = await readFile(new URL("../src/deal-room-tools.js", import.meta.url), "utf8");
   assert.match(source, /from v_deal_room_current_lease where deal_id=\$1/);
 });

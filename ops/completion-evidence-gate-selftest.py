@@ -649,95 +649,50 @@ def f05_rule_contract_binder_is_a_write():
     return passed
 
 
-def registry_prefix_coverage(*, required=False):
-    """Keep the family classifier honest against the local live registry when present."""
-    registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
-    if not os.path.exists(registry):
-        print("FAIL  live registry unavailable" if required else "SKIP  live registry unavailable")
-        return not required
-    script = (
-        'import { TOOLS } from "./src/tools.js"; '
-        'console.log(JSON.stringify(Object.keys(TOOLS).filter((n) => TOOLS[n].write).sort()))'
-    )
-    result = subprocess.run(["node", "--input-type=module", "-e", script],
-                            cwd=os.path.join(REPO, "mcp-server"), text=True,
-                            capture_output=True, timeout=30)
-    if result.returncode:
-        print("FAIL  live registry could not load; run npm --prefix mcp-server ci" if required else "SKIP  live registry could not load")
-        return not required
-    writes = json.loads(result.stdout)
-    missing = [name for name in writes if not mod.is_write_action(name)]
-    # notification-feed and read-doc-conversation are WR-000113/112 READS and must
-    # stay False: a prefix that captured either would make every future read named
-    # the same way a write.
-    reads = ["review-queue", "get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
-             "notification-feed", "read-doc-conversation", "read-journey-one-clock"]
-    false_writes = [name for name in reads if mod.is_write_action(name)]
-    ok = not missing and not false_writes
-    print(f"{'PASS' if ok else 'FAIL'}  live registry write coverage: "
-          f"{len(writes) - len(missing)}/{len(writes)} writes classified"
-          + (f"; missing={','.join(missing)}" if missing else "")
+def declaration_classification():
+    facts = {"synthetic-mutation": {"completionClass": "write"},
+             "register-shaped-read": {"completionClass": "read"}}
+    assert mod.is_write_action("synthetic-mutation", facts)
+    assert not mod.is_write_action("register-shaped-read", facts)
+    assert mod.is_write_action("call-verb", facts)
+    assert mod.is_write_action("update-future-verb", facts)
+    assert not mod.verification("mcp__carr__update_future_verb", {})
+    # Runtime classification must not invoke Node or depend on its availability.
+    from unittest.mock import patch
+    with patch.object(mod.subprocess, "run", side_effect=FileNotFoundError("node")):
+        assert mod.is_write_action("update-lead")
+        assert not mod.is_write_action("find")
+
+
+declaration_classification()
+
+
+def registry_declaration_coverage():
+    """The live registry's declarations decide classification; a load failure fails."""
+    generated = subprocess.run(["node", "ops/verb-completion-facts.mjs", "--check"],
+                               cwd=REPO, capture_output=True, text=True, timeout=30)
+    if generated.returncode:
+        print("FAIL  live registry declarations could not be checked; run npm --prefix "
+              "mcp-server ci, then node ops/verb-completion-facts.mjs --write\n"
+              + generated.stderr.strip())
+        return False
+    facts = mod.registry_verb_facts()
+    mismatched = [name for name, value in facts.items()
+                  if mod.is_write_action(name) != (value["completionClass"] == "write")]
+    # Prior evidence classes for these reads stay writes; the named reads stay reads.
+    lost_writes = [name for name in ["prepare-conversation", "claim-card", "resolve-doctrine-rules"]
+                   if not mod.is_write_action(name)]
+    false_writes = [name for name in ["get-deal", "list-verbs", "catch-me-up", "deal-board", "find",
+                                      "notification-feed", "read-doc-conversation",
+                                      "read-journey-one-clock"]
+                    if mod.is_write_action(name)]
+    ok = bool(facts) and not (mismatched or lost_writes or false_writes)
+    print(f"{'PASS' if ok else 'FAIL'}  declaration-derived classification: {len(facts)} verbs"
+          + (f"; mismatched={','.join(mismatched)}" if mismatched else "")
+          + (f"; lost writes={','.join(lost_writes)}" if lost_writes else "")
           + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
     return ok
 
-
-def r03_notification_classification():
-    """acknowledge-notification is a WRITE_ACTION_EXACT entry; its siblings are reads.
-
-    Positive and negative in one case, because the pair is the point: the entry
-    is EXACT so it covers exactly the one verb that writes a durable receipt,
-    and the two reads named next to it stay unclassified.
-    """
-    positives = ["acknowledge-notification", "add-doc-conversation-turn"]
-    negatives = ["notification-feed", "read-doc-conversation"]
-    missing = [action for action in positives if not mod.is_write_action(action)]
-    false_writes = [action for action in negatives if mod.is_write_action(action)]
-    ok = not missing and not false_writes
-    print(f"{'PASS' if ok else 'FAIL'}  R03 notification and Doc conversation classification"
-          + (f"; missing={','.join(missing)}" if missing else "")
-          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
-    return ok
-
-
-def doc_conversation_write_door_classification():
-    """WR-000114: the three write doors classify as writes; the read still does not.
-
-    Positive and negative in ONE case, added together, because the pair is the
-    point (a policy flip that only moves the positives leaves the negative
-    silently asserting the old world). create-doc-conversation is covered by the
-    EXISTING "create" prefix and is asserted here anyway, so a future narrowing
-    of that prefix fails a case that names this verb. share- and rename- are
-    WRITE_ACTION_EXACT entries rather than new prefixes, so the negatives below
-    include the same two words in READ positions: a "share" or "rename" prefix
-    would turn both of them into writes and fail this case.
-    """
-    positives = ["create-doc-conversation", "share-doc-conversation",
-                 "rename-doc-conversation", "whats-new"]
-    negatives = ["read-doc-conversation", "share-preview", "rename-preview", "whats-new-preview"]
-    missing = [action for action in positives if not mod.is_write_action(action)]
-    false_writes = [action for action in negatives if mod.is_write_action(action)]
-    ok = not missing and not false_writes
-    print(f"{'PASS' if ok else 'FAIL'}  Doc conversation write-door classification"
-          + (f"; missing={','.join(missing)}" if missing else "")
-          + (f"; read false positives={','.join(false_writes)}" if false_writes else ""))
-    return ok
-
-
-def authority_family_coverage():
-    """Human-only acceptance/retirement and future proposal/approval writes stay gated."""
-    actions = [
-        "accept-workflow", "disable-legacy-schedule", "approve-work-request",
-        "accept-outcome-feedback",
-        "issue-execution-envelope", "transition-evaluation-case",
-        "transition-execution-environment-provider",
-        "propose-cognition-job", "decide-guidance-import-batch",
-        "deactivate-guidance-registry",
-    ]
-    missing = [action for action in actions if not mod.is_write_action(action)]
-    ok = not missing
-    print(f"{'PASS' if ok else 'FAIL'}  authority workflow family coverage"
-          + (f"; missing={','.join(missing)}" if missing else ""))
-    return ok
 
 
 def prose_request_prints_no_advisory():
@@ -1091,9 +1046,38 @@ def native_context_orders():
     return all(outcomes)
 
 
+
+def projection_startup_refuses():
+    """Installed projection failures must use the hook's blocking protocol."""
+    invalid = [None, "{", '{}', '{"schema":"verb-completion-facts/v1","verbs":{"update-x":{"completionClass":"write"}}}',
+               '{"schema":"verb-completion-facts/v1","verbs":{"update-x":{"completionClass":"write"}},"unknown_write_prefixes":[null]}']
+    outcomes = []
+    for payload in invalid:
+        probe = f"""import builtins, io, runpy
+real_open = builtins.open
+def open_projection(path, *args, **kwargs):
+    if str(path).endswith('verb-completion-facts.generated.json'):
+        payload = {payload!r}
+        if payload is None: raise FileNotFoundError('synthetic missing projection')
+        return io.StringIO(payload)
+    return real_open(path, *args, **kwargs)
+builtins.open = open_projection
+runpy.run_path({os.path.join(REPO, 'hooks', 'completion-evidence-gate.py')!r}, run_name='__main__')
+"""
+        result = subprocess.run([os.sys.executable, '-c', probe], input='{}', capture_output=True, text=True)
+        try:
+            verdict = json.loads(result.stdout)
+            outcomes.append(result.returncode == 2 and verdict.get('decision') == 'block' and 'projection' in verdict.get('reason', ''))
+        except ValueError:
+            outcomes.append(False)
+    ok = all(outcomes)
+    print(f"{'PASS' if ok else 'FAIL'}  projection startup failures block: {sum(outcomes)}/{len(outcomes)}")
+    return ok
+
+
 def main():
     if sys.argv[1:] == ["--registry-only"]:
-        return 0 if registry_prefix_coverage(required=True) else 1
+        return 0 if registry_declaration_coverage() else 1
     outcomes = []
     _dot_runpy.run_path(str(__import__("pathlib").Path(__file__).with_name("dot-review-selftest.py")))["run_regressions"](['test_b21', 'test_b22'])
     for name, recs, expected in CASES:
@@ -1125,10 +1109,8 @@ def main():
     outcomes.append(evaluate_artifact_deletion_is_a_write())
     outcomes.append(cre_lifecycle_writes_are_writes())
     outcomes.append(f05_rule_contract_binder_is_a_write())
-    outcomes.append(registry_prefix_coverage())
-    outcomes.append(authority_family_coverage())
-    outcomes.append(r03_notification_classification())
-    outcomes.append(doc_conversation_write_door_classification())
+    outcomes.append(registry_declaration_coverage())
+    outcomes.append(projection_startup_refuses())
     outcomes.append(latch_cases())
     outcomes.append(prose_request_prints_no_advisory())
     outcomes.append(explicit_contract_needs_review_announces())

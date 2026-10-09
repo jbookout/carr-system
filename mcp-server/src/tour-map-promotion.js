@@ -82,7 +82,7 @@ function tenant(actor, ToolError) {
 
 export function tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }) {
   return {
-    "record-tour-map-promotion-receipt": {
+    "record-tour-map-promotion-receipt": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       humanOnly: true,

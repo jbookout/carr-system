@@ -20,7 +20,7 @@ export function invoiceTrackerTools({ ToolError, withEnvelope, writeEvent }) {
           observed_at: new Date().toISOString() };
       },
     },
-    'record-commission-receipt': {
+    'record-commission-receipt': { serialization: "idempotency-key",
       write: true,
       humanOnly: true,
       description: 'Record full receipt of one already invoiced CARR commission with its payment date. Never creates a commission, alters amounts, pays out a broker, contacts anyone or moves money. Fresh base_version required; conflict refuses without rebasing. The event and receipt are atomic and the idempotency key replays the same outcome.',

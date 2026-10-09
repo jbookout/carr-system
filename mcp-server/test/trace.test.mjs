@@ -855,7 +855,7 @@ test("mcp.js: dispatch() decorates env.CORRELATION_ID onto scopedActor.correlati
 
 test("tools.js: withEnvelope's tool_call insert and writeEvent's event insert both carry identity.correlation_id", async () => {
   const { readFile } = await import("node:fs/promises");
-  const src = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
+  const src = await readFile(new URL("../src/versioned-write.js", import.meta.url), "utf8");
   const envelopeBody = src.slice(src.indexOf("async function withEnvelope"), src.indexOf("async function writeEvent"));
   assert.match(envelopeBody, /insert into tool_call[\s\S]*correlation_id/, "withEnvelope's insert must carry correlation_id");
   assert.match(envelopeBody, /identity\.correlation_id/, "withEnvelope must pass identity.correlation_id as a param");
@@ -867,7 +867,7 @@ test("tools.js: withEnvelope's tool_call insert and writeEvent's event insert bo
 
 test("tools.js: log-decision's own bespoke event insert also carries correlation_id — the second, non-writeEvent writer of the event table", async () => {
   const { readFile } = await import("node:fs/promises");
-  const src = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
+  const src = await readFile(new URL("../src/decision-tools.js", import.meta.url), "utf8");
   const idx = src.indexOf("'log-decision', 'decision'");
   assert.ok(idx > -1, "log-decision's direct event insert must still exist at this call site");
   const nearby = src.slice(idx - 400, idx + 800);

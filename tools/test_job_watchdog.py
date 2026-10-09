@@ -1079,9 +1079,21 @@ class StateTests(unittest.TestCase):
     def test_every_filed_loop_names_an_owner_the_verb_accepts(self):
         import job_watchdog as w
         from unittest.mock import patch
-        accepted = set(json.loads(re.search(
-            r"LOOP_OWNERS = Object\.freeze\((\[[^\]]*\])\)",
-            (ROOT / "mcp-server/src/tools.js").read_text()).group(1)))
+        owner_contract = subprocess.run(
+            ["node", "--input-type=module", "-e", """
+import {TOOLS} from './mcp-server/src/tools.js';
+try {
+  await TOOLS['add-loop'].handler({query: async () => ({rows: []})},
+    {id: '10000000-0000-0000-0000-000000000010', slug: 'joe-local'},
+    {idempotency_key: 'watchdog-owner-contract', kind: 'idea',
+      title: 'synthetic watchdog owner probe', owner: 'orchestrator'});
+  throw new Error('invalid owner accepted');
+} catch (error) {
+  if (error.payload?.error !== 'unknown_owner') throw error;
+  process.stdout.write(JSON.stringify(error.payload.owners));
+}
+"""], cwd=ROOT, capture_output=True, text=True, check=True, timeout=30)
+        accepted = set(json.loads(owner_contract.stdout))
         self.assertEqual(accepted, {"joe", "dell", "claude"})
         c = w.load_config(ROOT / "ops/config/job-watchdog.json")
         cases = (("pr_ci_red", None, "claude"), ("job_hang", "credentials", "joe"),

@@ -151,211 +151,6 @@ VERIFY_COMMAND = re.compile(
     r"\b(test|check|lint|health|diff|status|verify|smoke|render|build)\b|"
     r"pytest|selftest", re.I)
 PATCH_PATH = re.compile(r"^(?:\+\+\+ b/|\*\*\* (?:Update|Add) File: )(.+)$", re.M)
-# The local registry contains more write verbs than a hand-maintained name list
-# can safely follow.  These are the action families used by the live registry;
-# deliberately narrow exceptions avoid turning known reads such as
-# `review-queue` into writes merely because they share a word with review-deal.
-WRITE_ACTION_PREFIXES = {
-    "accept", "activate", "add", "admit", "amend", "append", "approve", "assign", "attach", "attest", "begin", "change", "claim", "close",
-    "complete", "confirm", "create", "deactivate", "decide", "decline", "detach", "end", "link",
-    "disable", "log", "measure", "merge", "new", "patch", "prepare", "promote", "propose",
-    "reassign", "record", "register", "release", "resolve", "restore", "retire",
-    "revert", "revoke", "score", "seal", "set", "stamp", "start", "teach", "triage",
-    "update", "write",
-}
-WRITE_ACTION_EXACT = {
-    "undo-invoice-close",
-    "undo-lead-move",
-    "advance-leads",  # evidence-driven stages and approval-only drafts
-    "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
-    "remove-research-site",  # soft-removes a research-site index row (removed_at, who, why).
-                              # EXACT rather than a "remove" prefix: it is the only remove-
-                              # verb, and a prefix would capture any future read named so.
-    "acknowledge-board-answer",  # durable Received receipt for a board answer
-    "answer-board-question",      # human partner records a durable answer
-    "ask-board-question",         # opens a named question on the board
-    "publish-board-snapshot",     # publishes the signed-in board view
-    "revise-board-question",      # preserves the prior question revision
-    "acknowledge-notification",  # writes ops.notification_read: a durable per-recipient
-                                 # receipt a session could report as "I cleared that".
-                                 # EXACT rather than a prefix for adjudicate's reason --
-                                 # "acknowledge" would cover exactly one verb today and
-                                 # would silently capture a future read named the same.
-    "acknowledge-dispatch",  # WR-000119: appends a public.room_dispatch_ack row, a durable
-                                 # per-dispatch receipt a session could report as "I took that
-                                 # up". EXACT for acknowledge-notification's own reason --
-                                 # "acknowledge" covers exactly two verbs today and as a prefix
-                                 # would silently capture a future read named the same.
-    "claude-checkpoint",     # durable Claude semantic checkpoint write
-    "claude-record-event",   # append-only Claude lifecycle receipt
-    "codex-checkpoint",      # durable semantic checkpoint write
-    "codex-record-event",    # append-only native lifecycle receipt
-    "adjudicate-incident",   # partner judgment on an operational incident — severity, owner,
-                              # duplicate-of. Same reasoning as its investigation sibling below:
-                              # "adjudicate" stays an exact entry rather than becoming a prefix,
-                              # because the two verbs it would cover are both judgment writes
-                              # somebody deliberately listed.
-    "adjudicate-investigation-branch",  # owner-only branch judgment write, like review-deal:
-                                         # a one-off judgment verb whose first word ("adjudicate")
-                                         # is not a generic write prefix
-    "share-doc-conversation",   # WR-000114: widens or withdraws another partner's access
-                                 # to a Doc conversation. EXACT rather than a prefix for
-                                 # acknowledge-notification's reason -- "share" would cover
-                                 # exactly one verb today and would silently capture a
-                                 # future read named the same way.
-    "rename-doc-conversation",  # WR-000114: renames, pins, unpins, archives or unarchives
-                                 # a Doc conversation under a compare-and-swap. EXACT for
-                                 # the same reason: "rename" covers one verb today, and a
-                                 # future rename-shaped read must not inherit the class.
-    "suggest-doc-work",       # B08: stores one source-bound obligation suggestion;
-                              # "suggest" stays exact so future read-like suggestions
-                              # do not inherit write classification.
-    "call-verb",             # unknown inner call is conservatively a write
-    "cancel-capability-session",  # abandons the open build session on a capability
-                              # project and returns that project to ready. A write in
-                              # the sense this gate cares about: it changes governed
-                              # lifecycle state and is the kind of act a session might
-                              # report as having tidied something up. "cancel" stays an
-                              # EXACT entry rather than becoming a prefix, for the same
-                              # reason as adjudicate above — it would cover exactly one
-                              # verb today, and a generic "cancel" prefix would silently
-                              # capture any future read named cancel-something.
-    "bind-rule-context-contract",  # V5-F05: appends an authority-only typed rule
-                                    # projection. EXACT: read-action-context is a
-                                    # read, and "bind" is not a blanket write prefix.
-    "dry-run-doctrine-gates",
-    "edit-loop-header",      # updates loop_block.prose_md, like presence-lease/review-deal:
-                              # a one-off verb whose first word ("edit") is not a generic
-                              # write prefix and has no sibling "edit-*" verbs to justify one
-    "open-campaign",
-    "open-incident",             # opens or appends to an operational incident. It is additive
-                                  # and it is still a write: a session that files an incident and
-                                  # then reports "handled" without reading the board back has
-                                  # claimed an outcome it never verified, which is the whole of
-                                  # what this gate is for.
-    "open-investigation",        # same "open" first-word as open-campaign; the "open" prefix
-                                  # is deliberately not generalized, so this sibling gets the
-                                  # same exact-entry treatment
-    "open-investigation-branch",  # sibling of open-investigation, same reasoning
-    "open-workflow-cutover-plan",  # DoctorCRE V5-R02 (Q116): opens a cutover state-machine
-                                  # plan for one workflow identity. Same "open" first-word
-                                  # reasoning as open-campaign/open-incident -- not
-                                  # generalized into a prefix, exact entry instead.
-    "open-complete-set-review",  # DoctorCRE V5-A03: opens an append-only independent
-                                  # complete-set review case over an immutable delivered-set
-                                  # digest. Same "open" first-word reasoning as
-                                  # open-campaign/open-incident/open-workflow-cutover-plan --
-                                  # not generalized into a prefix, exact entry instead.
-    "advance-workflow-cutover-stage",  # DoctorCRE V5-R02 (Q116): moves a cutover plan one
-                                  # stage forward (read_legacy..recovery_ready). A durable
-                                  # state transition a session could report as done without
-                                  # having actually advanced, so it is a write this gate cares
-                                  # about; "advance" has two siblings now and still no
-                                  # blanket prefix: each advance-* is its own exact entry.
-    "advance-journey-one-clock",  # DoctorCRE V5-M01: appends one Journey 1 clock revision
-                                  # through a server-bound installation. A session could
-                                  # report the clock as started or advanced without it
-                                  # having happened (every deployed Worker refuses it), so
-                                  # it is a write this gate cares about. Exact entry.
-    "mark-slice-completion",     # DoctorCRE V5-R02 (Q153): the explicit slice-completion
-                                  # marker Joe asked for. "mark" is not generalized into a
-                                  # prefix (a future mark-* read must not inherit this class).
-    "mark-slice-progress",       # DoctorCRE V5-R02 (Q153): the writer-side in_progress/blocked
-                                  # mark beside mark-slice-completion; same exact-entry reasoning.
-    "propose-slice-completion",  # slice done-marker (0628): the automated seat's completion
-                                  # PROPOSAL (never a mark). Exact entry for
-                                  # mark-slice-completion's reason.
-    "confirm-slice-completions",  # slice done-marker (0628): the partner batch confirmation
-                                  # that writes complete. Exact entry, same reasoning.
-    "bind-slice-criterion-evidence",    # slice done-marker (0628): binds an unbound criterion
-                                  # to server-resolved evidence, once. "bind" is not a prefix.
-    "rebind-slice-criterion-evidence",  # slice done-marker (0628): the partner override of a
-                                  # binding; exact entry, same reasoning.
-    "cancel-workflow-cutover-plan",  # DoctorCRE V5-R02: cancels an active cutover plan so it
-                                  # stops governing enqueue. Exact entry, like
-                                  # cancel-capability-session -- no blanket "cancel" prefix.
-    "issue-tour-share-grant",  # creates a confidential Tour share grant; "issue" stays
-                                  # exact because issue-style reads may exist elsewhere
-    "presence-lease",
-    "produce-assurance-fabric-preactivation-receipt",
-    "produce-foundation-assurance-benchmark-coverage",
-    "produce-foundation-control-plane-preactivation-receipt",
-    "produce-global-execution-contract-receipt",
-    "produce-global-no-phi-boundary-receipt",
-    "produce-global-prompt-injection-boundary-receipt",
-    "produce-global-secrets-boundary-receipt",
-    "produce-global-source-authority-receipt",
-    "project-room-queue",   # shape-checked unattended room projection write;
-                              # "project" is not generalized because projection reads exist
-    "report-problem",       # Program 6 additive Work Request capture; "report"
-                              # is not generalized because report-style reads exist
-    "request-tour-pdf-render",  # queues a governed PDF render and writes its audit event;
-                                  # "request" remains exact because request-shaped reads exist
-    "review-and-triage",    # Program 6 human state transition; exact because
-                              # other review-* actions include non-mutating reads
-    "review-benchmark-manifest-draft",  # persisted independent WR95 benchmark verdict;
-                                          # exact because other review-* actions are reads
-    "rotate-tour-share-grant",  # supersedes an active share grant; exact rather than
-                                  # widening every future rotate-* action
-    "propose-ready-plan",   # Program 6 immutable plan proposal; explicit evidence coverage
-    "review-heavy-build-plan", # Program 6 independent heavy-plan review receipt;
-                               # exact because other review-* actions include reads
-    "accept-ready-plan",    # Program 6 human readiness transition; never execution
-    "propose-outcome-feedback", # Program 6 immutable evidence proposal; no self-attestation
-    "accept-outcome-feedback",  # Program 6 human-only observational acceptance; never completion
-    "answer-work-request-for-joe",  # human-only needs_joe -> triaged answer; exact rather
-                                      # than widening every future answer-* action
-    "ask-jev",  # the Worker makes the Jev call and appends an append-only receipt row
-                # (migration 0587) the Jev gates credit; exact rather than an ask-* prefix
-    "supersede-work-request",  # Program 6 withdrawal of a request captured in error, into the
-                                # request that replaced it. Its sibling decline-work-request is
-                                # already covered by the "decline" prefix; "supersede" is in
-                                # neither set, so this one verb would otherwise read as a NON-write
-                                # and a session could close a Work Request and report it handled
-                                # with no evidence demanded. Exact rather than a new prefix, for
-                                # the same reason as cancel and adjudicate above: it would cover
-                                # exactly one verb today, and a generic "supersede" prefix would
-                                # silently capture any future read named supersede-something.
-    "review-deal",
-    "review-engineering-slice",  # independent typed review is a persisted verdict;
-                                   # other review-* actions include non-mutating reads
-    "review-portfolio-revision",  # the portfolio's independent review is a persisted
-                                    # pass/fail row the acceptance guard then reads, so it
-                                    # is a write for the same reason review-deal is
-    "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
-    "correct-memory",  # immutable successor write; exact transition
-    "correct-party-identity",  # writes party name, org and state; exact for the same
-                                # reason as correct-memory: "correct" is not a prefix
-    "forget-memory",   # reversible suppression write; exact transition
-    "issue-execution-envelope",  # persists one immutable governed execution envelope
-    "transition-evaluation-case",  # human-authority append-only eval lifecycle write
-    "transition-execution-environment-provider",  # human-authority provider CAS/rollback lifecycle write
-    "record-foundation-assurance-minimum-outcome",
-    "evaluate-artifact-deletion",  # V5-F01: persists one bounded deletion-evaluation
-                                   # receipt (it never deletes). EXACT rather than a
-                                   # prefix: "evaluate" names judgments that are reads
-                                   # elsewhere, and as a prefix would capture them.
-    "raise-delivery-cadence-alert",  # V5-A05: persists a durable escalation/quiet-hours
-                                       # alert row the sweep job's own state depends on;
-                                       # "raise" stays exact rather than becoming a prefix,
-                                       # since a future raise-* read must not inherit the
-                                       # class -- same reasoning as report-problem/open-incident.
-    # V5-J102: the CRE lifecycle writers whose first word is not a write prefix.
-    # Each appends a lifecycle subject or event row (or one shadow run record) a
-    # session could report as done. EXACT, not prefixes: initialize-, open-,
-    # commit-, cancel- and run- would capture future reads named the same way.
-    "initialize-prospect-relationship",
-    "initialize-assignment",
-    "initialize-property-negotiation",
-    "open-cre-assignment",
-    "commit-winning-property",
-    "cancel-pending-deal",
-    "run-migration-shadow",
-}
-HUMAN_ONLY_WRITE_ACTION_EXACT = {
-    "advance-leads",  # evidence-driven stages and approval-only drafts
-    "acknowledge-ready-plan-amendment",  # WR-000126 authenticated human-only notice write.
-}
 # The three reason classes that carry a latch identity. Named constants rather
 # than repeated literals, because an identity keyed on a string that drifts is
 # an identity that silently stops matching — the latch would then look present
@@ -515,11 +310,38 @@ def normalized_action(value):
     return value.replace("_", "-").lower()
 
 
-def is_write_action(action):
-    """Classify a CARR registry action without treating similar reads as writes."""
-    return (action in WRITE_ACTION_EXACT
-            or action in HUMAN_ONLY_WRITE_ACTION_EXACT
-            or action.partition("-")[0] in WRITE_ACTION_PREFIXES)
+# Classification is required evidence: installation failure uses the hook's
+# refusal protocol rather than its best-effort transcript parser.
+try:
+    with open(os.path.join(REPO, "ops", "config", "verb-completion-facts.generated.json")) as source:
+        COMPLETION_FACTS = json.load(source)
+    if not isinstance(COMPLETION_FACTS, dict) or COMPLETION_FACTS.get("schema") != "verb-completion-facts/v1":
+        raise ValueError("unsupported schema")
+    verbs = COMPLETION_FACTS.get("verbs")
+    prefixes = COMPLETION_FACTS.get("unknown_write_prefixes")
+    if not isinstance(verbs, dict) or not verbs or any(
+            not isinstance(name, str) or not isinstance(value, dict) or value.get("completionClass") not in {"read", "write"}
+            for name, value in verbs.items()):
+        raise ValueError("malformed declarations")
+    if not isinstance(prefixes, list) or not prefixes or any(not isinstance(value, str) or not value for value in prefixes):
+        raise ValueError("malformed unknown-name policy")
+except (OSError, ValueError, TypeError) as error:
+    print(json.dumps({"decision": "block", "reason": f"Completion verb facts projection unavailable: {error}. Restore the generated projection before completing."}))
+    raise SystemExit(2)
+
+
+def registry_verb_facts():
+    return COMPLETION_FACTS["verbs"]
+
+
+def is_write_action(action, facts=None):
+    """Declarations decide known names; unknown names retain family fallback."""
+    if action == "call-verb":
+        return True
+    declarations = registry_verb_facts() if facts is None else facts
+    if action in declarations:
+        return declarations[action]["completionClass"] == "write"
+    return action.split("-", 1)[0] in COMPLETION_FACTS["unknown_write_prefixes"]
 
 
 def nested_carr_actions(value):

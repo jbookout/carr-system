@@ -8,7 +8,7 @@
 // this is a checked-in module.
 
 export const REVIEW_TIERS_SOURCE = "ops/config/review-tiers.v1.json";
-export const REVIEW_TIERS_DIGEST = "sha256:731c9b99162294ba83c76c03cf9cfc095e6f3d3b45f39595ccfd5a96ad57fb6a";
+export const REVIEW_TIERS_DIGEST = "sha256:ed85f104fdf864dcdc4e0250aa519bcc7f6875903f1f49a5cba573b705556335";
 
 export const REVIEW_TIERS = Object.freeze({
   default_tier: 1,
@@ -24,6 +24,26 @@ export const REVIEW_TIERS = Object.freeze({
     Object.freeze({"id": "claude-md", "tier": 3, "class": "protected", "match": "basename", "pattern": "CLAUDE.md"}),
     Object.freeze({"id": "agents-md", "tier": 3, "class": "protected", "match": "basename", "pattern": "AGENTS.md"}),
     Object.freeze({"id": "tools-js", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/tools.js"}),
+    Object.freeze({"id": "extracted-tool-execution", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/tool-execution.js"}),
+    Object.freeze({"id": "extracted-tool-registry", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/tool-registry.js"}),
+    Object.freeze({"id": "extracted-versioned-write", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/versioned-write.js"}),
+    Object.freeze({"id": "extracted-verb-support", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/verb-support.js"}),
+    Object.freeze({"id": "extracted-activity-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/activity-tools.js"}),
+    Object.freeze({"id": "extracted-campaign-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/campaign-tools.js"}),
+    Object.freeze({"id": "extracted-deal-room-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/deal-room-tools.js"}),
+    Object.freeze({"id": "extracted-deal-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/deal-tools.js"}),
+    Object.freeze({"id": "extracted-decision-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/decision-tools.js"}),
+    Object.freeze({"id": "extracted-document-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/document-tools.js"}),
+    Object.freeze({"id": "extracted-gate-zero-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/gate-zero-tools.js"}),
+    Object.freeze({"id": "extracted-industry-event-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/industry-event-tools.js"}),
+    Object.freeze({"id": "extracted-introspection-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/introspection-tools.js"}),
+    Object.freeze({"id": "extracted-lead-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/lead-tools.js"}),
+    Object.freeze({"id": "extracted-loop-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/loop-tools.js"}),
+    Object.freeze({"id": "extracted-party-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/party-tools.js"}),
+    Object.freeze({"id": "extracted-rule-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/rule-tools.js"}),
+    Object.freeze({"id": "extracted-search-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/search-tools.js"}),
+    Object.freeze({"id": "extracted-workspace-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/workspace-tools.js"}),
+    Object.freeze({"id": "extracted-doc-outcome-cards-tools", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/doc-outcome-cards-tools.js"}),
     Object.freeze({"id": "sealed-engineering-runtime", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/engineering-runtime.js"}),
     Object.freeze({"id": "sealed-mcp", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/mcp.js"}),
     Object.freeze({"id": "sealed-sha256", "tier": 3, "class": "protected", "match": "path", "pattern": "mcp-server/src/sha256.js"}),

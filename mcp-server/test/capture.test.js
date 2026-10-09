@@ -460,7 +460,7 @@ test("capture SQL casts every temporal response and the contract has no transcri
   const dealroom = await import("node:fs/promises").then(fs => fs.readFile(new URL("../src/dealroom.js", import.meta.url), "utf8"));
   assert.match(dealroom, /to_jsonb\(started_at\)#>>'\{\}' as started_at/);
   assert.match(dealroom, /to_jsonb\(state_at\)#>>'\{\}' as state_at/);
-  const tools = await import("node:fs/promises").then(fs => fs.readFile(new URL("../src/tools.js", import.meta.url), "utf8"));
+  const tools = await import("node:fs/promises").then(fs => fs.readFile(new URL("../src/deal-room-tools.js", import.meta.url), "utf8"));
   assert.match(tools, /to_jsonb\(created_at\)#>>'\{\}' as created_at/);
   const migration = await import("node:fs/promises").then(fs => fs.readFile(new URL("../../migrations/0081_capture_bridge.sql", import.meta.url), "utf8"));
   assert.doesNotMatch(migration, /^\s*transcript\w*\s+/im);

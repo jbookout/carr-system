@@ -140,6 +140,20 @@ class CandidateTests(unittest.TestCase):
             shutil.copyfile(REPO/'tools'/name,self.repo/'tools'/name)
         for name in ['git_env.py','integration-generation.mjs']:
             shutil.copyfile(REPO/'ops'/name,self.repo/'ops'/name)
+    def test_large_artifact_write_yields_and_finishes_after_publication(self):
+        self.install_sink()
+        target = self.repo/'migrations/0749_pending.sql'
+        content = '-- large generated artifact\n' * 32768
+        script = """import {writeIntegratedArtifact} from './ops/integration-generation.mjs';
+let yielded = false;
+setImmediate(() => { yielded = true; });
+await writeIntegratedArtifact(process.argv[1], '-- large generated artifact\\n'.repeat(32768));
+if (!yielded) throw new Error('artifact publication blocked the event loop');
+"""
+        result = subprocess.run(['node', '--input-type=module', '-e', script, str(target)],
+                                cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(target.read_text(), content)
     def sink(self,target_expr,content,env=None):
         script=("import {writeIntegratedArtifact} from './ops/integration-generation.mjs';"
                 f"await writeIntegratedArtifact({target_expr},process.argv[1]);")

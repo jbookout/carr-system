@@ -58,7 +58,7 @@ function validText(value, field, ToolError) {
 export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }) {
   const guard = args => { if (assertNoCallerAuthorityFields) assertNoCallerAuthorityFields(args); };
   return {
-    "observe-memory": {
+    "observe-memory": { serialization: "idempotency-key",
       write: true,
       description: "Record an evidence-backed memory candidate. Scope is shared or the authenticated partner's personal scope; actor and sponsor are server-derived. Observation never grants authority and does not promote the memory.",
       inputSchema: { type: "object", properties: {
@@ -176,7 +176,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       },
     },
 
-    "promote-memory": {
+    "promote-memory": { serialization: "idempotency-key",
       write: true,
       description: "Promote one candidate memory after a human confirms it. Requires a fresh memory version; promotion changes recall eligibility, never authority.",
       inputSchema: { type: "object", properties: {
@@ -195,7 +195,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       }) },
     },
 
-    "correct-memory": {
+    "correct-memory": { serialization: "idempotency-key",
       write: true,
       description: "Correct a memory without rewriting history. The prior row becomes corrected and a new version carries the replacement statement.",
       inputSchema: { type: "object", properties: {
@@ -227,7 +227,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
       }) },
     },
 
-    "forget-memory": {
+    "forget-memory": { serialization: "idempotency-key",
       write: true,
       description: "Forget a memory by suppressing it from recall while retaining its evidence and audit history. This is not a DELETE.",
       inputSchema: { type: "object", properties: {

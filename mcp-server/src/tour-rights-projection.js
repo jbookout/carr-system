@@ -405,7 +405,7 @@ const idempotencyProperty = { idempotency_key: { type: "string", description: "U
 
 export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError }) {
   return {
-    "append-tour-rights-receipt": {
+    "append-tour-rights-receipt": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       description: "Append one immutable, versioned provider/policy rights receipt for Tour evidence and fact use. Tenant and reviewer actor are derived by the server. This does not publish or promote a Tour.",
@@ -437,7 +437,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
       },
     },
 
-    "revoke-tour-rights-receipt": {
+    "revoke-tour-rights-receipt": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       description: "Append an immutable revocation successor for one Tour rights receipt. Tenant and revoking actor are server-derived. This does not mutate the predecessor.",
@@ -464,7 +464,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
       },
     },
 
-    "append-tour-source-evidence": {
+    "append-tour-source-evidence": { serialization: "idempotency-key",
       write: true,
       description: "Append one immutable Tour source-evidence record bound to an exact provider, policy, and rights receipt. Tenant is server-derived.",
       inputSchema: schema({ ...idempotencyProperty,
@@ -490,7 +490,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
       },
     },
 
-    "append-tour-field-assertion": {
+    "append-tour-field-assertion": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       description: "Append one immutable, authority-reviewed, provenance-bound Tour property field assertion. Tenant is server-derived; this does not select the fact for public display.",
@@ -519,7 +519,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
       },
     },
 
-    "create-tour-public-projection-draft": {
+    "create-tour-public-projection-draft": { serialization: "idempotency-key",
       write: true,
       description: "Create an empty facts-only Tour public-projection draft for one immutable route membership set. Tenant is server-derived. Draft creation grants no publication authority.",
       inputSchema: schema({ ...idempotencyProperty, tour_id: { type: "string" }, projection_version: { type: "integer", minimum: 1 }, route_version: { type: "integer", minimum: 1 }, as_of: { type: "string" } }, ["idempotency_key", "tour_id", "projection_version", "route_version", "as_of"]),
@@ -546,7 +546,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
       },
     },
 
-    "seal-tour-public-projection": {
+    "seal-tour-public-projection": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       description: "Atomically insert the complete selected public fact set and its immutable approval seal. The database rechecks selected membership, reviewed public assertions, current rights, safe values, and computes the canonical digest. Tenant and sealing actor are server-derived. This is not publication or promotion.",

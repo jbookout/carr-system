@@ -665,3 +665,8 @@ test("regional ISP and other consumer mail domains never count as corroboration"
     e => e.payload.error === "identity_evidence_required", domain);
   }
 });
+
+test("record-finding directs confirmed corrections through the identity and contact write doors", () => {
+  assert.match(TOOLS["record-finding"].description, /apply the correction in the same run through correct-party-identity/);
+  assert.match(TOOLS["record-finding"].description, /update-party-contact \(contact facts\)/);
+});

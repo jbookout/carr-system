@@ -631,7 +631,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         };
       },
     },
-    "report-problem": {
+    "report-problem": { serialization: "idempotency-key",
       write: true,
       description: "Capture one operational problem from the current deterministic situation source. It only creates a captured Work Request; it never triages, assigns, dispatches, approves, executes, or changes an existing request.",
       inputSchema: { type: "object", properties: {
@@ -765,7 +765,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           actions: [] };
       },
     },
-    "review-and-triage": {
+    "review-and-triage": { serialization: "idempotency-key",
       write: true, humanOnly: true, authorityOnly: true,
       description: "HUMAN-ONLY: classify one sourced captured Work Request and make its sole allowed transition, captured to triaged. It never assigns, dispatches, approves, executes, or advances any later state.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -796,7 +796,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "answer-work-request-for-joe": {
+    "answer-work-request-for-joe": { serialization: "idempotency-key",
       write: true, humanOnly: true, authorityOnly: true,
       description: "HUMAN-ONLY, DIRECT HUMAN ONLY (no sponsored-agent route): record Joe's answer on one needs_joe Work Request and make its sole allowed transition, needs_joe to triaged. scope_confirmed must be exactly true, pinned to base_version, and the row must carry non-empty acceptance_criteria -- together these satisfy the needs_joe -> triaged guard's 'scope and acceptance criteria revalidated' half. It never assigns, dispatches, approves, executes, or advances any later state.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -906,7 +906,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
     // arrival and would misreport this verb's protection in the derived
     // action-risk registry. base_version is the live guard, as it is for
     // propose-ready-plan and propose-outcome-feedback.
-    "decline-work-request": {
+    "decline-work-request": { serialization: "idempotency-key",
       write: true,
       description: "Withdraw one sourced Work Request captured in error by declining it, recording why. It is the only backward move a captured request has, it works from captured and no later state, and it never triages, assigns, dispatches, approves, executes, or names a successor.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -943,7 +943,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "supersede-work-request": {
+    "supersede-work-request": { serialization: "idempotency-key",
       write: true,
       description: "Withdraw one sourced Work Request captured in error by superseding it into the request that replaces it, recording why. It works from captured and no later state; it never triages, assigns, dispatches, approves, executes, or changes the successor.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -977,7 +977,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "propose-ready-plan": {
+    "propose-ready-plan": { serialization: "idempotency-key",
       write: true,
       description: "Append one immutable, bounded ready-plan proposal to a triaged Work Request. The database derives whether the work is heavy from the request and plan size. Heavy work is refused until a current Work Shape plus a typed research manifest and complete master plan are bound to the proposal. It does not change request state, assign work, dispatch, execute, or approve.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -1050,7 +1050,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "review-heavy-build-plan": {
+    "review-heavy-build-plan": { serialization: "idempotency-key",
       write: true,
       description: "Record a fresh-context independent review of one exact heavy-build admission and immutable plan. A passing receipt is required before human plan acceptance; this verb never accepts, dispatches, executes, or changes Work Request state.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -1089,7 +1089,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "propose-ready-plan-amendment": {
+    "propose-ready-plan-amendment": { serialization: "idempotency-key",
       write: true,
       description: "Append one immutable same-Work-Request ready-plan successor proposal with its closed heavy-build contract. The caller binds the exact accepted predecessor hash; the database records successor build admission, serializes the lineage, preserves history, and creates no acceptance, cancellation, assignment, dispatch, or execution authority.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -1123,7 +1123,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "accept-ready-plan-amendment": {
+    "accept-ready-plan-amendment": { serialization: "idempotency-key",
       write: true, humanOnly: true, authorityOnly: true,
       description: "HUMAN-ONLY: accept one exact reviewed same-Work-Request plan successor at the database safe point. It preserves predecessor history and grants no dispatch, execution, merge, lease, or release authority.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -1185,7 +1185,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         return row;
       },
     },
-    "acknowledge-ready-plan-amendment": {
+    "acknowledge-ready-plan-amendment": { serialization: "idempotency-key",
       write: true,
       description: "Record the authenticated actor's acknowledgement of one durable ready-plan amendment notice. It changes no plan, assignment, dispatch, execution, or authority.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -1215,13 +1215,13 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "accept-ready-plan": {
+    "accept-ready-plan": { serialization: "idempotency-key",
       write:true,humanOnly:true,authorityOnly:true,
       description:"HUMAN-ONLY: accept one exact immutable ready-plan hash and make the sole triaged-to-ready transition. It never dispatches, executes, assigns, or grants approval authority.",
       inputSchema:{type:"object",additionalProperties:false,properties:{idempotency_key:{type:"string"},human_ref:{type:"string"},base_version:{type:"integer",minimum:1},plan_hash:{type:"string",pattern:"^sha256:[0-9a-f]{64}$"}},required:["idempotency_key","human_ref","base_version","plan_hash"]},
       handler:async(c,actor,args)=>{validateAcceptPlan(args,ToolError);return withEnvelope(c,actor,"accept-ready-plan",{...args,_server_actor_id:actor.id},async()=>{const r=await c.query(`select * from ops.accept_sourced_work_request_plan($1::text,$2::integer,$3::text,$4::uuid) /* work-request-intake:accept-ready-plan */`,[args.human_ref,args.base_version,args.plan_hash,args.idempotency_key]);const row=r.rows[0];if(!row)throw new ToolError({error:"version_conflict"});await writeEvent(c,actor,"accept-ready-plan","ops_work_request",row.work_request_id,{field:"state",old:{state:"triaged",version:args.base_version},new:{state:"ready",plan_ref:row.plan_ref,plan_hash:row.plan_hash},idempotency_key:args.idempotency_key});return {ok:true,human_ref:row.ref,state:row.state,version:Number(row.version),plan_ref:row.plan_ref,plan_hash:row.plan_hash,accepted_by_actor_slug:row.accepted_by_actor_slug,accepted_at:row.accepted_at,shape_disposition:row.shape_disposition,shape_fixed_surface_ref:row.shape_fixed_surface_ref};});},
     },
-    "propose-outcome-feedback": {
+    "propose-outcome-feedback": { serialization: "idempotency-key",
       write: true,
       description: "Propose evidence-bound outcome feedback for one accepted sourced ready plan. It creates no success claim, state transition, execution, assignment, dispatch, approval, or completion.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -1257,7 +1257,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         });
       },
     },
-    "accept-outcome-feedback": {
+    "accept-outcome-feedback": { serialization: "idempotency-key",
       write: true, humanOnly: true, authorityOnly: true,
       description: "HUMAN-ONLY: accept one exact immutable ready-plan outcome-feedback hash. It records human-verified observation only; it never self-attests success, changes state, executes, dispatches, assigns, approves, or completes work.",
       inputSchema: { type: "object", additionalProperties: false, properties: {

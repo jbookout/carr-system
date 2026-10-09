@@ -21,13 +21,17 @@ class PreflightTests(unittest.TestCase):
     def test_required_registry_read_cannot_skip_loader_failure(self):
         mod = load("completion_preflight", "completion-evidence-gate-selftest.py")
         with patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")), contextlib.redirect_stdout(io.StringIO()):
-            self.assertFalse(mod.registry_prefix_coverage(required=True))
+            self.assertFalse(mod.registry_declaration_coverage())
 
-    def test_registry_refuses_unknown_writes_and_accepts_classified_writes(self):
+    def test_registry_refuses_misdeclared_reads_and_accepts_current_declarations(self):
         mod = load("completion_preflight", "completion-evidence-gate-selftest.py")
-        for names, expected in [('["add-loop"]', True), ('["retro-unknown-write"]', False)]:
-            with patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, names, "")), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(mod.registry_prefix_coverage(required=True), expected)
+        current = mod.mod.registry_verb_facts()
+        misdeclared = {**current, "find": {"completionClass": "write"}}
+        for facts, expected in [(current, True), (misdeclared, False)]:
+            with patch.object(mod.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+                    patch.object(mod.mod, "registry_verb_facts", return_value=facts), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(mod.registry_declaration_coverage(), expected)
 
     def test_collection_only_does_not_run_the_full_selftest(self):
         mod = load("ci_preflight", "ci-selftest.py")

@@ -34,6 +34,18 @@ function mergeRefuses(filename) {
   return result.reason_codes.includes("protected_source_authority_boundary");
 }
 
+test('extracted verb declarations and execution retain tools.js protection', () => {
+  const modules = ['tool-execution', 'tool-registry', 'versioned-write', 'verb-support',
+    'activity-tools', 'campaign-tools', 'deal-room-tools', 'deal-tools', 'decision-tools',
+    'document-tools', 'doc-outcome-cards-tools', 'gate-zero-tools', 'industry-event-tools', 'introspection-tools',
+    'lead-tools', 'loop-tools', 'party-tools', 'rule-tools', 'search-tools', 'workspace-tools'];
+  for (const module of modules) {
+    const path = `mcp-server/src/${module}.js`;
+    assert.equal(reviewTierForPath(path), 3, path);
+    assert.equal(mergeRefuses(path), true, path);
+  }
+});
+
 test("every path the controller refused before the map is still refused", () => {
   assert.ok(BASELINE.merge_protected.length > 0);
   const loosened = BASELINE.merge_protected.filter(path => !mergeRefuses(path));

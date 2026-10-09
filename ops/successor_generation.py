@@ -238,7 +238,7 @@ import {appendSuccessor} from './ops/registry-chain.mjs';
 import {writeIntegratedArtifact} from './ops/integration-generation.mjs';
 import {readFileSync,writeFileSync} from 'node:fs';
 const p=JSON.parse(readFileSync(process.argv[1],'utf8'));
-const result=appendSuccessor(p);
+const result=await appendSuccessor(p);
 if(createHash('sha256').update(result.sql).digest('hex')!==p.expectedSqlDigest) throw new Error('chain SQL differs from disposable readback');
 await writeIntegratedArtifact('mcp-server/src/scac-mutation-registry.current.generated.js',result.runtime);
 writeFileSync('ops/config/scac-registry-chain.json',JSON.stringify(result.chain,null,2)+'\\n');

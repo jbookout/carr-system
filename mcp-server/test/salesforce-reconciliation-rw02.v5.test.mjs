@@ -61,7 +61,7 @@ const {
 } = rw02;
 
 const SRC = fileURLToPath(new URL("../src/salesforce-reconciliation-rw02.v5.js", import.meta.url));
-const TOOLS = fileURLToPath(new URL("../src/tools.js", import.meta.url));
+const TOOLS = fileURLToPath(new URL("../src/deal-tools.js", import.meta.url));
 
 const T = ORGANIZATION_TENANT_ID;
 const ORIGIN = "https://synthetic-org.invalid";

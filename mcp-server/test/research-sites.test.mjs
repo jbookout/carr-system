@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TOOLS, ToolError, executeRegisteredTool } from "../src/tools.js";
-import { RESEARCH_SITE_WRITE_VERBS, normalizeResearchHost, normalizeTopics } from "../src/research-sites.js";
+import { normalizeResearchHost, normalizeTopics } from "../src/research-sites.js";
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe",
   human: true, via: "oauth", client_id: "claude-ai" };
@@ -39,7 +39,8 @@ test("the index verbs are registered and none is human-only", () => {
   assert.equal(TOOLS["add-research-site"].write, true);
   assert.equal(TOOLS["remove-research-site"].write, true);
   assert.notEqual(TOOLS["list-research-sites"].write, true);
-  assert.deepEqual([...RESEARCH_SITE_WRITE_VERBS].sort(), ["add-research-site", "remove-research-site"]);
+  for (const name of ["add-research-site", "remove-research-site"])
+    assert.equal(TOOLS[name].serialization, "idempotency-key", name);
   assert.deepEqual(TOOLS["add-research-site"].inputSchema.required, ["idempotency_key", "host", "topics"]);
   assert.deepEqual(TOOLS["remove-research-site"].inputSchema.required, ["idempotency_key", "host", "reason"]);
   assert.match(TOOLS["list-research-sites"].description, /open internet/);

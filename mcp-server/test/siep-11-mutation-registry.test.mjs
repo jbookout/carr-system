@@ -1151,7 +1151,8 @@ test("composites expose exact reviewed edges and generic dispatch stays default 
   assert.deepEqual(registeredOperation("morning-brief").delegates_to,
     ["claim-card", "deal-room-board", "loop-board", "today-triage"]);
   assert.deepEqual(registeredOperation("call-verb").delegates_to, ["*registered_operation"]);
-  assert.match(readRegistryArtifact(new URL("../src/tools.js", import.meta.url), "utf8"),
+  const stampTouchSource = registeredOperation("stamp-touch").source_locator;
+  assert.match(readRegistryArtifact(new URL(`../../${stampTouchSource}`, import.meta.url), "utf8"),
     /executeRegisteredTool\(c, actor, "log-activity"/);
 });
 

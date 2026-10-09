@@ -126,7 +126,7 @@ const idempotencyProperty = { idempotency_key: { type: "string", description: "U
 
 export function tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolError }) {
   return {
-    "append-tour-property-identifier-assertion": {
+    "append-tour-property-identifier-assertion": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       description: "Authority-only append of one rights-bound canonical property identifier assertion. Tenant and authority are server-derived. This does not create a property, choose an identity, merge lineage, or publish anything.",
@@ -214,7 +214,7 @@ export function tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolEr
       },
     },
 
-    "append-tour-coordinate-candidate": {
+    "append-tour-coordinate-candidate": { serialization: "idempotency-key",
       write: true,
       description: "Append one rights-bound, unpromoted coordinate candidate. Provider coordinates are confined to non-canonical candidate roles. This is not a map, navigation, public, or client-promotion approval.",
       inputSchema: schema({ ...idempotencyProperty,
@@ -258,7 +258,7 @@ export function tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolEr
       },
     },
 
-    "append-tour-entrance-verification-receipt": {
+    "append-tour-entrance-verification-receipt": { serialization: "idempotency-key",
       write: true,
       authorityOnly: true,
       description: "Authority-only append of one immutable human entrance-verification receipt. The database requires a reviewed entrance, driveway, or parking-access candidate. This is not route, map, publication, or client-promotion authorization.",

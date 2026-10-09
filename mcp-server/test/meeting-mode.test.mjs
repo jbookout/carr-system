@@ -18,7 +18,7 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 
 import {
-  MEETING_MODE_SCHEMA_VERSION, MEETING_MODE_VERBS, MEETING_MODE_WRITE_VERBS,
+  MEETING_MODE_SCHEMA_VERSION, MEETING_MODE_VERBS,
   assertNoRecordingFields, meetingModeTools, meetingProjection, meetingRecap, validateMeetingCommand,
 } from "../src/meeting-mode.js";
 import {
@@ -71,7 +71,6 @@ test("the registry carries exactly the eight meeting verbs, as closed writer-con
     assert.equal(tool.writerConnection, true, `${name} must carry the actor context`);
     assert.notEqual(tool.authorityOnly, true, `${name} is called by the signed-in partner, never authority-only`);
     assert.notEqual(tool.humanOnly, true, name);
-    assert.equal(tool.write === true, MEETING_MODE_WRITE_VERBS.includes(name), name);
     assert.equal(tool.inputSchema.additionalProperties, false, `${name} schema must be closed`);
     const names = JSON.stringify(tool.inputSchema).match(/"([a-z_]+)":\{/g) ?? [];
     for (const field of names.map(n => n.slice(1, -3))) {

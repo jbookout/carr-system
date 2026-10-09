@@ -11,8 +11,6 @@
 // runs included — Joe ruled he does not want to be involved in adding sites.
 import { ToolError } from "./tool-error.js";
 
-export const RESEARCH_SITE_WRITE_VERBS = new Set(["add-research-site", "remove-research-site"]);
-
 // An exact public hostname: no scheme, path, port, credentials, wildcard or IP.
 const HOST_OK = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const NON_PUBLIC_SUFFIX = new Set(["localhost", "local", "internal", "localdomain", "arpa", "lan"]);
@@ -100,7 +98,7 @@ export function researchSiteTools({ withEnvelope, writeEvent }) {
     },
 
     "add-research-site": {
-      write: true,
+      write: true, serialization: "idempotency-key",
       description: "Add a useful research source to the index so future research checks it first. Open to every caller, sessions and scheduled runs included: add a site whenever research turns up a source worth returning to. Give the exact host (www.example.com), topic tags saying what it is good for, and optionally a starting url and a note. Adding a host already listed changes nothing and returns the existing row. The index does not grant or restrict network access.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
@@ -130,7 +128,7 @@ export function researchSiteTools({ withEnvelope, writeEvent }) {
     },
 
     "remove-research-site": {
-      write: true,
+      write: true, serialization: "idempotency-key",
       description: "Take a source out of the research-site index (dead, moved, or not useful). Open to every caller. The row is kept with who removed it, when and why; adding the host again later makes a new row.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string" },
