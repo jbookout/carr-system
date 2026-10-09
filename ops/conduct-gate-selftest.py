@@ -38,7 +38,24 @@ CASES = [('fenced-bash', 'update the repo', "I've made the changes. Now run:\n\n
  ('fire-youll-run-it', 'fix the exporter', "Fixed. You'll run it after the restart.", True)]
 
 
-def run_case(human, assistant):
+CASES.extend([
+    ('retry-run-reader', 'fix the exporter', 'Re-run it after the restart.', True),
+    ('retry-execute-reader', 'fix the exporter', 'Re-execute this after the restart.', True),
+    ('retry-first-person', 'fix the exporter', "I'll re-execute this after the restart.", False),
+    ('open-your-terminal', 'fix the exporter', 'Open your terminal and check the output.', True),
+    ('open-terminal-bold', 'fix the exporter', '**Open Terminal** and check the output.', True),
+    ('open-terminal-list', 'fix the exporter', '- Open Terminal and check the output.', True),
+    ('open-terminal-you-can', 'fix the exporter', 'You can open Terminal to check the output.', True),
+    ('terminal-relative-path', 'fix the exporter', 'Run ./run.sh health in the terminal.', True),
+    ('terminal-long-command', 'fix the exporter', 'Execute the verification command with all the normal flags and arguments in the terminal.', True),
+    ('terminal-first-person', 'fix the exporter', "I'll run the tests at the command line.", False),
+    ('terminal-label-description', 'fix the exporter', 'The button label is: Launch Terminal.', False),
+    ('terminal-first-person-your', 'fix the exporter', "I'll run the tests in your terminal.", False),
+    ('terminal-please-numbered', 'fix the exporter', '1. Please launch the terminal and check the output.', True),
+])
+
+
+def run_case(human, assistant, timeout=30):
     fd, path = tempfile.mkstemp(suffix=".jsonl")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -49,7 +66,7 @@ def run_case(human, assistant):
         p = subprocess.run([sys.executable, HOOK],
             input=json.dumps({"transcript_path": path, "stop_hook_active": False,
                               "session_id": "selftest"}),
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=timeout)
         out = (p.stdout or "").strip()
         if not out:
             return False
@@ -342,6 +359,15 @@ def main():
         if not ok: bad.append(name)
         print(f"  {'ok  ' if ok else 'FAIL'} {name:28} "
               f"want={'BLOCK' if expect else 'allow'} got={'BLOCK' if got else 'allow'}")
+
+    try:
+        timely_block = run_case('fix the exporter', 'Fixed.' + '\n' * 24000 + 'Run this once.', timeout=15)
+    except subprocess.TimeoutExpired:
+        timely_block = False
+    name = 'long-whitespace-stop-deadline'
+    passed, failed = (passed+1, failed) if timely_block else (passed, failed+1)
+    if not timely_block: bad.append(name)
+    print(f"  {'ok  ' if timely_block else 'FAIL'} {name} (BLOCK within 15 seconds)")
 
     for name, ok in handoff_scan_cases():
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)

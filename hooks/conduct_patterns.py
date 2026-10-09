@@ -113,24 +113,29 @@ BARE_FENCE_CMD = re.compile(r"```[ \t]*\n[ \t]*(?:\$\s*)?(?:" + CMD_WORDS + r")\
 # An inline `command` whose first word is one the session holds. A question
 # prompt carries commands this way far more often than in a fenced block.
 INLINE_CMD = re.compile(r"`((?:\$\s*)?(?:" + CMD_WORDS + r")[^`\n]*)`", re.I)
+# Sentence/clause starts accept Markdown instructions but not label colons.
+# Horizontal whitespace avoids rescanning a whole newline run at every boundary.
+READER_INSTRUCTION = (
+    r"(?:^|(?<=[.!?;\n]))[ \t]*"
+    r"(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:\*\*|__)?"
+    r"(?:(?:please|now|then|just|next)[ \t]+)*"
+    r"(?:you(?:'ll| will| can| should| need to)?[ \t]+(?:need to[ \t]+)?)?"
+)
+TERMINAL = r"(?:terminal|iterm|shell|command line)\b"
+COMMAND_VERB = r"(?:re-?)?(?:run|execute)|type|enter|paste|copy"
 HANDOFF_PROSE = [
-    # Not the session's own first-person plan ("I'll run it", "we will run this",
-    # "I'm going to run it") and not "re-run"/"rerun" (the hyphen made \b fire).
-    ("run_this",      re.compile(r"(?<![-\w])(?<!i.ll )(?<!i will )(?<!we.ll )(?<!we will )"
-                                 r"(?<!i can )(?<!we can )(?<!i.m going to )(?<!i am going to )"
-                                 r"(?<!we.re going to )(?<!we are going to )"
-                                 r"(run|execute) (this|these|the following|it)\b", re.I)),
-    ("paste_this",    re.compile(r"\bpaste (this|these|it|the following)\b", re.I)),
-    # An instruction to the reader: "in/from/into YOUR terminal", an imperative
-    # "open Terminal" opening a sentence, or "run/type/paste ... in the terminal".
-    # A bare "open Terminal" inside a description of what an app does is not one.
-    ("in_terminal",   re.compile(r"\b(in|into|from) your (terminal|iterm|shell|command line)\b"
-                                 r"|(?:^|[.!?:\n])\s*(?:(?:please|now|then|just|next) )*"
-                                 r"(?:open|launch) (?:a |the )?(?:terminal|iterm|shell|command line)\b"
-                                 r"|\b(?:run|execute|type|enter|paste|copy)\b[^.\n]{0,60}"
-                                 r"\b(?:in|into|from|at) (?:the|a) (?:terminal|iterm|shell|command line)\b", re.I)),
-    ("you_run",       re.compile(r"\byou'?(ll| will| can| should) (need to )?run\b", re.I)),
-    ("go_ahead_run",  re.compile(r"\bgo ahead and run\b", re.I)),
+    ("run_this", re.compile(READER_INSTRUCTION +
+                            r"(?:re-?)?(?:run|execute)[ \t]+(?:this|these|the following|it)\b", re.I)),
+    ("paste_this", re.compile(r"\bpaste (this|these|it|the following)\b", re.I)),
+    ("in_terminal", re.compile(
+        READER_INSTRUCTION + r"(?:"
+        r"(?:open|launch)[ \t]+(?:(?:a|the|your)[ \t]+)?" + TERMINAL +
+        r"|(?:" + COMMAND_VERB + r")\b[^\n]*\b(?:in|into|from|at)[ \t]+(?:the|a|your)[ \t]+" + TERMINAL +
+        r"|(?:in|into|from)[ \t]+your[ \t]+" + TERMINAL + r")"
+        r"|\byou(?:'ll| will| can| should)?[ \t]+[^\n]*\b(?:in|into|from)[ \t]+your[ \t]+" + TERMINAL,
+        re.I)),
+    ("you_run", re.compile(r"\byou'?(ll| will| can| should) (need to )?run\b", re.I)),
+    ("go_ahead_run", re.compile(r"\bgo ahead and run\b", re.I)),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
