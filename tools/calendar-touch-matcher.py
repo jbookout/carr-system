@@ -59,7 +59,7 @@ INTERNAL_DOMAIN = "carr.us"
 
 
 def read_view(view):
-    """All rows of one export view as dicts, through the exporters' own login.
+    """Column names and all rows of one export view, through the exporters' login.
 
     ``view`` is always one of the RECORD_VIEWS constants, never caller input.
     exporters.common.connect resolves its own credential and exits when there
@@ -70,7 +70,7 @@ def read_view(view):
     with connect() as conn, conn.cursor() as cur:
         cur.execute(f"select * from {view}")
         cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return cols, [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
 class NoRecordContacts(RuntimeError):
@@ -100,12 +100,12 @@ def load_record_contacts(snapshot=None):
     missing = []
     for view, id_col, name_col, org_col in RECORD_VIEWS:
         try:
-            rows = read_view(view)
+            cols, rows = read_view(view)
         except (Exception, SystemExit) as exc:
             # The exception TYPE only: its text can carry a DSN or an address.
             missing.append(f"{view} (unreachable: {type(exc).__name__})")
             continue
-        if rows and not {id_col, name_col, org_col, "Email"} <= set(rows[0]):
+        if not {id_col, name_col, org_col, "Email"} <= set(cols):
             missing.append(f"{view} (required columns missing)")
             continue
         for row in rows:

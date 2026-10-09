@@ -44,8 +44,38 @@ def reader_for(views):
         value = views[view]
         if isinstance(value, BaseException):
             raise value
-        return value
+        cols = list(value[0]) if value else [
+            *next(fields[1:] for fields in matcher.RECORD_VIEWS if fields[0] == view), "Email"]
+        return cols, value
     return read
+
+
+class RecordViewSchema(unittest.TestCase):
+    def test_empty_view_with_wrong_columns_fails_closed(self):
+        sys.path.insert(0, str(REPO))
+        for malformed in ("v_export_clients", "v_export_leads", "v_export_vendors"):
+            with self.subTest(view=malformed):
+                views = live_views()
+                views[malformed] = []
+                columns = {
+                    "v_export_clients": ["Client ID", "Name", "Practice / Entity", "Email"],
+                    "v_export_leads": ["Lead ID", "Contact Name", "Practice", "Email"],
+                    "v_export_vendors": ["ID", "Name", "Company", "Email"],
+                }
+                columns[malformed] = ["Email"]
+                cursor = mock.MagicMock()
+                def execute(sql):
+                    view = sql.rsplit(" ", 1)[1]
+                    cursor.description = [(name,) for name in columns[view]]
+                    cursor.fetchall.return_value = [
+                        tuple(row.get(name) for name in columns[view]) for row in views[view]]
+                cursor.execute.side_effect = execute
+                conn = mock.MagicMock()
+                conn.__enter__.return_value.cursor.return_value.__enter__.return_value = cursor
+                with mock.patch("exporters.common.connect", return_value=conn), \
+                        self.assertRaises(matcher.NoRecordContacts) as caught:
+                    matcher.load_record_contacts()
+                self.assertIn(f"{malformed} (required columns missing)", str(caught.exception))
 
 
 class RecordViews(unittest.TestCase):
