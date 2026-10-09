@@ -387,6 +387,61 @@ def _to_codex(
         return {**base, "status": "completed", "result": result}
 
 
+def _execute(request: dict, *, on_executor=None) -> dict:
+    """Invoke one adapter; owned jobs reach this only inside the launch gate."""
+    entry, task, msg_id = request['entry'], request['task'], request['msg_id']
+    name = entry.get('name')
+    env = request.get('env')
+    fresh = request.get('fresh', False)
+    cwd = request.get('cwd')
+    retrieval = request.get('retrieval', False)
+    live_desktop = request.get('live_desktop', False)
+    codex_timeout_s = request.get('codex_timeout_s')
+    config_overrides = tuple(request.get('config_overrides', ()))
+    stream_options: dict = {'stream_output': True} if request.get('stream_output') else {}
+    def executor_started(identity):
+        on_executor({**identity, **({'socket': entry['socket']}
+                                    if identity.get('kind') == 'codex_turn' else {})})
+    executor_options: dict = {'on_executor': executor_started} if on_executor else {}
+    codex_options: dict = {**executor_options, 'claim_id': request.get('claim_id')} if on_executor else {}
+    if entry["kind"] == "claude-session":
+        if name == "flash":
+            with flashlib.activity_scope():
+                outcome = _to_claude(entry, task, msg_id)
+        else:
+            outcome = _to_claude(entry, task, msg_id)
+    elif entry["kind"] == "claude-desktop":
+        outcome = _to_claude_desktop(entry, task)
+    elif entry["kind"] == "claude-remote":
+        outcome = claude_remote_wire.run_task(entry, task, msg_id)
+    elif entry["kind"] == "grok-cli":
+        outcome = grok_wire.run_task(entry, task, **({"retrieval": True} if retrieval else {}))
+    elif entry["kind"] == "flash-local":
+        outcome = flash_wire.run_task(task)
+    elif entry["kind"] == "codex-live":
+        outcome = codex_wire.run_turn(
+            entry["socket"], task,
+            thread_id=None if fresh else entry.get("thread_id"),
+            cwd=entry.get("cwd"), model=entry.get("model"), effort=entry["effort"],
+            deadline_s=codex_timeout_s,
+            **executor_options,
+        )
+    elif cwd:
+        outcome = _to_codex(
+            {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
+            timeout_s=codex_timeout_s, **stream_options,
+            **codex_options,
+        )
+    else:
+        outcome = _to_codex(
+            entry, task, env, fresh=fresh, config_overrides=config_overrides,
+            live_desktop=live_desktop, timeout_s=codex_timeout_s,
+            **stream_options,
+            **codex_options,
+        )
+    return outcome
+
+
 def dispatch(
     name: str,
     task: str,
@@ -434,7 +489,6 @@ def dispatch(
         raise DeskError("unsupported_retrieval", "explicit source retrieval requires a Grok desk")
     if stream_output and entry["kind"] not in ("codex-session", "codex-exec"):
         raise DeskError("unsupported_stream", "stream output requires a headless Codex desk")
-    stream_options: dict = {"stream_output": True} if stream_output else {}
     original_task = task
     # The background wire validates the original task before adding its own
     # instruction. Prepending here would turn a blank task into valid work.
@@ -478,14 +532,9 @@ def dispatch(
         print(f"executor: {entry['model']} / {entry['effort']} (family {entry['family']}, desk {name})",
               file=sys.stderr, flush=True)
 
-    def executor_started(identity):
-        if ownership:
-            ownership.update(write_ownership.bind_executor(msg_id, {**identity,
-                **({'socket': entry['socket']} if identity.get('kind') == 'codex_turn' else {})}))
-            _record(results_path, {**base, **ownership, 'status': 'running'})
-
-    executor_options: dict = {'on_executor': executor_started} if ownership else {}
-    codex_options: dict = {**executor_options, 'claim_id': msg_id} if ownership else {}
+    def executor_bound(bound):
+        ownership.update(bound)
+        _record(results_path, {**base, **ownership, 'status': 'running'})
 
     try:
         if checkout is not None:
@@ -497,48 +546,18 @@ def dispatch(
                 entry = {**entry, **prepared, 'cwd': prepared['checkout_workspace']}
                 if cwd:
                     cwd = prepared['checkout_workspace']
+        request = {'entry': entry, 'task': task, 'msg_id': msg_id, 'env': env,
+                   'fresh': fresh, 'cwd': cwd, 'retrieval': retrieval,
+                   'live_desktop': live_desktop, 'codex_timeout_s': codex_timeout_s,
+                   'config_overrides': config_overrides, 'stream_output': stream_output,
+                   'claim_id': msg_id if ownership else None}
         if ownership:
-            ownership.update(write_ownership.launch(msg_id))
-        if entry["kind"] == "claude-session":
-            if name == "flash":
-                with flashlib.activity_scope():
-                    outcome = _to_claude(entry, task, msg_id)
-            else:
-                outcome = _to_claude(entry, task, msg_id)
-        elif entry["kind"] == "claude-desktop":
-            outcome = _to_claude_desktop(entry, task)
-        elif entry["kind"] == "claude-remote":
-            outcome = claude_remote_wire.run_task(entry, task, msg_id)
-        elif entry["kind"] == "grok-cli":
-            outcome = grok_wire.run_task(entry, task, **({"retrieval": True} if retrieval else {}))
-        elif entry["kind"] == "flash-local":
-            outcome = flash_wire.run_task(task)
-        elif entry["kind"] == "codex-live":
-            outcome = codex_wire.run_turn(
-                entry["socket"], task,
-                thread_id=None if fresh else entry.get("thread_id"),
-                cwd=entry.get("cwd"), model=entry.get("model"), effort=entry["effort"],
-                deadline_s=codex_timeout_s,
-                **executor_options,
-            )
-            if outcome.get("thread_id"):
-                registry.remember_thread(name, outcome["thread_id"])
-        elif cwd:
-            outcome = _to_codex(
-                {**entry, "cwd": cwd}, task, env, fresh=True, config_overrides=config_overrides,
-                timeout_s=codex_timeout_s, **stream_options,
-                **codex_options,
-            )
+            outcome = write_ownership.launch(msg_id, request, on_bound=executor_bound)
         else:
-            outcome = _to_codex(
-                entry, task, env, fresh=fresh, config_overrides=config_overrides,
-                live_desktop=live_desktop, timeout_s=codex_timeout_s,
-                **stream_options,
-                **codex_options,
-            )
-            # pin the desk to its thread so the next task lands in the same one
-            if outcome.get("thread_id"):
-                registry.remember_thread(name, outcome["thread_id"])
+            outcome = _execute(request)
+        if outcome.get('thread_id') and (entry['kind'] == 'codex-live'
+                or entry['kind'] in codex_models.CODEX_KINDS and not cwd):
+            registry.remember_thread(name, outcome['thread_id'])
     except BaseException:
         if ownership:
             ownership.update(write_ownership.release(msg_id, reason='executor raised'))
@@ -918,9 +937,9 @@ def main(argv: list[str]) -> int:
 
     try:
         if a.cmd == 'reconcile':
-            rows = write_ownership.reconcile(a.claim, limit=a.limit)
-            print(json.dumps({'ledger': str(write_ownership.LEDGER), 'claims': rows}, indent=2))
-            return 1 if any(row['ownership_state'] == 'held' for row in rows) else 0
+            claims = write_ownership.reconcile(a.claim, limit=a.limit)
+            print(json.dumps({'ledger': str(write_ownership.LEDGER), 'claims': claims}, indent=2))
+            return 1 if any(row['ownership_state'] == 'held' for row in claims) else 0
         if a.cmd == "where":
             return _cmd_where()
 

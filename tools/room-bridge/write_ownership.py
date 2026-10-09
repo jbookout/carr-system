@@ -13,6 +13,9 @@ import sys
 import socket
 import ctypes
 import pwd
+import select
+import signal
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -89,6 +92,11 @@ def termination_evidence(row: dict) -> str | None:
             return 'dispatcher terminated; no executor launch recorded'
         return None
     kind = executor.get('kind')
+    if row.get('gated_launch') and process_terminated(row.get('owner_process') or {}):
+        if executor == {'kind': 'unconfirmed'}:
+            return 'dispatcher terminated; no executor identity recorded behind launch gate'
+        if kind == 'launch_gate' and process_terminated(executor, group=True):
+            return 'dispatcher and unopened launch gate terminated; executor never authorized'
     if kind == 'process_group' and process_terminated(executor, group=True):
         return 'recorded executor identity terminated and process group absent'
     if kind == 'codex_turn' and executor.get('socket') and executor.get('turn_id'):
@@ -315,15 +323,88 @@ def reserve(row: dict, cwd: str, writes: list[str]) -> dict:
                          'ownership_state': 'held', 'status': 'running'})
 
 
-def launch(msg_id: str) -> dict:
-    """Durably mark handoff BEFORE anything that could start a writer."""
+def launch(msg_id: str, request: dict | None = None, *, on_bound=None) -> dict:
+    """Mark handoff, then bind a gated child before any adapter can launch work."""
     with _locked(LEDGER):
         row = _claim(msg_id)
         if (row['ownership_state'] != 'held' or row.get('launch_marker')
                 or row['owner_process'] != process_owner()):
             raise DeskError('claim_launch_conflict', 'claim is not awaiting its first launch')
-        return _persist({**row, 'launch_marker': datetime.now(timezone.utc).isoformat(),
-                         'executor': {'kind': 'unconfirmed'}})
+        row = _persist({**row, 'launch_marker': datetime.now(timezone.utc).isoformat(),
+                        'gated_launch': True, 'executor': {'kind': 'unconfirmed'}})
+    if request is None:
+        return row
+    return _run_gated(msg_id, request, on_bound)
+
+
+def _run_gated(msg_id: str, request: dict, on_bound=None) -> dict:
+    receipt_read, receipt_write = os.pipe()
+    gate_read, gate_write = os.pipe()
+    proc = None
+    try:
+        proc = subprocess.Popen([sys.executable, str(Path(__file__).with_name('ownership_executor.py')),
+            str(receipt_write), str(gate_read), '--dispatch'], stdin=subprocess.PIPE,
+            start_new_session=True, pass_fds=(receipt_write, gate_read))
+    finally:
+        os.close(receipt_write)
+        os.close(gate_read)
+        if proc is None:
+            os.close(receipt_read)
+            os.close(gate_write)
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(request).encode())
+        proc.stdin.close()
+        if not select.select([receipt_read], [], [], 5)[0]:
+            raise RuntimeError('executor identity handshake timed out')
+        with os.fdopen(receipt_read) as receipt:
+            receipt_read = -1
+            outcome = None
+            initial = True
+            for line in receipt:
+                message = json.loads(line)
+                if message['type'] == 'executor':
+                    identity = message['identity']
+                    if initial:
+                        if (identity.get('kind') != 'launch_gate' or identity.get('pid') != proc.pid
+                                or identity.get('pgid') != proc.pid
+                                or identity.get('host') != socket.gethostname()
+                                or not identity.get('start_time')
+                                or identity.get('start_time') != process_start(proc.pid)):
+                            raise RuntimeError('executor kernel identity unavailable')
+                        initial = False
+                    bound = bind_executor(msg_id, identity)
+                    if on_bound:
+                        on_bound(bound)
+                    os.write(gate_write, b'1')
+                elif message['type'] == 'result':
+                    outcome = message['outcome']
+                elif message['type'] == 'error':
+                    if message.get('code'):
+                        raise DeskError(message['code'], message['detail'])
+                    raise RuntimeError(message['detail'])
+                else:
+                    raise RuntimeError('invalid executor receipt')
+        proc.wait(timeout=2)
+        if outcome is None or proc.returncode:
+            raise RuntimeError('gated executor exited without a result')
+        return outcome
+    except BaseException:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        if receipt_read >= 0:
+            os.close(receipt_read)
+        os.close(gate_write)
+        if proc.stdin is not None:
+            proc.stdin.close()
 
 
 def bind_executor(msg_id: str, identity: dict) -> dict:
@@ -333,7 +414,8 @@ def bind_executor(msg_id: str, identity: dict) -> dict:
                 or row['owner_process'] != process_owner()):
             raise DeskError('claim_launch_conflict', 'executor needs a held launch claim')
         old = row['executor']
-        if old.get('kind') != 'unconfirmed' and any(v is not None and identity.get(k) != v for k, v in old.items()):
+        gate_handoff = (old.get('kind') == 'launch_gate' and identity == {**old, 'kind': 'unconfirmed'})
+        if not gate_handoff and old.get('kind') != 'unconfirmed' and any(v is not None and identity.get(k) != v for k, v in old.items()):
             raise DeskError('claim_identity_conflict', 'cannot replace an executor identity')
         return _persist({**row, 'executor': dict(identity)})
 

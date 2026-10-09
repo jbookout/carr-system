@@ -10,6 +10,7 @@ import sys
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ import dispatch
 import write_ownership
 from test_codex_models_unit import catalog_fixture
 from test_codex_live_unit import FakeAppServer
+from test_dispatch_unit import Listener
 
 
 class OwnershipTests(unittest.TestCase):
@@ -36,6 +38,18 @@ class OwnershipTests(unittest.TestCase):
         self.catalog = catalog_fixture()
         self.catalog.__enter__()
         self.addCleanup(self.catalog.__exit__, None, None, None)
+        # Isolate adapter unit tests from the child transport. Gate/crash tests
+        # below use real processes and stop this fixture explicitly when needed.
+        self.transport = patch.object(write_ownership, '_run_gated', side_effect=self.run_adapter)
+        self.transport.start()
+        self.addCleanup(self.transport.stop)
+
+    def run_adapter(self, msg_id, request, on_bound=None):
+        def bind(identity):
+            row = write_ownership.bind_executor(msg_id, identity)
+            if on_bound:
+                on_bound(row)
+        return dispatch._execute(request, on_executor=bind)
 
     def completed(self, *args, **kwargs):
         if kwargs.get('on_executor'):
@@ -210,6 +224,7 @@ os._exit(17)
         self.assertIn('terminated', recovered['ownership_detail'])
 
     def test_timeout_without_termination_keeps_claim_and_blocks_second_turn(self):
+        self.transport.stop()
         sock = str(self.root / 'live.sock')
         server = FakeAppServer(sock, silent_turn=True)
         self.addCleanup(server.close)
@@ -313,6 +328,7 @@ os._exit(17)
         self.assertFalse(write_ownership.process_terminated(identity))
 
     def test_headless_codex_records_a_dedicated_group_and_releases_after_exit(self):
+        self.transport.stop()
         binary = self.root / 'bin'
         binary.mkdir()
         probe = self.root / 'process.json'
@@ -384,12 +400,149 @@ os._exit(17)
         self.assertEqual(write_ownership.reconcile('crashed')[0], row)
         self.assertEqual(self.ledger.read_bytes(), before)
 
+    def test_dispatcher_death_after_launch_before_executor_recovers(self):
+        code = """
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import write_ownership as w
+w.LEDGER = Path(sys.argv[2])
+w.open_prs = lambda cwd: ('owner/repo', [])
+w.reserve({'msg_id': 'crashed', 'desk': 'sol', 'task': 'build'}, '.', ['src/*'])
+w.launch('crashed')
+os._exit(17)
+"""
+        crashed = subprocess.run([sys.executable, '-c', code,
+            str(Path(dispatch.__file__).parent), str(self.ledger)], capture_output=True, text=True)
+        self.assertEqual(crashed.returncode, 17, crashed.stderr)
+        row = write_ownership.reconcile('crashed')[0]
+        self.assertTrue(row['launch_marker'])
+        self.assertEqual(row['executor'], {'kind': 'unconfirmed'})
+        self.assertTrue(write_ownership.process_terminated(row['owner_process']))
+        self.assertEqual(row['ownership_state'], 'released')
+        before = self.ledger.read_bytes()
+        self.assertEqual(write_ownership.reconcile('crashed')[0], row)
+        self.assertEqual(self.ledger.read_bytes(), before)
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])):
+            replacement = write_ownership.reserve(
+                {'msg_id': 'replacement', 'desk': 'sol', 'task': 'build'}, '.', ['src/*'])
+        self.assertEqual(replacement['ownership_state'], 'held')
+
     def test_crash_after_launch_marker_with_unknown_executor_keeps_claim(self):
         self.active(writes=['src/*'], owner_process={**write_ownership.process_owner(),
                      'pid': 2147483647, 'start_time': 'dead-dispatcher'})
         row = write_ownership.reconcile('other')[0]
         self.assertEqual(row['ownership_state'], 'held')
         self.assertIn('stuck', row['ownership_detail'])
+
+    def test_dispatcher_death_after_spawn_before_gate_never_runs_executor(self):
+        marker = self.root / 'executor-wrote'
+        binary = self.root / 'bin'
+        binary.mkdir()
+        codex = binary / 'codex'
+        codex.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).write_text("ran")\n')
+        codex.chmod(0o755)
+        identity_path = self.root / 'gated-child.json'
+        code = """
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import write_ownership as w
+w.LEDGER = Path(sys.argv[2])
+w.open_prs = lambda cwd: ('owner/repo', [])
+w.reserve({'msg_id': 'crashed', 'desk': 'sol', 'task': 'build'}, '.', ['src/*'])
+original_bind = w.bind_executor
+def die_before_binding(msg_id, identity):
+    Path(sys.argv[4]).write_text(json.dumps(identity))
+    if sys.argv[5] == 'after-bind':
+        original_bind(msg_id, identity)
+    os._exit(17)
+w.bind_executor = die_before_binding
+w.launch('crashed', {'entry': {'kind': 'codex-session', 'name': 'sol',
+    'model': 'fixture', 'effort': 'high'}, 'task': 'build',
+    'env': {**os.environ, 'PATH': sys.argv[3]}})
+"""
+        for boundary in ('before-bind', 'after-bind'):
+            with self.subTest(boundary=boundary):
+                ledger = self.root / (boundary + '.jsonl')
+                crashed = subprocess.run([sys.executable, '-c', code,
+                    str(Path(dispatch.__file__).parent), str(ledger), str(binary),
+                    str(identity_path), boundary], capture_output=True, text=True, timeout=10)
+                self.assertEqual(crashed.returncode, 17, crashed.stderr)
+                self.assertFalse(marker.exists())
+                identity = json.loads(identity_path.read_text())
+                self.assertTrue(identity['start_time'])
+                deadline = time.monotonic() + 5
+                while not write_ownership.process_terminated(identity, group=True) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(write_ownership.process_terminated(identity, group=True))
+                with patch.object(write_ownership, 'LEDGER', ledger):
+                    row = write_ownership.reconcile('crashed')[0]
+                self.assertEqual(row['ownership_state'], 'released')
+                self.assertFalse(marker.exists())
+
+    def test_recorded_executor_alive_keeps_claim(self):
+        code = """
+import os, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import write_ownership as w
+w.LEDGER = Path(sys.argv[2])
+w.open_prs = lambda cwd: ('owner/repo', [])
+w.reserve({'msg_id': 'live', 'desk': 'sol', 'task': 'build'}, '.', ['src/*'])
+w.launch('live')
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+w.bind_executor('live', {**w.process_owner(), 'kind': 'process_group',
+    'pid': child.pid, 'pgid': child.pid, 'start_time': w.process_start(child.pid)})
+os._exit(17)
+"""
+        crashed = subprocess.run([sys.executable, '-c', code,
+            str(Path(dispatch.__file__).parent), str(self.ledger)], capture_output=True, text=True)
+        self.assertEqual(crashed.returncode, 17, crashed.stderr)
+        row = write_ownership.reconcile('live')[0]
+        self.addCleanup(os.kill, row['executor']['pid'], 9)
+        self.assertTrue(write_ownership.process_terminated(row['owner_process']))
+        self.assertFalse(write_ownership.process_terminated(row['executor'], group=True))
+        self.assertEqual(row['ownership_state'], 'held')
+
+    def test_launch_marker_with_live_dispatcher_keeps_claim(self):
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])):
+            write_ownership.reserve({'msg_id': 'live', 'desk': 'sol', 'task': 'build'}, '.', ['src/*'])
+        write_ownership.launch('live')
+        self.assertEqual(write_ownership.reconcile('live')[0]['ownership_state'], 'held')
+
+    def test_non_codex_delivery_keeps_claim_after_dispatcher_death(self):
+        sock = str(self.root / 'claude.sock')
+        listener = Listener(sock)
+        self.addCleanup(listener.close)
+        code = """
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import write_ownership as w
+w.LEDGER = Path(sys.argv[2])
+w.open_prs = lambda cwd: ('owner/repo', [])
+w.reserve({'msg_id': 'remote', 'desk': 'claude', 'task': 'repair'}, '.', ['src/*'])
+result = w.launch('remote', {'entry': {'kind': 'claude-session',
+    'name': 'claude', 'socket': sys.argv[3]}, 'task': 'repair', 'msg_id': 'remote'})
+assert result['status'] == 'delivered', result
+os._exit(17)
+"""
+        crashed = subprocess.run([sys.executable, '-c', code,
+            str(Path(dispatch.__file__).parent), str(self.ledger), sock],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(crashed.returncode, 17, crashed.stderr)
+        self.assertTrue(any('repair' in line for line in listener.lines))
+        row = write_ownership.reconcile('remote')[0]
+        self.assertTrue(write_ownership.process_terminated(row['owner_process']))
+        self.assertTrue(write_ownership.process_terminated(row['executor'], group=True))
+        self.assertEqual(row['executor']['kind'], 'unconfirmed')
+        self.assertEqual(row['ownership_state'], 'held')
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])):
+            with self.assertRaisesRegex(desks.DeskError, 'write set owned'):
+                write_ownership.reserve({'msg_id': 'overlap', 'desk': 'sol', 'task': 'build'},
+                                        '.', ['src/a.py'])
 
     def test_pid_reuse_is_checked_but_live_process_group_still_blocks_release(self):
         identity = {**write_ownership.process_owner(), 'start_time': 'old-start', 'pgid': 987}
@@ -463,6 +616,9 @@ os._exit(17)
         here = Path(dispatch.__file__).parent
         writers = []
         released_writes = []
+        adapter_calls = []
+        execute_calls = []
+        gate_calls = []
         for path in here.glob('*.py'):
             if path.name.startswith('test_'):
                 continue
@@ -490,6 +646,22 @@ os._exit(17)
                     released_writes.append((path.name, owner(node)))
                 if isinstance(node, ast.Call):
                     name = ast.unparse(node.func)
+                    if path.name == 'dispatch.py' and name in (
+                            '_to_codex', '_to_claude', '_to_claude_desktop',
+                            'codex_wire.run_turn', 'claude_remote_wire.run_task',
+                            'grok_wire.run_task', 'flash_wire.run_task'):
+                        adapter_calls.append(owner(node))
+                    if name in ('_execute', 'dispatch._execute'):
+                        execute_calls.append((path.name, owner(node)))
+                        if path.name == 'dispatch.py':
+                            branch = parents[node]
+                            while branch in parents and not isinstance(branch, ast.If):
+                                branch = parents[branch]
+                            self.assertEqual(ast.unparse(branch.test), 'ownership')
+                            self.assertIn(parents[node], branch.orelse)
+                            self.assertIn('write_ownership.launch', ast.unparse(branch.body[0]))
+                    if name == '_run_gated':
+                        gate_calls.append((path.name, owner(node)))
                     if name == '_persist':
                         writers.append((path.name, owner(node)))
                     if name == '_append' and node.args and ast.unparse(node.args[0]) == 'LEDGER':
@@ -497,11 +669,44 @@ os._exit(17)
                 if isinstance(node, ast.Delete):
                     self.assertNotIn('claim', ast.unparse(node).lower())
         self.assertEqual(released_writes, [('write_ownership.py', 'release')])
+        self.assertTrue(adapter_calls)
+        self.assertEqual(set(adapter_calls), {'_execute'})
+        self.assertEqual(set(execute_calls), {('dispatch.py', 'dispatch'),
+                                            ('ownership_executor.py', 'main')})
+        self.assertEqual(gate_calls, [('write_ownership.py', 'launch')])
+        worker = ast.parse((here / 'ownership_executor.py').read_text())
+        main = next(node for node in worker.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        gated = next(node for node in main.body if isinstance(node, ast.If)
+                     and ast.unparse(node.test) == 'dispatching')
+        statements = [ast.unparse(node) for node in gated.body]
+        initial = statements.index('bind(identity)')
+        uncertain = statements.index("bind({**identity, 'kind': 'unconfirmed'})")
+        invoke = next(i for i, statement in enumerate(statements) if 'dispatch._execute' in statement)
+        self.assertLess(initial, uncertain)
+        self.assertLess(uncertain, invoke)
+        binding = next(node for node in gated.body if isinstance(node, ast.FunctionDef) and node.name == 'bind')
+        permission = next(node for node in binding.body if isinstance(node, ast.If))
+        self.assertEqual(ast.unparse(permission.test), "os.read(gate, 1) != b'1'")
+        self.assertEqual(ast.unparse(permission.body[0]), 'raise SystemExit(125)')
         self.assertEqual(set(writers), {('write_ownership.py', name) for name in
                                        ('reserve', 'launch', 'bind_executor', 'release')})
         source = Path(write_ownership.__file__).read_text()
         for forbidden in ('.unlink(', '.remove(', 'claims.pop(', 'row.pop(', '.write_text(', '.write_bytes('):
             self.assertNotIn(forbidden, source)
+
+    def test_every_adapter_refuses_launch_when_identity_cannot_be_recorded(self):
+        self.transport.stop()
+        for kind in desks.KINDS:
+            with self.subTest(kind=kind):
+                with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])):
+                    write_ownership.reserve({'msg_id': kind, 'desk': kind, 'task': 'build'},
+                                            '.', [kind + '/*'])
+                with patch.object(write_ownership, 'bind_executor', side_effect=RuntimeError('cannot record identity')) as bind:
+                    with self.assertRaisesRegex(RuntimeError, 'cannot record identity'):
+                        write_ownership.launch(kind, {'entry': {'kind': kind}, 'task': 'build'})
+                    identity = bind.call_args.args[1]
+                self.assertTrue(write_ownership.process_terminated(identity, group=True))
+                self.assertEqual(write_ownership.reconcile(kind)[0]['ownership_state'], 'held')
 
     def test_executor_cannot_write_before_durable_binding(self):
         marker = self.root / 'executor-wrote'
