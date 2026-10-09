@@ -5,8 +5,9 @@
 //
 // Three properties carry the rule's trade-off (an occasional wrong edit that is
 // cheap to undo, over a pile of proposals nobody applies):
-//   - confirmed high/medium identity evidence, independent corroboration and a
-//     re-verifiable source are required before entering the write envelope;
+//   - confirmed high/medium identity evidence and a re-verifiable source are
+//     required before entering the envelope; independence is checked against
+//     the resolved party before any write;
 //     every changed field records its evidence and prior value for reversal;
 //   - base_version guards the party exactly as update-party-contact does;
 //   - an org change follows rule 8cddc6ad. A shared org row is never renamed,
@@ -28,17 +29,21 @@ export const PARTY_IDENTITY_FIELDS = Object.freeze(["name", "org", "state"]);
 const CORROBORATING_FIELDS = Object.freeze(["firm", "email_domain", "city", "phone", "address", "npi"]);
 const UNCONFIRMED = /\b(?:unconfirmed|unverified|confirm|possible match|surname[- ]only|not (?:yet )?confirmed)\b/i;
 
-// Validate before withEnvelope: refused evidence must not reserve an
-// idempotency key, write a tool-call record, or emit an event.
-function identityEvidence(args) {
+// Validate the evidence shape before withEnvelope, then its independence once
+// the party is resolved. Neither refusal reserves a key or emits an event.
+function identityEvidence(args, before) {
   const evidence = args.evidence;
   const value = typeof evidence?.corroborating_value === "string" ? evidence.corroborating_value.trim() : "";
+  const identityValue = v => typeof v === "string" ? v.trim().replace(/\s+/g, " ").toLowerCase() : "";
+  const correctedValues = Object.entries(args.fields || {}).filter(([k]) => PARTY_IDENTITY_FIELDS.includes(k))
+    .flatMap(([k, v]) => [v, before?.[k === "org" ? "org_name" : k]]);
   if (!evidence || evidence.confirmed !== true || !["high", "medium"].includes(evidence.confidence)
       || !CORROBORATING_FIELDS.includes(evidence.corroborating_field) || !value || value.length > 200
       || UNCONFIRMED.test(value) || /[;\r\n]|\s(?:or|\/)\s/i.test(value) || isPlaceholder(value)
       || (evidence.corroborating_field === "email_domain" && /(?:^|\.)carr\.us$/i.test(value))
-      || (evidence.corroborating_field === "firm" && args.fields?.org !== undefined)
-      || Object.values(args.fields || {}).some(v => typeof v === "string" && v.trim().toLowerCase() === value.toLowerCase()))
+      || (evidence.corroborating_field === "firm"
+        && (args.fields?.org !== undefined || (before?.kind === "org" && args.fields?.name !== undefined)))
+      || correctedValues.some(v => identityValue(v) === identityValue(value)))
     throw new ToolError({ error: "identity_evidence_required",
       hint: "identity must be confirmed:true at high or medium confidence, with an independent corroborating_field (firm, email_domain, city, phone, address or npi) and its confirmed corroborating_value; a corrected field cannot corroborate itself" });
   return { confirmed: true, confidence: evidence.confidence,
@@ -163,6 +168,9 @@ export function partyIdentityTools({ withEnvelope, writeEvent, versionGuard, res
             `select p.kind, p.name, p.state, p.org_id, o.name as org_name from party p
                left join party o on o.id=p.org_id where p.id=$1`, [partyId])).rows[0];
           if (!before) throw new ToolError({ error: "not_found", table: "party", id: partyId });
+          // The stored kind decides whether name and firm are the same field.
+          // Check prior values too, before any correction or envelope receipt.
+          identityEvidence(args, before);
           if (fields.org !== undefined && before.kind !== "person")
             throw new ToolError({ error: "org_on_org_party",
               hint: "an org party has no firm; correct its own name with fields.name" });
