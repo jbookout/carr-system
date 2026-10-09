@@ -337,6 +337,76 @@ class QueueTests(unittest.TestCase):
         with q.budget.call_slot(timeout=.02):
             pass
 
+    def test_completion_lock_failure_never_replays_an_issued_update(self):
+        p = self.pr(state='behind')
+        real_open = os.open
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                q = module.Queue(self.root / f'cleanup-{cancelled}', self.root, gap=0)
+                self.addCleanup(q.db.close)
+                calls = []
+                def command(*args, **kwargs):
+                    calls.append(args)
+                    if cancelled:
+                        raise module.Cancelled()
+                    return '{}'
+                def open_lock(path, *args, **kwargs):
+                    if calls and str(path) == str(q.budget.path) + '.lock':
+                        raise OSError('completion lock unavailable')
+                    return real_open(path, *args, **kwargs)
+                with patch.object(q, 'pr', return_value=p), \
+                        patch.object(q, 'behind', return_value=True), \
+                        patch.object(module, 'command', side_effect=command):
+                    with patch('lib.github_rate_limit.os.open', side_effect=open_lock):
+                        if cancelled:
+                            with self.assertRaises(module.ActionUncertain):
+                                q.action('update', module.REPOS[0], 1, self.approved, '')
+                        else:
+                            q.action('update', module.REPOS[0], 1, self.approved, '')
+                    self.assertEqual(q.db.execute('SELECT phase,attempts FROM actions').fetchone()[:],
+                                     ('issued', 1))
+                    with self.assertRaises(module.ActionUncertain):
+                        q.action('update', module.REPOS[0], 1, self.approved, '')
+                self.assertEqual(len(calls), 1)
+
+    def test_failed_completion_write_keeps_peer_spacing(self):
+        for fault in ('fsync', 'replace'):
+            with self.subTest(fault=fault):
+                q = module.Queue(self.root / f'first-{fault}', self.root)
+                other = module.Queue(self.root / f'peer-{fault}', self.root)
+                self.addCleanup(q.db.close); self.addCleanup(other.db.close)
+                now, starts, failed = [100.0], [], []
+                q.budget.clock = other.budget.clock = lambda: now[0]
+                real_fsync, real_replace = os.fsync, os.replace
+                def inject_fault(operation):
+                    if operation == fault and len(starts) == 1 and not failed:
+                        failed.append(operation)
+                        raise OSError('completion persistence failed')
+                def fsync(fd):
+                    inject_fault('fsync')
+                    real_fsync(fd)
+                    if not starts:
+                        now[0] += .4
+                def replace(*args):
+                    inject_fault('replace')
+                    return real_replace(*args)
+                def command(*args, **kwargs):
+                    starts.append(now[0])
+                    now[0] += .1
+                    return '{}'
+                with patch.object(module.time, 'monotonic', side_effect=lambda: now[0]), \
+                        patch.object(module.time, 'sleep', side_effect=lambda seconds: now.__setitem__(0, now[0] + min(seconds, .05))), \
+                        patch('lib.github_rate_limit.os.fsync', side_effect=fsync), \
+                        patch('lib.github_rate_limit.os.replace', side_effect=replace), \
+                        patch.object(module, 'command', side_effect=command):
+                    try:
+                        q.api('repos/example/repo')
+                    except RuntimeError:
+                        pass
+                    other.api('repos/example/repo')
+                self.assertEqual(failed, [fault])
+                self.assertGreaterEqual(starts[1] - starts[0], 2.0)
+
     def test_orphan_dispatch_on_restart_releases_desk_without_replay(self):
         registry = self.root / 'desks.json'; registry.write_text('{"desks":{}}')
         os.environ['CARR_HERMES_DESKS'] = str(registry)
