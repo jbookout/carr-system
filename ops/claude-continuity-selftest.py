@@ -50,7 +50,7 @@ if name=='claude-read-recovery':
  if os.environ.get('RECOVERY_EMPTY')=='1':
   print(json.dumps({'ok':True,'found':False,'checkpoint':None,'capsule':None}))
  else:
-  print(json.dumps({'ok':True,'found':True,'checkpoint':{'checkpoint_version':'3'},'capsule':os.environ.get('RECOVERY_CAPSULE','bounded recovery capsule')}))
+  print(json.dumps({'ok':True,'found':True,'checkpoint':{'checkpoint_version':os.environ.get('RECOVERY_VERSION','3'),'compaction_generation':os.environ.get('RECOVERY_GENERATION','0')},'capsule':os.environ.get('RECOVERY_CAPSULE','bounded recovery capsule')}))
 else:
  print(json.dumps({'ok':True}))
 """, encoding="utf-8")
@@ -124,7 +124,7 @@ else:
         startup = self.run_hook("SessionStart", source="startup")
         compact = self.run_hook("SessionStart", source="compact")
         startup_output = json.loads(startup.stdout)
-        self.assertIn("current_checkpoint_version=3", startup_output["hookSpecificOutput"]["additionalContext"])
+        self.assertIn('"expected_version":3', startup_output["hookSpecificOutput"]["additionalContext"])
         self.assertNotIn("bounded recovery capsule", startup_output["hookSpecificOutput"]["additionalContext"])
         output = json.loads(compact.stdout)
         self.assertEqual(output["hookSpecificOutput"]["hookEventName"], "SessionStart")
@@ -140,11 +140,10 @@ else:
         self.assertIn('"session_id":"session-1"', context)
         self.assertIn('"transcript_path_digest":', context)
         self.assertIn('"project_affinity":', context)
-        self.assertIn("current_checkpoint_version=0", context)
         self.assertIn("mcp__carr-continuity__claude-checkpoint", context)
         arguments = json.loads(context.split("arguments=", 1)[1].split("\n", 1)[0])
         self.assertEqual(arguments["expected_version"], 0)
-        self.assertIn("must never be replayed automatically", context)
+        self.assertIn("Never infer completion from telemetry or replay pending effects", context)
         self.assertLessEqual(len(context.encode()), 4800)
 
     def test_checkpoint_arguments_preserve_recovered_version_and_generation(self):
@@ -182,7 +181,7 @@ else:
 
         self.assertEqual(result.returncode, 0, result.stderr)
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("current_checkpoint_version=3", context)
+        self.assertIn('"expected_version":3', context)
         arguments = json.loads(context.split("arguments=", 1)[1].split("\n", 1)[0])
         cursor = arguments["state"]["source_cursor"]
         self.assertEqual(cursor["byte_offset"], 0)
@@ -223,16 +222,31 @@ else:
                      "Pending external effects (verify; never replay):\n- pending sentinel\n"
                      "Next action:\n- next sentinel\n")
         self.base_env["RECOVERY_CAPSULE"] = mandatory + "x" * (3200 - len(mandatory.encode()))
+        self.spool.mkdir()
+        for index in range(100):
+            (self.spool / f"{index}.json").write_text("{}", encoding="utf-8")
 
-        result = self.run_hook("SessionStart", source="compact", session_id=session_id,
-                               agent_id=agent_id, transcript_path=str(transcript))
+        for source in ("compact", "resume"):
+            for version in (1000, 2 ** 53 - 1):
+                with self.subTest(source=source, version=version):
+                    self.base_env["RECOVERY_VERSION"] = str(version)
+                    self.base_env["RECOVERY_GENERATION"] = str(version)
+                    result = self.run_hook("SessionStart", source=source, session_id=session_id,
+                                           agent_id=agent_id, transcript_path=str(transcript))
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertLessEqual(len(context.encode()), 4800)
-        for sentinel in ("objective sentinel", "correction sentinel", "constraint sentinel",
-                         "pending sentinel", "next sentinel"):
-            self.assertIn(sentinel, context)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(result.stdout, result.stderr)
+                    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+                    self.assertLessEqual(len(context.encode()), 4800)
+                    self.assertTrue(context.endswith(self.base_env["RECOVERY_CAPSULE"]))
+                    arguments = json.loads(context.split("arguments=", 1)[1].split("\n", 1)[0])
+                    self.assertEqual(arguments["expected_version"], version)
+                    self.assertEqual(arguments["compaction_generation"], version)
+                    self.assertEqual(arguments["session_id"], session_id)
+                    self.assertEqual(arguments["native_agent_id"], agent_id)
+                    for sentinel in ("objective sentinel", "correction sentinel", "constraint sentinel",
+                                     "pending sentinel", "next sentinel"):
+                        self.assertIn(sentinel, context)
 
     def test_multibyte_agent_identifier_is_refused_before_recovery(self):
         self.set_mode("inject")

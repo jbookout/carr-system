@@ -495,21 +495,15 @@ def _checkpoint_version(response: dict | None) -> int | None:
 
 
 def _activation_envelope(identity: dict, cursor: dict, response: dict | None) -> str:
-    current_version = _checkpoint_version(response)
-    version_text = str(current_version) if current_version is not None else "unavailable"
     lines = [
-        "Claude continuity.",
         _checkpoint_arguments(identity, cursor, response),
-        f"current_checkpoint_version={version_text}",
-        "Call mcp__carr-continuity__claude-checkpoint at milestones. Fill state; refresh cursor/time. "
-        "Keep generation nondecreasing. Fresh key per milestone; reuse on retry. "
-        "If version unavailable, read recovery first.",
-        "Never infer completion from telemetry. Pending effects must never be replayed automatically.",
+        "Call mcp__carr-continuity__claude-checkpoint at milestones: fill state; refresh cursor/time; "
+        "nondecreasing generation; new key, reuse on retry. Null version: read recovery first.",
+        "Never infer completion from telemetry or replay pending effects.",
     ]
     unsent = unsent_receipts()
     if unsent:
-        lines.append(f"Local spool holds {unsent} unsent continuity receipt(s); nothing replays them. "
-                     "A spool that keeps growing means writes are being refused, not that they are queued.")
+        lines.append(f"Spool: {unsent} unsent continuity receipts; no replay. Growth: refused writes.")
     return "\n".join(lines)
 
 
