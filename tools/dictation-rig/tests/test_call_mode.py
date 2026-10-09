@@ -648,6 +648,19 @@ class PostCallTests(SemanticTestCase):
         resident.assert_called_once()
         llama.assert_not_called()
 
+    def test_switched_off_distiller_defers_without_dropping_call_data(self) -> None:
+        post_call.store_context(self.session, self.context)
+        state = Path(self.tmp.name) / "flash-state"
+        state.mkdir()
+        (state / "flash.off").touch()
+        with patch.dict(os.environ, {"CARR_FLASH_STATE_DIR": str(state)}), \
+             patch.object(post_call, "resident_flash_distiller", side_effect=AssertionError("Flash was invoked")):
+            status = post_call.process_session(self.session)
+        self.assertEqual(status["state"], "blocked")
+        self.assertEqual(status["reason"], "flash is switched off")
+        self.assertTrue((self.session / "transcript.json").exists())
+        self.assertIsNotNone(post_call.read_json(self.session / post_call.CONTEXT_FILE))
+
     def test_default_distiller_prefers_the_resident_server_and_never_falls_back_on_a_content_failure(self) -> None:
         with patch.object(post_call, "resident_flash_distiller", return_value=self.output()) as resident, \
              patch.object(post_call, "llama_distiller") as llama:

@@ -269,40 +269,30 @@ def assess_activation(rule_id_raw):
     )
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        log(f"ALLOW(parse-error) rule-shape {exc}")
-        sys.exit(0)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        ti = ti if isinstance(ti, dict) else {}
 
-        if tool.endswith("__activate-rule"):
-            warning = assess_activation(ti.get("rule_id", ""))
-            if warning:
-                log(f"ACTIVATE-CLASS-WARN :: {ti.get('rule_id', '')}")
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "allow",
-                        "additionalContext": warning,
-                    }
-                }))
-            sys.exit(0)
+def _parse_error(exc):
+    log(f"ALLOW(parse-error) rule-shape {exc}")
+    return 0
 
-        if not tool.endswith("__teach"):
-            sys.exit(0)
-        stmt = ti.get("statement", "")
-        if not stmt or len(stmt) < 40:
-            sys.exit(0)
 
-        warning = assess(stmt)
+def _decision_error(exc):
+    log(f"ALLOW(internal-error) rule-shape {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    ti = ti if isinstance(ti, dict) else {}
+
+    if tool.endswith("__activate-rule"):
+        warning = assess_activation(ti.get("rule_id", ""))
         if warning:
-            log(f"SHAPE-WARN :: {stmt[:160]}")
+            log(f"ACTIVATE-CLASS-WARN :: {ti.get('rule_id', '')}")
             print(json.dumps({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -311,10 +301,29 @@ def main():
                 }
             }))
         sys.exit(0)
-    except Exception as exc:
-        log(f"ALLOW(internal-error) rule-shape {exc}")
+
+    if not tool.endswith("__teach"):
         sys.exit(0)
+    stmt = ti.get("statement", "")
+    if not stmt or len(stmt) < 40:
+        sys.exit(0)
+
+    warning = assess(stmt)
+    if warning:
+        log(f"SHAPE-WARN :: {stmt[:160]}")
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "additionalContext": warning,
+            }
+        }))
+    sys.exit(0)
+
+
+def main():
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

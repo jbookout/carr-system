@@ -138,12 +138,12 @@ def class_advisory(payload):
         return
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        sys.exit(0)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
+
+@decision(failure="raise")
+def decide(payload):
     class_advisory(payload)
 
     try:
@@ -161,5 +161,9 @@ def main():
         sys.exit(0)
 
 
+def main():
+    sys.exit(run(decide))
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

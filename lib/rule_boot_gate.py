@@ -17,6 +17,8 @@ STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
     <session>/arm.json                    status (armed | unavailable |
                                           not_deployed), digest, pages_total,
                                           epoch
+    <session>/agents/<agent>.epoch        one epoch per child context; a child
+                                          SessionStart rotates only this file
     <session>/fetched/<agent>/<key>/      one directory per context and digest
         p<N>        page N's fetch was ATTEMPTED (PreToolUse)
         c<N>        page N came back as a real boot page (PostToolUse); holds
@@ -28,9 +30,11 @@ STATE LAYOUT (under out/rule-boot-gate/, gitignored, per machine):
         d<H>-<rnd>  one deny, made when H pages were confirmed
 Marker files, not a read-modify-write JSON, because a model often fetches the
 pages in parallel and parallel hooks would otherwise lose each other's pages.
-<key> is the digest for a subagent and digest+epoch for the main context, so
-a SessionStart re-arm (startup, resume, clear, compact, fork) makes the main
-context fetch again, and a digest change re-gates every context.
+<key> is digest+the child's own epoch when its epoch file exists, digest alone
+for a child that has not emitted SessionStart, and digest+the session epoch for
+the main context. A child SessionStart therefore re-gates only that child. A
+main SessionStart re-gates the main context, and a digest change re-gates every
+context.
 
 WHEN THE DIGEST MOVES MID-SESSION. Every boot page carries the corpus digest
 and page count. When a fetch in any context returns a digest or page count
@@ -177,6 +181,30 @@ def write_arm(session_id, arm):
     os.replace(tmp, os.path.join(folder, "arm.json"))
 
 
+def _agent_epoch_path(session_id, agent_id):
+    return os.path.join(_session_dir(session_id), "agents",
+                        safe_key(agent_id, "agent") + ".epoch")
+
+
+def _read_agent_epoch(session_id, agent_id):
+    try:
+        with open(_agent_epoch_path(session_id, agent_id), encoding="utf-8") as fh:
+            return safe_key(fh.read().strip(), "invalid")
+    except FileNotFoundError:
+        return None
+
+
+def _write_agent_epoch(session_id, agent_id):
+    path = _agent_epoch_path(session_id, agent_id)
+    folder = os.path.dirname(path)
+    os.makedirs(folder, exist_ok=True)
+    epoch = secrets.token_hex(6)
+    tmp = os.path.join(folder, f".{os.path.basename(path)}.{os.getpid()}.{secrets.token_hex(3)}.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(epoch)
+    os.replace(tmp, path)
+
+
 def _stand_in(arm):
     """The keying arm for a context whose session has no usable page count."""
     return arm if arm and arm.get("status") == "armed" else {
@@ -187,7 +215,11 @@ def _stand_in(arm):
 def _fetch_dir(session_id, agent_id, arm):
     agent = safe_key(agent_id, "main")
     digest = safe_key(str(arm.get("digest") or "").replace("sha256:", ""), "none")[:24]
-    key = digest if agent_id else f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
+    if agent_id:
+        epoch = _read_agent_epoch(session_id, agent_id)
+        key = f"{digest}-{epoch}" if epoch else digest
+    else:
+        key = f"{digest}-{safe_key(arm.get('epoch'), 'e0')}"
     return os.path.join(_session_dir(session_id), "fetched", agent, key)
 
 
@@ -599,18 +631,32 @@ def _live_page_one(timeout=10):
     return None, f"unreachable (exit {proc.returncode})"
 
 
-def arm_session(session_id, source, now=None):
+def arm_session(session_id, source, now=None, *, agent_id=None):
     """Arm the gate for a session at SessionStart and return the context text
     (always under 10k characters: SessionStart context is capped there)."""
+    stored = read_arm(session_id)
     response, reason = _live_page_one()
     boot = response.get("rule_boot") if isinstance(response, dict) else None
+    live_armed = (isinstance(boot, dict) and boot.get("digest")
+                  and int(boot.get("pages_total") or 0) >= 1)
+    stored_armed = stored and stored.get("status") == "armed"
+    same_corpus = (live_armed and stored_armed
+                   and stored.get("digest") == boot.get("digest")
+                   and int(stored.get("pages_total") or 0) == int(boot.get("pages_total") or 0))
+    if agent_id and stored_armed and (same_corpus or not live_armed):
+        _write_agent_epoch(session_id, agent_id)
+        return fetch_instructions(list(range(1, int(stored["pages_total"]) + 1)),
+                                  stored["digest"], int(stored["pages_total"]))
+
     arm = {"schema": SCHEMA, "source": str(source or ""), "armed_at": int(now or time.time()),
            "epoch": secrets.token_hex(6)}
-    if isinstance(boot, dict) and boot.get("digest") and int(boot.get("pages_total") or 0) >= 1:
+    if live_armed:
         arm.update(status="armed", digest=boot["digest"], pages_total=int(boot["pages_total"]))
         if int(boot.get("total_chars") or 0) >= 1:
             arm["total_chars"] = int(boot["total_chars"])
         write_arm(session_id, arm)
+        if agent_id:
+            _write_agent_epoch(session_id, agent_id)
         return fetch_instructions(list(range(1, arm["pages_total"] + 1)), arm["digest"], arm["pages_total"])
     if str(reason or "").startswith("not_deployed"):
         arm.update(status="not_deployed", reason=reason)
