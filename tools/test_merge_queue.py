@@ -899,6 +899,103 @@ class QueueTests(unittest.TestCase):
         self.assertIn('progress_board_write_failed',(self.state/'queue.log').read_text())
         self.assertEqual(self.q.db.execute('SELECT phase FROM entries').fetchone()[0],'done')
 
+    def test_real_board_cli_creates_and_updates_queue_cards(self):
+        board_root = self.root / 'board-output'
+        env = {'PROGRESS_BOARD_ROOT': str(board_root), 'PROGRESS_BOARD_LOCAL_ONLY': '1',
+               'PROGRESS_BOARD_SKIP_GH': '1', 'PROGRESS_BOARD_SKIP_PROBE': '1'}
+        with patch.dict(os.environ, env):
+            module.command([sys.executable, str(ROOT / 'tools/progress_board.py'),
+                            'init', 'carr-v5', '--title', 'Queue test'])
+            self.q.root = ROOT
+            for repo in module.REPOS:
+                with self.q.db:
+                    self.q.event(repo, 123, 'queued', 'Approved test head')
+            self.q.flush_events()
+            path = board_root / 'boards/carr-v5.json'
+            tasks = json.loads(path.read_text())['tasks']
+            for card, repo in zip(('pr-123', 'app-pr-123', 'factory-pr-123'), module.REPOS):
+                self.assertEqual(tasks[card]['repo'], repo)
+                self.assertEqual(tasks[card]['pr'], 123)
+                self.assertEqual(tasks[card]['status'], 'review')
+                self.assertEqual(tasks[card]['executor'], 'Merge queue')
+                self.assertEqual(tasks[card]['title'], f'{repo.split("/")[-1]} PR #123')
+            with self.q.db:
+                self.q.event(module.REPOS[0], 123, 'waiting_ci', 'Hosted checks pending')
+            self.q.flush_events()
+            card = json.loads(path.read_text())['tasks']['pr-123']
+            self.assertEqual(card['stage'], 'ci')
+            self.assertEqual(card['note'], 'Merge queue: waiting_ci. Hosted checks pending')
+            self.assertEqual(self.q.db.execute('SELECT COUNT(*) FROM events WHERE published=1').fetchone()[0], 4)
+
+    def test_real_board_queue_events_preserve_existing_card_metadata(self):
+        board_root = self.root / 'board-output'
+        env = {'PROGRESS_BOARD_ROOT': str(board_root), 'PROGRESS_BOARD_LOCAL_ONLY': '1',
+               'PROGRESS_BOARD_SKIP_GH': '1', 'PROGRESS_BOARD_SKIP_PROBE': '1'}
+        board_cli = [sys.executable, str(ROOT / 'tools/progress_board.py')]
+        metadata = {'title': 'Assigned task', 'executor': 'Codex', 'provider': 'OpenAI',
+                    'model': 'fixture', 'effort': 'high'}
+        with patch.dict(os.environ, env):
+            module.command(board_cli + ['init', 'carr-v5', '--title', 'Queue test'])
+            for card, repo in zip(('pr-123', 'app-pr-123', 'factory-pr-123'), module.REPOS):
+                fields = [value for key, value in metadata.items() for value in ('--' + key, value)]
+                module.command(board_cli + ['task', 'carr-v5', card, *fields,
+                                            '--status', 'review', '--repo', repo, '--pr', '123'])
+            self.q.root = ROOT
+            for outcome, stage in (('waiting_ci', 'ci'), ('blocked_review', 'review')):
+                for repo in module.REPOS:
+                    with self.q.db:
+                        self.q.event(repo, 123, outcome, 'Queue update')
+                self.q.flush_events()
+                tasks = json.loads((board_root / 'boards/carr-v5.json').read_text())['tasks']
+                for card in ('pr-123', 'app-pr-123', 'factory-pr-123'):
+                    self.assertEqual({key: tasks[card][key] for key in metadata}, metadata)
+                    self.assertEqual(tasks[card]['stage'], stage)
+                    self.assertEqual(tasks[card]['note'], f'Merge queue: {outcome}. Queue update')
+            self.assertEqual(self.q.db.execute('SELECT COUNT(*) FROM events WHERE published=1').fetchone()[0], 6)
+
+    def test_board_stderr_survives_retry_exhaustion_and_restart(self):
+        script = self.root / 'tools/progress_board.py'
+        script.write_text("import sys\nprint('board rejected: missing executor', file=sys.stderr)\nsys.exit(1)\n")
+        self.q.enqueue(module.REPOS[0], 123, self.approved)
+        for _ in range(module.MAX_ATTEMPTS):
+            self.q.flush_events()
+        self.q.db.close()
+        self.q = module.Queue(self.state, self.root, gap=0)
+        self.addCleanup(self.q.db.close)
+        self.q.flush_events()
+        rows = [json.loads(line) for line in (self.state / 'queue.log').read_text().splitlines()]
+        failures = [row for row in rows if row['outcome'].startswith('progress_board_write_')]
+        self.assertEqual(failures[-1]['outcome'], 'progress_board_write_exhausted')
+        self.assertIn('board rejected: missing executor', failures[-1]['detail'])
+        self.assertIn('exhausted 4 attempts', failures[-1]['detail'])
+        self.assertEqual(self.q.db.execute('SELECT published FROM events').fetchone()[0], 0)
+
+    def test_board_stderr_is_redacted_before_bounding(self):
+        script = self.root / 'tools/progress_board.py'
+        script.write_text("import sys\nprint('prefix-' + 'x' * 3000 + ' postgres://user:secret@host/database token=ghp_' + 'a' * 3000 + ' final failure', file=sys.stderr)\nsys.exit(1)\n")  # ci-secret-scan: allow
+        self.q.enqueue(module.REPOS[0], 123, self.approved)
+        self.q.flush_events()
+        row = json.loads((self.state / 'queue.log').read_text().splitlines()[-1])
+        self.assertIn('final failure', row['detail'])
+        self.assertIn('[REDACTED]', row['detail'])
+        self.assertNotIn('postgres://', row['detail'])
+        self.assertNotIn('a' * 100, row['detail'])
+        self.assertNotIn('prefix-', row['detail'])
+        self.assertLess(len(row['detail']), 2200)
+
+    def test_board_timeout_keeps_partial_stderr_and_stops_retries(self):
+        self.q.enqueue(module.REPOS[0], 123, self.approved)
+        timeout = subprocess.TimeoutExpired('board', 60, stderr=b'publication stalled: token=ghp_abcdefghijklmnopqrstuv')
+        with patch.object(module.subprocess, 'run', side_effect=timeout) as run:
+            self.q.flush_events()
+            self.q.flush_events()
+        row = json.loads((self.state / 'queue.log').read_text().splitlines()[-1])
+        self.assertEqual(row['outcome'], 'progress_board_write_exhausted')
+        self.assertIn('publication stalled', row['detail'])
+        self.assertIn('[REDACTED]', row['detail'])
+        self.assertNotIn('ghp_', row['detail'])
+        self.assertEqual(run.call_count, 1)
+
     def test_fifo_across_repositories(self):
         self.pr(n=2, repo=module.REPOS[1])
         self.pr(n=1)

@@ -268,6 +268,24 @@ async function deliveryRows(client, notificationId) {
     [notificationId])).rows;
 }
 
+async function withActivationAge(client, days, fn) {
+  const filename = "0617_delivery_cadence_a05.sql";
+  const prior = (await client.query(
+    "select applied_at::text as applied_at from public.schema_migrations where filename=$1", [filename])).rows[0];
+  assert.ok(prior, "the cadence activation migration is recorded");
+  // The schema snapshot retains its historical activation date. This disposable
+  // fixture sets the age each case needs, then restores it for later proofs.
+  await client.query(
+    "update public.schema_migrations set applied_at=clock_timestamp()-make_interval(days=>$2) where filename=$1",
+    [filename, days]);
+  try {
+    return await fn();
+  } finally {
+    await client.query(
+      "update public.schema_migrations set applied_at=$2 where filename=$1", [filename, prior.applied_at]);
+  }
+}
+
 async function backdateOnlyReceipt(client, receiptId) {
   // ops.v5_a05_cadence_receipt is append-only (v5_a05_cadence_receipt_immutable,
   // migration 0617) by design; this setup-only backdate disables that trigger
@@ -299,10 +317,26 @@ test("V5A05-READER-ROUTE-DB: cadence-status is refused on the carr_reader route 
   // The route it takes now.
   const route = connectionRouteForTool(TOOLS["cadence-status"]);
   assert.equal(route, "writer_read_only");
-  const status = await onRoute(client, route, () =>
-    verb.handler(wrap(client), SYSTEM_ACTOR(joe.id), subject));
+  const status = await withActivationAge(client, 1, () => onRoute(client, route, () =>
+    verb.handler(wrap(client), SYSTEM_ACTOR(joe.id), subject)));
   assert.equal(status.status, "no_receipt_on_record");
   assert.equal(status.interval_days, 14);
+});
+
+test("V5A05-CADENCE-ACTIVATION: a subject with no receipts is missed after the activation grace period", async t => {
+  const pg = await skipUnlessDatabase(t);
+  if (!pg) return;
+  const client = await connect(pg);
+  t.after(() => client.end().catch(() => {}));
+  const { joe } = await joeAndDell(client);
+  const subject = { subject_type: "engineering_program", subject_ref: `v5a05-activation-${randomUUID()}` };
+  const status = await withActivationAge(client, 15, () => onRoute(client, "writer_read_only", () =>
+    a05()["cadence-status"].handler(wrap(client), SYSTEM_ACTOR(joe.id), subject)));
+  assert.equal(status.status, "missed");
+  assert.equal(status.reason_id, "cadence_interval_exceeded_since_activation");
+  assert.equal(status.requires_replan, true);
+  assert.equal(status.last_receipt_issued_at, null);
+  assert.equal(status.receipts_in_window, 0);
 });
 
 test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated prior receipt reads missed", async t => {
@@ -317,7 +351,7 @@ test("V5A05-CADENCE-RECEIPT: record then read status current, then a backdated p
   const read = () => onRoute(client, "writer_read_only", () =>
     verbs["cadence-status"].handler(wrap(client), PARTNER_ACTOR(joe.id), subject));
 
-  assert.equal((await read()).status, "no_receipt_on_record");
+  assert.equal((await withActivationAge(client, 1, read)).status, "no_receipt_on_record");
 
   const receiptArgs = { idempotency_key: randomUUID(), ...subject };
   const recorded = await dispatched(client, () =>
