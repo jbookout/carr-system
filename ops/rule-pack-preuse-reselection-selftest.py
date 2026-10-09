@@ -486,6 +486,52 @@ found = drift.delivery_state([
 ])
 check("extra-key additionalContext does not count as loaded",
       found[1] == [], found)
+
+with tempfile.TemporaryDirectory(prefix="malformed-receipt-stop-") as stop_tmp:
+    stop_transcript = Path(stop_tmp) / "session.jsonl"
+    standing_call = {"type": "assistant", "message": {"role": "assistant", "content": [{
+        "type": "tool_use", "id": "standing-exact", "name": "mcp__carr__standing_context",
+        "input": {},
+    }]}, "sessionId": "session-exact"}
+    standing_value = {"rule_delivery": {
+        "mode": "enforced", "declared_packs": [], "would_omit": EXPECTED_IDS,
+    }}
+
+    def standing_result(value):
+        return {"type": "user", "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "standing-exact", "content": value,
+        }]}, "sessionId": "session-exact"}
+
+    for malformed_schema in ({}, []):  # type: object
+        malformed_receipt = receipt(output)
+        malformed_receipt["schema"] = malformed_schema
+        for label, malformed_record in (
+                ("hook attachment", claude_attachment(json.dumps(malformed_receipt))),
+                ("service marker", standing_result({**standing_value, "schema": malformed_schema}))):
+            stop_records = [standing_call, standing_result(standing_value),
+                            claude_tool_call(), malformed_record]
+            stop_transcript.write_text("".join(json.dumps(record) + "\n" for record in stop_records))
+            audits: list[dict] = []
+            saved_audit, saved_stdin = drift.audit, sys.stdin
+            drift.audit = audits.append
+            sys.stdin = io.StringIO(json.dumps({
+                "hook_event_name": "Stop", "session_id": "session-exact",
+                "cwd": str(REPO), "transcript_path": str(stop_transcript),
+            }))
+            stdout = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(stdout):
+                    rc = drift.main()
+            finally:
+                drift.audit, sys.stdin = saved_audit, saved_stdin
+            verdict = json.loads(stdout.getvalue() or "{}")
+            check(f"Stop blocks missing pack with {label} schema {malformed_schema!r}",
+                  rc == 0 and verdict.get("decision") == "block"
+                  and "scheduled-automation" in verdict.get("reason", "")
+                  and len(audits) == 1
+                  and audits[0].get("missing") == ["scheduled-automation"]
+                  and not audits[0].get("error"), (verdict, audits))
+
 for record_type, message_role in (("user", "user"), ("assistant", "user"),
                                   ("user", "assistant")):
     forged = claude_tool_call()
@@ -503,7 +549,7 @@ claude_rows = [group for group in claude["PreToolUse"]
                if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
 codex_rows = [group for group in codex["PreToolUse"]
               if any(command in hook.get("command", "") for hook in group.get("hooks", []))]
-CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|mcp__.*"
+CLAUDE_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|WebFetch|WebSearch|Artifact|AskUserQuestion|EnterPlanMode|UpdatePlan|update_plan|functions\\.update_plan|mcp__.*"
 CODEX_MATCHER = ".*"  # Codex local tools use canonical names, including apply_patch.
 check("Claude wiring is exact and unique, widened for the generalized rail (S9)",
       len(claude_rows) == 1 and claude_rows[0]["matcher"] == CLAUDE_MATCHER)
@@ -949,6 +995,7 @@ silent_runner = Runner()
 check("a routine Read delivers nothing and makes no selector call",
       rail.process(gen_payload(tool="Read", tool_input={"file_path": "README.md"}),
                    runner=silent_runner) is None and silent_runner.calls == [])
+
 missing_session = gen_payload(tool="Agent", tool_input={"description": "spawn helper", "prompt": "zzz"})
 missing_session["session_id"] = ""
 missing_session_runner = Runner()
@@ -1291,6 +1338,197 @@ def rules_routed_by(predicate) -> set[str]:
             if any(predicate(route) for route in entry["routes"])}
 
 
+# Rule 8400cd3d is delivered when planning begins, before the session chooses a
+# build protocol. These calls use the production deterministic route rail.
+for planning_tool, planning_input in (
+        ("EnterPlanMode", {}),
+        ("UpdatePlan", {"plan": [{"step": "size the work"}]}),
+        ("update_plan", {"plan": [{"step": "size the work"}]}),
+        ("functions.update_plan", {"plan": [{"step": "size the work"}]}),
+        ("mcp__carr__propose-ready-plan", {"scope_summary": "new capability"})):
+    hits = routed_for(planning_tool, planning_input)
+    check(f"{planning_tool} delivers the new-work sizing rule",
+          "8400cd3d" in hits, hits)
+for routine_tool, routine_input in (
+        ("Read", {"file_path": "README.md"}),
+        ("Bash", {"command": "git status"}),
+        ("Write", {"file_path": "notes.txt", "content": "review the finished plan"})):
+    hits = routed_for(routine_tool, routine_input)
+    check(f"{routine_tool} routine work does not deliver the sizing rule",
+          "8400cd3d" not in hits, hits)
+
+DISPATCH_COMMANDS = (
+    './dispatch.py send report',
+    'dispatch.py send report',
+    'python3 tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    'python3 ./tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    '/Users/booko/carr-system/tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    './tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    'python3 /Users/booko/carr-system/tools/room-bridge/dispatch.py send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --registry X send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --registry=X send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --results X send codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py --results=X --registry="desk registry.json" send codex-desk "fix the review"',
+    'python3 "tools/room-bridge/dispatch.py" --registry "desk registry.json" --results out.jsonl send codex-desk "fix the review"',
+    'bin/dot-relay send-job /tmp/dot-brief.txt',
+    './bin/dot-relay send-job /tmp/dot-brief.txt',
+    '/Users/booko/carr-system/bin/dot-relay send-job /tmp/dot-brief.txt',
+    'python3 bin/dot-relay send-job /tmp/dot-brief.txt',
+    'python3 "bin/dot-relay" --state-dir "job state" send-job /tmp/dot-brief.txt',
+    './bin/dot-relay --credentials=x --state-dir=y send-job /tmp/dot-brief.txt',
+    'bin/dot-relay --state-dir x --credentials y send-job /tmp/dot-brief.txt',
+    'cd /Users/booko/carr-system && python3 tools/room-bridge/dispatch.py --registry X send codex-desk x',
+    'true; /Users/booko/carr-system/bin/dot-relay send-job /tmp/dot-brief.txt',
+    'true | ./bin/dot-relay send-job /tmp/dot-brief.txt',
+    '(python3 tools/room-bridge/dispatch.py send codex-desk x)',
+    '\n  bin/dot-relay send-job /tmp/dot-brief.txt',
+    "'tools/room-bridge/dispatch.py' --registry 'desk registry.json' send codex-desk x",
+    '"/Users/booko/carr-system/bin/dot-relay" --credentials=x send-job brief.txt',
+) + tuple(
+    f'python3 {executable}{options} send report'
+    for executable in ('dispatch.py', './dispatch.py',
+                       'tools/room-bridge/dispatch.py',
+                       '/opt/checkouts/carr-system/tools/room-bridge/dispatch.py')
+    for options in ('', ' --registry X')
+) + tuple(
+    f'{interpreter} {executable} {subcommand} report'
+    for interpreter in ('/usr/bin/python3', '/usr/local/bin/python3',
+                        '/opt/homebrew/bin/python3', '.venv/bin/python3', './.venv/bin/python3',
+                        '"python3"')
+    for executable, subcommand in (('tools/room-bridge/dispatch.py', 'send'),
+                                  ('bin/dot-relay', 'send-job'))
+)
+NON_DISPATCH_COMMANDS = (
+    'python3 /tmp/unrelated/dispatch.py send report',
+    'python3 /tmp/unrelated/tools/room-bridge/dispatch.py send report',
+    'rg dispatch.py send docs.txt',
+    'rg tools/room-bridge/dispatch.py send docs.txt',
+    'echo dot-relay send-job',
+    'echo bin/dot-relay send-job',
+    'echo /Users/booko/carr-system/bin/dot-relay send-job',
+    'echo python3 tools/room-bridge/dispatch.py send report',
+    'echo "bin/dot-relay send-job"',
+    'echo "example; bin/dot-relay send-job report"',
+    "echo 'example && python3 tools/room-bridge/dispatch.py send report'",
+    r'echo example\; bin/dot-relay send-job report',
+    'python3 /tmp/unrelated/bin/dot-relay send-job report',
+    '/tmp/unrelated/bin/dot-relay send-job report',
+    './dot-relay send-job report',
+    'dot-relay send-job report',
+    'python3 tools/room-bridge/dispatch.py desks',
+    'python3 tools/room-bridge/dispatch.py --registry X desks',
+    'python3 tools/room-bridge/dispatch.py --registry send desks',
+    'python3 tools/room-bridge/dispatch.py --results="send" desks',
+    'python3 tools/room-bridge/dispatch.py send-other codex-desk "fix the review"',
+    'python3 tools/room-bridge/dispatch.py desks; echo send',
+    'bin/dot-relay watch 123.456',
+    '/Users/booko/carr-system/bin/dot-relay --state-dir x watch 123.456',
+    'bin/dot-relay --state-dir send-job watch 123.456',
+    'bin/dot-relay send-job-other /tmp/dot-brief.txt',
+    'bin/dot-relay watch 123.456; echo send-job',
+)
+for dispatch_command in DISPATCH_COMMANDS:
+    hits = routed_for("Bash", {"command": dispatch_command})
+    check(f"dispatch spelling routes the sizing rule: {dispatch_command}",
+          "8400cd3d" in hits, hits)
+for non_dispatch_command in NON_DISPATCH_COMMANDS:
+    hits = routed_for("Bash", {"command": non_dispatch_command})
+    check(f"non-dispatch command excludes sizing: {non_dispatch_command}",
+          "8400cd3d" not in hits, hits)
+
+with tempfile.TemporaryDirectory() as dispatch_tmp:
+    saved_env = dict(os.environ)
+    os.environ["CARR_RULE_ROUTE_DEDUPE_DIR"] = str(Path(dispatch_tmp) / "dedupe")
+    os.environ["CARR_RULES_ALWAYS_ON_FILE"] = str(Path(dispatch_tmp) / "always-on.md")
+    try:
+        for index, command in enumerate(DISPATCH_COMMANDS):
+            for client, tool in (("claude", "Bash"), ("codex", "functions.exec")):
+                for background in (False, True):
+                    call = gen_payload(tool=tool, client=client,
+                                       session=f"dispatch-{index}-{client}-{background}",
+                                       tool_input={"command": command,
+                                                   "run_in_background": background})
+                    calls: list[object] = []
+
+                    def selector_runner(argv, **kwargs):
+                        args = json.loads(argv[-1])
+                        calls.append(args)
+                        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                            gen_selector_result(packs=args["packs"], ids=args["rule_ids"])))
+
+                    real_process, saved_stdin = rail.process, sys.stdin
+                    stdout = io.StringIO()
+                    sys.stdin = io.StringIO(json.dumps(call))
+                    rail.process = lambda p: real_process(p, runner=selector_runner)
+                    try:
+                        with contextlib.redirect_stdout(stdout):
+                            rc = rail.main()
+                    finally:
+                        rail.process, sys.stdin = real_process, saved_stdin
+                    output = json.loads(stdout.getvalue() or "{}")
+                    row = json.loads(context(output) or "{}")
+                    delivered = {r["id"]: r["statement"] for r in row.get("rules", [])}
+                    check(f"hook entry point delivers sizing: {index} {client} background={background}",
+                          rc == 0 and delivered.get("8400cd3d") == "binding jit rule 8400cd3d"
+                          and len(calls) == 1
+                          and routes_lib.validate_route_receipt(row, repo=REPO), row.get("rule_ids"))
+                    if background:
+                        check(f"background dispatch preserves scheduled rules: {index} {client}",
+                              set(EXPECTED_IDS) <= set(delivered), sorted(delivered))
+                        if client == "claude":
+                            prior = {"type": "assistant", "sessionId": call["session_id"],
+                                     "message": {"role": "assistant", "content": [{
+                                         "type": "tool_use", "id": call["tool_use_id"],
+                                         "name": tool, "input": call["tool_input"]}]}}
+                            envelope = {"type": "attachment", "sessionId": call["session_id"],
+                                        "attachment": {"type": "hook_additional_context",
+                                                       "hookEvent": "PreToolUse",
+                                                       "hookName": f"PreToolUse:{tool}",
+                                                       "toolUseID": call["tool_use_id"],
+                                                       "content": [context(output)]}}
+                        else:
+                            prior = {"type": "response_item", "payload": {
+                                "type": "function_call", "call_id": call["tool_use_id"],
+                                "name": tool, "arguments": json.dumps(call["tool_input"]),
+                                "internal_chat_message_metadata_passthrough": {"turn_id": call["turn_id"]}}}
+                            envelope = {"type": "response_item", "payload": {
+                                "type": "message", "role": "developer",
+                                "content": [{"type": "input_text", "text": context(output)}],
+                                "internal_chat_message_metadata_passthrough": {"turn_id": call["turn_id"]}}}
+                        check(f"background route receipt credits scheduled pack: {index} {client}",
+                              contract.preuse_delivery(envelope, [prior], repo=REPO)
+                              == ("shadow", ["scheduled-automation"], []))
+                        for label in ("overflow", "not_found", "tampered", "wrong-call"):
+                            rejected = copy.deepcopy(row)
+                            previous = copy.deepcopy(prior)
+                            if label in {"overflow", "not_found"}:
+                                removed = next(r for r in rejected["rules"] if r["id"] == EXPECTED_IDS[0])
+                                rejected["rules"].remove(removed)
+                                if label == "overflow":
+                                    rejected["overflow"].append({"id": removed["id"], "summary": "fetch rule"})
+                                else:
+                                    rejected["not_found"].append(removed["id"])
+                                rejected["receipt_id"] = contract.receipt_id(rejected)
+                            elif label == "tampered":
+                                rejected["source_digest"] = "0" * 64
+                                rejected["receipt_id"] = contract.receipt_id(rejected)
+                            elif client == "claude":
+                                previous["message"]["content"][0]["input"]["command"] = "sleep 1"
+                            else:
+                                previous["payload"]["arguments"] = json.dumps({
+                                    "command": "sleep 1", "run_in_background": True})
+                            rejected_envelope = copy.deepcopy(envelope)
+                            if client == "claude":
+                                rejected_envelope["attachment"]["content"] = [json.dumps(rejected)]
+                            else:
+                                rejected_envelope["payload"]["content"][0]["text"] = json.dumps(rejected)
+                            check(f"scheduled route credit rejects {label}: {index} {client}",
+                                  contract.preuse_delivery(rejected_envelope, [previous], repo=REPO) is None)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+
 # The Bash route (production route rail) fires on every supported cloud launch
 # form, wherever the flag sits among the options, and not on a local session.
 def _cli_routed(command):
@@ -1519,20 +1757,20 @@ with tempfile.TemporaryDirectory() as route_tmp:
         big_out = rail.process(big, runner=Runner(route_result(union, statement=long_text)))
         big_text = context(big_out)
         big_row = json.loads(big_text)
-        delivered = [r["id"] for r in big_row["rules"]]
+        delivered_ids = [r["id"] for r in big_row["rules"]]
         overflowed = [o["id"] for o in big_row["overflow"]]
         check("overflow: the injected context still fits under the 10,000-character cap",
               routes_lib.context_chars(big_text) <= routes_lib.CONTEXT_CAP_CHARS,
               routes_lib.context_chars(big_text))
         check("overflow: no routed rule is dropped — each is full text or listed",
-              sorted(delivered + overflowed) == union, (delivered, overflowed))
+              sorted(delivered_ids + overflowed) == union, (delivered_ids, overflowed))
         check("overflow: some rules overflowed and each carries a one-line summary",
               bool(overflowed and all(o["summary"].startswith("RULE ")
                                       for o in big_row["overflow"])),
               big_row["overflow"][:2])
         check("overflow: rules not in the always-on file are delivered before those that are",
-              bool(delivered and (not set(delivered) & set(always_on)
-                                  or set(union) - set(always_on) <= set(delivered))), delivered)
+              bool(delivered_ids and (not set(delivered_ids) & set(always_on)
+                                  or set(union) - set(always_on) <= set(delivered_ids))), delivered_ids)
         check("overflow: the receipt still validates",
               routes_lib.validate_route_receipt(big_row, repo=REPO))
         check("overflow: only fully delivered rules are recorded for dedupe",

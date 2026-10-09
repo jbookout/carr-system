@@ -718,6 +718,13 @@ def settle_restarts(desk_entries: dict, auth_by_desk: dict, state: dict, *,
     return settled
 
 
+
+def queue_dispatch_kwargs(entry: dict) -> dict:
+    """A Codex job from the queue gets a limit inside its claim, never the router default."""
+    if entry.get("kind") in ("codex-session", "codex-live"):
+        return {"codex_timeout_s": kanban_adapter.QUEUE_CODEX_TIMEOUT_S}
+    return {}
+
 def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAULT_STATE,
              room: str = DEFAULT_ROOM, results_path: Path | None = None,
              pending_timeout_s: float = PENDING_TIMEOUT_S,
@@ -928,7 +935,8 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
 
                     def dispatch_queue(prompt: str) -> dict:
                         return dispatch_fn(
-                            name, prompt, registry=registry, results_path=results_path)
+                            name, prompt, registry=registry, results_path=results_path,
+                            **queue_dispatch_kwargs(entry))
 
                     # Flash and Grok have no MCP tools of their own. Their
                     # synchronous answers must reach the room through this
