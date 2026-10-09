@@ -486,6 +486,8 @@ def fallback_cases(tmp):
     check("the island fixture deliberately has NO hook_meter.py",
           not os.path.exists(os.path.join(island, "hooks", "hook_meter.py")))
 
+    shutil.copytree(os.path.join(REPO, "lib"), os.path.join(island, "lib"),
+                    ignore=shutil.ignore_patterns("__pycache__"))
     gate = os.path.join(island, "hooks", "guard-unattended.py")
     data = payload(tool_input={"command": "rm -rf /Users/booko/Documents/live"})
     env = env_for(tmp)
