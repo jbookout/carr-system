@@ -100,11 +100,12 @@ class ReviewRegressions(unittest.TestCase):
             self.assertTrue(snapshot.wait(3))
             writer = threading.Thread(target=handoff)
             writer.start()
-            was_released = released.wait(.15)
+            # The handoff no longer waits for the slow snapshot; a claim
+            # released mid-scan still refuses the overlapping reservation.
+            self.assertTrue(released.wait(3), 'handoff blocked behind the PR snapshot')
             resume.set()
             reader.join(3)
             writer.join(3)
-        self.assertFalse(was_released, 'handoff released ownership while snapshot was in flight')
         self.assertEqual(failures, ['write_set_overlap'])
         self.assertTrue(released.is_set())
 
