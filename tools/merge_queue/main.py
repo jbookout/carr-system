@@ -472,6 +472,24 @@ class Queue:
             if not prev or tuple(prev) != (outcome, detail):
                 self.event(e['repo'], e['pr'], outcome, detail, e['id'])
 
+        if outcome == 'fresh_review' and phase == 'review':
+            self.request_review(e['repo'], e['pr'])
+
+    def request_review(self, repo, n):
+        router = self.root / 'bin/dot-review.py'
+        if not router.exists():
+            with self.db:
+                self.event(repo, n, 'review_handoff_unavailable', 'Install bin/dot-review.py before dispatching review')
+            return
+        try:
+            receipt = command([sys.executable, str(router), '--orch', str(self.root / 'out/orch'),
+                               'request', repo, str(n)], timeout=900)
+            with self.db:
+                self.event(repo, n, 'review_handoff', receipt[-2000:])
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            with self.db:
+                self.event(repo, n, 'review_handoff_failed', type(exc).__name__ + '; no reviewer dispatch inferred')
+
     def flush_events(self):
         for ev in bounded_items('snapshot', self.db.execute('SELECT * FROM events WHERE logged=0 ORDER BY id').fetchall()):
             with (self.state / 'queue.log').open('a') as f:
@@ -545,12 +563,15 @@ class Queue:
     def approval(self, repo, n):
         comments = self.pages(f'repos/{repo}/issues/{n}/comments?per_page=100')
         cfg = REVIEW_CONFIG['app' if repo == REPOS[1] else 'worker']
-        stamp = re.compile(r'APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
-                           r'(?:Orchestrator merge queue:|Orchestrator: verified exact head)[^\r\n]*\r?\n?')
-        independent = [c for c in bounded_items('snapshot', comments) if not stamp.fullmatch(c.get('body', ''))]
+        stamp = re.compile(r'^APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
+                           r'(?:Orchestrator merge queue:|Orchestrator: verified exact head)[^\r\n]*', re.M)
+        independent = [c for c in bounded_items('snapshot', comments) if not stamp.match(c.get('body', ''))]
         last = REVIEW['deciding_verdict'](independent, cfg)
         if last and REVIEW['verdict'](last.get('body', ''), cfg) == 'approve':
-            return REVIEW['reviewed_header_sha'](last.get('body', ''))
+            sha = REVIEW['reviewed_header_sha'](last.get('body', ''))
+            if 'Reviewer: ChatGPT Dot' in last.get('body', '') and sha != self.pr(repo, n)['head']['sha']:
+                return None
+            return sha
         return None
 
     def green(self, repo, n, head):

@@ -190,6 +190,40 @@ class QueueTests(unittest.TestCase):
         self.q = module.Queue(self.state, self.root, gap=0)
         self.addCleanup(self.q.db.close)
 
+    def test_dot_approve_at_head_stale_and_blocked(self):
+        self.pr()
+        for verdict, sha, expected in [('APPROVE', self.approved, self.approved),
+                                       ('APPROVE', self.changed, None),
+                                       ('REVIEW: BLOCKED', self.approved, None)]:
+            with self.subTest(verdict=verdict, sha=sha):
+                self.data['comments'][module.REPOS[0]+'#1'] = [{
+                    'body': f'{verdict}\nReviewed-SHA: {sha}\n\nReviewer: ChatGPT Dot',
+                    'author_association': 'OWNER'}]
+                self.save()
+                self.assertEqual(self.q.approval(module.REPOS[0], 1), expected)
+
+    def test_orchestrator_stamp_with_dot_marker_stays_excluded(self):
+        self.pr()
+        self.data['comments'][module.REPOS[0]+'#1'] = [{
+            'body': f'APPROVE\nReviewed-SHA: {self.approved}\n\nOrchestrator merge queue: stamp\nReviewer: ChatGPT Dot',
+            'author_association': 'OWNER'}]
+        self.save()
+        self.assertIsNone(self.q.approval(module.REPOS[0], 1))
+
+    def test_fresh_review_handoff_uses_shared_free_first_router(self):
+        from unittest.mock import patch
+        self.pr()
+        router = self.root / 'bin/dot-review.py'
+        router.parent.mkdir(exist_ok=True)
+        router.write_text('# fixture')
+        entry = self.q.enqueue(module.REPOS[0], 1, self.approved)
+        e = self.q.db.execute('SELECT * FROM entries WHERE id=?', (entry,)).fetchone()
+        with patch.object(module, 'command', return_value='queued Dot: free capacity') as cmd:
+            self.q.report(e, 'fresh_review', 'head changed', 'review')
+        argv = cmd.call_args.args[0]
+        self.assertEqual(argv[1], str(router))
+        self.assertEqual(argv[-3:], ['request', module.REPOS[0], '1'])
+
     def test_block_quoting_queue_stamp_remains_authoritative(self):
         self.pr()
         self.data['comments'][module.REPOS[0]+'#1'].append({
