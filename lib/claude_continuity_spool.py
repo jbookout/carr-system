@@ -247,8 +247,8 @@ def drain(call=None) -> dict:
             for path in spooled():
                 body = _read(path)
                 reason = _not_replayable(body)
-                if reason:
-                    _move_to_archive(path, "not_replayable", reason)
+                if reason or body is None:
+                    _move_to_archive(path, "not_replayable", reason or "unreadable")
                     result["archived"] += 1
                     continue
                 response, failure = call(body["verb"], body["args"])
