@@ -307,9 +307,17 @@ def _claim(msg_id: str) -> dict:
 
 def reserve(row: dict, cwd: str, writes: list[str]) -> dict:
     writes = declaration('', writes)
+    # The PR scan makes one paced gh call per open PR, so it runs outside the
+    # ledger lock. Any claim not already released when the scan began (held
+    # then, or created during the scan) may publish its PR and release before
+    # the scan ends, after the snapshot missed that PR; such a claim still
+    # counts as an owner below, so the overlap is refused rather than missed.
     with _locked(LEDGER):
-        repo, prs = open_prs(cwd)
-        mine = own_pr(row['task'], repo)
+        released_before_scan = {k for k, v in _claims().items()
+                                if v['ownership_state'] == 'released'}
+    repo, prs = open_prs(cwd)
+    mine = own_pr(row['task'], repo)
+    with _locked(LEDGER):
         claims = _claims()
         if row['msg_id'] in claims:
             raise DeskError('claim_exists', 'a job cannot reserve twice')
@@ -319,7 +327,8 @@ def reserve(row: dict, cwd: str, writes: list[str]) -> dict:
                 raise DeskError('write_set_overlap', f"write set owned by PR {pr['number']} "
                     f"({pr['title']}); build on top of PR {pr['number']}")
         for previous in claims.values():
-            if previous['ownership_state'] == 'released' or previous.get('repo', '').lower() != repo.lower():
+            released = previous['msg_id'] in released_before_scan
+            if released or previous.get('repo', '').lower() != repo.lower():
                 continue
             if any(overlaps(a, b) for a in writes for b in previous['writes']):
                 owner_pr = previous.get('own_pr')
