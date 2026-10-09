@@ -24,7 +24,12 @@ from pathlib import Path
 f=Path(os.environ['FAKE_GH_STATE']); d=json.loads(f.read_text()); a=sys.argv[1:]
 d['calls'].append(a)
 def save(): f.write_text(json.dumps(d))
-def emit(x): save(); print(json.dumps(x))
+def emit(x):
+ save()
+ if '--include' in a:
+  if isinstance(x,list) and len(x)==1 and (isinstance(x[0],list) or isinstance(x[0],dict) and 'check_runs' in x[0]): x=x[0]
+  print('HTTP/2.0 200 OK\n\n'+json.dumps(x))
+ else: print(json.dumps(x))
 if a[:2]==['label','create']: emit({'name':'do_not_merge'});sys.exit()
 if a[:2]==['api','graphql']:
  repo=next(x[5:] for x in a if x.startswith('repo='));owner=next(x[6:] for x in a if x.startswith('owner='));n=next(x[2:] for x in a if x.startswith('n='));p=d['prs'][owner+'/'+repo+'#'+n]
@@ -316,6 +321,60 @@ class QueueTests(unittest.TestCase):
                          ('exhausted', 'ci_timeout'))
         self.assertEqual(self.calls('merge'), [])
 
+    def test_dispatch_cancelled_after_bridge_preflight_never_spawns(self):
+        self.pr()
+        brief = self.root / 'cancelled.txt'; brief.write_text('task')
+        registry = self.root / 'desks.json'
+        registry.write_text(json.dumps({'desks': {'sol': {
+            'kind':'codex-session', 'model':'gpt-6.1-sol', 'effort':'high',
+            'sandbox':'workspace-write', 'last_auth':True, 'thread_id':None}}}))
+        os.environ['CARR_HERMES_DESKS'] = str(registry)
+        with self.q.db:
+            self.q.db.execute('INSERT INTO actions(key,kind,repo,pr,head,payload) VALUES(?,?,?,?,?,?)',
+                              ('cancel', 'dispatch', module.REPOS[0], 1, self.approved, str(brief)))
+        real_command = module.command
+        def cancel(argv, **kwargs):
+            if '--help' in argv:
+                self.q.stopped = True
+                return 'send --fresh'
+            return real_command(argv, **kwargs)
+        with patch.object(module, 'command', side_effect=cancel): self.q.dispatch_conflicts()
+        self.assertEqual(self.q.db.execute('SELECT phase,desk FROM actions').fetchone()[:], ('planned', None))
+        self.assertEqual(self.q.children, {})
+
+    def test_restart_adopts_live_dispatcher_identity_but_rejects_pid_reuse(self):
+        registry = self.root / 'desks.json'; registry.write_text('{"desks":{}}')
+        os.environ['CARR_HERMES_DESKS'] = str(registry)
+        brief = self.root / 'live.txt'; brief.write_text('task')
+        receipt = brief.with_suffix('.dispatch.jsonl')
+        identity = f'4242 Thu Oct 8 12:00:00 2026 python {self.root}/tools/room-bridge/dispatch.py --results {receipt} send sol'
+        ps = self.root / 'bin/ps'; ps.write_text('#!/bin/sh\necho "'+identity+'"\n'); ps.chmod(0o755)
+        with self.q.db:
+            self.q.db.execute('INSERT INTO actions(key,kind,repo,pr,head,payload,phase,desk,dispatcher_pid,dispatcher_identity,receipt) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                ('live', 'dispatch', module.REPOS[0], 1, self.approved, str(brief), 'issued', 'sol',
+                 4242, module.hashlib.sha256(identity.encode()).hexdigest(), str(receipt)))
+        self.restart(); self.q.dispatch_conflicts()
+        self.assertEqual(self.q.db.execute('SELECT phase,desk FROM actions').fetchone()[:], ('issued', 'sol'))
+        ps.write_text('#!/bin/sh\necho "4242 unrelated-process"\n')
+        self.restart(); self.q.dispatch_conflicts()
+        self.assertEqual(self.q.db.execute('SELECT phase,desk FROM actions').fetchone()[:], ('uncertain', None))
+
+    def test_cancellation_while_waiting_for_call_slot_leaves_update_unissued(self):
+        self.pr(state='behind')
+        self.q.enqueue(module.REPOS[0], 1, self.approved)
+        original_sleep = module.time.sleep
+        def cancel(seconds):
+            self.q.stopped = True
+            original_sleep(0)
+        real_gh = self.q.gh
+        def delay_update(*args, **kwargs):
+            if 'update-branch' in str(args): self.q.last_gh = time.monotonic() + 1
+            return real_gh(*args, **kwargs)
+        with patch.object(self.q, 'gh', side_effect=delay_update), patch.object(module.time, 'sleep', side_effect=cancel):
+            self.q.tick()
+        self.assertEqual(self.q.db.execute('SELECT phase,attempts FROM actions').fetchone()[:], ('planned', 0))
+        self.assertFalse(any('update-branch' in str(a) for a in self.load()['calls']))
+
     def test_transient_read_failures_have_three_retries(self):
         self.pr(); self.q.enqueue(module.REPOS[0], 1, self.approved)
         for _ in range(8):
@@ -324,6 +383,25 @@ class QueueTests(unittest.TestCase):
             self.restart()
         self.assertEqual(self.q.db.execute('SELECT phase,outcome FROM entries').fetchone()[:],
                          ('exhausted', 'retry_exhausted'))
+
+    def test_issued_merge_observation_exhausts_without_losing_intent(self):
+        self.pr(); self.q.enqueue(module.REPOS[0], 1, self.approved)
+        with self.q.db:
+            self.q.db.execute("UPDATE entries SET phase='merging',tested=?,merge_attempts=1", (self.approved,))
+        reads = 0
+        read = self.q.pr
+        def fail(*args):
+            nonlocal reads
+            reads += 1
+            read(*args)
+            raise RuntimeError('provider observation failed')
+        with patch.object(self.q, 'pr', side_effect=fail):
+            for _ in range(8): self.q.tick()
+        self.assertEqual(reads, 4)
+        self.assertEqual(self.q.db.execute('SELECT phase,tested,outcome FROM entries').fetchone()[:],
+                         ('exhausted', self.approved, 'retry_exhausted'))
+        self.q.reconcile(1)
+        self.assertEqual(self.calls('merge'), [])
 
     def test_auto_enqueue_reactivation_is_capped_at_three(self):
         self.pr()
@@ -351,7 +429,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(len(self.calls('merge')), 1)
         self.assertEqual(self.calls('merge')[0][-1], self.updated)
         posts=[a for a in self.load()['calls'] if any(x.startswith('body=APPROVE') for x in a)]
-        self.assertIn('Reviewed-SHA: '+self.updated, posts[0][-1])
+        self.assertIn('Reviewed-SHA: '+self.updated, next(x for x in posts[0] if x.startswith('body=')))
 
     def test_conflicting_writes_brief_without_resolving(self):
         (self.remote/'file.txt').write_text('main conflict\n')
