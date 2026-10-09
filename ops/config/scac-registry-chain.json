@@ -5744,6 +5744,62 @@
         "catalog_function": "ops.scac_mutation_catalog_v115_current()"
       },
       "migration_sha256": "705a261d13f85c9cdcce6e05e3668a3721a99fc38da33fdbf8cd7cb2f18363c5"
+    },
+    {
+      "number": 116,
+      "version": "scac-mutation-registry.v116",
+      "predecessor": "scac-mutation-registry.v115",
+      "digest": "sha256:918e548c54c0b5d450d4e03332427a8c02f429d0cd55c6802e37a6c76d6f2a7a",
+      "source_set_digest": "sha256:921ba709b3f7425d48b5e33989263cf7a37bce3848ba03ae18606641242ed557",
+      "catalog_digest": "sha256:c6fc792cd2331cb80180a7004cb8d2263541e2eb1de07169ba27375cfe5203af",
+      "artifact_sha256": "67b3defc79727cf6ba106cad1d40d3494360a259b64c6db0c1eb257299b16863",
+      "path": "mcp-server/src/scac-mutation-registry.current.generated.js",
+      "catalog": {
+        "column_dml": {
+          "count": 15,
+          "digest": "sha256:f7a33d14ce431ba588cc07dff07fc9fd91a0dcdb41112de6fecd390fb42dc098"
+        },
+        "relation_dml": {
+          "count": 320,
+          "digest": "sha256:3fefb729b3fdaf82f58fe9b9704db9fa02939002e1a2bae2bcaac63f45b2c3dc"
+        },
+        "role_authority": {
+          "count": 13,
+          "digest": "sha256:93724fe71ed216afac9b4bf48eee500e693de057cae0b59f59ff8e68cc6a2bc0"
+        },
+        "secdef_execute": {
+          "count": 1257,
+          "digest": "sha256:dd74d434f5b712a170a0be7da5a475db1efea24f55b67ccd474ad63a54b91641"
+        },
+        "job_definitions": {
+          "count": 2,
+          "digest": "sha256:6aaf1872cd46bbac152381573b93ea0baa6b7ce8f9b5de546f96d0d477fee534"
+        },
+        "projection_version": "scac-db-catalog-projection.v116",
+        "runtime_dml_grants": {
+          "count": 335,
+          "digest": "sha256:130b35b793b967487754bc90cc81b5e956aa7b7001a3e712cce711d8c1cf4d0e"
+        }
+      },
+      "commit": "fb782f6bee9d08ae5c30bce8ac898466825232da",
+      "source_count": 1193,
+      "entry_count": 2785,
+      "migration": "migrations/0855_dot_database_design_scac_successor.sql",
+      "entry_set_digest": "sha256:9944e8ca41325947051e0c0d67aee0bdbfc66f457b3337c1c6b9f68ef0d6f799",
+      "atomic_pair": [
+        "0854_dot_database_design.sql",
+        "0855_dot_database_design_scac_successor.sql"
+      ],
+      "strict_atomic": true,
+      "dependencies": [
+        "0853_party_identity_scac_successor.sql",
+        "0854_dot_database_design.sql"
+      ],
+      "snapshot": {
+        "include_current_entry_set": true,
+        "catalog_function": "ops.scac_mutation_catalog_v116_current()"
+      },
+      "migration_sha256": "58401be8ee0c8a866b241f561d2585d4c3cf0255b879b3afce2050512bfb10ac"
     }
   ],
   "atomic_groups": [
@@ -5959,6 +6015,10 @@
     [
       "0852_party_identity_correction_view.sql",
       "0853_party_identity_scac_successor.sql"
+    ],
+    [
+      "0854_dot_database_design.sql",
+      "0855_dot_database_design_scac_successor.sql"
     ]
   ],
   "strict_atomic_groups": [
@@ -6125,6 +6185,10 @@
     [
       "0852_party_identity_correction_view.sql",
       "0853_party_identity_scac_successor.sql"
+    ],
+    [
+      "0854_dot_database_design.sql",
+      "0855_dot_database_design_scac_successor.sql"
     ]
   ],
   "inactive_atomic_groups": [
