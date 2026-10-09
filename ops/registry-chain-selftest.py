@@ -10,6 +10,24 @@ from registry_chain import registry_chain, snapshot_selection, validate_chain, s
 
 
 class RegistryChain(unittest.TestCase):
+    def test_feature_switches_are_atomic_and_selected_after_their_predecessor(self):
+        chain = registry_chain()
+        domain = '0854_feature_switches.sql'
+        successor = '0855_feature_switches_scac_successor.sql'
+        rows = [row for row in chain['versions'] if row['migration'] == 'migrations/' + successor]
+        self.assertEqual(len(rows), 1, 'feature switches must be admitted by the canonical chain')
+        row = rows[0]
+        predecessor = chain['versions'][row['number'] - 2]
+        self.assertIn([domain, successor], chain['atomic_groups'])
+        self.assertIn([domain, successor], chain['strict_atomic_groups'])
+        ledger = [Path(predecessor['migration']).name, domain, successor]
+        selected = successor_snapshot_selection(ledger, predecessor['number'], chain)
+        self.assertEqual(selected['SCAC_CURRENT_NUMBER'], str(row['number']))
+        self.assertEqual(selected['SCAC_EXPECTED_CURRENT_DIGEST'], row['digest'].removeprefix('sha256:'))
+        self.assertEqual(successor_snapshot_selection(ledger[:-1], predecessor['number'], chain), {})
+        with self.assertRaisesRegex(ValueError, 'dependency'):
+            successor_snapshot_selection(ledger[1:], predecessor['number'], chain)
+
     def test_generated_successor_passes_the_snapshot_seal_loader(self):
         root = Path(__file__).resolve().parents[1]
         script = """import {appendSuccessor,registryChain} from './ops/registry-chain.mjs';

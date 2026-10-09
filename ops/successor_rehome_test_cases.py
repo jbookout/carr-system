@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from git_env import fixture_env
+from git_env import fixture_env, clone_checkout_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,11 +15,14 @@ ROOT = Path(__file__).resolve().parents[1]
 class SuccessorCommands(unittest.TestCase):
     def test_generated_successor_rehome_uses_all_current_main_predecessor_inputs(self):
         from unittest.mock import patch
-        subprocess.run(['git', 'clone', '--quiet', '--shared', str(ROOT), str(self.repo / 'source')],
-                       env=self.env, check=True, capture_output=True)
+        clone_checkout_fixture(ROOT, self.repo / 'source', self.env)
         self.repo = self.repo / 'source'
         self.git('config', 'user.name', 'Fixture')
         self.git('config', 'user.email', 'fixture@example.invalid')
+        if self.git('diff', '--cached', '--name-only'):
+            message = self.repo / '.git/fixture-message'
+            message.write_text('Snapshot pending tracked checkout changes\n')
+            self.git('commit', '-q', '-F', str(message))
         self.git('remote', 'set-url', 'origin', str(self.repo))
         self.git('switch', '-C', 'main', 'HEAD')
         self.git('switch', '-qc', 'feature')

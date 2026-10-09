@@ -649,6 +649,19 @@ def f05_rule_contract_binder_is_a_write():
     return passed
 
 
+def feature_switch_writes_are_not_verification():
+    positives = ("set-feature-switch", "flip-feature-switch", "check-feature-switches")
+    negatives = ("list-feature-switches", "check-feature-preview", "flip-feature-preview")
+    passed = all(mod.is_write_action(action) for action in positives)
+    passed = passed and not any(mod.is_write_action(action) for action in negatives)
+    for action in positives:
+        passed = passed and not mod.verification(f"mcp__carr__{action}", {})
+        passed = passed and not mod.verification("functions.exec", f"await tools.mcp__carr__{action.replace('-', '_')}({{}});")
+    passed = passed and mod.verification("mcp__carr__list-feature-switches", {})
+    print(f"{'PASS' if passed else 'FAIL'}  feature switch writes cannot supply read verification")
+    return passed
+
+
 def registry_prefix_coverage(*, required=False):
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -1126,6 +1139,7 @@ def main():
     outcomes.append(cre_lifecycle_writes_are_writes())
     outcomes.append(f05_rule_contract_binder_is_a_write())
     outcomes.append(registry_prefix_coverage())
+    outcomes.append(feature_switch_writes_are_not_verification())
     outcomes.append(authority_family_coverage())
     outcomes.append(r03_notification_classification())
     outcomes.append(doc_conversation_write_door_classification())

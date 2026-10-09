@@ -43,6 +43,7 @@ stops covering GIT_LOCATION_VARS — the hook keeps its own literal list on
 purpose (see the note there) and that case is what stops the two drifting.
 """
 import os
+import subprocess
 
 # Every variable git consults BEFORE the working directory. Sourced from
 # git(1)'s environment section rather than from memory, and deliberately
@@ -111,3 +112,15 @@ def fixture_env(base=None):
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     return env
+
+
+def clone_checkout_fixture(source, target, base=None):
+    """Clone history and apply the checkout's pending tracked changes to a fixture."""
+    env = fixture_env(base)
+    subprocess.run(["git", "clone", "-q", "--shared", str(source), str(target)],
+                   env=env, check=True, capture_output=True)
+    patch = subprocess.check_output(["git", "diff", "--binary", "HEAD"],
+                                    cwd=source, env=env)
+    if patch:
+        subprocess.run(["git", "apply", "--index"], input=patch,
+                       cwd=target, env=env, check=True, capture_output=True)
