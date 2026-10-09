@@ -12,8 +12,8 @@ from registry_chain import registry_chain, snapshot_selection, validate_chain, s
 class RegistryChain(unittest.TestCase):
     def test_feature_switches_are_atomic_and_selected_after_their_predecessor(self):
         chain = registry_chain()
-        domain = '0849_feature_switches.sql'
-        successor = '0850_feature_switches_scac_successor.sql'
+        domain = '0854_feature_switches.sql'
+        successor = '0855_feature_switches_scac_successor.sql'
         rows = [row for row in chain['versions'] if row['migration'] == 'migrations/' + successor]
         self.assertEqual(len(rows), 1, 'feature switches must be admitted by the canonical chain')
         row = rows[0]
