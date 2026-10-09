@@ -179,7 +179,12 @@ def open_prs(cwd: str) -> tuple[str, list[dict]]:
                         if not isinstance(item[key], str) or not item[key]:
                             raise ValueError('invalid PR file')
                         paths.append(item[key])
-            owners.append({'number': number, 'title': pr['title'], 'files': paths})
+            # A draft labelled do_not_merge is parked, not being built: its
+            # overlap is reported but does not refuse the job.
+            held = pr.get('draft') is True and any(
+                isinstance(label, dict) and label.get('name') == 'do_not_merge'
+                for label in pr.get('labels') or [])
+            owners.append({'number': number, 'title': pr['title'], 'files': paths, 'held': held})
         return repo, owners
     except (RuntimeError, OSError, ValueError, KeyError, TypeError) as exc:
         raise DeskError('ownership_unreadable', f'cannot verify open PR ownership: {exc}') from exc
@@ -324,6 +329,10 @@ def reserve(row: dict, cwd: str, writes: list[str]) -> dict:
         for pr in prs:
             if pr['number'] != mine and any(fnmatchcase(file, pattern)
                     for file in pr['files'] for pattern in writes):
+                if pr.get('held'):
+                    print(f"warning: write set overlaps held draft PR {pr['number']} "
+                          f"({pr['title']}); it must rebase before it can merge", file=sys.stderr)
+                    continue
                 raise DeskError('write_set_overlap', f"write set owned by PR {pr['number']} "
                     f"({pr['title']}); build on top of PR {pr['number']}")
         for previous in claims.values():
