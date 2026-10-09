@@ -26,8 +26,8 @@ def load(path):
 
 
 class GrokHookBoundaryTests(unittest.TestCase):
-    def test_context_wrapper_delegates_to_protected_probe(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+    def test_context_wrapper_reaches_protected_probe_without_process_readback(self):
+        meter = load(ROOT / 'lib/hook_execution.py')
         from hooks import grok_invocation as boundary
         with mock.patch.dict(os.environ, {}, clear=True), \
                 mock.patch.object(boundary, 'grok_session', return_value=False) as called, \
@@ -80,7 +80,7 @@ class GrokHookBoundaryTests(unittest.TestCase):
             self.assertFalse(boundary.grok_session())
 
     def test_meter_skips_context_hooks_only_for_grok_sessions(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        meter = load(ROOT / 'lib/hook_execution.py')
         self.assertIn('rule-boot-gate.py', meter.GROK_CONTEXT_HOOKS)
         self.assertNotIn('guard-unattended.py', meter.GROK_CONTEXT_HOOKS)
         with mock.patch.object(meter, 'grok_session', return_value=True), \
@@ -129,6 +129,8 @@ class GrokHookBoundaryTests(unittest.TestCase):
                 self.assertNotEqual(integrity.current()[helper.name], before)
             # Drive the strict checker itself on a copied fixture. No mutation
             # of this checkout, live wiring, or provider state is needed.
+            (root / "lib").mkdir()
+            shutil.copy(ROOT / "lib/hook_runtime.py", root / "lib/hook_runtime.py")
             shutil.copy(ROOT / 'hooks/gate-integrity.py', hooks)
             config = root / 'ops/config'
             config.mkdir(parents=True)
@@ -223,7 +225,7 @@ int main(int argc, char **argv) {
             meter_probe = scratch / 'meter-probe.py'
             meter_probe.write_text('import importlib.util, sys\n'
                 'spec = importlib.util.spec_from_file_location("meter", ' +
-                repr(str(ROOT / 'hooks/hook-meter-run.py')) + ')\n'
+                repr(str(ROOT / 'lib/hook_execution.py')) + ')\n'
                 'meter = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(meter)\n'
                 'sys.argv = ["meter", ' + repr(str(ROOT / 'hooks/rule-boot-gate.py')) +
                 ']\nsys.exit(meter.main())\n')
@@ -286,7 +288,7 @@ int main(int argc, char **argv) {
                 self.assertEqual(env.get('CARR_GROK_RUN_READ_ONLY'), None if writable else '1')
 
     def test_context_hooks_skip_before_reading_payload_or_running_target(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        meter = load(ROOT / 'lib/hook_execution.py')
         for target in ('gate-integrity.py', 'rule-boot-gate.py', 'context-handoff-gate.py',
                        'session-presence-hook.py', 'rule-pack-preuse-reselection.py',
                        'rule-pack-drift-gate.py', 'chat-lint-carryover.py'):
@@ -314,7 +316,7 @@ int main(int argc, char **argv) {
             self.test_effect_guard_runs_and_context_hooks_run_without_exemption()
 
     def test_meter_has_no_unused_read_only_adapter(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        meter = load(ROOT / 'lib/hook_execution.py')
         self.assertFalse(hasattr(meter, 'bounded_grok_read_only'))
 
     def test_both_policies_use_the_same_owner_readback(self):
@@ -328,7 +330,7 @@ int main(int argc, char **argv) {
             self.assertEqual(owner.call_count, 2)
 
     def test_effect_guard_runs_and_context_hooks_run_without_exemption(self):
-        meter = load(ROOT / 'hooks/hook-meter-run.py')
+        meter = load(ROOT / 'lib/hook_execution.py')
         for target, bounded in (('guard-unattended.py', True),
                                 ('guard-unattended.py', False),
                                 ('rule-boot-gate.py', False)):

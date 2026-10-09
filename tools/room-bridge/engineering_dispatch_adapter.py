@@ -727,6 +727,7 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
                 hydration["source_merge_required"], envelope),
         env=_safe_child_env(), fresh=True,
         config_overrides=AUTHORIZED_CODEX_CONFIG_OVERRIDES,
+        codex_timeout_s=EXECUTOR_TIMEOUT_SECONDS,
     )
     if not isinstance(row, dict) or row.get("status") != "completed":
         status = row.get("status") if isinstance(row, dict) else "invalid"

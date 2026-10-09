@@ -402,122 +402,130 @@ def is_tracked(rel_path):
     return bool(out.strip())
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        dlog(f"ALLOW(parse-error) {exc}")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _parse_error(exc):
+    dlog(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    dlog(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    if tool not in EDIT_TOOLS:
+        sys.exit(0)
+    ti = payload.get("tool_input") or payload.get("toolInput") or {}
+    path = (ti.get("file_path") or ti.get("filePath") or "") if isinstance(ti, dict) else ""
+    if not path:
         sys.exit(0)
 
-    try:
-        tool = payload.get("tool_name") or payload.get("toolName") or ""
-        if tool not in EDIT_TOOLS:
-            sys.exit(0)
-        ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        path = (ti.get("file_path") or ti.get("filePath") or "") if isinstance(ti, dict) else ""
-        if not path:
-            sys.exit(0)
+    ap = os.path.realpath(os.path.expanduser(path))
 
-        ap = os.path.realpath(os.path.expanduser(path))
+    if not (ap == REPO or ap.startswith(REPO + os.sep)):
+        dlog(f"ALLOW(outside-repo) {tool} {path}")
+        sys.exit(0)                                # not our tree at all
 
-        if not (ap == REPO or ap.startswith(REPO + os.sep)):
-            dlog(f"ALLOW(outside-repo) {tool} {path}")
-            sys.exit(0)                                # not our tree at all
+    if in_worktree(ap):
+        dlog(f"ALLOW(worktree) {tool} {path}")
+        sys.exit(0)                                # the remedy itself
 
-        if in_worktree(ap):
-            dlog(f"ALLOW(worktree) {tool} {path}")
-            sys.exit(0)                                # the remedy itself
+    rel = os.path.relpath(ap, REPO)
 
-        rel = os.path.relpath(ap, REPO)
+    if not is_tracked(rel):
+        dlog(f"ALLOW(untracked) {tool} {rel}")
+        sys.exit(0)                                # nothing shared to clobber yet
 
-        if not is_tracked(rel):
-            dlog(f"ALLOW(untracked) {tool} {rel}")
-            sys.exit(0)                                # nothing shared to clobber yet
+    # From here the write is genuinely aimed at a tracked file in the
+    # shared integration tree. There is no escape hatch on this path any
+    # more (R02 disposition 3).
+    reason = (
+        "CANONICAL EDIT GATE — refused.\n\n"
+        f"'{rel}' is tracked by git and sits in ~/carr-system itself — the "
+        "SHARED integration tree, not a session's own copy. Worktree-per-"
+        "session is this repo's active rule: a session takes its own "
+        "worktree BEFORE its first write to a tracked canonical file, and "
+        "this checkout is for merged, reviewed integration only.\n\n"
+        "DO THIS INSTEAD — run this command as written, then work in the "
+        "tree it prints:\n"
+        f"    {WORKTREE_COMMAND}\n"
+        "    cd .claude/worktrees/<name>\n"
+        "Then edit, commit, push and open a PR from there. `--from "
+        "origin/main` matters: the canonical checkout runs chronically "
+        "behind origin, so branching from its HEAD starts you on stale "
+        "code.\n\n"
+        "This rule already binds at commit (ops/githooks/pre-commit refuses "
+        "`main`) and at push (the server ruleset is PR-only) — this is the "
+        "same rule, caught at the moment it actually starts: the first "
+        "edit, before any of that dirty state exists.\n\n"
+        "STILL ALLOWED, and unaffected by this refusal: new untracked "
+        "files anywhere in this checkout (out/, receipts, scratch), and "
+        "anything inside any registered worktree of this repo.\n\n"
+        "THERE IS NO ENVIRONMENT-VARIABLE BYPASS FOR THIS GATE. The former "
+        "CARR_ALLOW_CANONICAL_EDIT hatch was removed deliberately (Repo "
+        "Hygiene Program R02): a scoped tracked-file edit from a session is "
+        "the hole that let dirt accumulate in the shared tree. If you "
+        "believe this specific edit must happen in the canonical checkout "
+        "and not in a worktree, say so and let a human decide — do not "
+        "route around this gate.\n"
+    )
 
-        # From here the write is genuinely aimed at a tracked file in the
-        # shared integration tree. There is no escape hatch on this path any
-        # more (R02 disposition 3).
-        reason = (
-            "CANONICAL EDIT GATE — refused.\n\n"
-            f"'{rel}' is tracked by git and sits in ~/carr-system itself — the "
-            "SHARED integration tree, not a session's own copy. Worktree-per-"
-            "session is this repo's active rule: a session takes its own "
-            "worktree BEFORE its first write to a tracked canonical file, and "
-            "this checkout is for merged, reviewed integration only.\n\n"
-            "DO THIS INSTEAD — run this command as written, then work in the "
-            "tree it prints:\n"
+    current = mode()
+    audit({"ts": now(), "hook": "canonical-edit-gate",
+           "classes": ["canonical_tree_edit"],
+           "patterns": ["canonical-edit:tracked-file"],
+           "session": payload.get("session_id"), "path": rel,
+           "mode": current,
+           "decision": {"enforcing": "deny", "announce": "allow-announced",
+                        "shadow": "allow-observed"}[current]})
+
+    if current == "shadow":
+        # Recorded, invisible to the session. The audit row above is the
+        # entire output: this is what a week of "how often would it have
+        # fired, and on what?" looks like before anything is refused.
+        dlog(f"SHADOW(would-deny) {tool} {rel}")
+        sys.exit(0)
+
+    if current == "announce":
+        note = (
+            "CANONICAL EDIT GATE — announced, not refused.\n\n"
+            f"This edit to the tracked canonical file '{rel}' was ALLOWED "
+            "because the gate is in `announce` mode. Under `enforcing` it "
+            "would have been refused. The remedy is the same either way:\n"
             f"    {WORKTREE_COMMAND}\n"
             "    cd .claude/worktrees/<name>\n"
-            "Then edit, commit, push and open a PR from there. `--from "
-            "origin/main` matters: the canonical checkout runs chronically "
-            "behind origin, so branching from its HEAD starts you on stale "
-            "code.\n\n"
-            "This rule already binds at commit (ops/githooks/pre-commit refuses "
-            "`main`) and at push (the server ruleset is PR-only) — this is the "
-            "same rule, caught at the moment it actually starts: the first "
-            "edit, before any of that dirty state exists.\n\n"
-            "STILL ALLOWED, and unaffected by this refusal: new untracked "
-            "files anywhere in this checkout (out/, receipts, scratch), and "
-            "anything inside any registered worktree of this repo.\n\n"
-            "THERE IS NO ENVIRONMENT-VARIABLE BYPASS FOR THIS GATE. The former "
-            "CARR_ALLOW_CANONICAL_EDIT hatch was removed deliberately (Repo "
-            "Hygiene Program R02): a scoped tracked-file edit from a session is "
-            "the hole that let dirt accumulate in the shared tree. If you "
-            "believe this specific edit must happen in the canonical checkout "
-            "and not in a worktree, say so and let a human decide — do not "
-            "route around this gate.\n"
+            "Recorded to out/conduct-gate.jsonl."
         )
-
-        current = mode()
-        audit({"ts": now(), "hook": "canonical-edit-gate",
-               "classes": ["canonical_tree_edit"],
-               "patterns": ["canonical-edit:tracked-file"],
-               "session": payload.get("session_id"), "path": rel,
-               "mode": current,
-               "decision": {"enforcing": "deny", "announce": "allow-announced",
-                            "shadow": "allow-observed"}[current]})
-
-        if current == "shadow":
-            # Recorded, invisible to the session. The audit row above is the
-            # entire output: this is what a week of "how often would it have
-            # fired, and on what?" looks like before anything is refused.
-            dlog(f"SHADOW(would-deny) {tool} {rel}")
-            sys.exit(0)
-
-        if current == "announce":
-            note = (
-                "CANONICAL EDIT GATE — announced, not refused.\n\n"
-                f"This edit to the tracked canonical file '{rel}' was ALLOWED "
-                "because the gate is in `announce` mode. Under `enforcing` it "
-                "would have been refused. The remedy is the same either way:\n"
-                f"    {WORKTREE_COMMAND}\n"
-                "    cd .claude/worktrees/<name>\n"
-                "Recorded to out/conduct-gate.jsonl."
-            )
-            dlog(f"ANNOUNCE(would-deny) {tool} {rel}")
-            # Structured allow on STDOUT with exit 0 — the same announce shape
-            # gate-edit-gate.py uses, so the two doors cannot drift.
-            print(json.dumps({
-                "systemMessage": note,
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": note,
-                },
-            }))
-            sys.exit(0)
-
-        dlog(f"DENY {tool} {rel}")
-        # Exit 2, not JSON: on a build that does not parse the structured
-        # contract, exit 0 reads as ALLOW and the gate fails open silently —
-        # same convention as every deny path in this family.
-        print(reason, file=sys.stderr)
-        sys.exit(2)
-
-    except Exception as exc:
-        dlog(f"ALLOW(internal-error) {exc}")
+        dlog(f"ANNOUNCE(would-deny) {tool} {rel}")
+        # Structured allow on STDOUT with exit 0 — the same announce shape
+        # gate-edit-gate.py uses, so the two doors cannot drift.
+        print(json.dumps({
+            "systemMessage": note,
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": note,
+            },
+        }))
         sys.exit(0)
+
+    dlog(f"DENY {tool} {rel}")
+    # Exit 2, not JSON: on a build that does not parse the structured
+    # contract, exit 0 reads as ALLOW and the gate fails open silently —
+    # same convention as every deny path in this family.
+    print(reason, file=sys.stderr)
+    sys.exit(2)
+
+
+def main():
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

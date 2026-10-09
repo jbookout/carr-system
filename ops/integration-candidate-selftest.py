@@ -302,6 +302,10 @@ class RestoreForwardTests(unittest.TestCase):
             def run(self,command,*,env=None,cwd=None,capture=False):
                 args=tuple(map(str,command));outer.events.append(args);outer.envs.append(dict(env or {}))
                 if fail and fail(args,env): return pg.CommandResult(4,'','private-canary-123')
+                # The fake starts no postmaster. A failed stop must be followed
+                # by pg_ctl's explicit "not running" status acknowledgement;
+                # status 0 would instead require the runner to retain data.
+                if args[0]=='/fake/pg_ctl' and args[-1]=='status': return pg.CommandResult(3,'','')
                 return pg.CommandResult(0,'{}' if args[-1]=='--fingerprint-only' else '','')
         binding={'base':'a'*40,'head':'b'*40,'tree':'c'*40}
         source=([binding,binding,{**binding,'tree':'d'*40}] if moved=='canonical' else

@@ -1007,16 +1007,17 @@ with tempfile.TemporaryDirectory() as directory:
     def _raise_with_secret(*_args, **_kwargs):
         raise RuntimeError("transcript read failed for " + secret)
     old_log, old_stdin = getattr(gate, "LOG"), sys.stdin
-    old_reader = getattr(gate, "load_transcript")
+    from lib.hook_runtime import Event
+    old_reader = Event.transcript
     setattr(gate, "LOG", str(Path(directory) / "shadow.jsonl"))
-    setattr(gate, "load_transcript", _raise_with_secret)
+    setattr(Event, "transcript", _raise_with_secret)
     sys.stdin = io.StringIO(json.dumps({"transcript_path": str(transcript),
                                         "session_id": "secret-test"}))
     try:
         gate.main()
     finally:
         setattr(gate, "LOG", old_log)
-        setattr(gate, "load_transcript", old_reader)
+        setattr(Event, "transcript", old_reader)
         sys.stdin = old_stdin
     persisted = Path(directory, "shadow.jsonl").read_text()
     error_row = json.loads(persisted)
