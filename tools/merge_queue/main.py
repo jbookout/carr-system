@@ -50,6 +50,10 @@ class ActionExhausted(RuntimeError):
     pass
 
 
+class GitHubExhausted(RuntimeError):
+    pass
+
+
 class Cancelled(Exception):
     pass
 
@@ -89,10 +93,11 @@ def command(argv, *, cwd=None, data=None, timeout=120, observe=None):
                                                          'base branch policy prohibits')):
             raise MergeRejected('GitHub rejected the merge; verify provider state before retry')
         status = re.search(r'HTTP (4[0-9]{2})', p.stderr)
-        if argv[:2] == ['gh', 'api'] and status and gh_api_read(argv):
+        read = (argv[:2] == ['gh', 'api'] and gh_api_read(argv)) or argv[:3] == ['gh', 'pr', 'checks']
+        if argv[0] == 'gh' and status and read:
             raise ReadRejected(f'GitHub read rejected (HTTP {status[1]}); reread before retry')
-        if argv[0] == 'gh' and (argv[1] == 'api' or argv[1:3] == ['pr', 'edit']) and status:
-            raise ActionRejected('GitHub rejected the action; reread before retry')
+        if argv[0] == 'gh' and status:
+            raise ActionRejected(f'GitHub rejected the action (HTTP {status[1]}); reread before retry')
         # Child stderr can contain authenticated URLs. Keep it in the child's domain.
         raise RuntimeError(f'{Path(argv[0]).name} {argv[1]} failed (exit {p.returncode})')
     return p.stdout
@@ -118,6 +123,10 @@ class Queue:
             CREATE TABLE IF NOT EXISTS actions (
                 key TEXT PRIMARY KEY, kind TEXT NOT NULL, repo TEXT NOT NULL, pr INTEGER NOT NULL,
                 head TEXT NOT NULL, payload TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'planned', desk TEXT);
+            CREATE TABLE IF NOT EXISTS github_failures (
+                scope TEXT NOT NULL, key TEXT NOT NULL, is_read INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL, entry_id INTEGER,
+                PRIMARY KEY(scope,key));
         ''')
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
@@ -125,6 +134,7 @@ class Queue:
                 'entries': {'merge_attempts': 'INTEGER NOT NULL DEFAULT 0',
                             'transient_attempts': 'INTEGER NOT NULL DEFAULT 0',
                             'read_attempts': 'INTEGER NOT NULL DEFAULT 0',
+                            'github_attempts': 'INTEGER NOT NULL DEFAULT 0',
                             'auto_attempts': 'INTEGER NOT NULL DEFAULT 0',
                             'ci_since': 'REAL', 'ci_head': 'TEXT'},
                 'actions': {'attempts': 'INTEGER NOT NULL DEFAULT 0', 'expected_base': 'TEXT',
@@ -139,6 +149,8 @@ class Queue:
         self.stopped = False
         self._lock_depth = 0
         self._next_page = None
+        self._github_scope = 'automatic'
+        self._github_entry = None
         self.children: dict[str, subprocess.Popen] = {}
 
     @contextmanager
@@ -158,7 +170,54 @@ class Queue:
         if self.stopped:
             raise Cancelled()
 
-    def gh(self, *args):
+    @contextmanager
+    def github_scope(self, scope):
+        old = self._github_scope, self._github_entry
+        self._github_scope, self._github_entry = scope, None
+        try:
+            yield
+        finally:
+            self._github_scope, self._github_entry = old
+
+    def gh(self, *args, decode=False, validate=None):
+        operation = list(args)
+        for index, arg in enumerate(operation):
+            if arg.startswith(('body=', 'expected_head_sha=')):
+                operation[index] = arg.split('=', 1)[0] + '='
+            elif index and operation[index - 1] == '--match-head-commit':
+                operation[index] = '<head>'
+        key = hashlib.sha256(json.dumps(operation, separators=(',', ':')).encode()).hexdigest()
+        failure = self.db.execute('SELECT * FROM github_failures WHERE scope=? AND key=?',
+                                  (self._github_scope, key)).fetchone()
+        if failure and failure['attempts'] >= MAX_ATTEMPTS:
+            raise GitHubExhausted(f'{failure["detail"]}; exhausted {MAX_ATTEMPTS} GitHub attempts')
+        if self._github_entry is not None:
+            attempts = self.db.execute('SELECT github_attempts FROM entries WHERE id=?',
+                                       (self._github_entry,)).fetchone()[0]
+            if attempts >= MAX_ATTEMPTS:
+                raise GitHubExhausted(f'Entry exhausted {MAX_ATTEMPTS} GitHub attempts')
+        read = gh_api_read(['gh', *args]) if args[0] == 'api' else args[:2] == ('pr', 'checks')
+        try:
+            return self._gh_request(args, decode, validate)
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+            detail = str(exc) if isinstance(exc, (ReadRejected, ActionRejected, MergeRejected)) else 'GitHub command or response failed'
+            with self.db:
+                self.db.execute('INSERT INTO github_failures(scope,key,is_read,attempts,detail,entry_id) VALUES(?,?,?,1,?,?) '
+                                'ON CONFLICT(scope,key) DO UPDATE SET attempts=attempts+1,detail=excluded.detail,entry_id=COALESCE(github_failures.entry_id,excluded.entry_id)',
+                                (self._github_scope, key, int(read), detail, self._github_entry))
+                if self._github_entry is not None:
+                    self.db.execute('UPDATE entries SET github_attempts=github_attempts+1 WHERE id=?', (self._github_entry,))
+                attempts = self.db.execute('SELECT attempts FROM github_failures WHERE scope=? AND key=?',
+                                           (self._github_scope, key)).fetchone()[0]
+                if self._github_entry is not None:
+                    attempts = max(attempts, self.db.execute('SELECT github_attempts FROM entries WHERE id=?',
+                                                            (self._github_entry,)).fetchone()[0])
+            if isinstance(exc, (KeyError, TypeError, ValueError)):
+                exc = RuntimeError(detail)
+            exc.github_attempts = attempts
+            raise exc
+
+    def _gh_request(self, args, decode, validate):
         resource = resource_for(list(args))
         delay = max(self.budget.reserve(resource), self.gap - (time.monotonic() - self.last_gh))
         end = time.monotonic() + max(0, delay)
@@ -176,31 +235,77 @@ class Queue:
             out = command(['gh', *args, *(['--include'] if include else [])], cwd=self.root, observe=observe)
             headers, body = split_response(out)
             self._next_page = bool(re.search(r';\s*rel="next"', headers.get('link', ''))) if out.startswith('HTTP/') else None
-            return body if include else out
+            result = body if include else out
+            if decode:
+                result = json.loads(result)
+                if args[:2] == ('api', 'graphql') and (not isinstance(result, dict) or result.get('errors')):
+                    raise RuntimeError('GitHub GraphQL response contains errors')
+                if validate is not None:
+                    validate(result)
+            return result
         finally:
             self.last_gh = time.monotonic()
 
-    def api(self, path, *args):
-        return json.loads(self.gh('api', path, *args))
+    def api(self, path, *args, validate=None):
+        return self.gh('api', path, *args, decode=True, validate=validate)
 
     def api_pages(self, path, collection=None):
         pages = []
         for page in range(1, 161):
             separator = '&' if '?' in path else '?'
-            data = self.api(f'{path}{separator}page={page}')
+            def validate(data):
+                rows = data[collection] if collection else data
+                if not isinstance(rows, list):
+                    raise ValueError('GitHub did not return a page list')
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise ValueError('GitHub returned an invalid page row')
+                    if '/pulls?' in path:
+                        self.validate_pr(row, summary=True)
+                        if not isinstance(row['title'], str):
+                            raise ValueError('GitHub returned an invalid PR title')
+                    elif '/comments?' in path:
+                        if not isinstance(row['body'], str):
+                            raise ValueError('GitHub returned an invalid comment')
+                    elif '/check-runs?' in path:
+                        if not isinstance(row['id'], int) or not isinstance(row['name'], str):
+                            raise ValueError('GitHub returned an invalid check run')
+                        if not isinstance(row['status'], str) or row['conclusion'] is not None and not isinstance(row['conclusion'], str):
+                            raise ValueError('GitHub returned an invalid check run')
+                        app = row.get('app', {})
+                        if not isinstance(app, dict) or app.get('id') is not None and not isinstance(app['id'], int):
+                            raise ValueError('GitHub returned an invalid check run')
+                    elif '/statuses?' in path:
+                        if not isinstance(row['context'], str) or not isinstance(row['state'], str):
+                            raise ValueError('GitHub returned an invalid status')
+                    elif '/files?' in path:
+                        if not isinstance(row['filename'], str):
+                            raise ValueError('GitHub returned an invalid filename')
+                if page == 160 and (self._next_page is True or self._next_page is None and len(rows) >= 100):
+                    raise RuntimeError('GitHub pagination limit reached; refusing partial read')
+            data = self.api(f'{path}{separator}page={page}', validate=validate)
             rows = data[collection] if collection else data
-            if not isinstance(rows, list):
-                raise ValueError('GitHub did not return a page list')
             pages.extend(rows)
             if self._next_page is False or (self._next_page is None and len(rows) < 100):
                 return pages
-        raise RuntimeError('GitHub pagination limit reached; refusing partial read')
 
     def pages(self, path):
         return self.api_pages(path)
 
     def pr(self, repo, n):
-        return self.api(f'repos/{repo}/pulls/{n}')
+        return self.api(f'repos/{repo}/pulls/{n}', validate=self.validate_pr)
+
+    def validate_pr(self, p, summary=False):
+        if not isinstance(p, dict) or p.get('state') not in ('open', 'closed'):
+            raise ValueError('GitHub did not return a PR')
+        if not isinstance(p['number'], int) or not SHA.fullmatch(p['head']['sha']) or not SHA.fullmatch(p['base']['sha']):
+            raise ValueError('GitHub returned an incomplete PR')
+        if not isinstance(p['head']['ref'], str) or not isinstance(p['base']['ref'], str) or not p['head']['ref'] or not p['base']['ref']:
+            raise ValueError('GitHub returned an incomplete PR')
+        if not isinstance(p.get('labels', []), list) or any(not isinstance(x['name'], str) for x in p.get('labels', [])):
+            raise ValueError('GitHub returned invalid PR labels')
+        if not summary and not p.get('merged') and not isinstance(p.get('mergeable_state'), str):
+            raise ValueError('GitHub returned an incomplete PR')
 
     def held(self, p):
         return HOLD in {x['name'] for x in p.get('labels', [])}
@@ -314,7 +419,10 @@ class Queue:
         if any(r['status'] != 'completed' or r['conclusion'] not in ('success', 'skipped', 'neutral')
                for r in latest.values()) or any(s['state'] != 'success' for s in contexts.values()):
             return False
-        checks = json.loads(self.gh('pr', 'checks', str(n), '-R', repo, '--required', '--json', 'bucket'))
+        def validate(checks):
+            if not isinstance(checks, list) or any(not isinstance(c, dict) or 'bucket' not in c for c in checks):
+                raise ValueError('GitHub did not return required checks')
+        checks = self.gh('pr', 'checks', str(n), '-R', repo, '--required', '--json', 'bucket', decode=True, validate=validate)
         return all(c['bucket'] in ('pass', 'skipping') for c in checks)
 
     def action(self, kind, repo, n, head, payload, expected_base=None):
@@ -470,7 +578,15 @@ class Queue:
         for a in self.db.execute("SELECT * FROM actions WHERE kind='dispatch' AND phase='planned' ORDER BY rowid").fetchall():
             if self.stopped:
                 return
-            p = self.pr(a['repo'], a['pr'])
+            try:
+                p = self.pr(a['repo'], a['pr'])
+            except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                with self.db:
+                    exhausted = isinstance(exc, GitHubExhausted) or getattr(exc, 'github_attempts', 0) >= MAX_ATTEMPTS
+                    if exhausted:
+                        self.db.execute("UPDATE actions SET phase='exhausted',desk=NULL WHERE key=?", (a['key'],))
+                    self.event(a['repo'], a['pr'], 'dispatch_exhausted' if exhausted else 'dispatch_waiting', str(exc))
+                continue
             if self.held(p):
                 continue
             if p['head']['sha'] != a['head'] or p['state'] != 'open':
@@ -618,6 +734,7 @@ class Queue:
     def _tick_repo(self, queued_repo):
         for e in self.db.execute("SELECT * FROM entries WHERE repo=? AND phase IN ('pending','merging','merge_rejected','refreshing') ORDER BY id", (queued_repo,)).fetchall():
             repo, n, approved = e['repo'], e['pr'], e['approved']
+            self._github_entry = None if e['phase'] == 'merge_rejected' else e['id']
             try:
                 p = self.pr(repo, n)
                 if p.get('merged'):
@@ -708,6 +825,8 @@ class Queue:
                     self.db.execute("UPDATE entries SET phase='merging',tested=?,merge_attempts=merge_attempts+1 WHERE id=?", (head, e['id']))
                 try:
                     self.gh('pr', 'merge', str(n), '-R', repo, '--squash', '--match-head-commit', head)
+                except ActionRejected as exc:
+                    raise MergeRejected(str(exc)) from exc
                 except Cancelled:
                     with self.db:
                         self.db.execute("UPDATE entries SET phase='pending',merge_attempts=merge_attempts-1 WHERE id=?", (e['id'],))
@@ -719,49 +838,55 @@ class Queue:
                 return
             except ActionExhausted as exc:
                 self.report(e, 'action_exhausted', str(exc), 'exhausted')
-                return
+                continue
+            except GitHubExhausted as exc:
+                self.report(e, 'github_exhausted', str(exc), 'blocked')
+                continue
             except ReadRejected as exc:
-                with self.db:
-                    self.db.execute('UPDATE entries SET read_attempts=read_attempts+1 WHERE id=?', (e['id'],))
-                    attempts = self.db.execute('SELECT read_attempts FROM entries WHERE id=?', (e['id'],)).fetchone()[0]
-                exhausted = attempts >= MAX_ATTEMPTS
-                self.report(e, 'read_exhausted' if exhausted else 'read_rejected',
-                            f'{exc}; {attempts} of {MAX_ATTEMPTS} read attempts', 'blocked' if exhausted else None)
-                if exhausted:
+                if self.failure(e, str(exc), 'read_attempts', 'read_rejected', 'read_exhausted', 'blocked', exc):
                     continue
                 return
             except ActionRejected as exc:
-                self.report(e, 'action_rejected', str(exc))
+                if self.failure(e, str(exc), 'transient_attempts', 'action_rejected', 'action_exhausted', 'blocked', exc):
+                    continue
                 return
             except Cancelled:
                 return
             except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-                self.retry(e, str(exc))
+                if self.retry(e, str(exc), exc):
+                    continue
                 return
+            finally:
+                self._github_entry = None
 
-    def retry(self, e, detail):
+    def failure(self, e, detail, counter, pending, exhausted_outcome, phase, exc=None):
         with self.db:
-            self.db.execute('UPDATE entries SET transient_attempts=transient_attempts+1 WHERE id=?', (e['id'],))
-            attempts = self.db.execute('SELECT transient_attempts FROM entries WHERE id=?', (e['id'],)).fetchone()[0]
-        # Exhaustion stops polling; tested and merge_attempts retain any issued intent for reconciliation.
+            self.db.execute(f'UPDATE entries SET {counter}={counter}+1 WHERE id=?', (e['id'],))
+            attempts = self.db.execute(f'SELECT {counter} FROM entries WHERE id=?', (e['id'],)).fetchone()[0]
+        attempts = max(attempts, getattr(exc, 'github_attempts', 0))
         exhausted = attempts >= MAX_ATTEMPTS
-        self.report(e, 'retry_exhausted' if exhausted else 'retry', detail,
-                    'exhausted' if exhausted else None)
+        self.report(e, exhausted_outcome if exhausted else pending,
+                    f'{detail}; {attempts} of {MAX_ATTEMPTS} attempts', phase if exhausted else None)
+        return exhausted
+
+    def retry(self, e, detail, exc=None):
+        return self.failure(e, detail, 'transient_attempts', 'retry', 'retry_exhausted', 'exhausted', exc)
 
     def merge_pending(self, repo, n, expected):
         owner, name = repo.split('/')
         query = ('query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){'
                  'pullRequest(number:$n){headRefOid state autoMergeRequest{enabledAt} mergeQueueEntry{id}}}}')
-        data = self.api('graphql', '-f', f'query={query}', '-f', f'owner={owner}', '-f', f'repo={name}', '-F', f'n={n}')
-        if data.get('errors'):
-            raise RuntimeError('merge intent readback unavailable')
+        def validate(data):
+            p = data['data']['repository']['pullRequest']
+            if p['headRefOid'] != expected or p['state'] != 'OPEN':
+                raise RuntimeError('merge intent readback changed; retry observation')
+            p['autoMergeRequest'], p['mergeQueueEntry']
+        data = self.api('graphql', '-f', f'query={query}', '-f', f'owner={owner}', '-f', f'repo={name}', '-F', f'n={n}', validate=validate)
         p = data['data']['repository']['pullRequest']
-        if p['headRefOid'] != expected or p['state'] != 'OPEN':
-            raise RuntimeError('merge intent readback changed; retry observation')
         return p['autoMergeRequest'] is not None or p['mergeQueueEntry'] is not None
 
     def reconcile(self, entry, retry=False):
-        with self.runner_lock():
+        with self.runner_lock(), self.github_scope(f'reconcile:{entry}'):
             self._reconcile(entry, retry)
 
     def _reconcile(self, entry, retry=False):
@@ -771,8 +896,7 @@ class Queue:
         p = self.pr(e['repo'], e['pr'])
         if p.get('merged'):
             if retry:
-                with self.db:
-                    self.db.execute('UPDATE entries SET transient_attempts=0,read_attempts=0 WHERE id=?', (entry,))
+                self.rearm_reads(entry)
                 self.report(e, 'reconciled', 'Provider reports merged; resume commit confirmation and post-merge refresh', 'merging')
             return
         if self.held(p) or p['base']['ref'] != 'main':
@@ -783,12 +907,18 @@ class Queue:
             if e['merge_attempts'] >= MAX_ATTEMPTS:
                 self.report(e, 'merge_exhausted', 'Provider readback complete; merge attempt cap reached', 'exhausted')
             else:
+                self.rearm_reads(entry)
                 self.report(e, 'reconciled', 'Explicit retry after exact-head provider readback proved no pending merge', 'pending')
         else:
             self.report(e, 'retry_available', 'Provider proved no pending merge; explicit reconcile --retry can rearm it')
 
+    def rearm_reads(self, entry):
+        with self.db:
+            self.db.execute('UPDATE entries SET transient_attempts=0,read_attempts=0,github_attempts=0 WHERE id=?', (entry,))
+            self.db.execute("DELETE FROM github_failures WHERE scope='automatic' AND is_read=1 AND entry_id=?", (entry,))
+
     def reconcile_action(self, key, retry=False):
-        with self.runner_lock():
+        with self.runner_lock(), self.github_scope('reconcile-action:' + hashlib.sha256(key.encode()).hexdigest()):
             self._reconcile_action(key, retry)
 
     def _reconcile_action(self, key, retry=False):
