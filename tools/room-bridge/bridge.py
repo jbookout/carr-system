@@ -335,11 +335,12 @@ def scan_for_result(log_path: Path, offset: int) -> str | None:
 
 def probe_live(entry: dict) -> bool:
     kind = entry.get("kind")
+    if kind == "claude-session" and entry.get("room_seat") == "flash":
+        return True  # Demand dispatch starts this desk; probes must not load it.
     if kind in ("claude-session", "codex-live"):
         return desks.is_live(entry.get("socket", ""))
     if kind == "flash-local":
-        # the Flash server is a local process with a health endpoint; a queue task waits while it is down
-        return flash_wire.is_up()
+        return True  # A claimed task, rather than a bridge heartbeat, starts Flash.
     # claude-desktop and codex-session are durable rather than live
     # (dispatch.py's own framing) —
     # there is no process to probe between dispatches, so "live" here means
@@ -541,7 +542,9 @@ def deliver(name: str, entry: dict, seat: str, queued_turn: dict, *, state: dict
             return {"desk": name, "outcome": "replied_sync"}
         add_room_turn(
             body=json.dumps({"desk": name, "status": status,
-                             "detail": row.get("detail")}, separators=(",", ":")),
+                             "detail": row.get("detail"),
+                             **({key: row[key] for key in ("next_route", "diagnostic_path") if key in row}
+                                if kind == "grok-cli" else {})}, separators=(",", ":")),
             seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
         )
         return {"desk": name, "outcome": f"failed:{status}"}
@@ -714,6 +717,13 @@ def settle_restarts(desk_entries: dict, auth_by_desk: dict, state: dict, *,
         settled.append({"desk": desk, **{k: v for k, v in result.items() if k != "detail"}})
     return settled
 
+
+
+def queue_dispatch_kwargs(entry: dict) -> dict:
+    """A Codex job from the queue gets a limit inside its claim, never the router default."""
+    if entry.get("kind") in ("codex-session", "codex-live"):
+        return {"codex_timeout_s": kanban_adapter.QUEUE_CODEX_TIMEOUT_S}
+    return {}
 
 def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAULT_STATE,
              room: str = DEFAULT_ROOM, results_path: Path | None = None,
@@ -925,7 +935,8 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
 
                     def dispatch_queue(prompt: str) -> dict:
                         return dispatch_fn(
-                            name, prompt, registry=registry, results_path=results_path)
+                            name, prompt, registry=registry, results_path=results_path,
+                            **queue_dispatch_kwargs(entry))
 
                     # Flash and Grok have no MCP tools of their own. Their
                     # synchronous answers must reach the room through this

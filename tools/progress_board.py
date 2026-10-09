@@ -12,6 +12,7 @@ all-repos board is built here from gh data on every publish.
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import fcntl
 import functools
@@ -20,7 +21,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import time
 import sys
@@ -35,7 +35,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 
-STATUSES = ("queued", "running", "review", "blocked", "done", "failed", "superseded")
+STATUSES = ("queued", "running", "review", "blocked", "question-for-orchestrator", "done", "failed", "superseded")
 # Failed and superseded cards leave the pipeline: they show only in History,
 # each with its reason.
 RETIRED_STATUSES = ("failed", "superseded")
@@ -55,6 +55,7 @@ STATUS_TO_STAGE = {
     "running": "build",
     "review": "review",
     "blocked": "review",
+    "question-for-orchestrator": "review",
     "failed": "ci",
     "superseded": "ci",
 }
@@ -582,42 +583,49 @@ def checks_summary(payload: dict[str, Any]) -> str:
     return f"{passed} pass · {pending} pending · {failed} fail"
 
 
-# launchd starts jobs with PATH=/usr/bin:/bin:/usr/sbin:/sbin, where Homebrew's
-# gh is invisible; a silent "no gh" there left every PR card frozen.
-GH_FALLBACKS = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh")
+def repo_lib(name: str) -> ModuleType:
+    """A lib/ module from the bound repository, imported when first used, so
+    an extracted copy still loads and reports what it cannot reach."""
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    return importlib.import_module(f"lib.{name}")
 
 
 def gh_binary() -> str | None:
     if os.environ.get("PROGRESS_BOARD_SKIP_GH"):
         return None
-    found = shutil.which("gh")
-    if found:
-        return found
-    return next((path for path in GH_FALLBACKS if os.access(path, os.X_OK)), None)
+    return repo_lib("github_reader").resolve_gh()
 
 
 def log(message: str) -> None:
     print(f"progress-board: {message}", file=sys.stderr)
 
 
+# The board re-renders on a short interval and keeps the last known state when
+# a read fails, so one quick retry is worth having and a long wait is not.
+GH_RETRY_DELAYS = (2,)
+
+
+@functools.lru_cache(maxsize=None)
+def gh_reader(binary: str, timeout: int) -> Any:
+    """One lib/github_reader reader per binary and timeout for the whole run,
+    so a GitHub outage costs one retry cycle per render rather than one per read."""
+    return repo_lib("github_reader").GitHubReader(gh=binary, timeout=timeout,
+                                                  retry_delays=GH_RETRY_DELAYS)
+
+
 def gh_text(args: list[str], timeout: int = 30) -> str:
     binary = gh_binary()
     if binary is None:
         raise RuntimeError("gh CLI unavailable")
-    try:
-        result = subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"gh {' '.join(args[:2])} failed: {exc}") from exc
-    if result.returncode != 0:
-        raise RuntimeError(f"gh {' '.join(args[:2])} failed: {(result.stderr or result.stdout).strip()[:200]}")
-    return result.stdout
+    return gh_reader(binary, timeout).text(args)
 
 
 def gh_json(args: list[str], timeout: int = 30) -> Any:
-    try:
-        return json.loads(gh_text(args, timeout))
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"gh {' '.join(args[:2])} returned invalid JSON") from exc
+    binary = gh_binary()
+    if binary is None:
+        raise RuntimeError("gh CLI unavailable")
+    return gh_reader(binary, timeout).json(args)
 
 
 # All GitHub reads for a render share this pass, including the all-repos
@@ -1853,31 +1861,28 @@ def refresh_and_publish(project: str) -> None:
                          f"Retry: tools/progress_board.py render {project} --publish")
 
 
-def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> None:
+def mutate(project: str, change: Callable[[dict[str, Any]], bool | None], *, refresh: bool = True) -> bool:
     """Read, change and write one board as a single locked transaction, then
     refresh and publish it."""
     with board_lock(project):
         state = read_state(project)
         if change(state) is False:
-            return
+            return False
         state["updated_at"] = stamp()
         write_json(state)
-    refresh_and_publish(project)
+    if refresh:
+        refresh_and_publish(project)
+    return True
 
 
 def call_verb(verb: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Use the existing noninteractive local-token route; no model is involved."""
-    repo = REPO_ROOT
-    result = subprocess.run(
-        [str(repo / "run.sh"), "call", verb, json.dumps(args, sort_keys=True, separators=(",", ":"))],
-        cwd=repo, capture_output=True, text=True, timeout=30, check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(f"{verb} failed: {(result.stderr or result.stdout).strip()[:500]}")
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{verb} returned invalid JSON") from exc
+    """Use the existing noninteractive local-token route; no model is involved.
+    Anything short of an explicit ok:true reply raises."""
+    record_call = repo_lib("record_call")
+    result = record_call.call_verb(verb, args, timeout=30)
+    payload = result.reply
+    if not result.ok and result.kind != record_call.REFUSED:
+        raise RuntimeError(result.describe())
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         raise RuntimeError(f"{verb} refused: {payload.get('error', 'unknown result') if isinstance(payload, dict) else 'invalid result'}")
     return payload
@@ -1933,9 +1938,22 @@ def fit_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
-    """The versioned data contract the app page renders. Deterministic for a
-    given state. Full diagnostics stay local; the app receives bounded cards."""
+@functools.cache
+def cost_snapshot_reader() -> Callable:
+    """Use the collector's validation contract without importing a provider client."""
+    path = Path(__file__).resolve().with_name("system_costs.py")
+    spec = importlib.util.spec_from_file_location("carr_system_costs", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("system cost snapshot reader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.load_snapshot
+
+
+def board_snapshot(state: dict[str, Any], *, costs=None) -> dict[str, Any]:
+    """The versioned data contract the app page renders, including fresh local
+    cost evidence. Full diagnostics stay local; the app receives bounded cards."""
     tasks = {}
     all_tasks = state.get("tasks") or {}
     for task_id, task in all_tasks.items():
@@ -1973,6 +1991,7 @@ def board_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         # When GitHub facts were last checked and verified, and what failed:
         # a card kept from before an outage is never shown as fresh.
         "github_sync": state.get("github_sync"),
+        "costs": costs if costs is not None else cost_snapshot_reader()(REPO_ROOT / "out" / "system-costs.json", now=now_utc()),
         "omitted": {"live": 0, "merged": 0, "history": 0},
         "updated_at": state.get("updated_at"),
     })
@@ -2020,12 +2039,12 @@ def publish_external_inventory(cache: dict[str, Any]) -> dict[str, Any]:
             'schema': 'system-work-external.v2', 'pages': pages, 'item_count': len(cache['items'])}
 
 
-def publish_board(project: str) -> dict[str, int]:
+def publish_board(project: str, *, costs=None) -> dict[str, int]:
     state = read_state(project)
     board = safe_project(project)
     before = call_verb("read-progress-board", {"board_id": board})
     remote_snapshot = before.get("snapshot")
-    snapshot = board_snapshot(state)
+    snapshot = board_snapshot(state, costs=costs)
     if board == "carr-v5":
         from system_work_cache import cached_github
         snapshot["external_inventory"] = publish_external_inventory(cached_github(board_dir() / "system-work-github-cache.json",
@@ -2182,7 +2201,8 @@ def command_render(args: argparse.Namespace) -> None:
         publish_board(args.project)
     if args.project == LAUNCHD_BOARD:
         poll_board_answers(args.project)
-        # The system-wide board rides the same two-minute job, after the
+        publish_needs_joe_local()
+        # The system-wide board rides the same scheduled job, after the
         # project board so a gh outage never holds that one back. A failed
         # rebuild is logged and the last known board is published again.
         try:
@@ -2192,6 +2212,22 @@ def command_render(args: argparse.Namespace) -> None:
             if not state_path(ALL_REPOS_BOARD).exists():
                 return
         publish_board(ALL_REPOS_BOARD)
+
+
+def publish_needs_joe_local() -> None:
+    """Publish the machine-local half of governance-queue's needs_joe list.
+    A failure is logged and left for the verb to report: it marks the page
+    stale after two hours, so a dead publisher shows on Joe's list itself."""
+    def pr_state(repo: str, number: int) -> dict[str, Any]:
+        return gh_json(["pr", "view", str(number), "--repo", repo, "--json", "state,title"])
+    try:
+        import needs_joe_local
+
+        count = needs_joe_local.publish(call_verb, stable_key, pr_state,
+                                        needs_joe_local.read_source(), stamp())
+        log(f"needs-joe local page published with {count} item(s)")
+    except Exception as exc:
+        log(f"needs-joe local page not published: {exc}")
 
 
 def command_poll(args: argparse.Namespace) -> None:
@@ -2216,25 +2252,40 @@ def command_init(args: argparse.Namespace) -> None:
     }
     with board_lock(args.project):
         create_json(state)
-    refresh_and_publish(args.project)
+    if getattr(args, "costs", None) is not None:
+        publish_board(args.project, costs=args.costs)
+    else:
+        refresh_and_publish(args.project)
 
 
 def command_task(args: argparse.Namespace) -> None:
     expected = json.loads(args.expected_task) if args.expected_task is not None else None
     if args.expected_task is not None and not isinstance(expected, dict):
         raise SystemExit("--expected-task must be a task object")
+    receipt = {"applied": False, "before": None, "after": None}
     def change(state):
+        before = copy.deepcopy(state.get("tasks", {}).get(args.task_id))
+        receipt["before"] = before
         if expected is not None and any(
                 state.get("tasks", {}).get(args.task_id, {}).get(key) != value
                 for key, value in expected.items()):
+            receipt["after"] = before
             return False
         update_task(state, args)
-    mutate(args.project, change)
+        receipt["applied"] = True
+        receipt["after"] = copy.deepcopy(state["tasks"][args.task_id])
+    mutate(args.project, change, refresh=not args.defer_refresh)
+    if args.receipt:
+        print(json.dumps(receipt, separators=(",", ":")))
 
 
 def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
     task_time = stamp()
     prior = state.setdefault("tasks", {}).get(args.task_id, {})
+    if prior and args.creation_defaults:
+        args = copy.copy(args)
+        for field in ("title", "executor", "provider", "model", "effort"):
+            setattr(args, field, None)
     if not prior and not all((args.title, args.status, args.executor)):
         raise SystemExit("new tasks require --title, --status, and --executor")
     stage = "live" if args.stage == "measured" else args.stage
@@ -2295,6 +2346,7 @@ def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
             task["blocked_reason"] = args.reason.strip()
     if args.next_action is not None:
         task["next_action"] = args.next_action.strip()
+    settle_done_without_pr(task)
     normalize_task(task)
     finished = task.get("status") == "done" or task_stage(task) == "live"
     if not finished and (task.get("status") == "blocked" or task.get("health") == "blocked"):
@@ -2400,6 +2452,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--provider")
     task.add_argument("--model")
     task.add_argument("--effort")
+    task.add_argument("--creation-defaults", action="store_true",
+                      help="apply title and executor metadata only when creating a task")
     task.add_argument("--summary")
     task.add_argument("--pr", type=int)
     task.add_argument("--repo")
@@ -2410,6 +2464,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--next-action", dest="next_action", help="what unblocks it (required with blocked)")
     task.add_argument("--lane", choices=("status", "needs-joe"))
     task.add_argument("--expected-task", help="update only if these task fields still match this JSON object")
+    task.add_argument("--receipt", action="store_true", help="print the locked before/after task mutation receipt")
+    task.add_argument("--defer-refresh", action="store_true", help="save the task without refreshing or publishing the board")
     task.add_argument("--note")
     task.add_argument("--evidence")
     task.add_argument("--delivery-target", choices=("worker", "app", "workstation", "database", "manual"),

@@ -46,7 +46,7 @@ VERIFICATION IS A STATUS CODE, NEVER A VALUE. Cloudflare's token-verify
 endpoint and GitHub's /user endpoint are both probed with the token, and only
 the HTTP status (plus, for Cloudflare, the `result.status` field) is read back
 — the response body is otherwise discarded. CLAUDE_CODE_OAUTH_TOKEN has no
-verify probe: presence is all this tool can attest to for it.
+live verify probe: only the inventory-owned token syntax is checked here.
 
 NO SEAL. This is a local operator script — no verb, no verb schema/flags, no
 worker route, no job definition — so per the SCAC successor seal procedure a
@@ -63,13 +63,18 @@ import getpass
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Callable, cast
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.credential_shape import valid_claude_token, claude_token_hint
 
 ENV_DIR = os.path.expanduser("~/.config/carr")
 TOKENS_ENV = os.path.join(ENV_DIR, "tokens.env")
@@ -165,6 +170,18 @@ def github_shape_hint(value: str) -> str:
     return hint
 
 
+def verify_claude_shape(token: str) -> tuple[bool, str]:
+    # `claude setup-token` wraps the token across two Terminal lines, so a
+    # one-line copy saves a short value that only fails later with HTTP 401.
+    if valid_claude_token(token):
+        return True, "shape checked (no live probe)"
+    return False, "not a complete setup-token value; copy both wrapped lines as one"
+
+
+def claude_shape_hint(value: str) -> str:
+    return claude_token_hint(value)
+
+
 # NAME -> {"target": <path under ~/.config/carr/>, "verify": callable | None,
 #          "shape_hint": callable | None}
 # Room for more: add an entry here, nothing else needs to change to support it.
@@ -181,8 +198,8 @@ CREDENTIALS: dict[str, dict[str, object]] = {
     },
     "CLAUDE_CODE_OAUTH_TOKEN": {
         "target": TOKENS_ENV,
-        "verify": None,
-        "shape_hint": None,
+        "verify": verify_claude_shape,
+        "shape_hint": claude_shape_hint,
     },
 }
 
@@ -204,6 +221,7 @@ def write_env_line(path: str, name: str, value: str) -> None:
     printed, or placed anywhere but this file.
     """
     directory = os.path.dirname(path) or "."
+    value = shlex.quote(value)
     os.makedirs(directory, mode=0o700, exist_ok=True)
     os.chmod(directory, 0o700)
 

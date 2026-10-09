@@ -322,17 +322,22 @@ const DECLARED_CHECK_NAMES = Object.freeze([
   "ops/ci.sh --strict --only replay",
   "ops/ci.sh --strict --only migration",
   "local-db-ci --class migration",
+  "DB shadow shard 1/2",
+  "DB shadow shard 2/2",
+  "shadow-aggregate",
   "is anything that should be reporting not reporting",
-  "main canary (gates, migration, types, freshness)",
+  "main canary",
+  "Resolve exact-tree PR evidence",
   "merge",
   "measure",
+  "CI flake proposals",
   "Backup artifact",
 ]);
 
 /**
  * GitHub's own ceiling on a check run's name. Nothing caller-supplied is ever
  * measured against it — the enumeration above already refuses every length but
- * the ten it holds. It is here so the enumeration is measured against it: the
+ * the declared names it holds. The enumeration is measured against it: the
  * self-check below refuses to let this module load carrying a name with a
  * newline, a control character, or more bytes than GitHub would store, which is
  * the way a future edit to the list gets caught at import rather than at a

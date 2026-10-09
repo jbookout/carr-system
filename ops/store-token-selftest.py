@@ -333,6 +333,28 @@ def test_claude_oauth_token_has_no_verify_probe():
             st.CREDENTIALS.update(original)
 
 
+def test_claude_oauth_token_truncated_paste_refused():
+    """setup-token wraps the 108-character token across two Terminal lines; a
+    paste of only the first line (79 characters, 2026-10-06) was saved and then
+    failed with HTTP 401. The real entry must refuse it and write nothing."""
+    with scratch_env_file() as target:
+        original = dict(st.CREDENTIALS)
+        try:
+            st.CREDENTIALS["CLAUDE_CODE_OAUTH_TOKEN"] = {**original["CLAUDE_CODE_OAUTH_TOKEN"], "target": target}
+            short = "sk-ant-oat01-" + "a" * 66
+            rc, _out, err, clip = _run("CLAUDE_CODE_OAUTH_TOKEN", short)
+            check("truncated Claude token refused", rc != 0)
+            check("truncated Claude token wrote nothing", not os.path.exists(target))
+            check("refusal names the expected length", "108" in err and short not in err)
+            check("clipboard kept after refusal", not clip)
+            full = "sk-ant-oat01-" + "b" * 95
+            rc, _out, _err, _clip = _run("CLAUDE_CODE_OAUTH_TOKEN", full)
+            check("full-length Claude token saved", rc == 0 and full in open(target, encoding="utf-8").read())
+        finally:
+            st.CREDENTIALS.clear()
+            st.CREDENTIALS.update(original)
+
+
 def test_http_status_helper_never_raises_on_http_error_status():
     """verify_cloudflare/verify_github read a status code, including 4xx/5xx,
     without the tool crashing -- only a genuine network failure should raise
@@ -369,6 +391,49 @@ def test_http_status_helper_never_raises_on_http_error_status():
         _urlreq.urlopen = original_urlopen  # type: ignore[assignment]
 
 
+def test_claude_malformed_pastes_preserve_credential_and_clipboard():
+    prefix = "sk-ant-oat01-"
+    for bad in (" ", "\n", "\t", "$(true)", "`true`", "'", '"', ";", "\\", "é"):
+        value = prefix + "a" * (108 - len(prefix) - len(bad) - 1) + bad + "b"
+        with scratch_env_file() as target:
+            before = b"CLAUDE_CODE_OAUTH_TOKEN=previous-value\n"
+            Path(target).write_bytes(before)
+            before_mtime = Path(target).stat().st_mtime_ns
+            entry = st.CREDENTIALS["CLAUDE_CODE_OAUTH_TOKEN"]
+            st.CREDENTIALS["CLAUDE_CODE_OAUTH_TOKEN"] = {**entry, "target": target}
+            try:
+                rc, out, err, clip = _run("CLAUDE_CODE_OAUTH_TOKEN", value)
+                check(f"Claude malformed {bad!r} refused without write or clipboard clear",
+                      rc != 0 and Path(target).read_bytes() == before
+                      and Path(target).stat().st_mtime_ns == before_mtime and not clip)
+                check(f"Claude malformed {bad!r} never echoed", value not in out + err)
+            finally:
+                st.CREDENTIALS["CLAUDE_CODE_OAUTH_TOKEN"] = entry
+
+
+def test_claude_save_health_shape_parity():
+    spec = importlib.util.spec_from_file_location("token_health_parity", REPO / "ops/credential-health.py")
+    assert spec is not None and spec.loader is not None
+    health: Any = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(health)
+    inventory = json.loads((REPO / "ops/config/credential-inventory.v1.json").read_text())
+    cred = next(c for c in inventory["credentials"] if c["probe"]["type"] == "claude_cli_token_age")
+    health.WHICH = lambda _: "synthetic-claude"
+    health.SUBPROCESS_RUN = lambda *a, **k: __import__("subprocess").CompletedProcess(a, 0, stdout="PONG")
+    for value, expected in (("sk-ant-oat" + "x" * 98, True),
+                            ("sk-ant-oat01-" + "x" * 95, True),
+                            ("sk-ant-oat" + "x" * 97, False),
+                            ("z" * 108, False),
+                            ("sk-ant-oat" + "x" * 90 + "$(true)z", False)):
+        with scratch_env_file() as target:
+            Path(target).write_text(f"CLAUDE_CODE_OAUTH_TOKEN='{value}'\n")
+            Path(target).chmod(0o600)
+            result = health.evaluate_credential({**cred, "probe": {**cred["probe"], "path": target}})
+            saved, _ = st.verify_claude_shape(value)
+            check("Claude save and health share the expected shape verdict",
+                  saved == (result.bucket == "ok") == expected)
+
+
 def main() -> int:
     test_writes_target_and_never_leaks_value()
     test_other_lines_preserved_and_replace_is_exact()
@@ -380,6 +445,9 @@ def main() -> int:
     test_github_shape_hint_flags_missing_prefix_and_spaces()
     test_claude_oauth_token_has_no_shape_hint()
     test_claude_oauth_token_has_no_verify_probe()
+    test_claude_oauth_token_truncated_paste_refused()
+    test_claude_malformed_pastes_preserve_credential_and_clipboard()
+    test_claude_save_health_shape_parity()
     test_http_status_helper_never_raises_on_http_error_status()
 
     if FAILURES:

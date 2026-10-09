@@ -663,6 +663,25 @@ class EndToEnd(unittest.TestCase):
         out = self.run_check(f"no-eval: session-instructions: {NoEvalLines.REASON}")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
+    def test_research_tasks_need_their_own_exemption_when_hooks_also_change(self):
+        self.commit("hooks/guard-unattended.py", "print('changed')\n")
+        tasks = ("contact-enrichment-weekly", "content-fuel-harvest-weekly",
+                 "deal-history-research-weekly", "social-batch-weekly")
+        for task in tasks:
+            self.commit(f"ops/scheduled-tasks/{task}.SKILL.md",
+                        "Read the research-site index, then search the open web.\n")
+        body = f"no-eval: context-hooks: {NoEvalLines.REASON}"
+        out = self.run_check(body)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        failures = self.fails(out)
+        self.assertEqual(len(failures), 1, out.stderr)
+        self.assertIn("session-instructions changed", failures[0])
+        for task in tasks:
+            self.assertIn(f"{task}.SKILL.md", failures[0])
+        out = self.run_check(body + f"\nno-eval: session-instructions: {NoEvalLines.REASON}")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("2 surface(s) touched", out.stdout)
+
     def fails(self, out) -> list[str]:
         return [line for line in out.stderr.splitlines() if "FAIL" in line]
 
@@ -1184,7 +1203,7 @@ class RuleDeliveryEvidenceChain(unittest.TestCase):
         for path, digest in {
             "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
             "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
-            "ops/rule_trigger_compile.py": "356aed19e2c4fc0f90da04e2d0461bdedf5820e88c97c9f3a70fc88f3d43fcb1",
+            "ops/rule_trigger_compile.py": "26e0595e793aaba54df070f206edfa9d72f33d861f77741e0f3947bf7dbccdce",
         }.items():
             self.assertEqual(deps.get(path), digest, path)
 
