@@ -14,7 +14,9 @@ export PATH=/Users/booko/carr-system/out/orch/bin:$PATH   # gh limiter + call lo
 # LANES (Joe 2026-10-01: "squeeze as much out of dot as possible while its free"): run several feeders at once,
 # LANE=1..N. Each claims a brief with an atomic mv into claim/, so no two lanes send the same job; only lane 1
 # resumes interrupted jobs. Run ONE lane: the Dot works one job at a time and takes the newest brief, so a second lane's queued job starves (measured 2026-10-01).
-D=${0:A:h}; R=/Users/booko/carr-system; Q=$D/queue; LANE=${LANE:-1}
+D=${0:A:h}; R=${D:h:h:h};
+export CARR_ORCH_DIR=${D:h}
+ Q=$D/queue; LANE=${LANE:-1}
 mkdir -p $Q $D/sent $D/failed $D/reports $D/claim
 LOG=$D/feeder.log; STATE=$HOME/.local/state/dot-relay
 PICKUP=1800; SILENT=1800; OVERDUE=5400   # 30 min pickup: the Dot runs one job at a time and queues the next (measured 2026-10-01), so a queued job waits for the current one
@@ -25,10 +27,7 @@ log(){ print -r -- "$(date '+%Y-%m-%dT%H:%M:%S%z') [lane $LANE] $*" >> $LOG; }
 locked(){ ioreg -n Root -d1 -a 2>/dev/null | grep -A1 IOConsoleLocked | grep -q true; }
 wait_unlock(){ locked || return 0; log "screen locked: Dot cannot see; holding"; print -r -- "screen locked since $(date '+%H:%M'): unlock this Mac" > $D/FEEDER-LOCKED
   while locked; do sleep 60; done; rm -f $D/FEEDER-LOCKED; log "screen unlocked: resuming"; }
-# research jobs answer in thread prose without a report marker: on their stall, harvest the thread as the report (2026-10-06)
-harvest(){ [[ $1 == *-LS-* || $1 == *-RP-* || $1 == *-E2E-* ]] || return 1; local t=${2##*thread }; t=${t%%[^0-9.]*}
-  local n; n=$($R/.venv/bin/python $D/harvest-thread.py $t $1 2>>$LOG) || return 1; log "HARVESTED $1: $n chars from thread $t"; }
-stall(){ harvest $1 "$2" && exit 0; log "STALLED $1: $2"; print -r -- "$1: $2" > $D/FEEDER-STALLED; mv $D/sent/$1.md $D/failed/ 2>/dev/null; exit ${3:-2}; }
+stall(){ log "STALLED $1: $2"; print -r -- "$1: $2" > $D/FEEDER-STALLED; mv $D/sent/$1.md $D/failed/ 2>/dev/null; exit ${3:-2}; }
 # file_report <name>: file a saved report into the record layer (bin/dot-file-reports, PR 1475). A filing
 # failure never stops the Dot: the report stays on disk and the next filer run picks it up.
 file_report(){ [ -x $R/bin/dot-file-reports ] || { log "filing skipped $1: filer not on main yet"; return 0; }
@@ -86,6 +85,9 @@ run_job(){
     RETRY=0; stall $name "relay ended rc=$rc with no report, thread $ts" 2
   fi
 }
+for helper in $D/dot-thread-age.py $D/dot-autofill.py $R/bin/dot-review.py $R/bin/dot-relay; do
+  [ -f "$helper" ] || { print -u2 -- "feeder dependency missing: $helper"; exit 9; }
+done
 log "feeder start pid $$"; rm -f $D/FEEDER-STALLED
 # resume any sent brief that has no report yet
 [ $LANE = 1 ] && for b in $D/sent/*.md(N); do   # glob, never ls: an empty (N) glob makes ls list the cwd (2026-10-02 it claimed _to_delete)
@@ -94,6 +96,7 @@ log "feeder start pid $$"; rm -f $D/FEEDER-STALLED
   [ -n "$ts" ] && { log "resume $name thread $ts"; run_job $name $ts; }
 done
 while true; do
+  python3 $R/bin/dot-review.py --orch ${D:h} drain 2>>$LOG || { log "review submission pending recovery"; sleep 60; continue; }
   nf=$(python3 $R/bin/dot-review.py --orch ${D:h} adopt 2>>$LOG) || { log "Dot adoption failed"; sleep 60; continue; }
   # Paid-token-saving support briefs precede idle review filler.
   support=( $Q/SUPPORT-*.md(N) )

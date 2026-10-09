@@ -483,7 +483,7 @@ class Queue:
             return
         try:
             receipt = command([sys.executable, str(router), '--orch', str(self.root / 'out/orch'),
-                               'request', repo, str(n)], timeout=900)
+                               'submit', repo, str(n)], timeout=BOUNDS['command']['seconds'])
             with self.db:
                 self.event(repo, n, 'review_handoff', receipt[-2000:])
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
@@ -556,6 +556,8 @@ class Queue:
     def covered(self, repo, approved, head):
         if approved == head:
             return True
+        if getattr(self, '_dot_reviews', {}).get((repo, approved)):
+            return False
         self.fetch(repo, approved, head)
         old = self.patch(repo, approved)
         return bool(old and old == self.patch(repo, head))
@@ -569,8 +571,9 @@ class Queue:
         last = REVIEW['deciding_verdict'](independent, cfg)
         if last and REVIEW['verdict'](last.get('body', ''), cfg) == 'approve':
             sha = REVIEW['reviewed_header_sha'](last.get('body', ''))
-            if 'Reviewer: ChatGPT Dot' in last.get('body', '') and sha != self.pr(repo, n)['head']['sha']:
-                return None
+            if not hasattr(self, '_dot_reviews'):
+                self._dot_reviews = {}
+            self._dot_reviews[(repo, sha)] = 'Reviewer: ChatGPT Dot' in last.get('body', '')
             return sha
         return None
 

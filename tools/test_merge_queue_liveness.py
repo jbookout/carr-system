@@ -30,6 +30,7 @@ EXERCISED_BOUNDS: set[str] = set()
 
 # Fixed test-owned site identities: adding a registry row cannot grant coverage.
 FAULT_SITES = {
+    'review_handoff': ('main.py:Queue.request_review:call:1',),
     'snapshot_cap': (
         'main.py:bounded_items:for:1',
         'main.py:gh_api_read:for:1',
@@ -686,6 +687,30 @@ class LivenessTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 wait_sites(source)
 
+    def test_review_handoff_faults_preserve_review_and_allow_recovery(self):
+        for fault in (OSError('unavailable'), subprocess.TimeoutExpired('submit', 120), RuntimeError('failed')):
+            f = fixture_module.QueueTests()
+            f.setUp()
+            try:
+                router = f.root / 'bin/dot-review.py'
+                router.parent.mkdir(exist_ok=True)
+                router.write_text('# fixture')
+                f.pr()
+                entry = f.q.enqueue(mq.REPOS[0], 1, f.approved)
+                e = f.q.db.execute('SELECT * FROM entries WHERE id=?', (entry,)).fetchone()
+                with patch.object(mq, 'command', side_effect=fault):
+                    f.q.report(e, 'fresh_review', 'head changed', 'review')
+                self.assertEqual(f.q.db.execute('SELECT phase FROM entries WHERE id=?', (entry,)).fetchone()[0], 'review')
+                f.restart()
+                with patch.object(mq, 'command', return_value='submitted durable request') as transport:
+                    f.q.request_review(mq.REPOS[0], 1)
+                self.assertEqual(transport.call_args.kwargs['timeout'], mq.BOUNDS['command']['seconds'])
+                self.assertEqual(transport.call_args.args[0][-3:], ['submit', mq.REPOS[0], '1'])
+                self.assertEqual(f.q.db.execute('SELECT outcome FROM events ORDER BY id DESC LIMIT 1').fetchone()[0], 'review_handoff')
+            finally:
+                f.doCleanups()
+        record_fault('review_handoff')
+
     def test_fault_table_covers_external_call_sites(self):
         source = '\n'.join(p.read_text() for p in sorted((ROOT / 'tools/merge_queue').rglob('*.py')))
         expected = Counter(site for effect in EFFECTS for site in effect.sites)
@@ -694,7 +719,7 @@ class LivenessTests(unittest.TestCase):
         added = source + '\ndef new_effect(self):\n    self.api("new/external/path")\n'
         self.assertNotEqual(census(added), expected)
         known_transports = Counter({
-            ('command', 'subprocess.run'): 1, ('_gh_request', 'command'): 1,
+            ('command', 'subprocess.run'): 1, ('_gh_request', 'command'): 1, ('request_review', 'command'): 1,
             ('flush_events', 'command'): 1, ('git', 'command'): 3, ('git', 'subprocess.run'): 1,
             ('patch', 'command'): 1, ('conflict', 'subprocess.run'): 1,
             ('dispatcher_identity', 'command'): 1, ('_dispatch_conflicts', 'command'): 2,

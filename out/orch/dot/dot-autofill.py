@@ -11,6 +11,11 @@ from datetime import datetime, timedelta
 import sys
 from pathlib import Path
 
+import runpy
+
+REVIEW = runpy.run_path(str(Path(__file__).resolve().parents[3] / "bin/dot-review.py"))
+atomic_brief = REVIEW["atomic_brief"]
+
 D = Path(__file__).resolve().parent
 REPOS = ["jbookout/carr-system", "jbookout/doctorcre-app"]
 HEADER = ("Rules, all required: 1. Read-only, public web and public GitHub only. 2. Never start or "
@@ -22,7 +27,7 @@ HEADER = ("Rules, all required: 1. Read-only, public web and public GitHub only.
 # 2026-10-02 the Dot stopped mid-job (triage-06) to ask which one. dot-thread-age.py accepts both.
 
 def query_prs(repo):
-    r = subprocess.run(["/Users/booko/carr-system/out/orch/bin/gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "30",
+    r = subprocess.run(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "30",
                         "--json", "number,title,headRefOid,isDraft"], capture_output=True, text=True, timeout=60)
     return json.loads(r.stdout or "[]") if r.returncode == 0 else []
 
@@ -122,7 +127,7 @@ def backlog(root, now):
             if not any((root / folder / name).exists() for folder in ("queue", "sent", "claim")):
                 break
             stamp += timedelta(minutes=1)
-        (root / "queue" / name).write_text(f"[orch] JOB {key}. {HEADER} Task: {task}\n")
+        atomic_brief(root / "queue" / name, f"[orch] JOB {key}. {HEADER} Task: {task}\n")
         ledger.write(json.dumps({"at": now.isoformat(), "key": key, "name": name[:-3]}) + "\n")
         return 1
 
@@ -137,8 +142,8 @@ def autofill(root=D, now=None, list_prs=query_prs):
             if pr["isDraft"]:
                 continue
             try:
-                receipt = review["request"](repo, pr["number"], orch=root.parent)
-                written += int(receipt.get("seat") == "dot")
+                receipt = review["request"](repo, pr["number"], orch=root.parent, idle=True)
+                written += int(receipt.get("seat") == "dot" and receipt.get("enqueued") is True and Path(receipt["brief"]).exists())
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 print(f"review routing failed for {repo}#{pr['number']}: {type(exc).__name__}", file=sys.stderr)
     return written

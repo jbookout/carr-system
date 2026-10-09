@@ -9,6 +9,10 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
+import selectors
+import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from lib.secret_redaction import redact_text, sensitive_env_values
 from lib import dot_relay
+
+REVIEW = runpy.run_path(str(ROOT / "ops/release-pipeline.py"))
+REVIEW_CONFIG = json.loads((ROOT / "ops/config/release-pipeline.v1.json").read_text())
 
 REPOS = {'jbookout/carr-system', 'jbookout/doctorcre-app', 'jbookout/software-factory'}
 DOT_MARKER = 'Reviewer: ChatGPT Dot'
@@ -48,7 +55,76 @@ def locked(path):
 
 
 def save(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
     dot_relay._write_json(path, value)
+
+
+def atomic_brief(path, body):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.', suffix='.partial', dir=path.parent)
+    os.close(fd)
+    partial = Path(name)
+    try:
+        partial.write_text(body)
+        with partial.open('rb') as stream:
+            os.fsync(stream.fileno())
+        partial.replace(path)
+        dot_relay._sync_directory(path.parent)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def review_config(repo):
+    return REVIEW_CONFIG['app' if repo == 'jbookout/doctorcre-app' else 'worker']
+
+
+def independent_verdict(comments, repo):
+    stamp = re.compile(r'^APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
+                       r'(?:Orchestrator merge queue:|Orchestrator: verified exact head)')
+    return REVIEW['deciding_verdict']([c for c in comments if not stamp.match(c.get('body', ''))], review_config(repo))
+
+
+def sandbox_command(argv, tree):
+    if sys.platform != 'darwin' or not shutil.which('sandbox-exec'):
+        raise ValueError('restricted test execution unavailable; needs hands-on testing')
+    sandbox = runpy.run_path(str(ROOT / 'tools/flash-run.py'))
+    return sandbox['sandbox_wrap'](argv, str(tree), reads=(str(tree.parent / 'repo.git'),))
+
+
+def run_bounded(argv, tree, env, *, timeout, limit):
+    child = subprocess.Popen(argv, cwd=tree, env=env, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+    assert child.stdout is not None
+    data = bytearray()
+    status = None
+    end = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    status = 'timeout'
+                    break
+                events = selector.select(min(.1, remaining))
+                if events:
+                    block = os.read(child.stdout.fileno(), min(65536, limit - len(data) + 1))
+                    if not block:
+                        break
+                    data.extend(block[:limit - len(data)])
+                    if len(data) >= limit:
+                        status = 'output_limit'
+                        break
+    finally:
+        # Even a completed parent can leave a child holding the output pipe.
+        child.poll()
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait(timeout=5)
+        child.stdout.close()
+    return status or str(child.returncode), data.decode('utf-8', errors='replace')
 
 
 def gh_api(path, **fields):
@@ -104,7 +180,7 @@ def test_commands(tree, files):
 def test_evidence(repo, sha, files, *, origin=None):
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'LC_ALL', 'TMPDIR') if k in os.environ}
     env.update(HOME='/nonexistent', PYTHONDONTWRITEBYTECODE='1', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
-    evidence = [f'SHA: {sha}\nTest checkout is a detached scratch worktree.']
+    evidence = [f'SHA: {sha}\nTest checkout is a detached scratch worktree under an OS execution sandbox.']
     with tempfile.TemporaryDirectory(prefix='dot-review-') as temp:
         bare, tree = Path(temp) / 'repo.git', Path(temp) / 'head'
         def git(*args):
@@ -125,17 +201,8 @@ def test_evidence(repo, sha, files, *, origin=None):
             if remaining <= 0:
                 evidence.append('Remaining modules not run: 480s evidence bound reached.')
                 break
-            with tempfile.TemporaryFile() as output:
-                try:
-                    result = subprocess.run(argv, cwd=tree, env=env, stdout=output, stderr=subprocess.STDOUT,
-                                            timeout=min(120, remaining))
-                    status = str(result.returncode)
-                except subprocess.TimeoutExpired:
-                    status = 'timeout'
-                output.seek(0, 2)
-                size = output.tell()
-                output.seek(max(0, size - tail_bound))
-                tail = output.read().decode('utf-8', errors='replace')
+            status, tail = run_bounded(sandbox_command(argv, tree), tree, env,
+                                       timeout=min(120, remaining), limit=tail_bound)
             evidence.append(f'$ {" ".join(argv)}\nexit: {status}\n{tail}')
     text = redact_text('\n\n'.join(evidence), known_secrets=sensitive_env_values(os.environ))
     return text[:12000] + ('\n[Evidence truncated at 12000 characters.]' if len(text) > 12000 else '')
@@ -151,12 +218,10 @@ def queue_delay(orch):
 def review_brief(meta, evidence, comments):
     repo, n, sha = meta['repo'], meta['pr'], meta['sha']
     job = f'REVIEW-{repo.split("/")[1]}-{n}-{sha}'
-    blocked = [c['body'] for c in comments if c.get('body', '').startswith('REVIEW: BLOCKED')]
-    scope = ('Confirm every original finding in the latest blocked review and regressions in its fix diff. '
-             'Unrelated findings are non-blocking follow-ups.\n' + blocked[-1][:6000]) if blocked else (
-             'Complete review: correctness/edge cases, concurrency, failure paths, security, exposure, '
+    scope = ('Complete review: correctness/edge cases, concurrency, failure paths, security, exposure, '
              'test gaps, contracts, CI, regressions, accessibility where relevant, design and debt. '
-             'Find all blockers in this pass; reproduce each with file:line and input.')
+             'Find all blockers in this pass; reproduce each with file:line and input. '
+             'Check prior findings and their fixes as part of this complete review.')
     return (f'[orch] JOB {job}. Read-only independent review of https://github.com/{repo}/pull/{n} at {sha}. '
             'Public source only; no credentials, client data or encrypted stores. Never delegate, edit, push, '
             'merge, approve by button or enable auto-merge. Read every changed file at this exact SHA and '
@@ -168,26 +233,72 @@ def review_brief(meta, evidence, comments):
 
 
 def launch_paid(receipt):
-    """One recorded Model Room dispatch, with no retry after an uncertain launch."""
+    """Reconcile terminal results; uncertain effects never authorize a second launch."""
     brief = Path(receipt['brief'])
     claim = brief.with_suffix('.launch.json')
+    results = brief.with_suffix('.dispatch.jsonl')
     with locked(claim.with_suffix('.lock')):
-        if claim.exists():
-            return json.loads(claim.read_text())
+        state = json.loads(claim.read_text()) if claim.exists() else {}
+        rows = [json.loads(line) for line in results.read_text().splitlines()] if results.exists() else []
+        if rows:
+            last = rows[-1]
+            if last.get('status') in ('completed', 'delivered'):
+                record = {**state, 'status': last['status'], 'result': last}
+                save(claim, record)
+                return record
+            if last.get('status') in ('failed', 'refused', 'rejected'):
+                state = {**state, 'status': 'failed' if last.get('execution_started') is False else 'uncertain', 'result': last}
+                save(claim, state)
+        if state and state.get('status') != 'failed':
+            if state.get('status') == 'dispatched':
+                try:
+                    os.kill(state['pid'], 0)
+                except ProcessLookupError:
+                    state = {**state, 'status': 'uncertain'}
+                    save(claim, state)
+            return state
         desk = os.environ.get('CARR_REVIEW_CODEX_DESK', 'sol')
+        # Archive a proven failed attempt so its terminal row cannot settle the new one.
+        if results.exists():
+            results.replace(results.with_name(results.name + '.' + str(time.time_ns()) + '.failed'))
         argv = [sys.executable, str(ROOT / 'tools/room-bridge/dispatch.py'),
-                '--results', str(brief.with_suffix('.dispatch.jsonl')), 'send', desk,
+                '--results', str(results), 'send', desk,
                 brief.read_text(), '--family', 'sol', '--effort', 'high', '--fresh']
         save(claim, {'status': 'dispatch_claimed', 'desk': desk})
-        with brief.with_suffix('.stdout').open('w') as out, brief.with_suffix('.stderr').open('w') as err:
-            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                                     start_new_session=True)
+        try:
+            with brief.with_suffix('.stdout').open('w') as out, brief.with_suffix('.stderr').open('w') as err:
+                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                         start_new_session=True)
+        except OSError:
+            save(claim, {'status': 'failed', 'desk': desk, 'execution_started': False})
+            raise
         record = {'status': 'dispatched', 'desk': desk, 'pid': child.pid}
         save(claim, record)
         return record
 
 
-def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=test_evidence, paid_launcher=launch_paid):
+def submit(repo, n, orch):
+    if repo not in REPOS or n <= 0:
+        raise ValueError('unauthorized repository or invalid PR')
+    path = Path(orch) / 'dot/requests' / (repo.split('/')[1] + '-' + str(n) + '.json')
+    with locked(path.with_suffix('.lock')):
+        save(path, {'repo': repo, 'pr': n})
+    return {'status': 'submitted', 'request': str(path)}
+
+
+def drain(orch, *, router=None):
+    router = router or request
+    for path in sorted((Path(orch) / 'dot/requests').glob('*.json')):
+        with locked(path.with_suffix('.lock')):
+            if not path.exists():
+                continue
+            job = json.loads(path.read_text())
+            receipt = router(job['repo'], job['pr'], orch=orch)
+            if receipt.get('status') != 'publication_uncertain' and receipt.get('dispatch', {}).get('status') not in ('uncertain', 'dispatch_claimed'):
+                path.unlink()
+
+
+def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=test_evidence, paid_launcher=launch_paid, idle=False):
     if repo not in REPOS or n <= 0:
         raise ValueError('unauthorized repository or invalid PR')
     orch = Path(orch or ROOT / 'out/orch')
@@ -201,8 +312,23 @@ def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=te
     ledger = orch / 'dot' / 'review-routes.json'
     with locked(ledger.with_suffix('.lock')):
         routes = json.loads(ledger.read_text()) if ledger.exists() else {}
-        if key in routes:
-            return routes[key]
+        old = routes.get(key)
+        comments = api(f'repos/{repo}/issues/{n}/comments?per_page=100')
+        deciding = independent_verdict(comments, repo)
+        if deciding and REVIEW['reviewed_header_sha'](deciding.get('body', '').replace('REVIEW: BLOCKED', 'APPROVE', 1)) == sha:
+            return {'status': 'completed', 'sha': sha, 'enqueued': False}
+        if old and old.get('publication') == 'posting':
+            return {**old, 'status': 'publication_uncertain', 'enqueued': False}
+        if idle:
+            labels = {x['name'].lower() for x in pr.get('labels', [])}
+            if not labels & {'review: unresolved', 'review: no-progress', 'review: budget-exhausted'}:
+                return {'status': 'ineligible', 'sha': sha, 'enqueued': False}
+            loop_lock = orch / 'locks' / f'pr-loop-{repo.split("/")[1]}-{n}.lock'
+            with loop_lock.open('a') if loop_lock.parent.exists() else tempfile.TemporaryFile() as stream:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return {'status': 'ineligible', 'sha': sha, 'enqueued': False}
         files = api(f'repos/{repo}/pulls/{n}/files?per_page=100')
         names = [f['filename'] for f in files]
         diff = '\n'.join(line for f in files for line in f.get('patch', '').splitlines() if line.startswith('+'))
@@ -211,10 +337,38 @@ def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=te
         urgent_file = orch / 'urgent-prs.txt'
         if urgent_file.exists():
             listed |= f'{repo}#{n}' in urgent_file.read_text().split()
-        seat, reason = choose_route(delay=queue_delay(orch), bound=int(os.environ.get('DOT_REVIEW_MAX_DELAY_SECONDS', '1800')),
+        wait_age = 0
+        if old and old.get('seat') == 'dot':
+            brief = Path(old['brief'])
+            queued = brief if brief.exists() else orch / 'dot/sent' / brief.name
+            wait_age = max(0, time.time() - queued.stat().st_mtime) if queued.exists() else max(0, time.time() - old.get('at', time.time()))
+        seat, reason = choose_route(delay=max(queue_delay(orch), wait_age), bound=int(os.environ.get('DOT_REVIEW_MAX_DELAY_SECONDS', '1800')),
                                     labels=[x['name'] for x in pr.get('labels', [])], listed=listed, files=names, diff=diff)
         meta = {'repo': repo, 'pr': n, 'sha': sha}
-        comments = api(f'repos/{repo}/issues/{n}/comments?per_page=100')
+        if old:
+            if old['seat'] == 'codex':
+                try:
+                    old['dispatch'] = paid_launcher(old)
+                except OSError:
+                    old['dispatch'] = {'status': 'failed', 'execution_started': False}
+                    save(ledger, routes)
+                    raise
+                save(ledger, routes)
+                return {**old, 'enqueued': False}
+            brief = Path(old['brief'])
+            failed = (orch / 'dot/failed' / brief.name).exists()
+            if failed:
+                seat, reason = 'codex', 'free review failed'
+            if seat == 'dot':
+                return {**old, 'enqueued': False}
+            review_key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()
+            save(orch / 'dot/cancelled-heads' / (review_key + '.json'), meta)
+            cancelled = orch / 'dot/cancelled' / brief.name
+            cancelled.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                brief.rename(cancelled)
+            except FileNotFoundError:
+                pass
         if seat == 'dot':
             try:
                 evidence = evidence_runner(repo, sha, names)
@@ -238,22 +392,29 @@ def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=te
                                    'Post the verdict as one PR comment only while its head still matches the reviewed SHA.'))
         if seat == 'codex':
             body = META.sub('', body).replace('End with DOT-REPORT-END outside code fences.', '')
-        path.write_text(body)
-        receipt = {'status': 'queued', 'seat': seat, 'reason': reason, 'sha': sha, 'brief': str(path)}
+        atomic_brief(path, body)
+        receipt = {'status': 'queued', 'seat': seat, 'reason': reason, 'sha': sha, 'brief': str(path), 'at': time.time()}
         routes[key] = receipt
         save(ledger, routes)
         with (orch / 'review-routing.jsonl').open('a') as log:
             log.write(json.dumps({'repo': repo, 'pr': n, 'at': time.time(), **receipt}) + '\n')
         if seat == 'codex':
-            receipt['dispatch'] = paid_launcher(receipt)
+            try:
+                receipt['dispatch'] = paid_launcher(receipt)
+            except OSError:
+                receipt['dispatch'] = {'status': 'failed', 'execution_started': False}
+                save(ledger, routes)
+                raise
             save(ledger, routes)
-        return receipt
+        return {**receipt, 'enqueued': True}
 
 
-def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=()):
+def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(), orch=None):
     lines = report.strip().splitlines()
     if len(lines) < 2 or lines[0] not in ('APPROVE', 'REVIEW: BLOCKED') or lines[1] != 'Reviewed-SHA: ' + meta['sha']:
         raise ValueError('Dot verdict must carry the exact brief SHA in its first two lines')
+    if any(line.strip() in ('APPROVE', 'REVIEW: BLOCKED') for line in lines[2:]):
+        raise ValueError('multiple verdicts in completed Dot report')
     if any('reviewed-sha:' in line.lower() for line in lines[2:]):
         raise ValueError('duplicate reviewed SHA')
     review_key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()
@@ -261,12 +422,27 @@ def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=())
     path = Path(directory).parent / 'review-publications' / (review_key + '.json')
     marker = '<!-- dot-review:' + review_key + ' -->'
     endpoint = f'repos/{meta["repo"]}/issues/{meta["pr"]}/comments'
-    with locked(path.with_suffix('.lock')):
+    findings = '\n'.join(line for line in lines[2:] if not line.startswith('DOT-REPORT-END'))
+    if re.search(r'^Orchestrator(?: merge queue:|: verified exact head)', findings, re.M):
+        raise ValueError('Dot report contains an orchestrator authority stamp')
+    body = '\n'.join(lines[:2]) + '\n\n' + redact_text(findings, known_secrets=known_secrets) + '\n\n' + DOT_MARKER + '\n' + marker
+    orch = Path(orch or os.environ.get('CARR_ORCH_DIR', ROOT / 'out/orch'))
+    route_ledger = orch / 'dot/review-routes.json'
+    with locked(route_ledger.with_suffix('.lock')), locked(path.with_suffix('.lock')):
+        if (orch / 'dot/cancelled-heads' / (review_key + '.json')).exists():
+            return 'cancelled'
+        routes = json.loads(route_ledger.read_text()) if route_ledger.exists() else {}
+        route_key = f'{meta["repo"]}#{meta["pr"]}@{meta["sha"]}'
         state = json.loads(path.read_text()) if path.exists() else {}
         if state.get('status') in ('posted', 'stale'):
             return state['status']
-        if any(marker in c.get('body', '') for c in api(endpoint + '?per_page=100')):
+        def receipt_matches(comment):
+            return REVIEW['trusted_commenter'](comment, review_config(meta['repo'])) and comment.get('body') == body
+        if any(receipt_matches(c) for c in api(endpoint + '?per_page=100')):
             save(path, {'status': 'posted', 'marker': marker})
+            if route_key in routes:
+                routes[route_key]['publication'] = 'posted'
+                save(route_ledger, routes)
             return 'posted'
         if state.get('status') == 'posting':
             raise ValueError('uncertain PR comment; reconcile publication before retry')
@@ -278,13 +454,15 @@ def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=())
             return 'stale'
         if pr.get('state') != 'open':
             raise ValueError('PR closed before Dot publication')
-        findings = '\n'.join(line for line in lines[2:] if not line.startswith('DOT-REPORT-END'))
-        if re.search(r'^Orchestrator(?: merge queue:|: verified exact head)', findings, re.M):
-            raise ValueError('Dot report contains an orchestrator authority stamp')
-        body = '\n'.join(lines[:2]) + '\n\n' + redact_text(findings, known_secrets=known_secrets) + '\n\n' + DOT_MARKER + '\n' + marker
         save(path, {'status': 'posting', 'marker': marker})
+        if route_key in routes:
+            routes[route_key]['publication'] = 'posting'
+            save(route_ledger, routes)
         response = api(endpoint, body=body)
         save(path, {'status': 'posted', 'marker': marker, 'comment_id': response.get('id')})
+        if route_key in routes:
+            routes[route_key]['publication'] = 'posted'
+            save(route_ledger, routes)
         return 'posted'
 
 
@@ -304,14 +482,18 @@ def adopt(orch):
                 if not claim.exists():
                     source.rename(claim)
         for claim in sorted(claims.iterdir()):
-            name = 'SUPPORT-' + claim.stem
+            text = claim.read_text()
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            name = 'SUPPORT-' + claim.name.replace('.', '-') + '-' + digest
             target = queue / (name + '.md')
             if not target.exists():
-                text = claim.read_text()
-                target.write_text(f'[orch] JOB {name}. Read-only analysis only. Never delegate or execute writes. '
+                atomic_brief(target, f'[orch] JOB {name}. Read-only analysis only. Never delegate or execute writes. '
                                   'Answer in Slack; finish with DOT-REPORT-END.\n' + text)
                 written += 1
-            claim.unlink()
+            if target.read_text().endswith(text):
+                claim.unlink()
+            else:
+                raise ValueError('support task identity collision; claim preserved')
 
     return written
 
@@ -350,7 +532,7 @@ class ReviewRelay(dot_relay.Relay):
                 raise ValueError('completed Dot review has no verdict header')
             report = '\n'.join(texts[start:])
             publish(directory, json.loads(meta_file.read_text()), report,
-                    requeue=lambda meta: request(meta['repo'], meta['pr'], expected=meta['sha']),
+                    requeue=lambda meta: submit(meta['repo'], meta['pr'], Path(os.environ.get('CARR_ORCH_DIR', ROOT / 'out/orch'))),
                     known_secrets=self.secrets)
         return done
 
@@ -364,9 +546,17 @@ def main():
     route.add_argument('pr', type=int)
     route.add_argument('--head')
     sub.add_parser('adopt')
+    sub.add_parser('drain')
+    submission = sub.add_parser('submit')
+    submission.add_argument('repo', choices=sorted(REPOS))
+    submission.add_argument('pr', type=int)
     args = parser.parse_args()
     if args.cmd == 'adopt':
         print(adopt(args.orch))
+    elif args.cmd == 'drain':
+        drain(args.orch)
+    elif args.cmd == 'submit':
+        print(json.dumps(submit(args.repo, args.pr, args.orch)))
     else:
         print(json.dumps(request(args.repo, args.pr, orch=args.orch, expected=args.head)))
 

@@ -190,10 +190,27 @@ class QueueTests(unittest.TestCase):
         self.q = module.Queue(self.state, self.root, gap=0)
         self.addCleanup(self.q.db.close)
 
+    def test_stale_dot_discovery_requests_exact_replacement(self):
+        from unittest.mock import patch
+        self.pr()
+        self.data['prs'][module.REPOS[0]+'#1']['head']['sha'] = self.changed
+        self.data['comments'][module.REPOS[0]+'#1'] = [{
+            'body': f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot',
+            'author_association': 'OWNER'}]
+        self.save()
+        with patch.object(self.q, 'request_review') as request:
+            self.q.discover()
+            self.q.tick()
+        entries = self.q.db.execute('SELECT * FROM entries').fetchall()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]['phase'], 'review')
+        request.assert_called_once_with(module.REPOS[0], 1)
+        self.assertEqual(self.calls('merge'), [])
+
     def test_dot_approve_at_head_stale_and_blocked(self):
         self.pr()
         for verdict, sha, expected in [('APPROVE', self.approved, self.approved),
-                                       ('APPROVE', self.changed, None),
+                                       ('APPROVE', self.changed, self.changed),
                                        ('REVIEW: BLOCKED', self.approved, None)]:
             with self.subTest(verdict=verdict, sha=sha):
                 self.data['comments'][module.REPOS[0]+'#1'] = [{
@@ -222,7 +239,7 @@ class QueueTests(unittest.TestCase):
             self.q.report(e, 'fresh_review', 'head changed', 'review')
         argv = cmd.call_args.args[0]
         self.assertEqual(argv[1], str(router))
-        self.assertEqual(argv[-3:], ['request', module.REPOS[0], '1'])
+        self.assertEqual(argv[-3:], ['submit', module.REPOS[0], '1'])
 
     def test_block_quoting_queue_stamp_remains_authoritative(self):
         self.pr()

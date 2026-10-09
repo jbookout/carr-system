@@ -710,6 +710,11 @@
       "bound": "installer",
       "shape": "subprocess.run",
       "scenario": "installer_timeout"
+    },
+    "main.py:Queue.request_review:call:1": {
+      "bound": "command",
+      "shape": "command",
+      "scenario": "review_handoff"
     }
   }
 }
