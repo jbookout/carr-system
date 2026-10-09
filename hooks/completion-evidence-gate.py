@@ -170,6 +170,9 @@ WRITE_ACTION_EXACT = {
     "undo-lead-move",
     "advance-leads",  # evidence-driven stages and approval-only drafts
     "whats-new",  # explicit mark_seen persists the authenticated partner's watermark
+    "remove-research-site",  # soft-removes a research-site index row (removed_at, who, why).
+                              # EXACT rather than a "remove" prefix: it is the only remove-
+                              # verb, and a prefix would capture any future read named so.
     "acknowledge-board-answer",  # durable Received receipt for a board answer
     "answer-board-question",      # human partner records a durable answer
     "ask-board-question",         # opens a named question on the board
@@ -323,6 +326,8 @@ WRITE_ACTION_EXACT = {
                                     # is a write for the same reason review-deal is
     "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
     "correct-memory",  # immutable successor write; exact transition
+    "correct-party-identity",  # writes party name, org and state; exact for the same
+                                # reason as correct-memory: "correct" is not a prefix
     "forget-memory",   # reversible suppression write; exact transition
     "issue-execution-envelope",  # persists one immutable governed execution envelope
     "transition-evaluation-case",  # human-authority append-only eval lifecycle write

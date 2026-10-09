@@ -42,6 +42,72 @@ APPROVAL_CASES = [
      "Restore the source-study rule?", ["Approve", "Don't approve"], False),
     ("approval-labelled-build", "work the queue",
      "Build all 16 retro fixes?", ["Approve", "Do not approve"], False),
+    # "rule: <what it says>" names a rule that has no short name yet. It must
+    # cite the stored rule's id and carry no choice wording anywhere, so an
+    # approach choice cannot borrow the form. The first was refused live 2026-10-08.
+    ("approve-described-rule", "approve the rule and fix the gate",
+     "Approve the new rule: research uses the whole internet, and the "
+     "research-site index is a memory, not a fence (check it first, also "
+     "search the open web, add useful new sites yourself, never involve you)?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], False),
+    ("labelled-described-rule", "work the queue",
+     "The proposed rule — sessions add useful research sites to the index themselves?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Do not approve"], False),
+    ("described-rule-without-id", "work the queue",
+     "Approve the new rule: research uses the whole internet?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-hides-choice", "work the queue",
+     "Approve the new rule: use nullable columns or a sentinel date?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], True),
+    ("described-rule-hides-which", "work the queue",
+     "Approve the rule: which folder structure should exports use?",
+     [("Approve", "Rule a9fc3f0e goes live."), "Don't approve"], True),
+    ("described-rule-unlabelled", "work the queue",
+     "The new rule: research uses the whole internet (a9fc3f0e)?", ["Yes", "No"], True),
+    # Bypasses found reviewing PR 1645; each reached Joe before the second fix.
+    ("described-rule-vs", "work the queue",
+     "Approve the rule (a9fc3f0e): use nullable columns vs a sentinel date for the deleted_at schema?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-rather-than", "work the queue",
+     "Approve the rule: run the nightly job at 2am rather than 4am (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-flat-folder-no-id", "work the queue",
+     "Approve the rule: use a flat folder layout for the exports directory?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-between", "work the queue",
+     "Approve the rule: pick between a flat and a nested folder layout for exports (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-should", "work the queue",
+     "Approve the new rule: should the sweep run nightly (a9fc3f0e)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-choice-in-description", "work the queue",
+     "Approve the rule: loops sort by created date (a9fc3f0e)?",
+     [("Approve", "Alt: sort by severity instead"), "Don't approve"], True),
+    # Second review of PR 1645: the choice moved to labels, header or a synonym.
+    ("described-rule-choice-in-labels", "work the queue",
+     "Approve the rule: the export folder layout (rule 1a2b3c4d)?",
+     ["Approve flat", "Approve nested", "Don't approve"], True),
+    ("described-rule-choice-in-header", "work the queue",
+     "Approve the rule: exports use the flat folder layout (rule 1a2b3c4d)?",
+     ["Approve", "Don't approve"], True, "Flat folders or nested folders?"),
+    ("described-rule-alternatively", "work the queue",
+     "Approve the rule: exports use the flat folder layout (rule 1a2b3c4d)?",
+     [("Approve", "Flat folders. Alternatively nested folders."), "Don't approve"], True),
+    ("described-rule-otherwise", "work the queue",
+     "Approve the rule: soft deletes (rule 1a2b3c4d)?",
+     [("Approve", "Otherwise the table keeps hard deletes"), "Don't approve"], True),
+    ("described-rule-option-b", "work the queue",
+     "Approve the rule: soft deletes (rule 1a2b3c4d)?",
+     [("Approve", "Option B, hard deletes"), "Don't approve"], True),
+    ("described-rule-numeric-id", "work the queue",
+     "Approve the rule: the nightly export runs at 2am (20261008)?",
+     ["Approve", "Don't approve"], True),
+    ("described-rule-slash-choice", "work the queue",
+     "Approve the rule: store config in env/file (rule 1a2b3c4d)?",
+     [("Approve", "Rule 1a2b3c4d goes live."), "Don't approve"], True),
+    ("described-rule-enumerated-choice", "work the queue",
+     "Approve the rule: config lives in (1) env variables (2) a settings file (rule 1a2b3c4d)?",
+     [("Approve", "Rule 1a2b3c4d goes live."), "Don't approve"], True),
     ("internal-approach", "work the queue",
      "Which approach should I take for the exporter refactor?", ["Rewrite", "Patch"], True),
     ("approve-internal-approach", "work the queue",
@@ -188,13 +254,14 @@ def with_transcript(human, build_payload):
         except Exception: pass
 
 
-def run_case(human, question, options, description=""):
+def run_case(human, question, options, description="", header="Q"):
     return with_transcript(human, lambda path: {
         "tool_name":"AskUserQuestion","transcript_path":path,
         "session_id":"selftest",
-        "tool_input":{"questions":[{"question":question,"header":"Q",
+        "tool_input":{"questions":[{"question":question,"header":header,
             "multiSelect":False,
-            "options":[{"label":o,"description":description} for o in options]}]}})
+            "options":[{"label":o[0],"description":o[1]} if isinstance(o, tuple)
+                         else {"label":o,"description":description} for o in options]}]}})
 
 
 def run_loop_case(human, tool_name, tool_input):
@@ -302,12 +369,12 @@ def main():
         print(f"FAIL: hook not found at {HOOK}"); return 1
     passed = failed = 0; bad = []
     approval_names = {case[0] for case in APPROVAL_CASES}
-    for name, human, q, opts, expect in CASES + APPROVAL_CASES:
+    for name, human, q, opts, expect, *header in CASES + APPROVAL_CASES:
         # These interviews concern internal doctrine/jobs; that context in
         # option descriptions is what the old whole-item classifier refuses.
         description = ("The source-study doctrine and retro-repair jobs."
                        if name in approval_names else "")
-        got = run_case(human, q, opts, description)
+        got = run_case(human, q, opts, description, *header)
         ok = (got == expect)
         passed, failed = (passed+1, failed) if ok else (passed, failed+1)
         if not ok: bad.append(name)

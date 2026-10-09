@@ -24,7 +24,7 @@ class SuccessorCommands(unittest.TestCase):
             message.write_text('Snapshot pending tracked checkout changes\n')
             self.git('commit', '-q', '-F', str(message))
         self.git('remote', 'set-url', 'origin', str(self.repo))
-        self.git('branch', 'main', 'HEAD')
+        self.git('switch', '-C', 'main', 'HEAD')
         self.git('switch', '-qc', 'feature')
         self.base = self.head()
         old = json.loads((self.repo / 'ops/config/scac-registry-chain.json').read_text())

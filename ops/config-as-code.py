@@ -1986,10 +1986,10 @@ def hand_off_self_reload(filename, dest, body, label, launchctl=LAUNCHCTL_BIN):
     return "deferred"
 
 
-def launchd_registration(label):
+def launchd_registration(label, *, timeout=15):
     """Read the job's registered plist path, or distinguish absence from error."""
     inspected = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
-                               capture_output=True, text=True, check=False)
+                               capture_output=True, text=True, check=False, timeout=timeout)
     if inspected.returncode == 0:
         path_match = re.search(r"(?m)^\s*path = (.+)$", inspected.stdout or "")
         if path_match:
@@ -2001,7 +2001,7 @@ def launchd_registration(label):
     return "failed", detail[:80] or "unknown launchctl error"
 
 
-def install_launchd_plist(filename, dest, body, body_matches):
+def install_launchd_plist(filename, dest, body, body_matches, *, timeout=15):
     """Render and load one plist without letting an active job unload itself.
 
     Returns ``loaded``, ``kept``, ``deferred`` or ``failed``.  A changed active
@@ -2016,7 +2016,7 @@ def install_launchd_plist(filename, dest, body, body_matches):
     try:
         if launchd_off_reason(filename, body):
             label = launchd_calendar.plist_label(body) or filename.removesuffix(".plist")
-            launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME)
+            launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME, timeout=timeout)
             return "held"
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"  HOLD REFUSED: {exc}")
@@ -2047,7 +2047,7 @@ def install_launchd_plist(filename, dest, body, body_matches):
     # Every non-self mutation first proves this label is absent or belongs to
     # this destination. A pending retry is an obligation to reconcile, not
     # authority to unload a same-label job registered from another path.
-    state, detail = launchd_registration(label)
+    state, detail = launchd_registration(label, timeout=timeout)
     if state == "loaded" and detail != dest:
         print(f"      INSPECT FAILED ({label} is loaded from an unexpected path); "
               "destination left unchanged")
@@ -2072,14 +2072,14 @@ def install_launchd_plist(filename, dest, body, body_matches):
             fh.write(body)
 
     subprocess.run(["launchctl", "unload", "-w", dest],
-                   capture_output=True, check=False)
-    state, detail = launchd_registration(label)
+                   capture_output=True, check=False, timeout=timeout)
+    state, detail = launchd_registration(label, timeout=timeout)
     if state != "absent":
         print(f"      UNLOAD FAILED ({detail if state == 'failed' else 'job remains loaded'}); "
               "pending reload retained")
         return "failed"
     try:
-        r = launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME)
+        r = launchd_hold.activate(label, ["launchctl", "load", "-w", dest], home=HOME, timeout=timeout)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"      HOLD REFUSED after unload: {exc}; pending reload retained")
         print(f"      fix by hand: repair launchd-hold, then run install --apply for {label}")
@@ -2087,7 +2087,7 @@ def install_launchd_plist(filename, dest, body, body_matches):
     if r.held:
         return "held"
     if r.returncode == 0:
-        state, detail = launchd_registration(label)
+        state, detail = launchd_registration(label, timeout=timeout)
         if (state == "loaded" and detail == dest
                 and launchd_texts_match(read(dest), body)):
             os.unlink(pending)

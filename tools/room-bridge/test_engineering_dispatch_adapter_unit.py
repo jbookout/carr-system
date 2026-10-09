@@ -192,7 +192,7 @@ def request() -> dict:
 class ValidEngineeringDesk:
     def resolve(self, name):
         assert name == "engineering-codex"
-        return {"name": name, "kind": "codex-session", "model": "gpt-6.1-sol", "effort": "xhigh",
+        return {"name": name, "kind": "codex-session", "family": "sol", "effort": "xhigh",
                 "cwd": str(ROOT), "sandbox": "workspace-write",
                 "add_dirs": adapter._dedicated_writable_roots(), "room_seat": None}
 
@@ -249,7 +249,6 @@ def test_bridge_auth_observations_are_allowed_but_malformed_metadata_refuses():
 def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert adapter.EXECUTOR_TIMEOUT_SECONDS == 900
     assert adapter.EXECUTOR_RECEIPT_RESERVE_SECONDS == 120
-    assert adapter.dispatch.CODEX_TIMEOUT_S == adapter.EXECUTOR_TIMEOUT_SECONDS
     seen = {}
 
     def fake_dispatch(desk, prompt, **kwargs):
@@ -267,6 +266,9 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
             os.environ["CARR_DB_JOBS_URL"] = old
     assert result["ok"] is True
     assert seen["desk"] == "engineering-codex" and seen["fresh"] is True
+    # The controller pins its own limit to its lease; it no longer relies on
+    # the general router default, which is longer.
+    assert seen["codex_timeout_s"] == adapter.EXECUTOR_TIMEOUT_SECONDS
     assert seen["config_overrides"] == adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES
     assert "CARR_DB_JOBS_URL" not in seen["env"]
     assert "SERVER-ISSUED SLICE PACKET" in seen["prompt"]
@@ -700,7 +702,7 @@ def test_tracked_bootstrap_registers_one_unseated_exact_desk_and_wrapper_has_no_
         registry = adapter.desks.Registry(Path(root) / "hermes-desks.json")
         entry = adapter.install_dedicated_codex_desk(registry)
         assert entry["name"] == "engineering-codex"
-        assert entry["kind"] == "codex-session" and entry["model"] == "gpt-6.1-sol"
+        assert entry["kind"] == "codex-session" and entry["family"] == "sol" and "model" not in entry
         assert entry["effort"] == "xhigh" and entry["sandbox"] == "workspace-write"
         assert entry["add_dirs"] == adapter._dedicated_writable_roots()
         assert entry.get("room_seat") is None and entry["thread_id"] is None

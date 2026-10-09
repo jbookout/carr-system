@@ -132,6 +132,7 @@ STRUCTURAL_KEYS = {
     "feature_switch_unreadable", "canonical_health_refused", "source_unreadable", "export_unreadable",
     "job_ledger", "control_state", "repo_status", "registry_integrity",
     "credential_health", "unrecorded_failure", "tailscale",
+    "storage_health_unavailable",
 }
 ALWAYS_HARD_ERROR_KEYS = STRUCTURAL_KEYS | {"jev_call_receipt_integrity", "scheduled_jobs_evidence_unavailable"}
 
@@ -689,6 +690,20 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         self.assertEqual(ns["_canonical_health"](), 1)
         self.assertEqual([row["key"] for row in ns["_FINDINGS"]], ["grok_session"])
 
+    def test_storage_section_does_not_read_unrelated_canonical_snapshot(self):
+        import contextlib, io
+        ns = self.namespace()
+
+        def unrelated_snapshot():
+            raise AssertionError("storage-only health read the canonical snapshot")
+
+        ns.update(CANONICAL_SECTION="storage", _canonical_snapshot=unrelated_snapshot,
+                  _storage_hygiene_row=lambda: ("OK storage hygiene fixture", False))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ns["_canonical_health"](), 0)
+        self.assertIn("OK storage hygiene fixture", out.getvalue())
+        self.assertEqual(ns["_FINDINGS"], [])
+
     def all_namespace(self):
         from unittest.mock import Mock
         ns = self.namespace()
@@ -696,6 +711,7 @@ class PaidCapCanonicalHealthTests(unittest.TestCase):
         ns.update(CANONICAL_SECTION="all", _canonical_snapshot=lambda: snap,
                   _seat_health_rows=lambda: ["PASS seat fixture"],
                   _branch_janitor_row=lambda: ("OK branch janitor fixture", False),
+                  _storage_hygiene_row=lambda: ("OK storage hygiene fixture", False),
                   _canonical_now=lambda snap: datetime.now(timezone.utc),
                   _canonical_contradiction_alarm=lambda: 0,
                   _canonical_workflow_truth=lambda: None, _canonical_assurance_health=lambda: None,
