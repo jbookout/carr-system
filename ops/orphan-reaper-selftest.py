@@ -21,6 +21,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from git_env import fixture_env
+ENV = fixture_env()
 from lib import launchd_calendar
 spec = importlib.util.spec_from_file_location('orphan_reaper', ROOT / 'ops/orphan-reaper.py')
 assert spec is not None and spec.loader is not None
@@ -412,7 +415,7 @@ class ReaperTests(unittest.TestCase):
         spec.loader.exec_module(installer)
         clone = self.repo / 'detached-clone'
         clone.mkdir()
-        env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
+        env = dict(ENV, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
                    GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
         for args in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'x'],
                      ['checkout', '-q', '--detach']):
