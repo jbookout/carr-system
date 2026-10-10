@@ -11,7 +11,6 @@ from pathlib import Path
 import re
 import runpy
 import selectors
-import signal
 import shutil
 import subprocess
 import sys
@@ -21,13 +20,13 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from lib.secret_redaction import redact_text, sensitive_env_values
-from lib import dot_relay
+from lib import dot_relay, dot_review_receipts
 
 REVIEW = runpy.run_path(str(ROOT / "ops/release-pipeline.py"))
 REVIEW_CONFIG = json.loads((ROOT / "ops/config/release-pipeline.v1.json").read_text())
 
 REPOS = {'jbookout/carr-system', 'jbookout/doctorcre-app', 'jbookout/software-factory'}
-DOT_MARKER = 'Reviewer: ChatGPT Dot'
+DOT_MARKER = dot_review_receipts.DOT_MARKER
 SHA = re.compile(r'[0-9a-f]{40}')
 META = re.compile(r'^Dot-Review: (.+)$', re.M)
 LOCKING = re.compile(r'\b(?:flock|mutex|semaphore|threading\.(?:Lock|RLock)|asyncio\.Lock|FOR UPDATE|BEGIN IMMEDIATE|compare_exchange|synchronized)\b', re.I)
@@ -78,10 +77,8 @@ def review_config(repo):
     return REVIEW_CONFIG['app' if repo == 'jbookout/doctorcre-app' else 'worker']
 
 
-def independent_verdict(comments, repo):
-    stamp = re.compile(r'^APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
-                       r'(?:Orchestrator merge queue:|Orchestrator: verified exact head)')
-    return REVIEW['deciding_verdict']([c for c in comments if not stamp.match(c.get('body', ''))], review_config(repo))
+def independent_verdict(comments, repo, n):
+    return dot_review_receipts.deciding(comments, repo, n, policy=REVIEW, config=review_config(repo))
 
 
 def sandbox_command(argv, tree):
@@ -92,6 +89,14 @@ def sandbox_command(argv, tree):
 
 
 def run_bounded(argv, tree, env, *, timeout, limit):
+    try:
+        subprocess.run(['ps', '-A', '-o', 'pid=,ppid='], capture_output=True,
+                       timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError('descendant inventory unavailable; evidence execution refused') from exc
+    containment = runpy.run_path(str(ROOT / 'tools/flash-run.py'))
+    token = os.urandom(16).hex()
+    env = {**env, containment['RUN_MARK']: token}
     child = subprocess.Popen(argv, cwd=tree, env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, start_new_session=True)
     assert child.stdout is not None
@@ -117,11 +122,7 @@ def run_bounded(argv, tree, env, *, timeout, limit):
                         break
     finally:
         # Even a completed parent can leave a child holding the output pipe.
-        child.poll()
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        containment['kill_run'](child.pid, token)
         child.wait(timeout=5)
         child.stdout.close()
     return status or str(child.returncode), data.decode('utf-8', errors='replace')
@@ -247,7 +248,12 @@ def launch_paid(receipt):
                 save(claim, record)
                 return record
             if last.get('status') in ('failed', 'refused', 'rejected'):
-                state = {**state, 'status': 'failed' if last.get('execution_started') is False else 'uncertain', 'result': last}
+                before_execution = (last.get('execution_started') is False or
+                                    (last.get('status') == 'failed' and
+                                     last.get('detail') == 'codex is not on PATH' and
+                                     last.get('termination_confirmed') is True and
+                                     'execution_started' not in last and not last.get('thread_id')))
+                state = {**state, 'status': 'failed' if before_execution else 'uncertain', 'result': last}
                 save(claim, state)
         if state and state.get('status') != 'failed':
             if state.get('status') == 'dispatched':
@@ -314,7 +320,7 @@ def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=te
         routes = json.loads(ledger.read_text()) if ledger.exists() else {}
         old = routes.get(key)
         comments = api(f'repos/{repo}/issues/{n}/comments?per_page=100')
-        deciding = independent_verdict(comments, repo)
+        deciding, _ = independent_verdict(comments, repo, n)
         if deciding and REVIEW['reviewed_header_sha'](deciding.get('body', '').replace('REVIEW: BLOCKED', 'APPROVE', 1)) == sha:
             return {'status': 'completed', 'sha': sha, 'enqueued': False}
         if old and old.get('publication') == 'posting':
@@ -373,8 +379,7 @@ def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=te
             try:
                 evidence = evidence_runner(repo, sha, names)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                seat, reason = 'codex', 'hands-on testing: local evidence unavailable'
-                evidence = type(exc).__name__ + '; paid reviewer must run changed-area tests at the bound head.'
+                evidence = type(exc).__name__ + '; local evidence unavailable. This is not a test pass; review the bound source and report the missing evidence.'
         else:
             evidence = 'Paid reviewer must check out the bound head and run changed-area tests before verdict.'
         # Re-read after tests; never feed stale test evidence to another head.
@@ -409,7 +414,8 @@ def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=te
         return {**receipt, 'enqueued': True}
 
 
-def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(), orch=None):
+def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(), orch=None,
+            *, reviewer=None, relay_run_id=None):
     lines = report.strip().splitlines()
     if len(lines) < 2 or lines[0] not in ('APPROVE', 'REVIEW: BLOCKED') or lines[1] != 'Reviewed-SHA: ' + meta['sha']:
         raise ValueError('Dot verdict must carry the exact brief SHA in its first two lines')
@@ -434,11 +440,16 @@ def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(),
         routes = json.loads(route_ledger.read_text()) if route_ledger.exists() else {}
         route_key = f'{meta["repo"]}#{meta["pr"]}@{meta["sha"]}'
         state = json.loads(path.read_text()) if path.exists() else {}
-        if state.get('status') in ('posted', 'stale'):
+        if state.get('status') == 'stale':
             return state['status']
         def receipt_matches(comment):
-            return REVIEW['trusted_commenter'](comment, review_config(meta['repo'])) and comment.get('body') == body
-        if any(receipt_matches(c) for c in api(endpoint + '?per_page=100')):
+            return comment.get('body') == body and dot_review_receipts.matching(meta, body) is not None
+        comments = api(endpoint + '?per_page=100')
+        if state.get('status') == 'posted':
+            if any(dot_review_receipts.matching(meta, c.get('body', '')) for c in comments):
+                return 'posted'
+            raise ValueError('posted PR comment lacks a matching relay receipt; reconcile publication')
+        if any(receipt_matches(c) for c in comments):
             save(path, {'status': 'posted', 'marker': marker})
             if route_key in routes:
                 routes[route_key]['publication'] = 'posted'
@@ -454,6 +465,9 @@ def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(),
             return 'stale'
         if pr.get('state') != 'open':
             raise ValueError('PR closed before Dot publication')
+        dot_review_receipts.record(meta, body, builder=(pr.get('user') or {}).get('login'),
+                                  reviewer=reviewer, relay_run_id=relay_run_id,
+                                  branch_author=((pr.get('head') or {}).get('user') or {}).get('login'))
         save(path, {'status': 'posting', 'marker': marker})
         if route_key in routes:
             routes[route_key]['publication'] = 'posting'
@@ -533,7 +547,8 @@ class ReviewRelay(dot_relay.Relay):
             report = '\n'.join(texts[start:])
             publish(directory, json.loads(meta_file.read_text()), report,
                     requeue=lambda meta: submit(meta['repo'], meta['pr'], Path(os.environ.get('CARR_ORCH_DIR', ROOT / 'out/orch'))),
-                    known_secrets=self.secrets)
+                    known_secrets=self.secrets, reviewer=self.sender,
+                    relay_run_id=f'{self.transport.channel}:{thread}')
         return done
 
 

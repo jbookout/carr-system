@@ -30,7 +30,7 @@ def inspect(queue, repo, n):
     if pr['state'] == 'closed':
         return {'state': 'closed', 'verdict': '', 'ready': False}
     sha = pr['head']['sha']
-    last = DOT['independent_verdict'](queue.pages(f'repos/{repo}/issues/{n}/comments?per_page=100'), repo)
+    last, receipt = DOT['independent_verdict'](queue.pages(f'repos/{repo}/issues/{n}/comments?per_page=100'), repo, n)
     verdict = ''
     if last:
         body = last.get('body', '')
@@ -38,7 +38,7 @@ def inspect(queue, repo, n):
         header = POLICY['REVIEW']['reviewed_header_sha'](body if decision == 'approve' else body.replace('REVIEW: BLOCKED', 'APPROVE', 1))
         if header:
             current = header == sha
-            if not current and decision == 'approve' and 'Reviewer: ChatGPT Dot' not in body:
+            if not current and decision == 'approve' and receipt is None:
                 current = queue.covered(repo, header, sha)
             verdict = ('APPROVE' if decision == 'approve' else 'REVIEW: BLOCKED') + ('' if current else '-STALE')
     ready = queue.green(repo, n, sha) and pr.get('mergeable') is True and pr.get('mergeable_state') != 'dirty'

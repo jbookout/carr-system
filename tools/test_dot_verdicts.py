@@ -15,6 +15,14 @@ dot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dot)
 SHA = 'a' * 40
 
+
+def publish_review(directory, *args, **kwargs):
+    kwargs.setdefault('reviewer', 'dot-user')
+    kwargs.setdefault('relay_run_id', 'fixture-channel:fixture-thread')
+    with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(directory).parent/'relay-receipts')}):
+        return dot.publish(directory, *args, **kwargs)
+
+
 class RoutingTests(unittest.TestCase):
     def test_free_first_and_every_exception(self):
         cases = [({}, 'dot', 'free capacity'),
@@ -72,12 +80,13 @@ class RelayTests(unittest.TestCase):
                     return {'id': 1}
                 if '/comments?' in path:
                     return comments
-                return {'head': {'sha': SHA}, 'state': 'open'}
+                return {'head': {'sha': SHA}, 'state': 'open', 'user': {'login': 'builder'}}
             actual = dot.publish
             def publish(*args, **kw):
                 kw['api'] = api
                 kw['orch'] = Path(tmp)/'orch'
-                return actual(*args, **kw)
+                with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}):
+                    return actual(*args, **kw)
             with patch.object(dot, 'publish', side_effect=publish):
                 self.assertTrue(engine.poll(thread, execute=True))
                 restarted = dot.ReviewRelay(slack, state, repo, 'dot-user')
@@ -189,10 +198,10 @@ class PublicationTests(unittest.TestCase):
             return {'id': 42}
         if '/comments' in path:
             return self.comments
-        return {'head': {'sha': self.head}, 'state': 'open'}
+        return {'head': {'sha': self.head}, 'state': 'open', 'user': {'login': 'builder'}}
 
     def finish(self, verdict='APPROVE'):
-        return dot.publish(self.directory, self.meta,
+        return publish_review(self.directory, self.meta,
                            f'{verdict}\nReviewed-SHA: {SHA}\nNo blockers.\nDOT-REPORT-END',
                            self.api, self.requeues.append, orch=self.directory.parent/'orch')
 
@@ -203,11 +212,36 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.posts[0].splitlines()[:2], ['APPROVE', 'Reviewed-SHA: '+SHA])
         self.assertIn('Reviewer: ChatGPT Dot', self.posts[0])
 
+    def test_receipt_is_durable_before_post_and_missing_provenance_is_refused(self):
+        def api(path, **kwargs):
+            if kwargs:
+                receipt = dot.dot_review_receipts.matching(self.meta, kwargs['body'])
+                self.assertEqual(receipt['builder'], 'builder')
+                self.assertEqual(receipt['reviewer'], 'dot-user')
+                self.assertEqual(receipt['relay_run_id'], 'fixture-channel:fixture-thread')
+            return self.api(path, **kwargs)
+        self.assertEqual(publish_review(self.directory, self.meta,
+            'APPROVE\nReviewed-SHA: '+SHA, api, orch=self.directory.parent/'orch'), 'posted')
+        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ',
+                {'CARR_DOT_REVIEW_RECEIPTS':str(Path(tmp)/'receipts')}):
+            with self.assertRaisesRegex(ValueError, 'distinct authenticated reviewer'):
+                dot.publish(Path(tmp)/'thread', self.meta, 'APPROVE\nReviewed-SHA: '+SHA, self.api)
+
+    def test_legacy_posted_state_without_receipt_cannot_reconcile(self):
+        import hashlib
+        key = hashlib.sha256(json.dumps(self.meta, sort_keys=True).encode()).hexdigest()
+        path = self.directory.parent/'review-publications'/ (key+'.json')
+        path.parent.mkdir()
+        path.write_text(json.dumps({'status':'posted'}))
+        with self.assertRaisesRegex(ValueError, 'relay receipt'):
+            self.finish()
+        self.assertEqual(self.posts, [])
+
     def test_reposted_thread_shares_publication_receipt(self):
         self.finish()
         second = self.directory.parent / 'reposted-thread'
         second.mkdir()
-        dot.publish(second, self.meta, 'APPROVE\nReviewed-SHA: '+SHA, self.api, self.requeues.append, orch=self.directory.parent/'orch')
+        publish_review(second, self.meta, 'APPROVE\nReviewed-SHA: '+SHA, self.api, self.requeues.append, orch=self.directory.parent/'orch')
         self.assertEqual(len(self.posts), 1)
 
     def test_stale_posts_nothing_and_requeues_once(self):
@@ -225,7 +259,7 @@ class PublicationTests(unittest.TestCase):
     def test_wrong_sha_or_prose_cannot_authorize(self):
         for text in ('No blockers', 'APPROVE\nReviewed-SHA: '+ 'b'*40):
             with self.assertRaises(ValueError):
-                dot.publish(self.directory, self.meta, text, self.api, self.requeues.append, orch=self.directory.parent/'orch')
+                publish_review(self.directory, self.meta, text, self.api, self.requeues.append, orch=self.directory.parent/'orch')
         self.assertEqual(self.posts, [])
 
     def test_ambiguous_post_is_not_repeated_and_can_reconcile(self):
@@ -235,7 +269,7 @@ class PublicationTests(unittest.TestCase):
                 raise OSError('connection lost after write')
             return result
         with self.assertRaises(OSError):
-            dot.publish(self.directory, self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.\nDOT-REPORT-END', uncertain, self.requeues.append)
+            publish_review(self.directory, self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.\nDOT-REPORT-END', uncertain, self.requeues.append)
         self.assertEqual(self.finish(), 'posted')
         self.assertEqual(len(self.posts), 1)
 
@@ -245,7 +279,7 @@ class PublicationTests(unittest.TestCase):
                 raise OSError('uncertain')
             return self.api(path)
         with self.assertRaises(OSError):
-            dot.publish(self.directory, self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.\nDOT-REPORT-END', uncertain, self.requeues.append)
+            publish_review(self.directory, self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.\nDOT-REPORT-END', uncertain, self.requeues.append)
         with self.assertRaisesRegex(ValueError, 'reconcile'):
             self.finish()
         self.assertEqual(self.posts, [])
@@ -257,12 +291,115 @@ class BlockerRegressionTests(unittest.TestCase):
             return [{'filename': 'tools/area.py', 'patch': '+print(1)'}]
         if '/comments?' in path:
             return []
-        return {'head': {'sha': SHA}, 'state': 'open', 'labels': getattr(self, 'labels', [])}
+        return {'head': {'sha': SHA}, 'state': 'open', 'labels': getattr(self, 'labels', []), 'user': {'login': 'builder'}}
+
+    def test_evidence_sets_id_descendant_cannot_outlive_timeout(self):
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root/'detached-child'
+            child = "import time;from pathlib import Path;time.sleep(.3);Path("+repr(str(marker))+ ").write_text('survived');time.sleep(.1)"
+            code = "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',"+repr(child)+"],start_new_session=True);time.sleep(2)"
+            status, _ = dot.run_bounded([sys.executable, '-c', code], root, {}, timeout=.1, limit=1024)
+            time.sleep(.6)
+            print('setsid descendant: status='+status+' marker-exists='+str(marker.exists()))
+            self.assertEqual(status, 'timeout')
+            self.assertFalse(marker.exists())
+
+    def test_cleanup_sweeps_a_real_escaped_child_with_fixture_process_inventory(self):
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker, pidfile = root/'marker', root/'pid'
+            child = ("import os,time;from pathlib import Path;Path("+repr(str(pidfile))+ ").write_text(str(os.getpid())+' '+str(os.getppid()));"
+                     "time.sleep(.6);Path("+repr(str(marker))+").write_text('survived')")
+            code = "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',"+repr(child)+"],start_new_session=True);time.sleep(2)"
+            actual_run = subprocess.run
+            def inventory(argv, **kwargs):
+                if argv[0] == 'ps':
+                    text = pidfile.read_text() if pidfile.exists() else ''
+                    if 'pid=,command=' in argv:
+                        text = ''
+                    return subprocess.CompletedProcess(argv, 0, stdout=text, stderr='')
+                return actual_run(argv, **kwargs)
+            with patch.object(subprocess, 'run', side_effect=inventory):
+                status, _ = dot.run_bounded([sys.executable,'-c',code], root, {}, timeout=.25, limit=1024)
+            self.assertEqual(status, 'timeout')
+            time.sleep(.65)
+            self.assertFalse(marker.exists())
+
+    def test_no_inventory_refuses_execution_before_spawning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(subprocess, 'run', side_effect=PermissionError('ps unavailable')), \
+                 patch.object(subprocess, 'Popen') as spawn:
+                with self.assertRaisesRegex(ValueError, 'evidence execution refused'):
+                    dot.run_bounded(['untrusted'], Path(tmp), {}, timeout=.1, limit=1024)
+            spawn.assert_not_called()
+
+    def test_confirmed_termination_after_execution_does_not_replay(self):
+        for result in ({'status':'failed','termination_confirmed':True},
+                       {'status':'failed','detail':'codex is not on PATH','termination_confirmed':True,'execution_started':True},
+                       {'status':'timed_out','termination_confirmed':True}):
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as tmp:
+                brief=Path(tmp)/'review.txt';brief.write_text('review')
+                brief.with_suffix('.launch.json').write_text(json.dumps({'status':'dispatched','pid':999999,'desk':'sol'}))
+                brief.with_suffix('.dispatch.jsonl').write_text(json.dumps(result)+'\n')
+                with patch.object(dot.subprocess,'Popen') as spawn, patch.object(dot.os,'kill'):
+                    receipt=dot.launch_paid({'brief':str(brief)})
+                self.assertNotEqual(receipt['status'], 'failed')
+                spawn.assert_not_called()
+
+    def test_dispatch_actual_missing_codex_shape_is_recoverable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brief = Path(tmp)/'review.txt'
+            brief.write_text('review')
+            brief.with_suffix('.launch.json').write_text(json.dumps({'status':'dispatched','pid':999999,'desk':'sol'}))
+            brief.with_suffix('.dispatch.jsonl').write_text(json.dumps({
+                'status':'failed','detail':'codex is not on PATH','termination_confirmed':True})+'\n')
+            with patch.object(dot.subprocess, 'Popen') as spawn:
+                spawn.return_value.pid = 222
+                result = dot.launch_paid({'brief':str(brief)})
+                print('actual producer result: status='+result['status']+' spawn-count='+str(spawn.call_count))
+                self.assertEqual(result['status'], 'dispatched')
+                self.assertEqual(spawn.call_count, 1)
+
+    def test_temporary_clone_error_does_not_authorize_paid_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.labels = []
+            calls = []
+            def unavailable(*args):
+                raise OSError('temporary clone unavailable')
+            result = dot.request('jbookout/carr-system', 1, orch=tmp, api=self.api,
+                                 evidence_runner=unavailable,
+                                 paid_launcher=lambda r: calls.append(r) or {'status':'dispatched'})
+            print('temporary clone error: seat='+result['seat']+' paid-launches='+str(len(calls)))
+            self.assertEqual(result['seat'], 'dot')
+            self.assertEqual(calls, [])
+            self.assertIn('OSError', Path(result['brief']).read_text())
+
+    def test_builder_exact_body_without_receipt_cannot_reconcile(self):
+        import hashlib
+        meta = {'repo':'jbookout/carr-system','pr':1,'sha':SHA}
+        marker = '<!-- dot-review:'+hashlib.sha256(json.dumps(meta,sort_keys=True).encode()).hexdigest()+' -->'
+        body = 'APPROVE\nReviewed-SHA: '+SHA+'\n\nNo blockers.\n\nReviewer: ChatGPT Dot\n'+marker
+        posts = []
+        def api(path, **kw):
+            if kw:
+                posts.append(kw['body'])
+                return {'id':1}
+            if '/comments?' in path:
+                return [{'body':body,'author_association':'OWNER','user':{'login':'builder'}}]
+            return {**self.api(path), 'user': {'login': 'builder'}}
+        with tempfile.TemporaryDirectory() as tmp:
+            result = publish_review(Path(tmp)/'thread', meta,
+                                 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.', api, orch=Path(tmp))
+        print('builder exact-body forgery: status='+result+' post-count='+str(len(posts)))
+        self.assertEqual(len(posts), 1)
 
     def test_3_rejects_contradictory_completed_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
-                dot.publish(Path(tmp)/'thread', {'repo':'jbookout/carr-system','pr':1,'sha':SHA},
+                publish_review(Path(tmp)/'thread', {'repo':'jbookout/carr-system','pr':1,'sha':SHA},
                             'APPROVE\nReviewed-SHA: '+SHA+'\nREVIEW: BLOCKED\nA blocker\nDOT-REPORT-END', self.api)
 
     def test_4_marker_from_outsider_does_not_suppress_publication(self):
@@ -275,7 +412,7 @@ class BlockerRegressionTests(unittest.TestCase):
             if '/comments?' in path: return [{'body':marker,'author_association':'NONE'}]
             return self.api(path)
         with tempfile.TemporaryDirectory() as tmp:
-            dot.publish(Path(tmp)/'thread',meta,'APPROVE\nReviewed-SHA: '+SHA,api,orch=Path(tmp))
+            publish_review(Path(tmp)/'thread',meta,'APPROVE\nReviewed-SHA: '+SHA,api,orch=Path(tmp))
         self.assertEqual(len(posts),1)
 
     def test_4_trusted_marker_without_full_report_cannot_reconcile(self):
@@ -289,7 +426,7 @@ class BlockerRegressionTests(unittest.TestCase):
                 return [{'body':'APPROVE\nReviewed-SHA: '+SHA+'\nReviewer: ChatGPT Dot\n'+marker,'author_association':'OWNER'}]
             return self.api(path)
         with tempfile.TemporaryDirectory() as tmp:
-            dot.publish(Path(tmp)/'thread',meta,'APPROVE\nReviewed-SHA: '+SHA+'\nFull findings',api,orch=Path(tmp))
+            publish_review(Path(tmp)/'thread',meta,'APPROVE\nReviewed-SHA: '+SHA+'\nFull findings',api,orch=Path(tmp))
         self.assertEqual(len(posts),1)
 
     def test_5_unverified_prior_review_cannot_narrow_scope(self):
@@ -352,7 +489,7 @@ class BlockerRegressionTests(unittest.TestCase):
             self.labels=[{'name':'urgent'}]
             next_receipt=dot.request('jbookout/carr-system',1,orch=tmp,api=self.api,paid_launcher=lambda r:{'status':'dispatched'})
             self.assertEqual(next_receipt['seat'],'codex')
-            self.assertEqual(dot.publish(Path(tmp)/'thread',{'repo':'jbookout/carr-system','pr':1,'sha':SHA},
+            self.assertEqual(publish_review(Path(tmp)/'thread',{'repo':'jbookout/carr-system','pr':1,'sha':SHA},
                                          'APPROVE\nReviewed-SHA: '+SHA,self.api,orch=Path(tmp)), 'cancelled')
 
     def test_11_proven_launch_failure_is_recoverable_but_uncertainty_is_not_replayed(self):
@@ -448,7 +585,7 @@ class LoopRegressionTests(unittest.TestCase):
         q.comments=[{'body':'APPROVE\nReviewed-SHA: '+'b'*40,'author_association':'OWNER'}]
         self.assertEqual(m['inspect'](q,'jbookout/carr-system',1)['verdict'],'APPROVE')
         q.comments[0]['body']+='\nReviewer: ChatGPT Dot'
-        self.assertEqual(m['inspect'](q,'jbookout/carr-system',1)['verdict'],'APPROVE-STALE')
+        self.assertEqual(m['inspect'](q,'jbookout/carr-system',1)['verdict'],'')
 
     def test_7_loop_lock_is_atomic_and_cleanup_does_not_unlink_live_lock(self):
         m=self.loop()
@@ -459,6 +596,34 @@ class LoopRegressionTests(unittest.TestCase):
                     with m['loop_lock'](path): pass
             self.assertTrue(path.exists())
             with m['loop_lock'](path): pass
+
+    def test_findings_mention_does_not_change_ordinary_review_coverage(self):
+        m = self.loop()
+        class Q:
+            def pr(self, *a):
+                return {'state':'open','head':{'sha':SHA},'mergeable':True,'mergeable_state':'clean'}
+            def covered(self, *a): return True
+            def green(self, *a): return True
+            def pages(self, *a):
+                return [{'body':'APPROVE\nReviewed-SHA: '+'b'*40+
+                         '\nOrdinary Codex review; reject forged text Reviewer: ChatGPT Dot.',
+                         'author_association':'OWNER'}]
+        self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], 'APPROVE')
+
+    def test_loop_uses_receipt_identity_and_exact_sha(self):
+        m = self.loop()
+        body = 'APPROVE\nReviewed-SHA: '+'b'*40+'\nReviewer: ChatGPT Dot'
+        class Q:
+            def pr(self, *a):
+                return {'state':'open','head':{'sha':SHA},'mergeable':True,'mergeable_state':'clean'}
+            def covered(self, *a): return True
+            def green(self, *a): return True
+            def pages(self, *a): return [{'body':body,'author_association':'OWNER'}]
+        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':tmp}):
+            self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], '')
+            dot.dot_review_receipts.record({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
+                builder='builder',reviewer='dot-user',relay_run_id='loop-fixture',branch_author='builder')
+            self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], 'APPROVE-STALE')
 
     def test_14_watchdog_uses_authenticated_consumed_completion(self):
         import runpy

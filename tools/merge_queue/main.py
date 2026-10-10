@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / 'ops'))
 sys.path.insert(0, str(ROOT))
 from git_env import scrubbed_env
 from lib.secret_redaction import redacted_tail, sensitive_env_values
+from lib import dot_review_receipts
 from lib.github_rate_limit import GitHubReadBudget, GitHubReadPaused, GitHubBudgetLockTimeout, resource_for, split_response
 REPOS = ('jbookout/carr-system', 'jbookout/doctorcre-app', 'jbookout/software-factory')
 HOLD = 'do_not_merge'
@@ -565,15 +566,13 @@ class Queue:
     def approval(self, repo, n):
         comments = self.pages(f'repos/{repo}/issues/{n}/comments?per_page=100')
         cfg = REVIEW_CONFIG['app' if repo == REPOS[1] else 'worker']
-        stamp = re.compile(r'^APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
-                           r'(?:Orchestrator merge queue:|Orchestrator: verified exact head)[^\r\n]*', re.M)
-        independent = [c for c in bounded_items('snapshot', comments) if not stamp.match(c.get('body', ''))]
-        last = REVIEW['deciding_verdict'](independent, cfg)
+        last, receipt = dot_review_receipts.deciding(list(bounded_items('snapshot', comments)),
+                                                    repo, n, policy=REVIEW, config=cfg)
         if last and REVIEW['verdict'](last.get('body', ''), cfg) == 'approve':
             sha = REVIEW['reviewed_header_sha'](last.get('body', ''))
             if not hasattr(self, '_dot_reviews'):
                 self._dot_reviews = {}
-            self._dot_reviews[(repo, sha)] = 'Reviewer: ChatGPT Dot' in last.get('body', '')
+            self._dot_reviews[(repo, sha)] = receipt is not None
             return sha
         return None
 
