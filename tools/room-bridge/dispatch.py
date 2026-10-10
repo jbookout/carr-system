@@ -520,16 +520,18 @@ def dispatch(
                if entry["kind"] in codex_models.CODEX_KINDS else {})}
     declared_writes = write_ownership.declaration(original_task, writes)
     ownership = {}
-    if results_path.resolve() in (write_ownership.LEDGER.resolve(),
-                                 Path(str(write_ownership.LEDGER) + '.lock').resolve()):
-        raise DeskError('bad_results_path', 'results cannot overwrite the ownership authority')
+    write_ownership.check_results_path(results_path)
     if declared_writes:
         if entry['kind'] not in codex_models.CODEX_KINDS:
             raise DeskError('unsupported_owned_adapter',
                             'owned dispatch requires a Codex adapter with verifiable termination recovery')
         ownership = write_ownership.reserve(base,
                                              cwd or entry.get("cwd") or str(Path.cwd()), declared_writes)
-        _record(results_path, ownership)
+        try:
+            _record(results_path, ownership)
+        except BaseException:
+            write_ownership.release(msg_id, reason='results path rejected')
+            raise
     else:
         print("warning: no write set declared; pass --writes or add Writes: to the brief",
               file=sys.stderr, flush=True)

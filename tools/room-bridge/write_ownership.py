@@ -371,12 +371,17 @@ def _append(path: Path, row: dict) -> None:
         os.fsync(fh.fileno())
 
 
-def record(path: Path, row: dict) -> None:
-    """Result snapshots are never used to decide ownership."""
+def check_results_path(path: Path) -> None:
+    """Refuse a results path that aliases ownership authority; callers run this BEFORE reserving."""
     protected = (LEDGER, _alias_path())
     if path.resolve() in {target.resolve() for authority in protected
                           for target in (authority, Path(str(authority) + '.lock'))}:
         raise DeskError('bad_results_path', 'results cannot overwrite the ownership authority')
+
+
+def record(path: Path, row: dict) -> None:
+    """Result snapshots are never used to decide ownership."""
+    check_results_path(path)
     with _locked(path):
         _append(path, row)
 

@@ -821,6 +821,27 @@ os._exit(17)
         self.assertFalse(alias.exists())
         self.assertFalse(Path(str(alias) + '.lock').exists())
 
+    def test_alias_results_path_rejection_leaves_no_held_reservation(self):
+        alias = write_ownership._alias_path()
+        for path in (alias, Path(str(alias) + '.lock')):
+            with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
+                 patch.object(dispatch, '_to_codex') as run:
+                with self.assertRaisesRegex(desks.DeskError, 'results cannot'):
+                    dispatch.dispatch('sol', 'build', registry=self.reg,
+                                      results_path=path, writes=['src/*'])
+                run.assert_not_called()
+            latest = {}
+            if self.ledger.exists():
+                for line in self.ledger.read_text().splitlines():
+                    row = json.loads(line)
+                    latest[row['msg_id']] = row['ownership_state']
+            self.assertNotIn('held', latest.values())
+        # The same write set is claimable afterwards: nothing was left held.
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed',
+                                                            'termination_confirmed': True}):
+            self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
+
     def test_home_environment_cannot_redirect_authority(self):
         code = "import sys; sys.path.insert(0, sys.argv[1]); import write_ownership; print(write_ownership.LEDGER)"
         proc = subprocess.run([sys.executable, '-c', code, str(Path(dispatch.__file__).parent)],
