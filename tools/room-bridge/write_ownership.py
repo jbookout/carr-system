@@ -72,11 +72,13 @@ def _aliases(path: Path) -> dict[str, set[str]]:
     if path.exists():
         for line in path.read_text(encoding='utf-8').splitlines():
             row = json.loads(line)
+            observed = (_valid_machine_id(row.get('machine_id'))
+                        if isinstance(row, dict) else None)
             if (not isinstance(row, dict) or set(row) != {'host', 'machine_id'}
                     or not isinstance(row['host'], str) or not row['host']
-                    or _valid_machine_id(row['machine_id']) is None):
+                    or observed is None):
                 raise ValueError('invalid hostname observation')
-            aliases.setdefault(row['host'], set()).add(_valid_machine_id(row['machine_id']))
+            aliases.setdefault(row['host'], set()).add(observed)
     return aliases
 
 
