@@ -378,8 +378,11 @@ class ReaperTests(unittest.TestCase):
         installer = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(installer)
         source = (ROOT / 'ops/launchd/com.carr.orphan-reaper.plist').read_text()
-        self.assertIsNone(installer.launchd_template_refusal(source))
+        # Bind the template to the fixture BEFORE validating it. The unbound
+        # template resolves {{REPO}} to whichever checkout runs this suite, and
+        # the installer rightly refuses a detached or non-main one (hosted CI).
         source = source.replace('{{REPO}}', str(self.repo))
+        self.assertIsNone(installer.launchd_template_refusal(source))
         for target in ('bin/run-scheduled.sh', '.venv/bin/python', 'ops/orphan-reaper.py'):
             path = self.repo / target
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -401,6 +404,26 @@ class ReaperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((agents / name).read_text(), installer.concrete(source))
         self.assertIn('bootstrap', log.read_text())
+
+    def test_installer_still_refuses_template_bound_to_detached_checkout(self):
+        spec = importlib.util.spec_from_file_location('reaper_installer_refusal', ROOT / 'ops/config-as-code.py')
+        assert spec and spec.loader
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        clone = self.repo / 'detached-clone'
+        clone.mkdir()
+        env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid',
+                   GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+        for args in (['init', '-q', '-b', 'main'], ['commit', '-q', '--allow-empty', '-m', 'x'],
+                     ['checkout', '-q', '--detach']):
+            subprocess.run(['git', '-C', str(clone), *args], check=True, capture_output=True, env=env)
+        source = (ROOT / 'ops/launchd/com.carr.orphan-reaper.plist').read_text()
+        refusal = installer.launchd_template_refusal(source.replace('{{REPO}}', str(clone)))
+        self.assertIsNotNone(refusal)
+        self.assertIn('detached HEAD', refusal)
+        # The same standalone clone on main is accepted, so the refusal is about the branch.
+        subprocess.run(['git', '-C', str(clone), 'checkout', '-q', 'main'], check=True, capture_output=True, env=env)
+        self.assertIsNone(installer.launchd_template_refusal(source.replace('{{REPO}}', str(clone))))
 
     def test_service_catalog_and_workflow_inventory_close(self):
         services = json.loads((ROOT / 'ops/config/services.json').read_text())['services']
