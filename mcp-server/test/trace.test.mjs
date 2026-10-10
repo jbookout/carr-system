@@ -157,17 +157,17 @@ test("incidentSignature: matches tools/ops-record.py assess()'s own signature sh
   );
 });
 
-test("incidentFactText: carries route, failure class and correlation id; appends detail only when given, truncated to 200 chars", () => {
+test("incidentFactText: carries route, failure class and correlation id; redacts arbitrary detail values", () => {
   const noDetail = incidentFactText({ routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR, detail: null });
   assert.equal(noDetail, `/mcp failed (http_5xx), correlation ${A_CORR}`);
 
   const withDetail = incidentFactText({ routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR, detail: "boom" });
-  assert.match(withDetail, /— boom$/);
+  assert.match(withDetail, /— \[redacted\]$/);
 
   const longDetail = "x".repeat(500);
   const truncated = incidentFactText({ routeKey: "/mcp", failureClass: "http_5xx", correlationId: A_CORR, detail: longDetail });
   const appended = truncated.slice(truncated.indexOf("— ") + 2);
-  assert.equal(appended.length, 200, "detail must be capped to 200 chars, never the full 500");
+  assert.equal(appended, '[redacted]', 'arbitrary detail must never reach the record');
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -463,7 +463,7 @@ test("recordWorkerFailure: a swallowed error is LOGGED via one structured consol
   assert.equal(parsed.route_key, "mcp:tools/call:read-loop");
   assert.equal(parsed.failure_class, "verb_internal_error");
   assert.equal(parsed.error_name, "TypeError");
-  assert.match(parsed.error_message, /Cannot read properties of undefined/);
+  assert.equal(parsed.error_message, 'Cannot read properties of [redacted]');
   // NEVER the query text, params, or client content — only what the error
   // object itself carries (name + message), matching correlation.js's own
   // logLine discipline for the uncaught-throw case.
@@ -698,7 +698,7 @@ test("scheduleFailureRecord: a connection string neon() rejects OUTRIGHT (synchr
   const parsed = JSON.parse(lines[0]);
   assert.equal(parsed.event, "worker_failure_record_error");
   assert.equal(parsed.correlation_id, A_CORR);
-  assert.match(parsed.error_message, /not a valid URL/);
+  assert.equal(parsed.error_message, '[redacted]');
 });
 
 // ────────────────────────────────────────────────────────────────────────

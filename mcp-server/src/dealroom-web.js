@@ -14,6 +14,7 @@ import {
   verifyGoogleIdToken,
 } from "./google-oidc.js";
 import { authenticatedIdentity, personalScopeForActor, propsForSlug, slugForEmail } from "./identity.js";
+import { runtimeErrorWeb, RUNTIME_ERROR_PATH } from './runtime-error-web.js';
 import { normalizeRoomPaging, ROOM_BODY_MAX } from "./partner-room.js";
 import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js";
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
@@ -1183,6 +1184,7 @@ async function handleRequest(request, env, ctx, dependencies) {
       // The business read is the ONLY addition to that surface, and it is
       // admitted by an exact path parser rather than a prefix.
       if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH &&
+          url.pathname !== RUNTIME_ERROR_PATH &&
           url.pathname !== USAGE_PATH && url.pathname !== `${USAGE_PATH}/session` &&
           url.pathname !== JEV_DEAL_READING_PATH &&
           url.pathname !== WORK_INVENTORY_PATH && url.pathname !== ATLAS_GRAPH_PATH &&
@@ -1220,7 +1222,7 @@ async function handleRequest(request, env, ctx, dependencies) {
             isBusinessApiPath(url.pathname)) {
           return json({ error: "AUTHENTICATION_REQUIRED" }, 401);
         }
-        if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
+        if (url.pathname === RUNTIME_ERROR_PATH || url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
             url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(ROOM_PREFIX) ||
             url.pathname.startsWith("/api/tours/")) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
@@ -1234,6 +1236,8 @@ async function handleRequest(request, env, ctx, dependencies) {
           : json({ error: "method_not_allowed" }, 405);
       } else if (url.pathname === USAGE_PATH || url.pathname === `${USAGE_PATH}/session`) {
         response = await usageResponse(request, env, session, dependencies, guardSystemWorkPost);
+      } else if (url.pathname === RUNTIME_ERROR_PATH) {
+        response = await runtimeErrorWeb(request, env);
       } else if (isTourInternalRequest(request) && dependencies.tourHandler?.fetch) {
         response = await dependencies.tourHandler.fetch(request, env, ctx, session.actor, session);
       } else if (url.pathname.startsWith(ROOM_PREFIX)) {

@@ -177,7 +177,7 @@ test("wrapWithCorrelation: a throwing handler emits a structured log line carryi
   const parsed = JSON.parse(lines[0]);
   assert.equal(parsed.correlation_id, A_REAL_UUID.toLowerCase());
   assert.equal(parsed.level, "error");
-  assert.match(parsed.message, /boom for the log/);
+  assert.equal(parsed.message, '[redacted]');
 });
 
 test("wrapWithCorrelation: never throws itself, even when the inner handler rejects with a non-Error", async () => {

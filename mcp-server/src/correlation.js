@@ -1,3 +1,5 @@
+import { scrubError } from './runtime-errors.js';
+
 // CARR MCP server — correlation id middleware (Program 3, Gap A, 2026-08-14).
 //
 // THE GAP THIS CLOSES. The production-maturity baseline's observability
@@ -141,8 +143,8 @@ export function wrapWithCorrelation(handler) {
     } catch (e) {
       logLine("error", "worker_uncaught_error", {
         correlation_id: correlationId,
-        path: safePath(request),
-        message: String((e && e.message) || e).slice(0, 300),
+        path: scrubError({ route: safePath(request) }).route,
+        message: scrubError({ type: e?.name, message: e?.message }).message,
       });
       response = new Response(
         JSON.stringify({ error: "internal_error", correlation_id: correlationId }),

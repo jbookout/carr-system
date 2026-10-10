@@ -1774,6 +1774,14 @@ def _canonical_health():
             print(f"  UNAVAILABLE jev spend — {type(exc).__name__}; "
                   "on breach: open/update one dedup loop · owner orchestrator · "
                   "remediation find caller in jev usage log · auto-clear when below threshold")
+        runtime_spec = importlib.util.spec_from_file_location('runtime_error_health', os.path.join(REPO_ROOT, 'ops', 'runtime_error_health.py'))
+        runtime_health = importlib.util.module_from_spec(runtime_spec)
+        runtime_spec.loader.exec_module(runtime_health)
+        runtime_row = runtime_health.health_row(REPO_ROOT)
+        print('  ' + runtime_row)
+        if runtime_row.startswith(('WARN', 'UNAVAILABLE')):
+            rc = _red('runtime_errors', runtime_row, hard_error=runtime_row.startswith('UNAVAILABLE'))
+
         # ── credential health (added 2026-09-24) ────────────────────────────
         # Daily liveness lane for every credential CARR needs to run
         # unattended — wrangler/Cloudflare, Neon, the two MCP machine-bearer

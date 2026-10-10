@@ -82,6 +82,14 @@ import INGEST_TRANSPORT from "./ingest-transport.v1.json" with { type: "json" };
 // at its own call site below, since a 401 is invisible to a >=500 check.
 
 import { OAuthProvider, getOAuthApi } from "@cloudflare/workers-oauth-provider";
+import { WorkerEntrypoint } from 'cloudflare:workers';
+import { withRuntimeErrors, captureRuntimeError } from './runtime-errors.js';
+import { runtimeErrorControl } from './runtime-error-web.js';
+export { RuntimeErrorStore } from './runtime-errors.js';
+
+export class RuntimeErrorSink extends WorkerEntrypoint {
+  async capture(input) { return captureRuntimeError(this.env, 'app-worker', input); }
+}
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch, dispatchEngineeringController, canonicalOwnershipExecutionHost } from "./mcp.js";
 import { engineeringControllerActorForToken } from "./authenticated-canonical-ownership.js";
@@ -686,6 +694,10 @@ const dealroomHandler = createDealroomHandler({
 // owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
+  if (url.pathname.startsWith('/_runtime-errors/')) {
+    if (!localActorFor(request, env)) return json({ error: 'unauthorized' }, 401);
+    return runtimeErrorControl(request, env);
+  }
   // Validate before machine-token, browser-cookie and provider routes alike.
   if (isSharedOAuthPath(url.pathname)) {
     const refused = mcpOriginRefusal(request, env);
@@ -742,5 +754,5 @@ async function routeRequest(request, env, ctx) {
 // ordering is load-bearing) so every route's >=500 responses and uncaught
 // throws are covered the same single-wrap way.
 export default {
-  fetch: wrapWithCorrelation(withFailureRecording(routeRequest)),
+  fetch: wrapWithCorrelation(withRuntimeErrors(withFailureRecording(routeRequest))),
 };
