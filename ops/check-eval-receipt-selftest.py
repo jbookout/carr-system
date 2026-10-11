@@ -510,8 +510,11 @@ class AcceptedRuleBootTradeoff(unittest.TestCase):
         classes = json.loads((ROOT / "ops/config/rule-classes.v1.json").read_text())
         cases = json.loads((ROOT / "ops/fixtures/rule-delivery-eval/cases.v2.json").read_text())
         gold = {c["id"]: set(c["gold"]) for c in cases["cases"]}
+        hard = json.loads((ROOT / "evals/rule-delivery/hard_cases.v1.json").read_text())
+        gold.update({c["id"]: set(c["required"]) for c in hard["cases"]})
         rels = {"ops/config/rule-classes.v1.json": classes,
-                "ops/fixtures/rule-delivery-eval/cases.v2.json": cases}
+                "ops/fixtures/rule-delivery-eval/cases.v2.json": cases,
+                "evals/rule-delivery/hard_cases.v1.json": hard}
         for rel, doc in rels.items():
             path = root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,6 +531,58 @@ class AcceptedRuleBootTradeoff(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             receipt["evidence"]["cohorts"][arm]["sha256"] = write_jsonl(path, rows)
         return receipt
+
+    def test_hard_required_bc_loss_blocks_acceptance(self):
+        classes = json.loads((ROOT / "ops/config/rule-classes.v1.json").read_text())["rules"]
+        hard = json.loads((ROOT / "evals/rule-delivery/hard_cases.v1.json").read_text())["cases"]
+        for cls in ("b", "c"):
+            with self.subTest(cls=cls), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                receipt = self.receipt(root)
+                self.assertTrue(cer.accepted_rule_boot_tradeoff(receipt, root))
+                cid, rid = next((c["id"], rid) for c in hard for rid in c["required"]
+                                if classes.get(rid, {}).get("class") == cls)
+                block = receipt["evidence"]["cohorts"]["candidate"]
+                rows = read_jsonl(root / block["path"])
+                next(row for row in rows if row["case_id"] == cid)["available"].remove(rid)
+                block["sha256"] = write_jsonl(root / block["path"], rows)
+                self.assertFalse(cer.accepted_rule_boot_tradeoff(receipt, root))
+
+    def test_hard_required_a_and_unclassified_loss_blocks_acceptance(self):
+        for rid in ("725dff46", "ffffffff"):
+            with self.subTest(rid=rid), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                receipt = self.receipt(root)
+                rel = "evals/rule-delivery/hard_cases.v1.json"
+                hard = json.loads((root / rel).read_text())
+                hard["cases"].append({"id": "h-required-loss", "required": [rid], "acceptable": []})
+                (root / rel).write_text(json.dumps(hard))
+                receipt["evidence"]["dependencies"][rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+                for arm in ("baseline", "candidate"):
+                    block = receipt["evidence"]["cohorts"][arm]
+                    rows = read_jsonl(root / block["path"])
+                    rows.append({"case_id": "h-required-loss", "available": [rid] if arm == "baseline" else []})
+                    block["sha256"] = write_jsonl(root / block["path"], rows)
+                self.assertFalse(cer.accepted_rule_boot_tradeoff(receipt, root))
+
+    def test_hard_preexisting_unclassified_gaps_are_not_new_losses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            receipt = self.receipt(root)
+            for arm in ("baseline", "candidate"):
+                block = receipt["evidence"]["cohorts"][arm]
+                rows = read_jsonl(root / block["path"])
+                for row in rows:
+                    row["available"] = [rid for rid in row["available"] if rid not in {"83b9a362", "e6e0b0e7"}]
+                block["sha256"] = write_jsonl(root / block["path"], rows)
+            self.assertTrue(cer.accepted_rule_boot_tradeoff(receipt, root))
+
+    def test_hard_labels_must_be_digest_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            receipt = self.receipt(root)
+            receipt["evidence"]["dependencies"]["evals/rule-delivery/hard_cases.v1.json"] = "0" * 64
+            self.assertFalse(cer.accepted_rule_boot_tradeoff(receipt, root))
 
     def test_only_the_named_de_drop_is_accepted_with_critical_flag_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -231,14 +231,14 @@ def _direction(delta: dict) -> str:
 
 
 def accepted_rule_boot_tradeoff(receipt: dict, root: Path, errors: list[str] | None = None) -> bool:
-    """Joe accepted only D/E full-text loss, with all other gold text available."""
+    """Joe accepted only new D/E full-text losses; protected gold must be preserved."""
     if receipt.get("surface") != "rule-delivery":
         return False
     if receipt.get("verdict", {}).get("accepted_tradeoff") != {
             "decision_ref": "1616f64c-5935-4a31-a5cc-ffa4e6721c01",
             "missing_classes": ["d", "e"]}:
         return False
-    dimension = next((d for d in receipt.get("dimensions", [])
+    dimension: dict[str, Any] = next((d for d in receipt.get("dimensions", [])
                       if d.get("dimension_id") == "full-text-availability"), {})
     if dimension.get("critical") is not True or dimension.get("status") != "passed":
         return False
@@ -247,13 +247,17 @@ def accepted_rule_boot_tradeoff(receipt: dict, root: Path, errors: list[str] | N
     dependencies = evidence.get("dependencies", {})
     try:
         docs = {}
-        for rel in ("ops/config/rule-classes.v1.json", "ops/fixtures/rule-delivery-eval/cases.v2.json"):
+        for rel in ("ops/config/rule-classes.v1.json", "ops/fixtures/rule-delivery-eval/cases.v2.json",
+                    "evals/rule-delivery/hard_cases.v1.json"):
             raw = _bound_bytes(root, rel, dependencies.get(rel), "accepted tradeoff", errors)
             if raw is None:
                 return False
             docs[rel] = json.loads(raw)
         classes = docs["ops/config/rule-classes.v1.json"]["rules"]
-        cases = docs["ops/fixtures/rule-delivery-eval/cases.v2.json"]["cases"]
+        cases = [(c["id"], set(c["gold"]), False)
+                 for c in docs["ops/fixtures/rule-delivery-eval/cases.v2.json"]["cases"]]
+        cases += [(c["id"], set(c["required"]), True)
+                  for c in docs["evals/rule-delivery/hard_cases.v1.json"]["cases"]]
         arms = {}
         for arm in ("baseline", "candidate"):
             block = evidence["cohorts"][arm]
@@ -263,16 +267,22 @@ def accepted_rule_boot_tradeoff(receipt: dict, root: Path, errors: list[str] | N
                 return False
             arms[arm] = {row["case_id"]: set(row["available"])
                          for row in (json.loads(line) for line in raw.splitlines() if line.strip())}
-        for case in cases:
+        for case_id, gold, is_hard in cases:
             for arm in ("baseline", "candidate"):
-                if case["id"] not in arms[arm]:
-                    errors.append(f"accepted tradeoff {arm} missing case {case['id']}")
+                if case_id not in arms[arm]:
+                    errors.append(f"accepted tradeoff {arm} missing case {case_id}")
                     return False
-            gold = set(case["gold"])
-            if not gold <= arms["baseline"][case["id"]]:
+            baseline_gold = gold & arms["baseline"][case_id]
+            if not is_hard and baseline_gold != gold:
                 return False
-            missing = gold - arms["candidate"][case["id"]]
-            if any(classes.get(rid, {}).get("class") not in {"d", "e"} for rid in missing):
+            # Pre-existing hard-case gaps are not candidate losses.
+            # Only required hard labels participate; acceptable-only labels are excluded.
+            missing = baseline_gold - arms["candidate"][case_id]
+            protected = sorted(rid for rid in missing
+                               if classes.get(rid, {}).get("class") not in {"d", "e"})
+            if protected:
+                errors.append(f"accepted tradeoff candidate loses protected gold in {case_id}: "
+                              + ", ".join(protected))
                 return False
     except (KeyError, TypeError, ValueError, OSError):
         return False
@@ -437,7 +447,7 @@ def claim_errors(r: Any, surface: str, root: Path = ROOT) -> list[str]:
         return errs
     decision, statement = verdict["decision"], verdict["statement"]
     shipping = decision in {"ship", "ship_cost_at_parity"}
-    acceptance_errors = []
+    acceptance_errors: list[str] = []
     accepted_boot = accepted_rule_boot_tradeoff(r, root, acceptance_errors)
     errs.extend(acceptance_errors)
     if accepted_boot:
