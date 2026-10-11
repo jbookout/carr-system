@@ -16,10 +16,25 @@ spec.loader.exec_module(dot)
 SHA = 'a' * 40
 
 
+def fake_slack(report):
+    slack = type('Slack', (), {'channel': 'fixture-channel'})()
+    slack.replies = lambda thread: [{'ts': thread, 'user': 'dot-user', 'text': report}]
+    return slack
+
+
+SLACK_REPORTS = {}
+
+
 def publish_review(directory, *args, **kwargs):
     kwargs.setdefault('reviewer', 'dot-user')
     kwargs.setdefault('relay_run_id', 'fixture-channel:1.000001' if Path(directory).name == 'thread' else 'fixture-channel:2.000001')
-    with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(directory).parent/'relay-receipts')}):
+    messages = SLACK_REPORTS.setdefault(str(Path(directory).parent), {})
+    ts = kwargs['relay_run_id'].rsplit(':', 1)[-1]
+    messages[ts] = {'ts': ts, 'user': kwargs['reviewer'], 'text': args[1]}
+    slack = fake_slack(args[1])
+    slack.replies = lambda thread: [messages[thread]] if thread in messages else []
+    with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(directory).parent/'relay-receipts')}), patch.object(
+            dot.dot_review_receipts, '_slack_transport', return_value=slack):
         body = dot.publication_body(args[0], args[1], kwargs.get('known_secrets', ()))
         dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
         dot.dot_review_receipts.attest_run(args[0], body, reviewer=kwargs['reviewer'],
@@ -93,7 +108,7 @@ class RelayTests(unittest.TestCase):
                 kw['orch'] = Path(tmp)/'orch'
                 with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}):
                     return actual(*args, **kw)
-            with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}), patch.object(dot, 'publish', side_effect=publish):
+            with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}), patch.object(dot, 'publish', side_effect=publish), patch.object(dot.dot_review_receipts, '_slack_transport', return_value=slack):
                 dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
                 self.assertTrue(engine.poll(thread, execute=True))
                 restarted = dot.ReviewRelay(slack, state, repo, 'dot-user')
@@ -102,7 +117,7 @@ class RelayTests(unittest.TestCase):
             self.assertIn('Part one\nPart two', posts[0])
             self.assertNotIn('Still reading', posts[0])
             self.assertNotIn('REVIEW: BLOCKED', posts[0])
-            with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}):
+            with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}), patch.object(dot.dot_review_receipts, '_slack_transport', return_value=slack):
                 receipt = dot.dot_review_receipts.matching(meta, posts[0], api=api)
                 self.assertEqual(receipt['slack_message_ts'], '4.000001')
                 self.assertEqual(receipt['relay_run_id'], 'fixture-channel:4.000001')
@@ -312,11 +327,11 @@ class PublicationTests(unittest.TestCase):
         self.comments = [{'body':body,'author_association':'OWNER','user':{'login':'builder'}}]
         with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(self.directory.parent/'forged')}):
             dot.dot_review_receipts.record(self.meta, body, builder='builder',
-                reviewer='invented-reviewer',relay_run_id='invented-thread',branch_author=None)
+                reviewer='invented-reviewer',relay_run_id='invented-channel:3.000001',branch_author=None)
             with self.assertRaisesRegex(ValueError, 'ledger failed validation'):
                 dot.publish(self.directory, self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.',
                             self.api, orch=self.directory.parent/'orch',
-                            reviewer='invented-reviewer',relay_run_id='invented-thread')
+                            reviewer='invented-reviewer',relay_run_id='invented-channel:3.000001')
         self.assertEqual(self.posts, [])
         self.assertEqual(list((self.directory.parent/'review-publications').glob('*.json')), [])
 
@@ -347,6 +362,28 @@ class PublicationTests(unittest.TestCase):
         path.write_text(json.dumps({'status':'posted'}))
         with self.assertRaisesRegex(ValueError, 'relay receipt'):
             self.finish()
+        self.assertEqual(self.posts, [])
+
+    def test_public_api_forgery_cannot_suppress_publication_without_slack(self):
+        report = 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.\nDOT-REPORT-END'
+        body = dot.publication_body(self.meta, report)
+        self.comments.append({'body': body, 'author_association': 'OWNER'})
+        slack = fake_slack(report)
+        slack.replies = lambda thread: []
+        with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(self.directory.parent/'relay-receipts')}), patch.object(
+                dot.dot_review_receipts, '_slack_transport', return_value=slack):
+            dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
+            dot.dot_review_receipts.attest_run(self.meta, body, reviewer='dot-user',
+                                               relay_run_id='fixture-channel:1.000001', report=report)
+            dot.dot_review_receipts.record(self.meta, body, reviewer='dot-user', builder='builder',
+                                           relay_run_id='fixture-channel:1.000001', report=report, anchor=True)
+            import io
+            from contextlib import redirect_stderr
+            with redirect_stderr(io.StringIO()) as alarm, self.assertRaisesRegex(ValueError, 'relay run receipt'):
+                dot.publish(self.directory, self.meta, report, self.api,
+                            orch=self.directory.parent/'orch', reviewer='dot-user',
+                            relay_run_id='fixture-channel:1.000001')
+            self.assertIn('DOT_REVIEW_RECEIPT_ALARM', alarm.getvalue())
         self.assertEqual(self.posts, [])
 
     def test_reposted_thread_shares_publication_receipt(self):
@@ -736,7 +773,7 @@ class LoopRegressionTests(unittest.TestCase):
             def green(self, *a): return True
             def pages(self, path):
                 return [{'author':{'login':'commit-author'}}] if '/commits?' in path else [{'body':body,'author_association':'OWNER'}]
-        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(Path(tmp)/'relay')}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(Path(tmp)/'relay')}), patch.object(dot.dot_review_receipts, '_slack_transport', return_value=fake_slack(body)):
             self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], '')
             dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
             dot.dot_review_receipts.attest_run({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,

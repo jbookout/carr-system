@@ -1,8 +1,9 @@
 """Detect local receipt tampering and bind Dot decisions to relay runs and live authors.
 
 An external SQLite checkpoint detects changes to either ledger head. Authenticated
-relay consumption advances it; raw ledger writes do not. Full coordinated rewriting
-of the ledgers, checkpoint history and external evidence remains out of scope.
+relay consumption advances it; raw ledger writes do not. Public append APIs are
+not an authentication boundary: every consumer verifies the report against Slack.
+Coordinated rewriting of both local evidence and Slack remains out of scope.
 """
 from __future__ import annotations
 
@@ -17,11 +18,15 @@ import sys
 import sqlite3
 import shutil
 import time
+from decimal import Decimal
+
+from lib import dot_relay
 
 SCHEMA = 'carr-dot-review-receipt/v2'
 RUN_SCHEMA = 'carr-dot-relay-run/v1'
 ALARM = 'DOT_REVIEW_RECEIPT_ALARM'
 GENESIS = '0' * 64
+TIMESTAMP_SKEW_SECONDS = 30
 DOT_MARKER = 'Reviewer: ChatGPT Dot'
 STAMP = re.compile(r'^APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
                    r'(?:Orchestrator merge queue:|Orchestrator: verified exact head)')
@@ -249,7 +254,7 @@ def _append(ledger, value, *, anchor=False):
                     if ledger == 'receipts' and not any(
                             all(run.get(k) == value.get(k) for k in
                                 ('repo', 'pr', 'reviewed_sha', 'body_sha256', 'reviewer',
-                                 'relay_run_id', 'slack_message_ts', 'report_sha256'))
+                                 'relay_run_id', 'slack_message_ts', 'slack_thread_ts', 'report_sha256'))
                             for run in ledgers['runs']):
                         raise _ChainError('publication lacks its anchored relay run')
         except (OSError, sqlite3.Error, ValueError) as error:
@@ -284,23 +289,30 @@ def _append(ledger, value, *, anchor=False):
         return value
 
 
-def _value(schema, meta, body, reviewer, relay_run_id, report=None):
+def _value(schema, meta, body, reviewer, relay_run_id, report=None, thread_ts=None):
     if (not isinstance(reviewer, str) or not reviewer.strip() or
             not isinstance(relay_run_id, str) or not relay_run_id.strip()):
-        raise ValueError('Dot ledger requires an authenticated reviewer and relay run')
+        raise ValueError('Dot ledger requires a reviewer and relay run')
+    ts = relay_run_id.rsplit(':', 1)[-1]
+    if not re.fullmatch(r'[0-9]+\.[0-9]{6}', ts):
+        raise ValueError('invalid Slack message timestamp')
+    if Decimal(ts) > Decimal(str(time.time())) + TIMESTAMP_SKEW_SECONDS:
+        raise ValueError('Slack message timestamp is in the future')
+    if thread_ts is not None and not re.fullmatch(r'[0-9]+\.[0-9]{6}', thread_ts):
+        raise ValueError('invalid Slack thread timestamp')
     return {'schema': schema, **_binding(meta, body), 'reviewer': reviewer.strip(),
-            'relay_run_id': relay_run_id.strip(), 'slack_message_ts': relay_run_id.rsplit(':', 1)[-1],
+            'relay_run_id': relay_run_id.strip(), 'slack_message_ts': ts, 'slack_thread_ts': thread_ts or ts,
             'report_sha256': hashlib.sha256((body if report is None else report).encode()).hexdigest()}
 
 
-def record_run(meta, body, *, reviewer, relay_run_id, report=None):
+def record_run(meta, body, *, reviewer, relay_run_id, report=None, thread_ts=None):
     """Append unanchored run evidence; this alone never authorizes a verdict."""
-    return _append('runs', _value(RUN_SCHEMA, meta, body, reviewer, relay_run_id, report))
+    return _append('runs', _value(RUN_SCHEMA, meta, body, reviewer, relay_run_id, report, thread_ts))
 
 
-def record(meta, body, *, reviewer, relay_run_id, builder=None, branch_author=None, report=None, anchor=False):
-    """Append publication provenance; anchor only after an attested run matches."""
-    value = _value(SCHEMA, meta, body, reviewer, relay_run_id, report)
+def record(meta, body, *, reviewer, relay_run_id, builder=None, branch_author=None, report=None, anchor=False, thread_ts=None):
+    """Append local provenance; consumers still require independent Slack verification."""
+    value = _value(SCHEMA, meta, body, reviewer, relay_run_id, report, thread_ts)
     if builder is not None:
         value['builder'] = builder
     if branch_author is not None:
@@ -308,9 +320,9 @@ def record(meta, body, *, reviewer, relay_run_id, builder=None, branch_author=No
     return _append('receipts', value, anchor=anchor)
 
 
-def attest_run(meta, body, *, reviewer, relay_run_id, report):
-    """Called by the relay after consuming the configured sender's Slack report."""
-    return _append('runs', _value(RUN_SCHEMA, meta, body, reviewer, relay_run_id, report), anchor=True)
+def attest_run(meta, body, *, reviewer, relay_run_id, report, thread_ts=None):
+    """Append report evidence; this public API does not authenticate Slack provenance."""
+    return _append('runs', _value(RUN_SCHEMA, meta, body, reviewer, relay_run_id, report, thread_ts), anchor=True)
 
 
 def _live_authors(meta, api):
@@ -336,6 +348,51 @@ def _live_authors(meta, api):
             if isinstance(alias, str) and alias.strip():
                 authors.add(alias.strip().casefold())
     return authors
+
+
+def _slack_transport(actor):
+    """Use the relay's credential loader and read adapter, never a local receipt as proof."""
+    config = dot_relay.read_config(Path.home() / '.hermes/.env', Path(__file__).resolve().parents[1])
+    if config['sender'] != actor['sender'] or config['channel'] != actor['channel']:
+        raise _ChainError('Slack configuration differs from the enrolled Dot actor')
+    return dot_relay.SlackTransport(config['token'], config['channel'])
+
+
+def _verify_slack(entry, body, actor):
+    ts = entry['slack_message_ts']
+    if Decimal(ts) > Decimal(str(time.time())):
+        raise _ChainError('Slack report timestamp is in the future')
+    transport = _slack_transport(actor)
+    if transport.channel != actor['channel']:
+        raise _ChainError('Slack reader channel differs from configured Dot channel')
+    messages = transport.replies(entry.get('slack_thread_ts', ts))
+    dot_relay._validate_messages(messages)
+    messages = sorted(messages, key=lambda m: dot_relay._timestamp_key(m['ts']))
+    start = next((i for i, message in enumerate(messages) if message['ts'] == ts), None)
+    if start is None:
+        raise _ChainError('recorded Dot Slack message does not exist')
+    if messages[start]['text'].strip().splitlines()[:2] != body.strip().splitlines()[:2]:
+        raise _ChainError('Dot Slack verdict and reviewed head differ from the publication')
+    report = []
+    for message in messages[start:]:
+        if actor['sender'] not in (message.get('user'), message.get('bot_id')):
+            if message['ts'] == ts:
+                raise _ChainError('recorded Slack message was not posted by Dot')
+            continue
+        if message.get('edited') or message.get('subtype') not in (None, 'bot_message'):
+            raise _ChainError('Dot Slack report has been edited or has an unexpected subtype')
+        if Decimal(message['ts']) > Decimal(str(time.time())):
+            raise _ChainError('Dot Slack report contains a future message')
+        if dot_relay._protocol(message['text'])[0]:
+            if message['ts'] == ts:
+                raise _ChainError('recorded Slack message is a command, not a report')
+            continue
+        report.append(message['text'])
+        if dot_relay._protocol(message['text'])[1] is not None:
+            break
+    text = '\n'.join(report)
+    if hashlib.sha256(text.encode()).hexdigest() != entry['report_sha256']:
+        raise _ChainError('Dot Slack report text differs from the recorded hash')
 
 
 def _matching(meta, body, api):
@@ -387,12 +444,19 @@ def _matching(meta, body, api):
         if actor['github_actor'].casefold() in authors:
             _alarm('mapped Dot GitHub actor is a live PR or commit author')
         else:
+            try:
+                _verify_slack(entry, body, actor)
+            except Exception as error:
+                # Credential/API exceptions may contain secrets. Log only their type.
+                _alarm('Slack report verification failed: ' + (str(error) if isinstance(error, _ChainError)
+                                                             else type(error).__name__))
+                continue
             return entry, True
     return None, True
 
 
 def matching(meta, body, *, api=None):
-    """Return verified provenance; absent, corrupted, or self-authored evidence refuses."""
+    """Return provenance verified against Slack and live authors; unverifiable evidence refuses."""
     return _matching(meta, body, api)[0]
 
 

@@ -91,6 +91,13 @@ spec.loader.exec_module(module)
 
 class QueueTests(unittest.TestCase):
     def setUp(self):
+        self.slack_messages = {}
+        slack = type('Slack', (), {'channel': 'fixture-channel'})()
+        self.slack = slack
+        slack.replies = lambda thread: [self.slack_messages[thread]] if thread in self.slack_messages else []
+        reader = patch.object(module.dot_review_receipts, '_slack_transport', return_value=slack)
+        reader.start()
+        self.addCleanup(reader.stop)
         patcher = patch.dict(os.environ, fixture_env(), clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -195,7 +202,9 @@ class QueueTests(unittest.TestCase):
     def receipt(self, meta, body, **fields):
         import hashlib
         module.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
-        fields['relay_run_id'] = 'fixture-channel:' + str(int(hashlib.sha256(fields['relay_run_id'].encode()).hexdigest()[:12], 16)) + '.000001'
+        fields['relay_run_id'] = 'fixture-channel:' + str(int(hashlib.sha256(fields['relay_run_id'].encode()).hexdigest()[:12], 16) % 1000000000) + '.000001'
+        ts = fields['relay_run_id'].rsplit(':', 1)[-1]
+        self.slack_messages[ts] = {'ts': ts, 'user': fields['reviewer'], 'text': body}
         module.dot_review_receipts.attest_run(meta, body, reviewer=fields['reviewer'],
                                              relay_run_id=fields['relay_run_id'], report=body)
         return module.dot_review_receipts.record(meta, body, **fields, anchor=True)
@@ -209,8 +218,31 @@ class QueueTests(unittest.TestCase):
         self.save()
         module.dot_review_receipts.record({'repo':repo,'pr':1,'sha':self.approved}, body,
             builder='builder',reviewer='invented-independent-user',
-            relay_run_id='invented-channel:invented-thread',branch_author='builder')
+            relay_run_id='invented-channel:3.000001',branch_author='builder')
         self.assertIsNone(self.q.approval(repo, 1))
+
+    def test_queue_requires_live_slack_report_even_after_public_api_attestation(self):
+        import io
+        from contextlib import redirect_stderr
+        repo = module.REPOS[0]
+        self.pr()
+        body = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'
+        self.data['comments'][repo+'#1'] = [{'body': body, 'author_association': 'OWNER'}]
+        self.save()
+        self.receipt({'repo': repo, 'pr': 1, 'sha': self.approved}, body,
+                     reviewer='dot-user', relay_run_id='live-slack-fixture')
+        self.assertEqual(self.q.approval(repo, 1), self.approved)
+        original = self.slack.replies
+        cases = {'invented': lambda thread: [],
+                 'different-text': lambda thread: [{**original(thread)[0], 'text': body+'\nChanged'}],
+                 'unreachable': lambda thread: (_ for _ in ()).throw(ConnectionError('offline'))}
+        for name, replies in cases.items():
+            with self.subTest(name=name), redirect_stderr(io.StringIO()) as alarm:
+                self.slack.replies = replies
+                self.assertIsNone(self.q.approval(repo, 1))
+                self.assertIn('DOT_REVIEW_RECEIPT_ALARM', alarm.getvalue())
+        self.slack.replies = original
+        self.assertEqual(self.q.approval(repo, 1), self.approved)
 
     def test_receipt_rechecks_pr_and_commit_authors_at_decision(self):
         repo = module.REPOS[0]

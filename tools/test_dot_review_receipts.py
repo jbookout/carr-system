@@ -31,6 +31,13 @@ class ReceiptTests(unittest.TestCase):
         self.commits = [{'author': {'login': 'other-builder'},
                          'commit': {'author': {'name': 'Other Builder', 'email': 'other@example.test'}}}]
         self.calls = []
+        self.messages = {}
+        self.slack = type('Slack', (), {'channel': 'fixture-channel'})()
+        self.slack.replies = lambda thread: list(self.messages.values())
+        self.reader_factory = receipts._slack_transport
+        reader = patch.object(receipts, '_slack_transport', return_value=self.slack)
+        reader.start()
+        self.addCleanup(reader.stop)
         self.policy = {
             'verdict': lambda body, config: body.startswith('APPROVE\n'),
             'reviewed_header_sha': lambda body: body.splitlines()[1].split(': ', 1)[1],
@@ -50,6 +57,8 @@ class ReceiptTests(unittest.TestCase):
                                reviewer=reviewer, relay_run_id=run, branch_author='invented-author', anchor=anchor)
 
     def pair(self, body=None, meta=None, run='fixture-channel:1.000001', reviewer='dot-user'):
+        ts = run.rsplit(':', 1)[-1]
+        self.messages[ts] = {'ts': ts, 'user': reviewer, 'text': body or self.body}
         receipts.attest_run(meta or self.meta, body or self.body, reviewer=reviewer, relay_run_id=run, report=body or self.body)
         return self.record(body, meta, run, reviewer, anchor=True)
 
@@ -63,6 +72,96 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(receipts.deciding([{'id': 1, 'body': self.body, 'author_association': 'OWNER'}],
                 'fixture/repo', 1, policy=self.policy, config={}, api=self.api), (None, None))
         self.assertIn('DOT_REVIEW_RECEIPT_ALARM', stderr.getvalue())
+
+    def test_public_attestation_with_invented_slack_timestamp_refuses_and_alarms(self):
+        self.pair()
+        self.messages.clear()
+        self.assert_alarm_refusal(self.matching)
+
+    def test_slack_report_text_mismatch_refuses_and_alarms(self):
+        self.pair()
+        self.messages['1.000001']['text'] += '\nDifferent Slack report'
+        self.assert_alarm_refusal(self.matching)
+
+    def test_slack_unreachable_refuses_and_alarms(self):
+        self.pair()
+        self.slack.replies = lambda thread: (_ for _ in ()).throw(ConnectionError('offline'))
+        self.assert_alarm_refusal(self.matching)
+
+    def test_genuine_slack_report_accepts(self):
+        original = self.pair()
+        self.assertEqual(self.matching(), original)
+
+    def test_wrong_slack_sender_refuses_and_alarms(self):
+        self.pair()
+        self.messages['1.000001']['user'] = 'outsider'
+        self.assert_alarm_refusal(self.matching)
+
+    def test_wrong_slack_channel_refuses_and_alarms(self):
+        self.pair()
+        self.slack.channel = 'other-channel'
+        self.assert_alarm_refusal(self.matching)
+
+    def test_real_block_report_cannot_attest_approve(self):
+        report = self.body.replace('APPROVE', 'REVIEW: BLOCKED', 1)
+        receipts.attest_run(self.meta, self.body, reviewer='dot-user',
+                            relay_run_id='fixture-channel:1.000001', report=report)
+        receipts.record(self.meta, self.body, reviewer='dot-user',
+                        relay_run_id='fixture-channel:1.000001', report=report, anchor=True)
+        self.messages['1.000001'] = {'ts': '1.000001', 'user': 'dot-user', 'text': report}
+        self.assert_alarm_refusal(self.matching)
+
+    def test_small_clock_skew_can_be_recorded_but_not_accepted_in_future(self):
+        with patch.object(receipts.time, 'time', return_value=100):
+            self.pair(run='fixture-channel:101.000001')
+            self.assert_alarm_refusal(self.matching)
+        with patch.object(receipts.time, 'time', return_value=102):
+            self.assertIsNotNone(self.matching())
+
+    def test_multipart_report_verifies_in_its_original_thread(self):
+        report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']+'\nFirst part\nSecond part\nDOT-REPORT-END'
+        receipts.attest_run(self.meta, self.body, reviewer='dot-user',
+                            relay_run_id='fixture-channel:2.000001', report=report, thread_ts='1.000001')
+        original = receipts.record(self.meta, self.body, reviewer='dot-user',
+                                   relay_run_id='fixture-channel:2.000001', report=report,
+                                   thread_ts='1.000001', anchor=True)
+        self.slack.replies = lambda thread: [
+            {'ts': '1.000001', 'user': 'orchestrator', 'text': 'Review brief'},
+            {'ts': '2.000001', 'user': 'dot-user', 'text': report.split('\nSecond part')[0]},
+            {'ts': '3.000001', 'user': 'outsider', 'text': 'Untrusted interruption'},
+            {'ts': '4.000001', 'user': 'dot-user', 'text': 'Second part\nDOT-REPORT-END'},
+            {'ts': '5.000001', 'user': 'dot-user', 'text': 'After completion'}] if thread == '1.000001' else []
+        self.assertEqual(self.matching(), original)
+
+    def test_edited_slack_message_refuses_and_alarms(self):
+        self.pair()
+        self.messages['1.000001']['edited'] = {'ts': '2.000001'}
+        self.assert_alarm_refusal(self.matching)
+
+    def test_existing_relay_reader_uses_configured_channel_and_thread(self):
+        self.pair()
+        calls = []
+        def api(method, payload):
+            calls.append((method, payload))
+            return {'ok': True, 'messages': list(self.messages.values()), 'has_more': False}
+        transport = receipts.dot_relay.SlackTransport
+        config = {'token': 'synthetic-test-token', 'channel': 'fixture-channel', 'sender': 'dot-user'}
+        with patch.object(receipts, '_slack_transport', side_effect=self.reader_factory), patch.object(
+                receipts.dot_relay, 'read_config', return_value=config), patch.object(
+                receipts.dot_relay, 'SlackTransport', side_effect=lambda token, channel:
+                    transport(token, channel, api=api, use_sdk=False)):
+            self.assertIsNotNone(self.matching())
+        self.assertEqual(calls, [('conversations.replies',
+            {'channel': 'fixture-channel', 'ts': '1.000001', 'limit': 15})])
+
+    def test_future_timestamp_is_refused_at_record_time(self):
+        import time
+        run = 'fixture-channel:' + str(int(time.time()) + 60) + '.000001'
+        for action in (lambda: self.record(run=run),
+                       lambda: receipts.attest_run(self.meta, self.body, reviewer='dot-user',
+                                                  relay_run_id=run, report=self.body)):
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                action()
 
     def test_appended_run_and_receipt_pair_alarm_and_refuse(self):
         self.pair()

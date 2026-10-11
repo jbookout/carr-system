@@ -439,7 +439,7 @@ def publication_body(meta, report, known_secrets=()):
 
 
 def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(), orch=None,
-            *, reviewer=None, relay_run_id=None):
+            *, reviewer=None, relay_run_id=None, thread_ts=None):
     body = publication_body(meta, report, known_secrets)
     review_key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()
     path = Path(directory).parent / 'review-publications' / (review_key + '.json')
@@ -481,7 +481,7 @@ def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(),
         dot_review_receipts.record(meta, body, builder=(pr.get('user') or {}).get('login'),
                                   reviewer=reviewer, relay_run_id=relay_run_id,
                                   branch_author=((pr.get('head') or {}).get('user') or {}).get('login'),
-                                  report=report, anchor=True)
+                                  report=report, anchor=True, thread_ts=thread_ts)
         if dot_review_receipts.matching(meta, body, api=api) is None:
             raise ValueError('Dot publication lacks an independent relay run receipt')
         save(path, {'status': 'posting', 'marker': marker})
@@ -565,11 +565,11 @@ class ReviewRelay(dot_relay.Relay):
             meta = json.loads(meta_file.read_text())
             run_id = f'{self.transport.channel}:{reports[start]["ts"]}'
             dot_review_receipts.attest_run(meta, publication_body(meta, report, self.secrets),
-                                           reviewer=self.sender, relay_run_id=run_id, report=report)
+                                           reviewer=self.sender, relay_run_id=run_id, report=report, thread_ts=thread)
             publish(directory, meta, report,
                     requeue=lambda meta: submit(meta['repo'], meta['pr'], Path(os.environ.get('CARR_ORCH_DIR', ROOT / 'out/orch'))),
                     known_secrets=self.secrets, reviewer=self.sender,
-                    relay_run_id=run_id)
+                    relay_run_id=run_id, thread_ts=thread)
         return done
 
 
