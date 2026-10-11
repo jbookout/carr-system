@@ -133,6 +133,12 @@ def python_errors(source):
             if 'cache_key' not in kw:
                 errors.append(f'{call.lineno}: cache: use jev_semantic.ask with complete input key')
 
+        exception_collectors = []
+
+        def capture_prefix(env, prior):
+            for prefixes in exception_collectors:
+                prefixes.append((dict(env), set(prior)))
+
         def expression(node, env, prior):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
                 return
@@ -140,6 +146,7 @@ def python_errors(source):
                 expression(child, env, prior)
             if isinstance(node, ast.Call):
                 inspect(node, env, prior)
+                capture_prefix(env, prior)
 
         def merge(env, prior, branches):
             for name in set(env).union(*(branch[0] for branch in branches)):
@@ -181,6 +188,7 @@ def python_errors(source):
 
         def walk(statements, env, prior):
             for node in statements:
+                capture_prefix(env, prior)
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue
                 if isinstance(node, ast.If):
@@ -248,13 +256,34 @@ def python_errors(source):
                             if isinstance(name, ast.Name):
                                 env[name.id] = values or [ast.Name(id=f'{name.id}@{node.lineno}', ctx=ast.Load())]
                 elif isinstance(node, (ast.Try, ast.TryStar)):
+                    prefixes = [(dict(env), set(prior))]
+                    success_env, success_seen = dict(env), set(prior)
+                    exception_collectors.append(prefixes)
+                    walk(node.body, success_env, success_seen)
+                    exception_collectors.pop()
+                    handler_env, handler_seen = {}, set()
+                    merge(handler_env, handler_seen, prefixes)
                     branches = []
-                    for body in (node.body, *(handler.body for handler in node.handlers)):
-                        branch_env, branch_seen = dict(env), set(prior)
-                        walk(body, branch_env, branch_seen)
+                    for handler in node.handlers:
+                        branch_env, branch_seen = dict(handler_env), set(handler_seen)
+                        if handler.type is not None:
+                            expression(handler.type, branch_env, branch_seen)
+                        if handler.name:
+                            branch_env.pop(handler.name, None)
+                        walk(handler.body, branch_env, branch_seen)
+                        if handler.name:
+                            branch_env.pop(handler.name, None)
                         branches.append((branch_env, branch_seen))
+                        if isinstance(node, ast.TryStar):
+                            merge(handler_env, handler_seen, [(handler_env, handler_seen),
+                                                             (branch_env, branch_seen)])
+                    walk(node.orelse, success_env, success_seen)
+                    branches.append((success_env, success_seen))
                     merge(env, prior, branches)
-                    walk(node.orelse, env, prior)
+                    if node.finalbody:
+                        # Unhandled exceptions also execute finally, possibly
+                        # before a later try assignment replaces a request.
+                        merge(env, prior, [(dict(env), set(prior)), *prefixes])
                     walk(node.finalbody, env, prior)
                 elif isinstance(node, (ast.With, ast.AsyncWith)):
                     for item in node.items:
@@ -262,6 +291,7 @@ def python_errors(source):
                     walk(node.body, env, prior)
                 else:
                     expression(node, env, prior)
+                capture_prefix(env, prior)
         walk(scope.body, bindings, seen)
     return sorted(set(errors))
 
