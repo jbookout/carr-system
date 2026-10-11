@@ -14,6 +14,99 @@ def load(name):
     return module
 
 class Conformance(unittest.TestCase):
+    def test_try_prefix_calls_reach_exception_handlers(self):
+        checker = load('check-jev-conformance')
+        for call in ("ask(state, {questions}, caller='fixture', version='v1')",
+                     "evaluate(JudgmentRequest(state, {questions}, caller='fixture', version='v1'))"):
+            source = "from jev_semantic import ask, evaluate, JudgmentRequest\n" + f"""def run(state, qa, qb):
+ try:
+  {call.format(questions='qa')}
+  raise ValueError()
+ except ValueError:
+  {call.format(questions='qb')}
+"""
+            with self.subTest(call=call):
+                self.assertEqual(checker.python_errors(source),
+                                 ['7: fanout: combine all questions for this state'])
+
+    def test_exception_handlers_retain_prefix_request_bindings(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import JudgmentRequest as R, evaluate as E
+def run(a, b, qa, qb):
+ request = R(a, qb, caller='fixture', version='v1')
+ try:
+  request = R(b, qb, caller='fixture', version='v1')
+  E(R(b, qa, caller='fixture', version='v1'))
+  request = R(a, qb, caller='fixture', version='v1')
+ except ValueError:
+  E(request)
+"""
+        self.assertEqual(checker.python_errors(source),
+                         ['9: fanout: combine all questions for this state'])
+
+    def test_nested_try_prefix_calls_reach_exception_handlers(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import ask
+def run(state, qa, qb, flag):
+ try:
+  if flag:
+   ask(state, qa, caller='fixture', version='v1')
+   raise ValueError()
+ except ValueError:
+  ask(state, qb, caller='fixture', version='v1')
+"""
+        self.assertEqual(checker.python_errors(source),
+                         ['8: fanout: combine all questions for this state'])
+
+    def test_handler_bodies_and_else_are_exclusive(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import ask
+def run(state, qa, qb):
+ try:
+  may_fail()
+ except ValueError:
+  ask(state, qa, caller='fixture', version='v1')
+ except TypeError:
+  ask(state, qb, caller='fixture', version='v1')
+ else:
+  ask(state, qb, caller='fixture', version='v1')
+"""
+        self.assertEqual(checker.python_errors(source), [])
+        self.assertEqual(checker.python_errors(source +
+                         " ask(state, qa, caller='fixture', version='v1')\n"),
+                         ['12: fanout: combine all questions for this state'])
+
+    def test_try_else_and_finally_preserve_executed_calls(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import ask
+def run(state, other, qa, qb):
+ try:
+  ask(state, qa, caller='fixture', version='v1')
+ except ValueError:
+  ask(other, qb, caller='fixture', version='v1')
+ else:
+  ask(state, qb, caller='fixture', version='v1')
+ finally:
+  ask(other, qa, caller='fixture', version='v1')
+"""
+        self.assertEqual(checker.python_errors(source), [
+            '10: fanout: combine all questions for this state',
+            '8: fanout: combine all questions for this state'])
+
+    def test_try_handler_distinct_states_remain_accepted(self):
+        checker = load('check-jev-conformance')
+        source = """from jev_semantic import ask
+def run(state, other, qa, qb):
+ try:
+  ask(state, qa, caller='fixture', version='v1')
+  raise ValueError()
+ except ValueError:
+  ask(other, qb, caller='fixture', version='v1')
+"""
+        self.assertEqual(checker.python_errors(source), [])
+        self.assertEqual(checker.python_errors(source.replace('ask(other, qb,', 'ask(state, qb,')),
+                         ['7: fanout: combine all questions for this state'])
+
     def test_failed_match_guard_keeps_calls_for_later_cases(self):
         checker = load('check-jev-conformance')
         source = """from jev_semantic import JudgmentRequest as R, evaluate as E
