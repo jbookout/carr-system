@@ -1046,8 +1046,10 @@ def _filtered_success(response, digest):
     if not isinstance(stdout, str):
         return False
     try:
-        receipt = json.loads(stdout)
-    except ValueError:
+        lines = stdout.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.lstrip().startswith("{"))
+        receipt = json.loads("\n".join(lines[start:]))
+    except (ValueError, StopIteration):
         return False
     return (isinstance(receipt, dict) and receipt.get("ok") is True
             and isinstance(receipt.get("rule_boot"), dict)

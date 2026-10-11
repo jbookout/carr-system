@@ -66,6 +66,192 @@ class OwnershipTests(unittest.TestCase):
             'ownership_state': 'held', 'launch_marker': 'fixture', 'executor': {'kind': 'unconfirmed'},
             **kwargs}) + '\n')
 
+    def test_matching_machine_recovers_dead_executor_after_hostname_rename(self):
+        machine = '11111111-1111-4111-8111-111111111111'
+        self.active(executor={'kind': 'process_group', 'host': 'before-rename',
+            'machine_id': machine, 'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id', return_value=machine, create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='after-rename'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'released')
+
+    def test_foreign_machine_matching_hostname_cannot_release(self):
+        self.active(executor={'kind': 'process_group', 'host': 'same-name',
+            'machine_id': '22222222-2222-4222-8222-222222222222',
+            'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='same-name'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill, \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'held')
+            kill.assert_not_called()
+
+    def test_legacy_observed_hostname_recovers_after_rename(self):
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='observed-before'):
+            write_ownership.process_owner()
+        self.active(executor={'kind': 'process_group', 'host': 'observed-before',
+                              'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='after-rename'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'released')
+
+    def test_legacy_unobserved_hostname_stays_held_even_if_current(self):
+        self.active(executor={'kind': 'process_group', 'host': 'never-observed',
+                              'pid': 1234, 'pgid': 1234, 'start_time': 'old'})
+        with patch.object(write_ownership, 'machine_id',
+                          return_value='11111111-1111-4111-8111-111111111111', create=True), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='never-observed'), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill, \
+             patch.object(write_ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.reconcile('other')[0]['ownership_state'], 'held')
+            kill.assert_not_called()
+
+    def test_machine_id_macos_lookup_is_cached_and_parses_ioreg(self):
+        write_ownership.machine_id.cache_clear()
+        self.addCleanup(write_ownership.machine_id.cache_clear)
+        uuid = '11111111-1111-4111-8111-111111111111'
+        result = subprocess.CompletedProcess([], 0,
+            '+-o IOPlatformExpertDevice\n    "IOPlatformUUID" = "' + uuid.upper() + '"\n', '')
+        with patch.object(write_ownership.sys, 'platform', 'darwin'), \
+             patch.object(write_ownership.subprocess, 'run', return_value=result) as run:
+            self.assertEqual(write_ownership.machine_id(), uuid)
+            self.assertEqual(write_ownership.machine_id(), uuid)
+        run.assert_called_once_with(['/usr/sbin/ioreg', '-r', '-d', '1', '-c',
+            'IOPlatformExpertDevice'], capture_output=True, text=True, check=True, timeout=2)
+
+    def test_machine_id_linux_lookup_and_unavailable_id(self):
+        self.addCleanup(write_ownership.machine_id.cache_clear)
+        for raw, expected in (('a' * 32 + '\n', 'a' * 32), ('garbled', None)):
+            write_ownership.machine_id.cache_clear()
+            with patch.object(write_ownership.sys, 'platform', 'linux'), \
+                 patch.object(Path, 'read_text', return_value=raw) as read:
+                self.assertEqual(write_ownership.machine_id(), expected)
+                read.assert_called_once_with()
+        write_ownership.machine_id.cache_clear()
+        with patch.object(write_ownership.sys, 'platform', 'darwin'), \
+             patch.object(write_ownership.subprocess, 'run', side_effect=OSError):
+            self.assertIsNone(write_ownership.machine_id())
+
+    def test_present_invalid_machine_id_never_uses_observed_hostname(self):
+        local = write_ownership.process_owner()
+        for invalid in (None, '', 'malformed', 123, {}, []):
+            with self.subTest(machine_id=invalid), \
+                 patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill:
+                self.assertFalse(write_ownership.process_terminated({**local,
+                    'machine_id': invalid, 'pid': 1234, 'start_time': 'old'}))
+                kill.assert_not_called()
+
+    def test_alias_corruption_and_io_failure_only_block_legacy_identity(self):
+        local = {**write_ownership.process_owner(), 'pid': 1234, 'start_time': 'old'}
+        legacy = {k: v for k, v in local.items() if k != 'machine_id'}
+        write_ownership._alias_path().write_text('{broken\n')
+        with patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError):
+            self.assertTrue(write_ownership.process_terminated(local))
+            self.assertFalse(write_ownership.process_terminated(legacy))
+        with patch.object(write_ownership, '_aliases', side_effect=OSError), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError):
+            self.assertEqual(write_ownership.process_owner()['machine_id'], local['machine_id'])
+            self.assertTrue(write_ownership.process_terminated(local))
+            self.assertFalse(write_ownership.process_terminated(legacy))
+
+    def test_alias_shared_by_two_machines_is_ambiguous(self):
+        first, second = '1' * 32, '2' * 32
+        for machine in (first, second):
+            with patch.object(write_ownership, 'machine_id', return_value=machine), \
+                 patch.object(write_ownership.socket, 'gethostname', return_value='shared-host'):
+                write_ownership.process_owner()
+        with patch.object(write_ownership, 'machine_id', return_value=first), \
+             patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill:
+            self.assertFalse(write_ownership.process_terminated(
+                {'host': 'shared-host', 'pid': 1234, 'start_time': 'old'}))
+            kill.assert_not_called()
+
+    def test_busy_alias_lock_does_not_delay_modern_process_identity(self):
+        alias = write_ownership._alias_path()
+        self.assertTrue(write_ownership.machine_id())
+        with Path(str(alias) + '.lock').open('a') as lock:
+            write_ownership.fcntl.flock(lock, write_ownership.fcntl.LOCK_EX)
+            started = time.monotonic()
+            local = write_ownership.process_owner()
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertTrue(local['machine_id'])
+            self.assertFalse(alias.exists())
+            with patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError):
+                self.assertTrue(write_ownership.process_terminated(
+                    {**local, 'pid': 1234, 'start_time': 'old'}))
+            write_ownership.fcntl.flock(lock, write_ownership.fcntl.LOCK_UN)
+
+    def test_rename_allows_launch_and_provider_identity_refinement(self):
+        machine = '1' * 32
+        with patch.object(write_ownership, 'machine_id', return_value=machine), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='first-name'), \
+             patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])):
+            reserved = write_ownership.reserve({'msg_id': 'rename', 'task': 'build'}, '.', ['src/*'])
+        self.assertEqual(reserved['executor'], {'kind': 'reservation',
+            'host': 'first-name', 'machine_id': machine})
+        with patch.object(write_ownership, 'machine_id', return_value=machine), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='second-name'):
+            launched = write_ownership.launch('rename')
+            first = write_ownership.bind_executor('rename', {'kind': 'codex_turn',
+                'socket': '/fixture.sock', 'thread_id': 'thread', 'turn_id': None})
+        self.assertEqual(launched['executor'], {'kind': 'unconfirmed',
+            'host': 'second-name', 'machine_id': machine})
+        self.assertEqual(first['executor']['machine_id'], machine)
+        with patch.object(write_ownership, 'machine_id', return_value=machine), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='third-name'):
+            final = write_ownership.bind_executor('rename', {'kind': 'codex_turn',
+                'socket': '/fixture.sock', 'thread_id': 'thread', 'turn_id': 'turn'})
+        self.assertEqual(final['executor']['host'], 'third-name')
+        self.assertEqual(final['executor']['machine_id'], machine)
+        self.assertEqual(final['executor']['turn_id'], 'turn')
+
+    def test_bind_stamps_all_executor_kinds_and_rejects_foreign_machine(self):
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])):
+            write_ownership.reserve({'msg_id': 'binding', 'task': 'build'}, '.', ['src/*'])
+        write_ownership.launch('binding')
+        local = write_ownership.process_owner()
+        with self.assertRaisesRegex(desks.DeskError, 'not local'):
+            write_ownership.bind_executor('binding', {'kind': 'codex_turn',
+                'machine_id': 'f' * 32, 'host': local['host']})
+        self.assertEqual(write_ownership._claim('binding')['executor']['kind'], 'unconfirmed')
+        with write_ownership._locked(self.ledger):
+            row = write_ownership._claim('binding')
+            write_ownership._persist({**row, 'executor': {'kind': 'unconfirmed',
+                'host': local['host'], 'machine_id': 'f' * 32}})
+        with self.assertRaisesRegex(desks.DeskError, 'not local'):
+            write_ownership.bind_executor('binding', {'kind': 'no_launch'})
+        for kind in ('unconfirmed', 'no_launch', 'codex_turn', 'codex_desktop', 'process_group'):
+            with self.subTest(kind=kind):
+                with write_ownership._locked(self.ledger):
+                    row = write_ownership._claim('binding')
+                    write_ownership._persist({**row, 'executor': {
+                        'kind': 'unconfirmed', 'host': local['host'], 'machine_id': local['machine_id']}})
+                bound = write_ownership.bind_executor('binding', {'kind': kind})
+                self.assertEqual(bound['executor'], {'kind': kind,
+                    'host': local['host'], 'machine_id': local['machine_id']})
+        alias_rows = [json.loads(line) for line in write_ownership._alias_path().read_text().splitlines()]
+        self.assertEqual(alias_rows, [{'host': local['host'], 'machine_id': local['machine_id']}])
+
+    def test_supplied_hostname_cannot_teach_legacy_alias(self):
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])):
+            write_ownership.reserve({'msg_id': 'binding', 'task': 'build'}, '.', ['src/*'])
+        write_ownership.launch('binding')
+        local = write_ownership.process_owner()
+        bound = write_ownership.bind_executor('binding', {'kind': 'codex_turn',
+            'machine_id': local['machine_id'], 'host': 'caller-supplied'})
+        self.assertEqual(bound['executor']['host'], local['host'])
+        with patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill:
+            self.assertFalse(write_ownership.process_terminated(
+                {'host': 'caller-supplied', 'pid': 1234, 'start_time': 'old'}))
+            kill.assert_not_called()
+
     def test_open_pr_overlap_refuses_before_launch(self):
         with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [
                 {'number': 42, 'title': 'the other builder', 'files': ['tools/new.py']}])) , \
@@ -74,6 +260,51 @@ class OwnershipTests(unittest.TestCase):
                 self.send(writes=['tools/*.py'])
             run.assert_not_called()
         self.assertFalse(self.results.exists())
+
+    def test_held_draft_overlap_warns_without_blocking(self):
+        # A parked do_not_merge draft has no live builder; 2026-10-09 two of them
+        # claimed every staging-harness file and froze all V1 harness fixes.
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [
+                {'number': 197, 'title': 'parked design', 'files': ['tools/new.py'], 'held': True}])), \
+             patch.object(dispatch, '_to_codex', side_effect=self.completed) as run, \
+             patch('sys.stderr', new_callable=io.StringIO) as err:
+            self.send(writes=['tools/*.py'])
+        run.assert_called_once()
+        self.assertIn('held draft PR 197', err.getvalue())
+
+    def test_held_needs_both_draft_and_do_not_merge_label(self):
+        class Reader:
+            def __init__(self, **kwargs): pass
+            def json(self, args): return {'nameWithOwner': 'owner/repo'}
+            def api(self, path, paginate=False):
+                if path.endswith('/files'):
+                    return [{'filename': 'tools/new.py'}]
+                return [
+                    {'number': 5, 'title': 'parked', 'draft': True, 'labels': [{'name': 'do_not_merge'}]},
+                    {'number': 6, 'title': 'ready but held', 'draft': False, 'labels': [{'name': 'do_not_merge'}]},
+                    {'number': 7, 'title': 'live draft', 'draft': True, 'labels': []},
+                ]
+        with patch.object(write_ownership, 'GitHubReader', Reader):
+            _, prs = write_ownership.open_prs('.')
+        self.assertEqual({pr['number']: pr['held'] for pr in prs}, {5: True, 6: False, 7: False})
+
+    def test_open_pr_scan_runs_outside_the_ledger_lock(self):
+        # The scan paginates every open PR's files at ~2 s per gh call; holding
+        # the ledger lock across it refused every other desk for minutes.
+        observed = []
+        def scan(cwd):
+            with open(str(self.ledger) + '.lock', 'a') as lock:
+                try:
+                    write_ownership.fcntl.flock(lock, write_ownership.fcntl.LOCK_EX | write_ownership.fcntl.LOCK_NB)
+                    write_ownership.fcntl.flock(lock, write_ownership.fcntl.LOCK_UN)
+                    observed.append('free')
+                except BlockingIOError:
+                    observed.append('held')
+            return ('owner/repo', [])
+        with patch('dispatch.write_ownership.open_prs', side_effect=scan), \
+             patch.object(dispatch, '_to_codex', side_effect=self.completed):
+            self.send(writes=['tools/*.py'])
+        self.assertEqual(observed, ['free'])
 
     def test_inflight_overlap_catches_not_yet_created_paths(self):
         self.active(writes=['tools/new-*.py'])
@@ -314,7 +545,7 @@ os._exit(17)
             write_ownership.reconcile(row['msg_id'])
             self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
 
-    def test_pid_probe_denied_or_from_another_host_keeps_claim(self):
+    def test_pid_probe_denied_or_from_another_machine_keeps_claim(self):
         identity = write_ownership.process_owner()
         self.active(writes=['src/*'], ownership_state='held', owner_process=identity,
                     executor={'kind': 'reservation'})
@@ -324,8 +555,10 @@ os._exit(17)
             with self.assertRaises(desks.DeskError):
                 self.send(writes=['src/*'])
             run.assert_not_called()
-        identity['host'] = 'somewhere-else'
-        self.assertFalse(write_ownership.process_terminated(identity))
+        identity['machine_id'] = 'f' * 32
+        with patch.object(write_ownership.os, 'kill', side_effect=ProcessLookupError) as kill:
+            self.assertFalse(write_ownership.process_terminated(identity))
+            kill.assert_not_called()
 
     def test_headless_codex_records_a_dedicated_group_and_releases_after_exit(self):
         self.transport.stop()
@@ -342,8 +575,11 @@ print(json.dumps({{'type': 'thread.started', 'thread_id': 'fake-thread'}}))
 print(json.dumps({{'type': 'turn.completed'}}))
 ''')
         codex.chmod(0o755)
-        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])):
+        with patch('dispatch.write_ownership.open_prs', return_value=('owner/repo', [])), \
+             patch.object(write_ownership.socket, 'gethostname', return_value='renamed-dispatcher'):
             row = self.send(writes=['src/*'], env={**os.environ, 'PATH': str(binary)})
+            self.assertEqual(row['executor']['host'], 'renamed-dispatcher')
+            self.assertEqual(row['executor']['machine_id'], row['owner_process']['machine_id'])
             self.assertEqual(row['status'], 'completed', row)
             self.assertTrue(row['termination_confirmed'], row)
             self.assertEqual(row['ownership_state'], 'released')
@@ -417,7 +653,9 @@ os._exit(17)
         self.assertEqual(crashed.returncode, 17, crashed.stderr)
         row = write_ownership.reconcile('crashed')[0]
         self.assertTrue(row['launch_marker'])
-        self.assertEqual(row['executor'], {'kind': 'unconfirmed'})
+        self.assertEqual(row['executor'], {'kind': 'unconfirmed',
+            'host': row['owner_process']['host'],
+            'machine_id': row['owner_process']['machine_id']})
         self.assertTrue(write_ownership.process_terminated(row['owner_process']))
         self.assertEqual(row['ownership_state'], 'released')
         before = self.ledger.read_bytes()
@@ -576,6 +814,33 @@ os._exit(17)
                 dispatch.dispatch('sol', 'build', registry=self.reg,
                                   results_path=path, writes=['src/*'])
         self.assertFalse(self.ledger.exists())
+        alias = write_ownership._alias_path()
+        for path in (alias, Path(str(alias) + '.lock')):
+            with self.assertRaisesRegex(desks.DeskError, 'results cannot'):
+                write_ownership.record(path, {'host': 'forged', 'machine_id': '1' * 32})
+        self.assertFalse(alias.exists())
+        self.assertFalse(Path(str(alias) + '.lock').exists())
+
+    def test_alias_results_path_rejection_leaves_no_held_reservation(self):
+        alias = write_ownership._alias_path()
+        for path in (alias, Path(str(alias) + '.lock')):
+            with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
+                 patch.object(dispatch, '_to_codex') as run:
+                with self.assertRaisesRegex(desks.DeskError, 'results cannot'):
+                    dispatch.dispatch('sol', 'build', registry=self.reg,
+                                      results_path=path, writes=['src/*'])
+                run.assert_not_called()
+            latest = {}
+            if self.ledger.exists():
+                for line in self.ledger.read_text().splitlines():
+                    row = json.loads(line)
+                    latest[row['msg_id']] = row['ownership_state']
+            self.assertNotIn('held', latest.values())
+        # The same write set is claimable afterwards: nothing was left held.
+        with patch.object(write_ownership, 'open_prs', return_value=('owner/repo', [])), \
+             patch.object(dispatch, '_to_codex', return_value={'status': 'completed',
+                                                            'termination_confirmed': True}):
+            self.assertEqual(self.send(writes=['src/*'])['status'], 'completed')
 
     def test_home_environment_cannot_redirect_authority(self):
         code = "import sys; sys.path.insert(0, sys.argv[1]); import write_ownership; print(write_ownership.LEDGER)"
