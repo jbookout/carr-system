@@ -2,7 +2,7 @@
   "adapter": {
     "adapter_id": "rule-delivery-production-functions",
     "adapter_version": "1",
-    "configuration_fingerprint": "sha256:eb04e875d66eef1276979bb5b69008c0da259f0fd58f0d1738492f60b0b8f59b",
+    "configuration_fingerprint": "sha256:d4a8129d85975792d4829be238f0b1a077e7c0757aa8d2d250b4413e4787f4b6",
     "harness_id": "evals/rule-delivery/run_eval.py",
     "harness_version": "3f049576a98b237d34ae4a664a287f8b1b13508d635838d06d9270e69ad2f4a6",
     "model_id": "deterministic-no-model",
@@ -165,7 +165,7 @@
       },
       "candidate": {
         "path": "evals/rule-delivery/evidence/candidate.jsonl",
-        "sha256": "52924f70a12afcda780749c08500a0cdf1a6cca65f05e8af390caa51e3cdb5b1"
+        "sha256": "a506488a45fa4f362123bf8ba3debebd14c7d1e446a79c1a8292d6c50b0e7397"
       }
     },
     "dependencies": {
@@ -179,7 +179,7 @@
       "lib/rule_routes.py": "03358163502892be114cb13de447c589ee1e8a7bcf1c0034408992885ad38ad0",
       "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
       "ops/config/jev-cost-guard.v1.json": "8920873a41078dca949d8e31f50705e1330bcfa087b5260c22693f220488a2f8",
-      "ops/config/rule-classes.v1.json": "946e4d79ec569176cda0667bc70dbc5095ac23065ea23f9fefe34d6ac537d0ab",
+      "ops/config/rule-classes.v1.json": "c419bb0cfda3fd1a614eab166fec1744c0234b92dd2d912c8caf7285332ed384",
       "ops/config/rule-enforcement-map.json": "2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4",
       "ops/config/rule-jev-triggers.v1.json": "b51679ed1288c439edd18d0b97f763a88513367f8a3d0bff771f62c49591291a",
       "ops/config/rule-jit-triggers.v1.json": "366643d404e9203970d784337c54a4809f97a87796ca026aa565d378dd9aa2e1",

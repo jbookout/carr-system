@@ -35,18 +35,18 @@
       "total_chars": 273409
     },
     "candidate": {
-      "approx_tokens": 36652,
-      "digest": "sha256:997bff1ef82e5d0af1453c8ab975b83800a73c79fc4657cffdc4b47703f7f316",
+      "approx_tokens": 36629,
+      "digest": "sha256:f9f0250412c1ea61ebac56b2170b855673f9340c7121368dcdfe82f63065dc8d",
       "discoverable_hits": 266,
       "full_text_availability": 0.6290097629009763,
       "full_text_hits": 451,
-      "full_text_rules": 87,
+      "full_text_rules": 88,
       "in_scope_rules": 197,
       "lifecycles": [
         {
           "allowed_after": true,
-          "delivered_ids_sha256": "d638514d3e163f3104125f36fa2082d5da47223397f46e552d06acef1692982a",
-          "delivered_rules": 87,
+          "delivered_ids_sha256": "95c301f964c5841b227dff4fdab928f9bb3fad7c492db0b4fdaadf3d7dd5768f",
+          "delivered_rules": 88,
           "digest_only_held": true,
           "held_before": true,
           "incomplete_held": true,
@@ -54,8 +54,8 @@
         },
         {
           "allowed_after": true,
-          "delivered_ids_sha256": "d638514d3e163f3104125f36fa2082d5da47223397f46e552d06acef1692982a",
-          "delivered_rules": 87,
+          "delivered_ids_sha256": "95c301f964c5841b227dff4fdab928f9bb3fad7c492db0b4fdaadf3d7dd5768f",
+          "delivered_rules": 88,
           "digest_only_held": true,
           "held_before": true,
           "incomplete_held": true,
@@ -99,7 +99,7 @@
       ],
       "pages": 6,
       "required_occurrences": 717,
-      "total_chars": 131946
+      "total_chars": 131863
     }
   },
   "baseline_ref": "2106816ed392fe7bcac30d171d8c115cba10735f",
@@ -112,9 +112,9 @@
     "evals/rule-delivery/boot_lifecycle.py": "79373e676215175e3ce87f3d339335fb46a81b2c9457b14a7f6864e5f0b375d8",
     "hooks/rule-boot-gate.py": "84d32a38ad62e4e24185267b5de2ef9a4f5da34b661cd89bdc5aa2e19ef603b3",
     "lib/rule_boot_gate.py": "2ba106fb66108075a063b08ce08fc3f4c2a6512da8e9370f7919720f465f7e0b",
-    "mcp-server/src/rule-boot-classes.js": "2ee9a88e12c3b1aab2cd6d7c331e8f786209c7990de2fe368c35c0e00d555650",
+    "mcp-server/src/rule-boot-classes.js": "356e5844cb4ece79eed0376dc5e288e4087808b9e3b713b0651f9786f07b8715",
     "mcp-server/src/rule-boot.js": "6012d7bbfead3f584d060b384983d417908a60302b6b7c6b75fae435e6950ca1",
-    "ops/config/rule-classes.v1.json": "946e4d79ec569176cda0667bc70dbc5095ac23065ea23f9fefe34d6ac537d0ab"
+    "ops/config/rule-classes.v1.json": "c419bb0cfda3fd1a614eab166fec1744c0234b92dd2d912c8caf7285332ed384"
   },
   "sponsor": "joe",
   "test_cases": 72,

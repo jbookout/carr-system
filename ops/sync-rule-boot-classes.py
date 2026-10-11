@@ -39,8 +39,8 @@ The one exclusion is the rule_surface "intro_politics" rules, which the verb's
 query leaves out of the boot.
 
 Usage:
-    ./.venv/bin/python ops/sync-rule-boot-classes.py            # regenerate
-    ./.venv/bin/python ops/sync-rule-boot-classes.py --check    # parity + budget; exit 1 on either
+    ./.venv/bin/python ops/sync-rule-boot-classes.py            # regenerate module + route-gap audit
+    ./.venv/bin/python ops/sync-rule-boot-classes.py --check    # parity + budget + gold retention
 """
 import argparse
 import hashlib
@@ -48,6 +48,8 @@ import json
 import os
 import re
 import sys
+from collections import Counter
+from pathlib import Path
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLASSES_PATH = os.path.join(REPO, "ops", "config", "rule-classes.v1.json")
@@ -55,6 +57,7 @@ MAP_PATH = os.path.join(REPO, "ops", "config", "rule-enforcement-map.json")
 CORPUS_PATH = os.path.join(REPO, "ops", "config", "rule-selection-corpus.v1.json")
 EXCLUDED_SURFACES = {"intro_politics"}
 OUT_PATH = os.path.join(REPO, "mcp-server", "src", "rule-boot-classes.js")
+GAPS_PATH = Path(REPO) / "evals/rule-delivery/evidence/route-gaps.json"
 CLASSES = {"a", "b", "c", "d", "e"}
 MAX_SUMMARY_WORDS = 20
 # Must match mcp-server/src/rule-boot.js's layout: one always-on entry is
@@ -285,6 +288,72 @@ def coverage_findings(doc, map_path=MAP_PATH):
     return findings
 
 
+def gap_cases(v2, hard, expectations):
+    """Normalize frozen v2 gold and hard-case required gold; acceptable is not required."""
+    cases = [dict(id=c["id"], gold=c["gold"], split=c["split"], source="v2")
+             for c in v2["cases"]]
+    cases.extend(dict(id=c["id"], gold=c["required"],
+                      split=expectations["cases"][c["id"]]["split"], source="hard")
+                 for c in hard["cases"])
+    return cases
+
+
+def route_gaps(doc, cases, observations):
+    """Count required B/C occurrences missed by routes, excluding boot availability."""
+    delivered = {row["case_id"]: set(row["delivered"]) for row in observations}
+    if len(delivered) != len(observations):
+        raise ValueError("duplicate route observations")
+    if len({case["id"] for case in cases}) != len(cases):
+        raise ValueError("duplicate gold cases")
+    counts = {scope: {cls: Counter() for cls in ("b", "c")}
+              for scope in ("all", "test", "v2", "hard")}
+    for case in cases:
+        if case["id"] not in delivered:
+            raise ValueError(f"missing route observation: {case['id']}")
+        for rid in set(case["gold"]) - delivered[case["id"]]:
+            cls = doc["rules"].get(rid, {}).get("class")
+            if cls not in ("b", "c"):
+                continue
+            for scope in ("all", case["source"]):
+                counts[scope][cls][rid] += 1
+            if case["split"] == "test":
+                counts["test"][cls][rid] += 1
+    return {scope: {cls: dict(sorted(rows.items())) for cls, rows in classes.items()}
+            for scope, classes in counts.items()}
+
+
+def gap_evidence(doc, classes_path=CLASSES_PATH):
+    root = Path(REPO)
+    paths = [root / "ops/fixtures/rule-delivery-eval/cases.v2.json",
+             root / "evals/rule-delivery/hard_cases.v1.json",
+             root / "evals/rule-delivery/expectations.v1.json",
+             root / "evals/rule-delivery/evidence/candidate.jsonl"]
+    v2, hard, expectations = [json.loads(path.read_text()) for path in paths[:3]]
+    observations = [json.loads(line) for line in paths[3].read_text().splitlines() if line.strip()]
+    for row in observations:
+        frozen = expectations["cases"][row["case_id"]]
+        if row["input_sha256"] != frozen["input_sha256"]:
+            raise ValueError(f"route input changed: {row['case_id']}")
+    paths.append(Path(classes_path))
+    return {
+        "schema": "rule-boot-route-gap-evidence/v1",
+        "baseline_ref": json.loads((root / "evals/rule-delivery/receipt.json").read_text())["evidence"]["baseline"]["ref"],
+        "method": "Subtract candidate.delivered from every frozen v2 gold and hard-case required set, "
+                  "then keep class B/C. Count train + test for retention; acceptable-only hard labels "
+                  "are excluded. Boot availability is excluded from gap derivation.",
+        "inputs": {os.path.relpath(path, root): hashlib.sha256(path.read_bytes()).hexdigest()
+                   for path in paths},
+        "missing_route_occurrences": route_gaps(doc, gap_cases(v2, hard, expectations), observations),
+    }
+
+
+def retention_findings(doc, evidence):
+    return [f"RULE BOOT RETENTION: {rid} ({cls.upper()}) has {count} missed gold route occurrences; "
+            "add keep_full_text with a reason until its route is fixed"
+            for cls, rows in evidence["missing_route_occurrences"]["all"].items()
+            for rid, count in rows.items() if rid not in doc.get("keep_full_text", {})]
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -297,11 +366,23 @@ def main(argv=None):
     if problems:
         print("rule-classes.v1.json INVALID:\n  " + "\n  ".join(problems))
         return 1
+    try:
+        evidence = gap_evidence(doc, args.classes)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"RULE BOOT RETENTION: cannot derive gold route gaps: {exc}")
+        return 1
+    problems = retention_findings(doc, evidence)
+    if problems:
+        print("\n".join(problems))
+        return 1
+    audit = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
     rendered = render(doc)
     if not args.check:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(rendered)
         print(f"wrote {os.path.relpath(args.out, REPO)} ({len(doc['rules'])} rules)")
+        GAPS_PATH.write_text(audit)
+        print(f"wrote {GAPS_PATH.relative_to(REPO)}")
         return 0
     rc = 0
     try:
@@ -313,6 +394,9 @@ def main(argv=None):
         print(f"STALE: {os.path.relpath(args.out, REPO)} does not match "
               "ops/config/rule-classes.v1.json. Regenerate: "
               "./.venv/bin/python ops/sync-rule-boot-classes.py")
+        rc = 1
+    if not GAPS_PATH.exists() or GAPS_PATH.read_text() != audit:
+        print("STALE: route-gaps.json; regenerate with ops/sync-rule-boot-classes.py")
         rc = 1
     for line in budget_findings(doc) + coverage_findings(doc):
         print(line)

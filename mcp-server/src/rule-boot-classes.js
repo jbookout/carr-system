@@ -9,7 +9,7 @@
 // at request time. A Worker has no filesystem, so this is a checked-in module.
 
 export const RULE_BOOT_CLASSES_SOURCE = "ops/config/rule-classes.v1.json";
-export const RULE_BOOT_CLASSES_DIGEST = "sha256:38f547771f19c1dd4b4d9d9c396137aa5fb909cbd73820d1481f80cce89f9760";
+export const RULE_BOOT_CLASSES_DIGEST = "sha256:99ed32e6c647b2a245223a931d1244fa2987eeebdf82cf248ade279406560e64";
 export const RULE_BOOT_BUDGET_TOKENS = 48000;
 export const RULE_BOOT_CHARS_PER_TOKEN = 3.6;
 
@@ -62,7 +62,7 @@ export const RULE_BOOT_CLASSES = Object.freeze({
   "3d185f2b": Object.freeze({"cls": "a", "on": true, "summary": "Joe leads system-design builds; Dell reviews the finished product.", "when": "every turn"}),
   "3fa17fa0": Object.freeze({"cls": "b", "on": false, "summary": "Before drafting re-engagement from notes older than ~60 days, ask Joe whether they're still true.", "when": "drafting re-engagement off notes older than ~60 days"}),
   "4039b9b5": Object.freeze({"cls": "d", "on": false, "summary": "Any qualified seat may write doctrine; store versioning, not a single writer, prevents collisions", "when": "versioned_record schema (doctrine section write)"}),
-  "412d37d3": Object.freeze({"cls": "c", "on": false, "summary": "When writing about healthcare compliance, spell HIPAA correctly and double-check compliance references.", "when": "client/compliance writing mentioning HIPAA"}),
+  "412d37d3": Object.freeze({"cls": "c", "on": true, "summary": "When writing about healthcare compliance, spell HIPAA correctly and double-check compliance references.", "when": "client/compliance writing mentioning HIPAA"}),
   "424ba0cc": Object.freeze({"cls": "a", "on": true, "summary": "The practice operates from abundance; avoid default cold-client nurture pings.", "when": "every turn"}),
   "4399df76": Object.freeze({"cls": "c", "on": false, "summary": "Treat every LOI template term as a negotiable default, never fixed policy from one client's documents.", "when": "working with LOI template terms"}),
   "43e2ef76": Object.freeze({"cls": "d", "on": false, "summary": "Before building anything non-trivial, plan how it will be verified before implementation starts", "when": "completion_evidence gate"}),
