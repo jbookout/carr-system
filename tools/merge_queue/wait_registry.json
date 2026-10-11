@@ -321,6 +321,11 @@
       "shape": "self.pages",
       "scenario": "transport_timeout"
     },
+    "main.py:Queue.approval:call:2": {
+      "bound": "command",
+      "shape": "self.pages",
+      "scenario": "dot_author_timeout"
+    },
     "main.py:Queue.green:call:1": {
       "bound": "command",
       "shape": "self.api_pages",

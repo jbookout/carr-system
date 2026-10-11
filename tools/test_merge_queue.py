@@ -53,6 +53,7 @@ if a[0]=='api':
    if d.get('update_async'): emit({'message':'Updating'}); sys.exit()
    p['head']['sha']=d['updated_head']; p['mergeable_state']='clean'; emit({'message':'Updated'}); sys.exit()
   if len(bits)>5 and bits[5].startswith('files'): emit([p.get('files',[])]);sys.exit()
+  if len(bits)>5 and bits[5].startswith('commits'): emit([p.get('commits',[{'author':{'login':'commit-author'}}])]);sys.exit()
   emit(p); sys.exit()
  if bits[3]=='issues':
   key=repo+'#'+n
@@ -175,7 +176,7 @@ class QueueTests(unittest.TestCase):
     def pr(self, n=1, repo=module.REPOS[0], head=None, state='clean', held=False, draft=False, base='main'):
         p = dict(number=n, repo=repo, head={'sha': head or self.approved, 'ref': f'branch-{n}'},
                  base={'sha': self.main, 'ref': base}, merged=False, state='open', draft=draft,
-                 title='Example change', mergeable_state=state,
+                 title='Example change', user={'login':'builder'}, mergeable_state=state,
                  mergeable=False if state=='dirty' else True,
                  labels=[{'name':'do_not_merge'}] if held else [])
         self.data['prs'][f'{repo}#{n}']=p
@@ -191,6 +192,39 @@ class QueueTests(unittest.TestCase):
         self.q = module.Queue(self.state, self.root, gap=0)
         self.addCleanup(self.q.db.close)
 
+    def receipt(self, meta, body, **fields):
+        module.dot_review_receipts.record_run(meta, body, reviewer=fields['reviewer'],
+                                             relay_run_id=fields['relay_run_id'])
+        return module.dot_review_receipts.record(meta, body, **fields)
+
+    def test_builder_minted_receipt_without_run_is_refused(self):
+        repo = module.REPOS[0]
+        self.pr()
+        body = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'
+        self.data['comments'][repo+'#1'] = [{'body':body,'author_association':'OWNER',
+                                            'user':{'login':'builder'}}]
+        self.save()
+        module.dot_review_receipts.record({'repo':repo,'pr':1,'sha':self.approved}, body,
+            builder='builder',reviewer='invented-independent-user',
+            relay_run_id='invented-channel:invented-thread',branch_author='builder')
+        self.assertIsNone(self.q.approval(repo, 1))
+
+    def test_receipt_rechecks_pr_and_commit_authors_at_decision(self):
+        repo = module.REPOS[0]
+        pr = self.pr()
+        body = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'
+        self.data['comments'][repo+'#1'] = [{'body':body,'author_association':'OWNER'}]
+        self.save()
+        self.receipt({'repo':repo,'pr':1,'sha':self.approved}, body, reviewer='dot-user',
+                     relay_run_id='fresh-author-fixture',builder='fictional-maker',branch_author=None)
+        self.assertEqual(self.q.approval(repo, 1), self.approved)
+        for pr_author, commit_author in [(' DOT-USER ', 'other'), ('builder', 'Dot-User')]:
+            with self.subTest(pr_author=pr_author, commit_author=commit_author):
+                pr['user'] = {'login':pr_author}
+                pr['commits'] = [{'author':{'login':commit_author}}]
+                self.save()
+                self.assertIsNone(self.q.approval(repo, 1))
+
     def test_stale_dot_discovery_requests_exact_replacement(self):
         from unittest.mock import patch
         self.pr()
@@ -199,7 +233,7 @@ class QueueTests(unittest.TestCase):
             'body': f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot',
             'author_association': 'OWNER'}]
         self.save()
-        module.dot_review_receipts.record({'repo':module.REPOS[0],'pr':1,'sha':self.approved},
+        self.receipt({'repo':module.REPOS[0],'pr':1,'sha':self.approved},
             self.data['comments'][module.REPOS[0]+'#1'][0]['body'], builder='builder',
             reviewer='dot-user', relay_run_id='stale-fixture', branch_author='builder')
         with patch.object(self.q, 'request_review') as request:
@@ -252,7 +286,7 @@ class QueueTests(unittest.TestCase):
                     'body': f'{verdict}\nReviewed-SHA: {sha}\n\nReviewer: ChatGPT Dot',
                     'author_association': 'OWNER'}]
                 self.save()
-                module.dot_review_receipts.record({'repo':module.REPOS[0],'pr':1,'sha':sha},
+                self.receipt({'repo':module.REPOS[0],'pr':1,'sha':sha},
                     self.data['comments'][module.REPOS[0]+'#1'][0]['body'], builder='builder',
                     reviewer='dot-user', relay_run_id=verdict+sha, branch_author='builder')
                 self.assertEqual(self.q.approval(module.REPOS[0], 1), expected)
@@ -265,9 +299,9 @@ class QueueTests(unittest.TestCase):
                                             'user':{'login':'shared-owner'}}]
         self.save()
         meta = {'repo':repo,'pr':1,'sha':self.approved}
-        receipt = module.dot_review_receipts.record(meta, body, builder='builder', reviewer='dot-user',
+        receipt = self.receipt(meta, body, builder='builder', reviewer='dot-user',
                                                    relay_run_id='receipt-fixture', branch_author='builder')
-        path = next((self.state/'relay').rglob('*.json'))
+        path = next((self.state/'relay'/'receipts').glob('*.json'))
         self.assertEqual(self.q.approval(repo, 1), self.approved)
         self.assertFalse(self.q.covered(repo, self.approved, self.updated))
         for field, value in [('repo', module.REPOS[1]), ('pr', 2), ('reviewed_sha', self.changed),
@@ -287,10 +321,10 @@ class QueueTests(unittest.TestCase):
         self.save()
         self.assertTrue(self.q.covered(repo, self.q.approval(repo, 1), self.updated))
         meta = {'repo':repo,'pr':1,'sha':self.approved}
-        module.dot_review_receipts.record(meta, body, builder='builder', reviewer='dot-user',
+        self.receipt(meta, body, builder='builder', reviewer='dot-user',
                                          relay_run_id='immutable', branch_author='builder')
         with self.assertRaisesRegex(ValueError, 'append-only'):
-            module.dot_review_receipts.record(meta, body, builder='different-builder', reviewer='dot-user',
+            self.receipt(meta, body, builder='different-builder', reviewer='dot-user',
                                              relay_run_id='immutable', branch_author='builder')
         forged = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot\nextra prose'
         self.data['comments'][repo+'#1'] = [{'body':forged,'author_association':'OWNER'}]

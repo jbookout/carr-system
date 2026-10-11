@@ -30,7 +30,8 @@ def inspect(queue, repo, n):
     if pr['state'] == 'closed':
         return {'state': 'closed', 'verdict': '', 'ready': False}
     sha = pr['head']['sha']
-    last, receipt = DOT['independent_verdict'](queue.pages(f'repos/{repo}/issues/{n}/comments?per_page=100'), repo, n)
+    last, receipt = DOT['independent_verdict'](queue.pages(f'repos/{repo}/issues/{n}/comments?per_page=100'), repo, n,
+                                              api=lambda path: queue.pages(path) if '/commits?' in path else queue.pr(repo, n))
     verdict = ''
     if last:
         body = last.get('body', '')

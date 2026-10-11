@@ -18,8 +18,11 @@ SHA = 'a' * 40
 
 def publish_review(directory, *args, **kwargs):
     kwargs.setdefault('reviewer', 'dot-user')
-    kwargs.setdefault('relay_run_id', 'fixture-channel:fixture-thread')
+    kwargs.setdefault('relay_run_id', 'fixture-channel:fixture-thread' if Path(directory).name == 'thread' else 'fixture-channel:'+Path(directory).name)
     with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(directory).parent/'relay-receipts')}):
+        body = dot.publication_body(args[0], args[1], kwargs.get('known_secrets', ()))
+        dot.dot_review_receipts.record_run(args[0], body, reviewer=kwargs['reviewer'],
+                                           relay_run_id=kwargs['relay_run_id'])
         return dot.publish(directory, *args, **kwargs)
 
 
@@ -78,6 +81,8 @@ class RelayTests(unittest.TestCase):
                     posts.append(kw['body'])
                     comments.append({'body': kw['body'], 'author_association': 'OWNER'})
                     return {'id': 1}
+                if '/commits?' in path:
+                    return [{'author':{'login':'commit-author'}}]
                 if '/comments?' in path:
                     return comments
                 return {'head': {'sha': SHA}, 'state': 'open', 'user': {'login': 'builder'}}
@@ -87,7 +92,7 @@ class RelayTests(unittest.TestCase):
                 kw['orch'] = Path(tmp)/'orch'
                 with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}):
                     return actual(*args, **kw)
-            with patch.object(dot, 'publish', side_effect=publish):
+            with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}), patch.object(dot, 'publish', side_effect=publish):
                 self.assertTrue(engine.poll(thread, execute=True))
                 restarted = dot.ReviewRelay(slack, state, repo, 'dot-user')
                 self.assertTrue(restarted.poll(thread, execute=True))
@@ -196,6 +201,8 @@ class PublicationTests(unittest.TestCase):
             self.posts.append(kwargs['body'])
             self.comments.append({'body': kwargs['body'], 'author_association': 'OWNER'})
             return {'id': 42}
+        if '/commits?' in path:
+            return [{'author':{'login':'commit-author'}}]
         if '/comments' in path:
             return self.comments
         return {'head': {'sha': self.head}, 'state': 'open', 'user': {'login': 'builder'}}
@@ -215,7 +222,7 @@ class PublicationTests(unittest.TestCase):
     def test_receipt_is_durable_before_post_and_missing_provenance_is_refused(self):
         def api(path, **kwargs):
             if kwargs:
-                receipt = dot.dot_review_receipts.matching(self.meta, kwargs['body'])
+                receipt = dot.dot_review_receipts.matching(self.meta, kwargs['body'], api=self.api)
                 self.assertEqual(receipt['builder'], 'builder')
                 self.assertEqual(receipt['reviewer'], 'dot-user')
                 self.assertEqual(receipt['relay_run_id'], 'fixture-channel:fixture-thread')
@@ -224,8 +231,21 @@ class PublicationTests(unittest.TestCase):
             'APPROVE\nReviewed-SHA: '+SHA, api, orch=self.directory.parent/'orch'), 'posted')
         with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ',
                 {'CARR_DOT_REVIEW_RECEIPTS':str(Path(tmp)/'receipts')}):
-            with self.assertRaisesRegex(ValueError, 'distinct authenticated reviewer'):
+            with self.assertRaisesRegex(ValueError, 'reviewer'):
                 dot.publish(Path(tmp)/'thread', self.meta, 'APPROVE\nReviewed-SHA: '+SHA, self.api)
+
+    def test_builder_receipt_without_relay_run_cannot_suppress_publication(self):
+        body = dot.publication_body(self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.')
+        self.comments = [{'body':body,'author_association':'OWNER','user':{'login':'builder'}}]
+        with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(self.directory.parent/'forged')}):
+            dot.dot_review_receipts.record(self.meta, body, builder='builder',
+                reviewer='invented-reviewer',relay_run_id='invented-thread',branch_author=None)
+            with self.assertRaisesRegex(ValueError, 'relay run'):
+                dot.publish(self.directory, self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.',
+                            self.api, orch=self.directory.parent/'orch',
+                            reviewer='invented-reviewer',relay_run_id='invented-thread')
+        self.assertEqual(self.posts, [])
+        self.assertEqual(list((self.directory.parent/'review-publications').glob('*.json')), [])
 
     def test_legacy_posted_state_without_receipt_cannot_reconcile(self):
         import hashlib
@@ -287,6 +307,8 @@ class PublicationTests(unittest.TestCase):
 
 class BlockerRegressionTests(unittest.TestCase):
     def api(self, path, **kw):
+        if '/commits?' in path:
+            return [{'author':{'login':'commit-author'}}]
         if '/files?' in path:
             return [{'filename': 'tools/area.py', 'patch': '+print(1)'}]
         if '/comments?' in path:
@@ -316,11 +338,12 @@ class BlockerRegressionTests(unittest.TestCase):
             code = "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',"+repr(child)+"],start_new_session=True);time.sleep(2)"
             actual_run = subprocess.run
             def inventory(argv, **kwargs):
+                import os
                 if argv[0] == 'ps':
-                    text = pidfile.read_text() if pidfile.exists() else ''
-                    if 'pid=,command=' in argv:
-                        text = ''
-                    return subprocess.CompletedProcess(argv, 0, stdout=text, stderr='')
+                    rows = [f'{os.getpid()} {os.getppid()} {os.getuid()}']
+                    if pidfile.exists():
+                        rows.append(pidfile.read_text()+' '+str(os.getuid()))
+                    return subprocess.CompletedProcess(argv, 0, stdout='\n'.join(rows), stderr='')
                 return actual_run(argv, **kwargs)
             with patch.object(subprocess, 'run', side_effect=inventory):
                 status, _ = dot.run_bounded([sys.executable,'-c',code], root, {}, timeout=.25, limit=1024)
@@ -389,7 +412,7 @@ class BlockerRegressionTests(unittest.TestCase):
                 return {'id':1}
             if '/comments?' in path:
                 return [{'body':body,'author_association':'OWNER','user':{'login':'builder'}}]
-            return {**self.api(path), 'user': {'login': 'builder'}}
+            return self.api(path)
         with tempfile.TemporaryDirectory() as tmp:
             result = publish_review(Path(tmp)/'thread', meta,
                                  'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.', api, orch=Path(tmp))
@@ -574,7 +597,7 @@ class LoopRegressionTests(unittest.TestCase):
     def test_6_only_canonical_authority_headers_can_stop_loop(self):
         m=self.loop()
         class Q:
-            def pr(self,*a): return {'state':'open','head':{'sha':SHA},'mergeable':True,'mergeable_state':'clean'}
+            def pr(self,*a): return {'state':'open','head':{'sha':SHA},'user':{'login':'builder'},'mergeable':True,'mergeable_state':'clean'}
             def covered(self,*a): return True
             def green(self,*a): return True
             def pages(self,*a): return self.comments
@@ -601,7 +624,7 @@ class LoopRegressionTests(unittest.TestCase):
         m = self.loop()
         class Q:
             def pr(self, *a):
-                return {'state':'open','head':{'sha':SHA},'mergeable':True,'mergeable_state':'clean'}
+                return {'state':'open','head':{'sha':SHA},'user':{'login':'builder'},'mergeable':True,'mergeable_state':'clean'}
             def covered(self, *a): return True
             def green(self, *a): return True
             def pages(self, *a):
@@ -615,12 +638,15 @@ class LoopRegressionTests(unittest.TestCase):
         body = 'APPROVE\nReviewed-SHA: '+'b'*40+'\nReviewer: ChatGPT Dot'
         class Q:
             def pr(self, *a):
-                return {'state':'open','head':{'sha':SHA},'mergeable':True,'mergeable_state':'clean'}
+                return {'state':'open','head':{'sha':SHA},'user':{'login':'builder'},'mergeable':True,'mergeable_state':'clean'}
             def covered(self, *a): return True
             def green(self, *a): return True
-            def pages(self, *a): return [{'body':body,'author_association':'OWNER'}]
+            def pages(self, path):
+                return [{'author':{'login':'commit-author'}}] if '/commits?' in path else [{'body':body,'author_association':'OWNER'}]
         with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':tmp}):
             self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], '')
+            dot.dot_review_receipts.record_run({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
+                reviewer='dot-user',relay_run_id='loop-fixture')
             dot.dot_review_receipts.record({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
                 builder='builder',reviewer='dot-user',relay_run_id='loop-fixture',branch_author='builder')
             self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], 'APPROVE-STALE')

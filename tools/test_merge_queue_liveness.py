@@ -31,6 +31,7 @@ EXERCISED_BOUNDS: set[str] = set()
 # Fixed test-owned site identities: adding a registry row cannot grant coverage.
 FAULT_SITES = {
     'review_handoff': ('main.py:Queue.request_review:call:1',),
+    'dot_author_timeout': ('main.py:Queue.approval:call:2',),
     'snapshot_cap': (
         'main.py:bounded_items:for:1',
         'main.py:gh_api_read:for:1',
@@ -45,7 +46,6 @@ FAULT_SITES = {
         'main.py:Queue.held:comprehension:1',
         'main.py:Queue.flush_events:for:1',
         'main.py:Queue.flush_events:for:2',
-        'main.py:Queue.approval:comprehension:1',
         'main.py:Queue.green:for:1',
         'main.py:Queue.green:for:2',
         'main.py:Queue.green:comprehension:1',
@@ -416,6 +416,7 @@ EFFECTS = (
     Effect('fetch', (('fetch', 'git'),), 'fetch'),
     Effect('board', (('flush_events', 'command'),)),
 )
+DOT_AUTHOR_EFFECT = Effect('dot_authors', (('approval', 'pages'),), 'dot_author')
 
 
 def census(source):
@@ -470,6 +471,8 @@ def operation(argv):
                 return ('check_runs' if bits[-1] == 'check-runs' else 'statuses'), repo, bits[4]
             n = int(bits[4])
             if bits[3] == 'pulls':
+                if len(bits) > 5 and bits[5] == 'commits':
+                    return 'dot_authors', repo, n
                 return ('pr_read' if len(bits) == 5 else 'update' if bits[5] == 'update-branch' else 'files'), repo, n
             if bits[-1] == 'labels':
                 return 'apply_label', repo, n
@@ -535,6 +538,8 @@ class RunLoop:
             result = [p for p in self.f.data['prs'].values() if p['repo'] == repo and p['state'] == 'open']
         elif name == 'approval':
             result = [dict(c, id=i+1) for i, c in enumerate(self.f.data['comments'][f'{repo}#{n}'])]
+        elif name == 'dot_authors':
+            result = [{'author': {'login': 'commit-author'}}]
         elif name == 'check_runs':
             result = {'check_runs': [{'id': 1, 'name': 'CI', 'app': {'id': 1}, 'status': 'completed', 'conclusion': 'success'}]}
         elif name == 'statuses':
@@ -600,6 +605,12 @@ class RunLoop:
         f.pr(1, head=f.updated if scenario == 'fetch' else f.approved,
              state='behind' if scenario == 'behind' else 'clean', draft=scenario == 'draft',
              base='branch-90' if scenario == 'retarget' else 'main')
+        if scenario == 'dot_author':
+            body = f'APPROVE\nReviewed-SHA: {f.approved}\nReviewer: ChatGPT Dot'
+            f.data['comments'][mq.REPOS[0]+'#1'] = [{'body':body, 'author_association':'OWNER'}]
+            f.save()
+            f.receipt({'repo':mq.REPOS[0], 'pr':1, 'sha':f.approved}, body,
+                      reviewer='dot-user', relay_run_id='author-timeout-fixture')
         entry = f.q.enqueue(mq.REPOS[0], 1, f.approved)
         if scenario == 'fetch':
             with f.q.db:
@@ -674,6 +685,24 @@ class RunLoop:
 
 
 class LivenessTests(unittest.TestCase):
+    def test_dot_commit_author_timeout_refuses_approval(self):
+        f = fixture_module.QueueTests(); f.setUp()
+        try:
+            loop = RunLoop(f, DOT_AUTHOR_EFFECT, 'timeout')
+            loop.seed()
+            loop.session()
+            self.assertGreater(loop.failures, 0)
+            self.assertNotIn((mq.REPOS[0], 1), {(repo,n) for repo,n,_ in loop.merged})
+            self.assertTrue({(repo,2) for repo in mq.REPOS} <= {(repo,n) for repo,n,_ in loop.merged})
+            f.restart()
+            self.assertEqual(f.q.db.execute('SELECT phase FROM entries WHERE repo=? AND pr=1',
+                                           (mq.REPOS[0],)).fetchone()[0], 'review')
+            self.assertTrue(f.q.db.execute("SELECT 1 FROM events WHERE repo=? AND pr=1 AND outcome='fresh_review'",
+                                          (mq.REPOS[0],)).fetchone())
+        finally:
+            f.doCleanups()
+        record_fault('dot_author_timeout')
+
     def test_wait_registry_is_complete_and_rejects_a_missing_site(self):
         validate_wait_registry(ROOT / 'tools/merge_queue')
         sites = dict(mq.WAIT_SITES)
@@ -713,7 +742,7 @@ class LivenessTests(unittest.TestCase):
 
     def test_fault_table_covers_external_call_sites(self):
         source = '\n'.join(p.read_text() for p in sorted((ROOT / 'tools/merge_queue').rglob('*.py')))
-        expected = Counter(site for effect in EFFECTS for site in effect.sites)
+        expected = Counter(site for effect in (*EFFECTS, DOT_AUTHOR_EFFECT) for site in effect.sites)
         self.assertEqual(census(source), expected,
                          'New external call sites require a fault-table entry and run-loop scenario')
         added = source + '\ndef new_effect(self):\n    self.api("new/external/path")\n'

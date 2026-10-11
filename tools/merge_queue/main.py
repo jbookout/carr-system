@@ -567,7 +567,8 @@ class Queue:
         comments = self.pages(f'repos/{repo}/issues/{n}/comments?per_page=100')
         cfg = REVIEW_CONFIG['app' if repo == REPOS[1] else 'worker']
         last, receipt = dot_review_receipts.deciding(list(bounded_items('snapshot', comments)),
-                                                    repo, n, policy=REVIEW, config=cfg)
+                                                    repo, n, policy=REVIEW, config=cfg,
+                                                    api=lambda path: self.pages(path) if '/commits?' in path else self.pr(repo, n))
         if last and REVIEW['verdict'](last.get('body', ''), cfg) == 'approve':
             sha = REVIEW['reviewed_header_sha'](last.get('body', ''))
             if not hasattr(self, '_dot_reviews'):
