@@ -52,7 +52,7 @@ STAMP_RE = re.compile(r"^Brief: (.+?) sha256:([0-9a-f]{64})\s*$", re.M)
 # section ("RULES FOR THIS JOB (all required):") is not a build requirement.
 HEADER_RE = re.compile(r"required", re.I)
 NOT_REQUIREMENTS_RE = re.compile(r"^\W*(RULES|BOUNDARIES)\b", re.I)
-ITEM_RE = re.compile(r"^\s*(\d+)\.\s+(.*)$")
+ITEM_RE = re.compile(r"^\s*(\d+)\.(?:\s+(.*))?$")
 # A caps label ("BOUNDARIES:", "RULES FOR THIS JOB (...):") or a markdown heading ends a list.
 SECTION_RE = re.compile(r"^(#|[A-Z][A-Z /-]{2,}(\([^)]*\))?:)")
 
@@ -91,17 +91,23 @@ def parse_requirements(text):
 
 def _numbered_list(lines):
     items = []
+    separated = False
     for line in lines:
         item = ITEM_RE.match(line)
         if item:
-            items.append({"n": int(item.group(1)), "text": item.group(2).strip()})
+            items.append({"n": int(item.group(1)), "text": (item.group(2) or "").strip()})
         elif not line.strip():
+            separated = True
             continue
-        elif SECTION_RE.match(line) or not items:
+        elif (SECTION_RE.match(line) or NOT_REQUIREMENTS_RE.match(line) or not items
+              or separated and not line[0].isspace()):
             if items:
                 break
         else:
-            items[-1]["text"] += " " + line.strip()
+            items[-1]["text"] = (items[-1]["text"] + " " + line.strip()).strip()
+        separated = False
+    if any(not item["text"] for item in items):
+        raise BriefError("empty requirement; supply an obligation before checking")
     numbers = [item["n"] for item in items]
     if len(numbers) != len(set(numbers)):
         raise BriefError("duplicate requirement numbers; disambiguate the brief before checking")
