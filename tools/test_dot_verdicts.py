@@ -112,6 +112,70 @@ class RelayTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_shim_git_is_resolved_before_sandbox_execution(self):
+        self.check_git_toolchain(shim=True)
+
+    def test_homebrew_git_symlink_is_resolved_before_sandbox_execution(self):
+        self.check_git_toolchain(shim=False)
+
+    def check_git_toolchain(self, *, shim):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            tree = root / 'head'; tree.mkdir()
+            developer = root / 'CommandLineTools'
+            binary = root / ('CommandLineTools/usr/bin/git' if shim else 'Cellar/git/bin/git')
+            binary.parent.mkdir(parents=True)
+            helpers = binary.parent.parent / 'libexec/git-core'; helpers.mkdir(parents=True)
+            binary.write_text('#!/bin/sh\n'
+                              'test -d "$TMPDIR" || exit 2\n'
+                              'test "$GIT_EXEC_PATH" = '+repr(str(helpers))+' || exit 3\n'
+                              'printf "RESOLVED-GIT\\n"\n')
+            binary.chmod(0o755)
+            shim_dir = root / 'shim'; shim_dir.mkdir()
+            (shim_dir / 'git').write_text('#!/bin/sh\necho "xcrun shim denied" >&2\nexit 126\n')
+            (shim_dir / 'git').chmod(0o755)
+            installed = root / 'homebrew/bin/git'
+            installed.parent.mkdir(parents=True)
+            installed.symlink_to(binary)
+            env = {'PATH': str(shim_dir)+':/usr/bin:/bin', 'HOME': '/nonexistent'}
+            self.assertEqual(subprocess.run(['git', 'rev-parse', 'HEAD'], env=env,
+                                           capture_output=True).returncode, 126)
+            actual_run = subprocess.run
+            calls = []
+            def metadata(argv, **kwargs):
+                calls.append(argv)
+                output = {('/usr/bin/xcode-select', '-p'): str(developer),
+                          ('/usr/bin/xcrun', '--find', 'git'): str(binary),
+                          (str(binary), '--exec-path'): str(helpers)}.get(tuple(argv))
+                if output is None:
+                    return actual_run(argv, **kwargs)
+                return subprocess.CompletedProcess(argv, 0, output+'\n', '')
+            with patch.object(dot.sys, 'platform', 'darwin'), \
+                 patch.object(dot.shutil, 'which', return_value='/usr/bin/git' if shim else str(installed)), \
+                 patch.object(dot.os.path, 'exists', return_value=True), \
+                 patch.object(dot.subprocess, 'run', side_effect=metadata):
+                prepared, execs = dot.prepare_test_sandbox(tree, env)
+                argv = dot.sandbox_command(['git', 'rev-parse', 'HEAD'], tree, execs=execs)
+            result = actual_run(argv[3:], cwd=tree, env=prepared, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), 'RESOLVED-GIT')
+            self.assertEqual(prepared['PATH'].split(os.pathsep)[0], str(binary.parent))
+            self.assertTrue(Path(prepared['TMPDIR']).is_relative_to(tree))
+            self.assertEqual(prepared.get('DEVELOPER_DIR'), str(developer) if shim else None)
+            self.assertEqual(prepared['GIT_OPTIONAL_LOCKS'], '0')
+            self.assertEqual(execs, (str(binary), str(helpers)))
+            profile = argv[2]
+            self.assertIn(f'(subpath "{binary}")', profile)
+            self.assertIn(f'(subpath "{helpers}")', profile)
+            self.assertNotIn(f'(subpath "{developer}")', profile)
+            self.assertIn('(deny network*)', profile)
+            self.assertNotIn('(allow network', profile)
+            self.assertIn('(deny file-write*)', profile)
+            self.assertIn('(deny file-write* (regex', profile)
+            self.assertEqual(sum('--exec-path' in call for call in calls), 1)
+            self.assertEqual(any('xcrun' in call[0] for call in calls), shim)
+
     def test_runs_module_in_scratch_at_bound_head_with_bounded_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / 'source'
@@ -601,8 +665,9 @@ class BlockerRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);tree=root/'tree';tree.mkdir();secret=root/'external';secret.write_text('harmless')
             code=f"import socket\nfrom pathlib import Path\nfor action in [lambda:Path({str(secret)!r}).read_text(), lambda:Path({str(root/'marker')!r}).write_text('bad'),lambda:socket.create_connection(('127.0.0.1',9),1)]:\n try: action();print('UNRESTRICTED')\n except OSError: print('DENIED')\n"
-            argv=dot.sandbox_command([sys.executable,'-c',code],tree)
-            status,output=dot.run_bounded(argv,tree,{},timeout=3,limit=4096)
+            env,execs=dot.prepare_test_sandbox(tree,{'PATH':dot.os.environ.get('PATH','/usr/bin:/bin')})
+            argv=dot.sandbox_command([sys.executable,'-c',code],tree,execs=execs)
+            status,output=dot.run_bounded(argv,tree,env,timeout=3,limit=4096)
             self.assertEqual(status,'0');self.assertEqual(output.count('DENIED'),3);self.assertFalse((root/'marker').exists())
 
     def test_2_timeout_kills_descendants_and_capture_stops_at_byte_limit(self):

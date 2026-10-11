@@ -102,11 +102,37 @@ def independent_verdict(comments, repo, n, *, api=None):
     return dot_review_receipts.deciding(comments, repo, n, policy=REVIEW, config=review_config(repo), api=api or gh_api)
 
 
-def sandbox_command(argv, tree):
+def prepare_test_sandbox(tree: Path, env: dict[str, str]) -> tuple[dict[str, str], tuple[str, str]]:
+    """Resolve trusted host Git before entering seatbelt; never invoke xcrun inside it."""
+    prepared = env.copy()
+    installed = shutil.which('git', path=env.get('PATH'))
+    if not installed:
+        raise ValueError('Git unavailable for restricted test execution')
+    binary = Path(installed).resolve()
+    def query(argv):
+        return subprocess.run(argv, env=prepared, capture_output=True, text=True,
+                              timeout=10, check=True).stdout.strip()
+    if sys.platform == 'darwin' and binary == Path('/usr/bin/git'):
+        prepared['DEVELOPER_DIR'] = query(['/usr/bin/xcode-select', '-p'])
+        binary = Path(query(['/usr/bin/xcrun', '--find', 'git'])).resolve()
+        if binary == Path('/usr/bin/git'):
+            raise ValueError('xcrun did not resolve the Git shim')
+    helpers = Path(query([str(binary), '--exec-path'])).resolve()
+    if not binary.is_file() or not helpers.is_dir():
+        raise ValueError('resolved Git toolchain is unavailable')
+    temp = tree.resolve() / '.dot-tmp'
+    temp.mkdir(mode=0o700)
+    prepared.update(PATH=str(binary.parent) + os.pathsep + env.get('PATH', os.defpath),
+                    TMPDIR=str(temp), GIT_EXEC_PATH=str(helpers), GIT_OPTIONAL_LOCKS='0')
+    return prepared, (str(binary), str(helpers))
+
+
+def sandbox_command(argv, tree, *, execs=()):
     if sys.platform != 'darwin' or not shutil.which('sandbox-exec'):
         raise ValueError('restricted test execution unavailable; needs hands-on testing')
     sandbox = runpy.run_path(str(ROOT / 'tools/flash-run.py'))
-    return sandbox['sandbox_wrap'](argv, str(tree), reads=(str(tree.parent / 'repo.git'),))
+    return sandbox['sandbox_wrap'](argv, str(tree),
+                                   reads=(str(tree.parent / 'repo.git'), *execs), execs=execs)
 
 
 def gh_api(path, **fields):
@@ -176,6 +202,7 @@ def test_evidence(repo, sha, files, *, origin=None):
         commands = test_commands(tree, files)
         if not commands:
             raise ValueError('no runnable changed-area tests; needs hands-on testing')
+        env, execs = prepare_test_sandbox(tree, env)
         tail_bound = min(4000, max(128, 8000 // len(commands)))
         started = time.monotonic()
         for argv in commands:
@@ -183,7 +210,7 @@ def test_evidence(repo, sha, files, *, origin=None):
             if remaining <= 0:
                 evidence.append('Remaining modules not run: 480s evidence bound reached.')
                 break
-            status, tail = run_bounded(sandbox_command(argv, tree), tree, env,
+            status, tail = run_bounded(sandbox_command(argv, tree, execs=execs), tree, env,
                                        timeout=min(120, remaining), limit=tail_bound)
             evidence.append(f'$ {" ".join(argv)}\nexit: {status}\n{tail}')
     text = redact_text('\n\n'.join(evidence), known_secrets=sensitive_env_values(os.environ))
