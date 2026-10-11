@@ -25,6 +25,47 @@ class ReviewRegressions(unittest.TestCase):
     send = ownership_tests.OwnershipTests.send
     active = ownership_tests.OwnershipTests.active
 
+    def test_foreign_machine_provider_and_no_launch_receipts_stay_held(self):
+        local = ownership.process_owner()
+        provider = {'kind': 'codex_turn', 'socket': '/fixture.sock',
+                    'thread_id': 'thread', 'turn_id': 'turn'}
+        desktop = {'kind': 'codex_desktop', 'thread_id': 'thread', 'marker': 'marker'}
+        no_launch = {'kind': 'no_launch', 'reason': 'setup_pending'}
+        for identity in (provider, desktop, no_launch):
+            for foreign_part in ('owner_process', 'executor'):
+                with self.subTest(kind=identity['kind'], foreign_part=foreign_part):
+                    owner = {**local, 'pid': 1234, 'start_time': 'dead'}
+                    executor = {**identity, 'host': local['host'], 'machine_id': local['machine_id']}
+                    if foreign_part == 'owner_process':
+                        owner['machine_id'] = 'f' * 32
+                    else:
+                        executor['machine_id'] = 'f' * 32
+                    self.active(owner_process=owner, executor=executor)
+                    with patch.object(codex_wire, 'turn_terminated', return_value=True) as turn, \
+                         patch.object(codex_wire, 'desktop_turn_terminated', return_value=True) as history:
+                        self.assertEqual(ownership.reconcile('other')[0]['ownership_state'], 'held')
+                    turn.assert_not_called()
+                    history.assert_not_called()
+
+    def test_pid_bearing_unconfirmed_executor_survives_dispatcher_death(self):
+        local = ownership.process_owner()
+        self.active(gated_launch=True,
+            owner_process={**local, 'pid': 1234, 'start_time': 'dead'},
+            executor={**local, 'kind': 'unconfirmed', 'pid': 5678,
+                      'pgid': 5678, 'start_time': 'dead-executor'})
+        with patch.object(ownership.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(ownership.reconcile('other')[0]['ownership_state'], 'held')
+
+    def test_normalized_empty_placeholder_releases_after_dispatcher_death(self):
+        local = ownership.process_owner()
+        self.active(gated_launch=True,
+            owner_process={**local, 'pid': 1234, 'start_time': 'dead'},
+            executor={k: v for k, v in {**local, 'kind': 'unconfirmed'}.items()
+                      if k in ('kind', 'host', 'machine_id')})
+        with patch.object(ownership.os, 'kill', side_effect=ProcessLookupError):
+            self.assertEqual(ownership.reconcile('other')[0]['ownership_state'], 'released')
+
     def test_path_aliases_cannot_bypass_pr_or_job_ownership(self):
         for alias in ('src/./a.py', 'src//a.py', '././src/a.py'):
             for active in (False, True):
