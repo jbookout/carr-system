@@ -26,7 +26,8 @@ class ReceiptTests(unittest.TestCase):
         self.addCleanup(self.env.stop)
         receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
         self.meta = {'repo': 'fixture/repo', 'pr': 1, 'sha': 'a' * 40}
-        self.body = 'APPROVE\nReviewed-SHA: ' + self.meta['sha'] + '\nReviewer: ChatGPT Dot'
+        self.report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']+'\nNo blockers.\nDOT-REPORT-END'
+        self.body = receipts.publication_body(self.meta, self.report)
         self.pr = {'user': {'login': 'builder'}}
         self.commits = [{'author': {'login': 'other-builder'},
                          'commit': {'author': {'name': 'Other Builder', 'email': 'other@example.test'}}}]
@@ -58,9 +59,11 @@ class ReceiptTests(unittest.TestCase):
 
     def pair(self, body=None, meta=None, run='fixture-channel:1.000001', reviewer='dot-user'):
         ts = run.rsplit(':', 1)[-1]
-        self.messages[ts] = {'ts': ts, 'user': reviewer, 'text': body or self.body}
-        receipts.attest_run(meta or self.meta, body or self.body, reviewer=reviewer, relay_run_id=run, report=body or self.body)
-        return self.record(body, meta, run, reviewer, anchor=True)
+        report = (body or self.body).rsplit('\n\nReviewer: ChatGPT Dot\n<!-- dot-review:', 1)[0]+'\nDOT-REPORT-END'
+        self.messages[ts] = {'ts': ts, 'user': reviewer, 'text': report}
+        receipts.attest_run(meta or self.meta, body or self.body, reviewer=reviewer, relay_run_id=run, report=report)
+        return receipts.record(meta or self.meta, body or self.body, reviewer=reviewer,
+                               relay_run_id=run, report=report, anchor=True)
 
     def matching(self, body=None, meta=None):
         return receipts.matching(meta or self.meta, body or self.body, api=self.api)
@@ -72,6 +75,55 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(receipts.deciding([{'id': 1, 'body': self.body, 'author_association': 'OWNER'}],
                 'fixture/repo', 1, policy=self.policy, config={}, api=self.api), (None, None))
         self.assertIn('DOT_REVIEW_RECEIPT_ALARM', stderr.getvalue())
+
+    def test_public_api_pair_cannot_hide_contradictory_multipart_report(self):
+        report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']+'\nFirst part\nREVIEW: BLOCKED\nP1 blocker\nDOT-REPORT-END'
+        self.append_report(report)
+        self.assert_alarm_refusal(self.matching)
+
+    def test_public_api_pair_cannot_change_findings_or_test_counts(self):
+        report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']+'\nOnly 2 tests passed.\nDOT-REPORT-END'
+        self.append_report(report)
+        self.assert_alarm_refusal(self.matching)
+
+    def test_public_api_pair_cannot_authorize_unfinished_report(self):
+        report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']
+        self.append_report(report)
+        self.assert_alarm_refusal(self.matching)
+
+    def test_public_api_pair_cannot_authorize_duplicate_sha(self):
+        report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']+'\nReviewed-SHA: '+self.meta['sha']+'\nDOT-REPORT-END'
+        self.append_report(report)
+        self.assert_alarm_refusal(self.matching)
+
+    def append_report(self, report):
+        parts = report.split('\nFirst part\n', 1)
+        self.messages['1.000001'] = {'ts': '1.000001', 'user': 'dot-user', 'text': parts[0]}
+        if len(parts) == 2:
+            self.messages['2.000001'] = {'ts': '2.000001', 'user': 'dot-user', 'text': 'First part\n'+parts[1]}
+        receipts.attest_run(self.meta, self.body, reviewer='dot-user',
+                            relay_run_id='fixture-channel:1.000001', report=report)
+        receipts.record(self.meta, self.body, reviewer='dot-user',
+                        relay_run_id='fixture-channel:1.000001', report=report, anchor=True)
+
+    def test_run_and_receipt_must_share_report_digest_message_and_thread(self):
+        self.pair()
+        ledgers = receipts._read_ledgers(self.store)
+        for field, value in [('report_sha256', 'b'*64), ('slack_message_ts', '2.000001'),
+                             ('slack_thread_ts', '3.000001')]:
+            altered = {**ledgers, 'runs': [{**ledgers['runs'][0], field: value}]}
+            with self.subTest(field=field), patch.object(receipts, '_read_ledgers', return_value=altered), patch.object(
+                    receipts, '_verify_heads', return_value={'sender': 'dot-user', 'channel': 'fixture-channel',
+                                                            'github_actor': 'dot-github-user'}):
+                self.assert_alarm_refusal(self.matching)
+
+    def test_canonical_redaction_is_derived_from_slack_with_relay_token(self):
+        self.slack.token = 'synthetic-relay-token'
+        report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']+'\nToken synthetic-relay-token\nDOT-REPORT-END'
+        self.body = receipts.publication_body(self.meta, report, (self.slack.token,))
+        self.append_report(report)
+        self.assertIsNotNone(self.matching())
+        self.assertIn('[REDACTED]', self.body)
 
     def test_public_attestation_with_invented_slack_timestamp_refuses_and_alarms(self):
         self.pair()
@@ -103,7 +155,7 @@ class ReceiptTests(unittest.TestCase):
         self.assert_alarm_refusal(self.matching)
 
     def test_real_block_report_cannot_attest_approve(self):
-        report = self.body.replace('APPROVE', 'REVIEW: BLOCKED', 1)
+        report = self.report.replace('APPROVE', 'REVIEW: BLOCKED', 1)
         receipts.attest_run(self.meta, self.body, reviewer='dot-user',
                             relay_run_id='fixture-channel:1.000001', report=report)
         receipts.record(self.meta, self.body, reviewer='dot-user',
@@ -120,6 +172,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_multipart_report_verifies_in_its_original_thread(self):
         report = 'APPROVE\nReviewed-SHA: '+self.meta['sha']+'\nFirst part\nSecond part\nDOT-REPORT-END'
+        self.body = receipts.publication_body(self.meta, report)
         receipts.attest_run(self.meta, self.body, reviewer='dot-user',
                             relay_run_id='fixture-channel:2.000001', report=report, thread_ts='1.000001')
         original = receipts.record(self.meta, self.body, reviewer='dot-user',
@@ -165,15 +218,15 @@ class ReceiptTests(unittest.TestCase):
 
     def test_appended_run_and_receipt_pair_alarm_and_refuse(self):
         self.pair()
-        forged = self.body + '\nForged appended verdict'
+        forged = self.body.replace('No blockers.', 'No blockers.' + '\nForged appended verdict')
         receipts.record_run(self.meta, forged, reviewer='dot-user', relay_run_id='fixture-channel:2.000001')
         self.record(body=forged, run='fixture-channel:2.000001')
         self.assert_alarm_refusal(lambda: self.matching(body=forged))
 
     def test_rewritten_tail_pair_alarm_and_refuse(self):
         self.pair()
-        self.pair(body=self.body + '\nOriginal tail', run='fixture-channel:2.000001')
-        forged = self.body + '\nRewritten tail'
+        self.pair(body=self.body.replace('No blockers.', 'No blockers.' + '\nOriginal tail'), run='fixture-channel:2.000001')
+        forged = self.body.replace('No blockers.', 'No blockers.' + '\nRewritten tail')
         for ledger in ('runs', 'receipts'):
             path = sorted((self.store / ledger).glob('*.json'))[-1]
             value = json.loads(path.read_text())
@@ -184,7 +237,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_truncated_tail_pair_alarm_and_refuse_even_for_older_verdict(self):
         self.pair()
-        self.pair(body=self.body + '\nTail', run='fixture-channel:2.000001')
+        self.pair(body=self.body.replace('No blockers.', 'No blockers.' + '\nTail'), run='fixture-channel:2.000001')
         for ledger in ('runs', 'receipts'):
             sorted((self.store / ledger).glob('*.json'))[-1].unlink()
         self.assert_alarm_refusal(self.matching)
@@ -218,7 +271,7 @@ class ReceiptTests(unittest.TestCase):
     def test_anchor_rollback_is_detected_even_with_truncated_ledgers(self):
         import sqlite3
         first = self.pair()
-        self.pair(body=self.body + '\nTail', run='fixture-channel:2.000001')
+        self.pair(body=self.body.replace('No blockers.', 'No blockers.' + '\nTail'), run='fixture-channel:2.000001')
         for ledger in ('runs', 'receipts'):
             sorted((self.store / ledger).glob('*.json'))[-1].unlink()
             head = json.loads(next((self.store / ledger).glob('*.json')).read_text())
@@ -298,15 +351,15 @@ class ReceiptTests(unittest.TestCase):
         first = self.pair()
         paths = sorted(self.store.rglob('*.json'))
         original = {p: p.read_bytes() for p in paths}
-        second = self.pair(body=self.body + '\nSecond report', run='fixture-channel:2.000001')
+        second = self.pair(body=self.body.replace('No blockers.', 'No blockers.' + '\nSecond report'), run='fixture-channel:2.000001')
         for path, content in original.items():
             self.assertEqual(path.read_bytes(), content)
         self.assertEqual(second['prev_sha256'], first['sha256'])
-        self.assertEqual(self.matching(body=self.body + '\nSecond report'), second)
+        self.assertEqual(self.matching(body=self.body.replace('No blockers.', 'No blockers.' + '\nSecond report')), second)
 
     def test_receipt_tampering_is_detected_even_for_unrelated_binding(self):
         self.pair()
-        self.pair(body=self.body + '\nOther report', run='fixture-channel:2.000001')
+        self.pair(body=self.body.replace('No blockers.', 'No blockers.' + '\nOther report'), run='fixture-channel:2.000001')
         path = sorted((self.store / 'receipts').glob('*.json'))[-1]
         value = json.loads(path.read_text())
         path.write_text(json.dumps({**value, 'reviewer': 'forged-reviewer'}))
@@ -314,7 +367,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_chain_gap_and_invalid_previous_hash_are_detected(self):
         self.pair()
-        self.pair(body=self.body + '\nOther report', run='fixture-channel:2.000001')
+        self.pair(body=self.body.replace('No blockers.', 'No blockers.' + '\nOther report'), run='fixture-channel:2.000001')
         first, second = sorted((self.store / 'receipts').glob('*.json'))
         original = first.read_bytes()
         first.unlink()
@@ -337,7 +390,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_run_must_match_receipt_binding_and_reviewer(self):
-        receipts.record_run(self.meta, self.body + '\nDifferent report',
+        receipts.record_run(self.meta, self.body.replace('No blockers.', 'No blockers.' + '\nDifferent report'),
                             reviewer='dot-user', relay_run_id='fixture-channel:1.000001')
         self.record()
         self.assert_alarm_refusal(self.matching)
@@ -384,7 +437,7 @@ class ReceiptTests(unittest.TestCase):
                      {**self.meta, 'pr': 2}):
             with self.subTest(meta=meta):
                 self.assertIsNone(self.matching(meta=meta))
-        self.assertIsNone(self.matching(body=self.body + '\nAdded body'))
+        self.assertIsNone(self.matching(body=self.body.replace('No blockers.', 'No blockers.' + '\nAdded body')))
         self.assertEqual(self.calls, [])
 
     def test_claimed_dot_comment_without_receipt_is_not_owner_approval(self):
@@ -401,7 +454,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_fenced_marker_and_stored_receipt_still_carry_review(self):
-        body = 'APPROVE\nReviewed-SHA: ' + self.meta['sha'] + '\n```\nReviewer: ChatGPT Dot\n```'
+        body = receipts.publication_body(self.meta, 'APPROVE\nReviewed-SHA: ' + self.meta['sha'] + '\n```\nReviewer: ChatGPT Dot\n```\nDOT-REPORT-END')
         receipt = self.pair(body=body)
         comment = {'id': 1, 'body': body, 'author_association': 'NONE'}
         self.assertEqual(receipts.deciding([comment], 'fixture/repo', 1, policy=self.policy,

@@ -21,6 +21,7 @@ import time
 from decimal import Decimal
 
 from lib import dot_relay
+from lib.secret_redaction import redact_text
 
 SCHEMA = 'carr-dot-review-receipt/v2'
 RUN_SCHEMA = 'carr-dot-relay-run/v1'
@@ -30,6 +31,22 @@ TIMESTAMP_SKEW_SECONDS = 30
 DOT_MARKER = 'Reviewer: ChatGPT Dot'
 STAMP = re.compile(r'^APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
                    r'(?:Orchestrator merge queue:|Orchestrator: verified exact head)')
+
+
+def publication_body(meta, report, known_secrets=()):
+    lines = report.strip().splitlines()
+    if len(lines) < 2 or lines[0] not in ('APPROVE', 'REVIEW: BLOCKED') or lines[1] != 'Reviewed-SHA: ' + meta['sha']:
+        raise ValueError('Dot verdict must carry the exact brief SHA in its first two lines')
+    if any(line.strip() in ('APPROVE', 'REVIEW: BLOCKED') for line in lines[2:]):
+        raise ValueError('multiple verdicts in completed Dot report')
+    if any('reviewed-sha:' in line.lower() for line in lines[2:]):
+        raise ValueError('duplicate reviewed SHA')
+    review_key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()
+    marker = '<!-- dot-review:' + review_key + ' -->'
+    findings = '\n'.join(line for line in lines[2:] if not line.startswith('DOT-REPORT-END')).strip()
+    if re.search(r'^Orchestrator(?: merge queue:|: verified exact head)', findings, re.M):
+        raise ValueError('Dot report contains an orchestrator authority stamp')
+    return '\n'.join(lines[:2]) + '\n\n' + redact_text(findings, known_secrets=known_secrets) + '\n\n' + DOT_MARKER + '\n' + marker
 
 
 def receipt_directory():
@@ -393,6 +410,15 @@ def _verify_slack(entry, body, actor):
     text = '\n'.join(report)
     if hashlib.sha256(text.encode()).hexdigest() != entry['report_sha256']:
         raise _ChainError('Dot Slack report text differs from the recorded hash')
+    if dot_relay._protocol(text)[1] is None:
+        raise _ChainError('Dot Slack report is incomplete')
+    meta = {'repo': entry['repo'], 'pr': entry['pr'], 'sha': entry['reviewed_sha']}
+    try:
+        canonical = publication_body(meta, text, (getattr(transport, 'token', ''),))
+    except ValueError as error:
+        raise _ChainError(str(error)) from error
+    if canonical != body:
+        raise _ChainError('publication differs from the canonical authenticated Slack report')
 
 
 def _matching(meta, body, api):
@@ -428,6 +454,8 @@ def _matching(meta, body, api):
         run = next((run for run in ledgers['runs']
                     if run['relay_run_id'] == entry['relay_run_id'] and
                     run['reviewer'] == entry['reviewer'] and
+                    all(run.get(k) == entry.get(k) for k in
+                        ('slack_message_ts', 'slack_thread_ts', 'report_sha256')) and
                     all(run.get(k) == v for k, v in binding.items())), None)
         if run is None:
             _alarm('receipt lacks a matching relay run')

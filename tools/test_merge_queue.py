@@ -204,15 +204,16 @@ class QueueTests(unittest.TestCase):
         module.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
         fields['relay_run_id'] = 'fixture-channel:' + str(int(hashlib.sha256(fields['relay_run_id'].encode()).hexdigest()[:12], 16) % 1000000000) + '.000001'
         ts = fields['relay_run_id'].rsplit(':', 1)[-1]
-        self.slack_messages[ts] = {'ts': ts, 'user': fields['reviewer'], 'text': body}
+        report = body.rsplit('\n\nReviewer: ChatGPT Dot\n<!-- dot-review:', 1)[0]+'\nDOT-REPORT-END'
+        self.slack_messages[ts] = {'ts': ts, 'user': fields['reviewer'], 'text': report}
         module.dot_review_receipts.attest_run(meta, body, reviewer=fields['reviewer'],
-                                             relay_run_id=fields['relay_run_id'], report=body)
-        return module.dot_review_receipts.record(meta, body, **fields, anchor=True)
+                                             relay_run_id=fields['relay_run_id'], report=report)
+        return module.dot_review_receipts.record(meta, body, **fields, report=report, anchor=True)
 
     def test_builder_minted_receipt_without_run_is_refused(self):
         repo = module.REPOS[0]
         self.pr()
-        body = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'
+        body = module.dot_review_receipts.publication_body({'repo': module.REPOS[0], 'pr': 1, 'sha': self.approved}, f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot')
         self.data['comments'][repo+'#1'] = [{'body':body,'author_association':'OWNER',
                                             'user':{'login':'builder'}}]
         self.save()
@@ -226,7 +227,7 @@ class QueueTests(unittest.TestCase):
         from contextlib import redirect_stderr
         repo = module.REPOS[0]
         self.pr()
-        body = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'
+        body = module.dot_review_receipts.publication_body({'repo': module.REPOS[0], 'pr': 1, 'sha': self.approved}, f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot')
         self.data['comments'][repo+'#1'] = [{'body': body, 'author_association': 'OWNER'}]
         self.save()
         self.receipt({'repo': repo, 'pr': 1, 'sha': self.approved}, body,
@@ -244,10 +245,39 @@ class QueueTests(unittest.TestCase):
         self.slack.replies = original
         self.assertEqual(self.q.approval(repo, 1), self.approved)
 
+    def test_public_api_pair_cannot_authorize_contradictory_or_changed_slack_report(self):
+        import io
+        from contextlib import redirect_stderr
+        repo = module.REPOS[0]
+        self.pr()
+        meta = {'repo': repo, 'pr': 1, 'sha': self.approved}
+        candidate = 'APPROVE\nReviewed-SHA: '+self.approved+'\nNo blockers.\nDOT-REPORT-END'
+        body = module.dot_review_receipts.publication_body(meta, candidate)
+        self.data['comments'][repo+'#1'] = [{'body': body, 'author_association': 'OWNER'}]
+        self.save()
+        module.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
+        reports = [
+            'APPROVE\nReviewed-SHA: '+self.approved+'\nREVIEW: BLOCKED\nP1 blocker\nDOT-REPORT-END',
+            'APPROVE\nReviewed-SHA: '+self.approved+'\nOnly 2 tests passed.\nDOT-REPORT-END',
+            'APPROVE\nReviewed-SHA: '+self.approved+'\nNo blockers.',
+            'APPROVE\nReviewed-SHA: '+self.approved+'\nReviewed-SHA: '+self.approved+'\nDOT-REPORT-END',
+        ]
+        for index, report in enumerate(reports, 1):
+            ts = str(index)+'.000001'
+            self.slack_messages[ts] = {'ts': ts, 'user': 'dot-user', 'text': report}
+            module.dot_review_receipts.attest_run(meta, body, reviewer='dot-user',
+                relay_run_id='fixture-channel:'+ts, report=report)
+            module.dot_review_receipts.record(meta, body, reviewer='dot-user',
+                relay_run_id='fixture-channel:'+ts, report=report, anchor=True)
+            with self.subTest(report=report), redirect_stderr(io.StringIO()) as alarm:
+                self.assertIsNone(self.q.approval(repo, 1))
+                self.assertEqual(self.calls('merge'), [])
+            self.assertIn('DOT_REVIEW_RECEIPT_ALARM', alarm.getvalue())
+
     def test_receipt_rechecks_pr_and_commit_authors_at_decision(self):
         repo = module.REPOS[0]
         pr = self.pr()
-        body = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'
+        body = module.dot_review_receipts.publication_body({'repo': module.REPOS[0], 'pr': 1, 'sha': self.approved}, f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot')
         self.data['comments'][repo+'#1'] = [{'body':body,'author_association':'OWNER'}]
         self.save()
         self.receipt({'repo':repo,'pr':1,'sha':self.approved}, body, reviewer='dot-user',
@@ -265,7 +295,7 @@ class QueueTests(unittest.TestCase):
         self.pr()
         self.data['prs'][module.REPOS[0]+'#1']['head']['sha'] = self.changed
         self.data['comments'][module.REPOS[0]+'#1'] = [{
-            'body': f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot',
+            'body': module.dot_review_receipts.publication_body({'repo': module.REPOS[0], 'pr': 1, 'sha': self.approved}, f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'),
             'author_association': 'OWNER'}]
         self.save()
         self.receipt({'repo':module.REPOS[0],'pr':1,'sha':self.approved},
@@ -291,7 +321,7 @@ class QueueTests(unittest.TestCase):
         for tag, association, author, sha in cases:
             with self.subTest(case=tag):
                 self.data['comments'][repo+'#1'] = [{
-                    'body': f'APPROVE\nReviewed-SHA: {sha}\nReviewer: ChatGPT Dot',
+                    'body': module.dot_review_receipts.publication_body({'repo': module.REPOS[0], 'pr': 1, 'sha': sha}, f'APPROVE\nReviewed-SHA: {sha}\nReviewer: ChatGPT Dot'),
                     'author_association': association, 'user': {'login': author}}]
                 self.save()
                 approved = self.q.approval(repo, 1)
@@ -318,7 +348,7 @@ class QueueTests(unittest.TestCase):
                                        ('REVIEW: BLOCKED', self.approved, None)]:
             with self.subTest(verdict=verdict, sha=sha):
                 self.data['comments'][module.REPOS[0]+'#1'] = [{
-                    'body': f'{verdict}\nReviewed-SHA: {sha}\n\nReviewer: ChatGPT Dot',
+                    'body': module.dot_review_receipts.publication_body({'repo': module.REPOS[0], 'pr': 1, 'sha': sha}, f'{verdict}\nReviewed-SHA: {sha}\n\nReviewer: ChatGPT Dot'),
                     'author_association': 'OWNER'}]
                 self.save()
                 self.receipt({'repo':module.REPOS[0],'pr':1,'sha':sha},
@@ -329,7 +359,7 @@ class QueueTests(unittest.TestCase):
     def test_dot_receipt_binds_all_fields_and_requires_independence(self):
         repo = module.REPOS[0]
         self.pr()
-        body = f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot'
+        body = module.dot_review_receipts.publication_body({'repo': module.REPOS[0], 'pr': 1, 'sha': self.approved}, f'APPROVE\nReviewed-SHA: {self.approved}\nReviewer: ChatGPT Dot')
         self.data['comments'][repo+'#1'] = [{'body':body, 'author_association':'NONE',
                                             'user':{'login':'shared-owner'}}]
         self.save()
@@ -356,6 +386,9 @@ class QueueTests(unittest.TestCase):
         self.save()
         self.assertTrue(self.q.covered(repo, self.q.approval(repo, 1), self.updated))
         meta = {'repo':repo,'pr':1,'sha':self.approved}
+        body = module.dot_review_receipts.publication_body(meta, body+'\nDOT-REPORT-END')
+        self.data['comments'][repo+'#1'][0]['body'] = body
+        self.save()
         self.receipt(meta, body, builder='builder', reviewer='dot-user',
                                          relay_run_id='immutable', branch_author='builder')
         with self.assertRaisesRegex(ValueError, 'append-only'):

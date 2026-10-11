@@ -41,6 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from lib.secret_redaction import redact_text, sensitive_env_values
 from lib import dot_relay, dot_review_receipts
+from lib.dot_review_receipts import publication_body
 from lib.dot_processes import run_bounded
 
 REVIEW = runpy.run_path(str(ROOT / "ops/release-pipeline.py"))
@@ -422,25 +423,14 @@ def request(repo, n, *, orch=None, expected=None, api=gh_api, evidence_runner=te
         return {**receipt, 'enqueued': True}
 
 
-def publication_body(meta, report, known_secrets=()):
-    lines = report.strip().splitlines()
-    if len(lines) < 2 or lines[0] not in ('APPROVE', 'REVIEW: BLOCKED') or lines[1] != 'Reviewed-SHA: ' + meta['sha']:
-        raise ValueError('Dot verdict must carry the exact brief SHA in its first two lines')
-    if any(line.strip() in ('APPROVE', 'REVIEW: BLOCKED') for line in lines[2:]):
-        raise ValueError('multiple verdicts in completed Dot report')
-    if any('reviewed-sha:' in line.lower() for line in lines[2:]):
-        raise ValueError('duplicate reviewed SHA')
-    review_key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()
-    marker = '<!-- dot-review:' + review_key + ' -->'
-    findings = '\n'.join(line for line in lines[2:] if not line.startswith('DOT-REPORT-END'))
-    if re.search(r'^Orchestrator(?: merge queue:|: verified exact head)', findings, re.M):
-        raise ValueError('Dot report contains an orchestrator authority stamp')
-    return '\n'.join(lines[:2]) + '\n\n' + redact_text(findings, known_secrets=known_secrets) + '\n\n' + DOT_MARKER + '\n' + marker
-
 
 def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(), orch=None,
             *, reviewer=None, relay_run_id=None, thread_ts=None):
-    body = publication_body(meta, report, known_secrets)
+    try:
+        body = publication_body(meta, report, known_secrets)
+    except ValueError:
+        dot_review_receipts._alarm('invalid Dot publication report')
+        raise
     review_key = hashlib.sha256(json.dumps(meta, sort_keys=True).encode()).hexdigest()
     path = Path(directory).parent / 'review-publications' / (review_key + '.json')
     marker = '<!-- dot-review:' + review_key + ' -->'
@@ -564,7 +554,12 @@ class ReviewRelay(dot_relay.Relay):
             report = '\n'.join(texts[start:])
             meta = json.loads(meta_file.read_text())
             run_id = f'{self.transport.channel}:{reports[start]["ts"]}'
-            dot_review_receipts.attest_run(meta, publication_body(meta, report, self.secrets),
+            try:
+                body = publication_body(meta, report, self.secrets)
+            except ValueError:
+                dot_review_receipts._alarm('invalid authenticated Dot report')
+                raise
+            dot_review_receipts.attest_run(meta, body,
                                            reviewer=self.sender, relay_run_id=run_id, report=report, thread_ts=thread)
             publish(directory, meta, report,
                     requeue=lambda meta: submit(meta['repo'], meta['pr'], Path(os.environ.get('CARR_ORCH_DIR', ROOT / 'out/orch'))),

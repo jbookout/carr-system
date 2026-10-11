@@ -22,10 +22,12 @@ def fake_slack(report):
     return slack
 
 
-SLACK_REPORTS = {}
+SLACK_REPORTS: dict[str, dict[str, dict[str, str]]] = {}
 
 
 def publish_review(directory, *args, **kwargs):
+    if dot.dot_relay._protocol(args[1])[1] is None:
+        args = (args[0], args[1]+'\nDOT-REPORT-END', *args[2:])
     kwargs.setdefault('reviewer', 'dot-user')
     kwargs.setdefault('relay_run_id', 'fixture-channel:1.000001' if Path(directory).name == 'thread' else 'fixture-channel:2.000001')
     messages = SLACK_REPORTS.setdefault(str(Path(directory).parent), {})
@@ -70,6 +72,31 @@ class RoutingTests(unittest.TestCase):
             self.assertIn('design critique', next((orch / 'dot/queue').glob('*.md')).read_text())
 
 class RelayTests(unittest.TestCase):
+    def test_contradictory_authenticated_relay_report_alarms_before_attestation(self):
+        import io
+        from contextlib import redirect_stderr
+        class Slack:
+            channel = 'fixture-channel'
+            def post(self, text, thread=None):
+                return '1.000001'
+            def replies(self, thread):
+                return [
+                    {'ts': '2.000001', 'user': 'dot-user', 'text': 'APPROVE\nReviewed-SHA: '+SHA},
+                    {'ts': '3.000001', 'user': 'dot-user', 'text': 'REVIEW: BLOCKED\nP1 blocker\nDOT-REPORT-END'},
+                ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root/'repo'
+            repo.mkdir()
+            relay = dot.ReviewRelay(Slack(), root/'state', repo, 'dot-user')
+            thread = relay.send_job('Dot-Review: '+json.dumps({'repo': 'jbookout/carr-system', 'pr': 1, 'sha': SHA}))
+            with patch.object(dot.dot_review_receipts, 'attest_run') as attest, patch.object(dot, 'publish') as publish:
+                with redirect_stderr(io.StringIO()) as alarm, self.assertRaisesRegex(ValueError, 'multiple verdicts'):
+                    relay.poll(thread, execute=True)
+                self.assertIn('DOT_REVIEW_RECEIPT_ALARM', alarm.getvalue())
+                attest.assert_not_called()
+                publish.assert_not_called()
+
     def test_authenticated_multipart_completion_posts_once_and_survives_restart(self):
         class Slack:
             channel = 'fixture-channel'
@@ -385,6 +412,40 @@ class PublicationTests(unittest.TestCase):
                             relay_run_id='fixture-channel:1.000001')
             self.assertIn('DOT_REVIEW_RECEIPT_ALARM', alarm.getvalue())
         self.assertEqual(self.posts, [])
+
+    def test_public_api_append_cannot_publish_or_reconcile_a_different_slack_report(self):
+        import io
+        from contextlib import redirect_stderr
+        candidate = 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.\nDOT-REPORT-END'
+        body = dot.publication_body(self.meta, candidate)
+        reports = [
+            'APPROVE\nReviewed-SHA: '+SHA+'\nREVIEW: BLOCKED\nP1 blocker\nDOT-REPORT-END',
+            'APPROVE\nReviewed-SHA: '+SHA+'\nOnly 2 tests passed.\nDOT-REPORT-END',
+            'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.',
+            'APPROVE\nReviewed-SHA: '+SHA+'\nReviewed-SHA: '+SHA+'\nDOT-REPORT-END',
+        ]
+        for report in reports:
+            for reconcile in (False, True):
+                with self.subTest(report=report, reconcile=reconcile), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    directory = root/'thread'
+                    directory.mkdir()
+                    self.comments = [{'body': body, 'author_association': 'OWNER'}] if reconcile else []
+                    with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(root/'receipts')}), patch.object(
+                            dot.dot_review_receipts, '_slack_transport', return_value=fake_slack(report)):
+                        dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
+                        dot.dot_review_receipts.attest_run(self.meta, body, reviewer='dot-user',
+                            relay_run_id='fixture-channel:1.000001', report=report)
+                        dot.dot_review_receipts.record(self.meta, body, reviewer='dot-user',
+                            relay_run_id='fixture-channel:1.000001', report=report, anchor=True)
+                        if reconcile:
+                            key = dot.hashlib.sha256(json.dumps(self.meta, sort_keys=True).encode()).hexdigest()
+                            dot.save(root/'review-publications'/(key+'.json'), {'status': 'posted'})
+                        with redirect_stderr(io.StringIO()) as alarm, self.assertRaises(ValueError):
+                            dot.publish(directory, self.meta, candidate, self.api, orch=root/'orch',
+                                        reviewer='dot-user', relay_run_id='fixture-channel:1.000001')
+                        self.assertIn('DOT_REVIEW_RECEIPT_ALARM', alarm.getvalue())
+                        self.assertEqual(self.posts, [])
 
     def test_reposted_thread_shares_publication_receipt(self):
         self.finish()
@@ -765,7 +826,9 @@ class LoopRegressionTests(unittest.TestCase):
 
     def test_loop_uses_receipt_identity_and_exact_sha(self):
         m = self.loop()
-        body = 'APPROVE\nReviewed-SHA: '+'b'*40+'\nReviewer: ChatGPT Dot'
+        meta = {'repo': 'jbookout/carr-system', 'pr': 1, 'sha': 'b'*40}
+        report = 'APPROVE\nReviewed-SHA: '+'b'*40+'\nNo blockers.\nDOT-REPORT-END'
+        body = dot.publication_body(meta, report)
         class Q:
             def pr(self, *a):
                 return {'state':'open','head':{'sha':SHA},'user':{'login':'builder'},'mergeable':True,'mergeable_state':'clean'}
@@ -773,13 +836,13 @@ class LoopRegressionTests(unittest.TestCase):
             def green(self, *a): return True
             def pages(self, path):
                 return [{'author':{'login':'commit-author'}}] if '/commits?' in path else [{'body':body,'author_association':'OWNER'}]
-        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(Path(tmp)/'relay')}), patch.object(dot.dot_review_receipts, '_slack_transport', return_value=fake_slack(body)):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(Path(tmp)/'relay')}), patch.object(dot.dot_review_receipts, '_slack_transport', return_value=fake_slack(report)):
             self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], '')
             dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
             dot.dot_review_receipts.attest_run({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
-                reviewer='dot-user',relay_run_id='fixture-channel:1.000001', report=body)
+                reviewer='dot-user',relay_run_id='fixture-channel:1.000001', report=report)
             dot.dot_review_receipts.record({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
-                builder='builder',reviewer='dot-user',relay_run_id='fixture-channel:1.000001',branch_author='builder', anchor=True)
+                builder='builder',reviewer='dot-user',relay_run_id='fixture-channel:1.000001',branch_author='builder', report=report, anchor=True)
             self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], 'APPROVE-STALE')
 
     def test_14_watchdog_uses_authenticated_consumed_completion(self):

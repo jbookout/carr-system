@@ -29,8 +29,8 @@ class BoundedProcessTests(unittest.TestCase):
                 (f'os.chdir({outside!r})\n' if outside_cwd else '') +
                 f'p=Path({str(inventory)!r});until=time.monotonic()+.9\n'
                 'while time.monotonic()<until:\n'
-                ' p.write_text(json.dumps(dict(pid=os.getpid(),ppid=os.getppid(),uid=os.getuid(),'
-                'mark=os.environ.get("CARR_FLASH_CONTAIN"))))\n'
+                ' temporary=p.with_suffix(".tmp");temporary.write_text(json.dumps(dict(pid=os.getpid(),ppid=os.getppid(),uid=os.getuid(),'
+                'mark=os.environ.get("CARR_FLASH_CONTAIN"))));temporary.replace(p)\n'
                 ' time.sleep(.005)\n'
                 f'Path({str(marker)!r}).write_text("survived")\n'
             )
