@@ -230,6 +230,55 @@ def _direction(delta: dict) -> str:
     return "equivalent"
 
 
+def accepted_rule_boot_tradeoff(receipt: dict, root: Path, errors: list[str] | None = None) -> bool:
+    """Joe accepted only D/E full-text loss, with all other gold text available."""
+    if receipt.get("surface") != "rule-delivery":
+        return False
+    if receipt.get("verdict", {}).get("accepted_tradeoff") != {
+            "decision_ref": "1616f64c-5935-4a31-a5cc-ffa4e6721c01",
+            "missing_classes": ["d", "e"]}:
+        return False
+    dimension = next((d for d in receipt.get("dimensions", [])
+                      if d.get("dimension_id") == "full-text-availability"), {})
+    if dimension.get("critical") is not True or dimension.get("status") != "passed":
+        return False
+    errors = [] if errors is None else errors
+    evidence = receipt.get("evidence", {})
+    dependencies = evidence.get("dependencies", {})
+    try:
+        docs = {}
+        for rel in ("ops/config/rule-classes.v1.json", "ops/fixtures/rule-delivery-eval/cases.v2.json"):
+            raw = _bound_bytes(root, rel, dependencies.get(rel), "accepted tradeoff", errors)
+            if raw is None:
+                return False
+            docs[rel] = json.loads(raw)
+        classes = docs["ops/config/rule-classes.v1.json"]["rules"]
+        cases = docs["ops/fixtures/rule-delivery-eval/cases.v2.json"]["cases"]
+        arms = {}
+        for arm in ("baseline", "candidate"):
+            block = evidence["cohorts"][arm]
+            raw = _bound_bytes(root, block["path"], block["sha256"], "accepted tradeoff", errors,
+                               under="evals/rule-delivery/evidence")
+            if raw is None:
+                return False
+            arms[arm] = {row["case_id"]: set(row["available"])
+                         for row in (json.loads(line) for line in raw.splitlines() if line.strip())}
+        for case in cases:
+            for arm in ("baseline", "candidate"):
+                if case["id"] not in arms[arm]:
+                    errors.append(f"accepted tradeoff {arm} missing case {case['id']}")
+                    return False
+            gold = set(case["gold"])
+            if not gold <= arms["baseline"][case["id"]]:
+                return False
+            missing = gold - arms["candidate"][case["id"]]
+            if any(classes.get(rid, {}).get("class") not in {"d", "e"} for rid in missing):
+                return False
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+    return not errors
+
+
 def claim_errors(r: Any, surface: str, root: Path = ROOT) -> list[str]:
     """Does the receipt's claim hold together: shape, kernel vocabulary, and a verdict its numbers allow."""
     errs: list[str] = []
@@ -388,6 +437,11 @@ def claim_errors(r: Any, surface: str, root: Path = ROOT) -> list[str]:
         return errs
     decision, statement = verdict["decision"], verdict["statement"]
     shipping = decision in {"ship", "ship_cost_at_parity"}
+    acceptance_errors = []
+    accepted_boot = accepted_rule_boot_tradeoff(r, root, acceptance_errors)
+    errs.extend(acceptance_errors)
+    if accepted_boot:
+        blockers = [b for b in blockers if b != "full-text-availability"]
     if blockers:
         if decision != "do_not_merge":
             errs.append(f"critical dimension(s) {', '.join(blockers)} failed or regressed: blocking whatever the "
@@ -396,7 +450,7 @@ def claim_errors(r: Any, surface: str, root: Path = ROOT) -> list[str]:
             if b_id not in statement:
                 errs.append(f"verdict statement must name the blocking dimension {b_id}")
     primary_dir = directions.get(primary)
-    if primary_dir == "regressed" and decision != "do_not_merge":
+    if primary_dir == "regressed" and decision != "do_not_merge" and not (accepted_boot and primary == "full-text-availability"):
         errs.append(f"primary dimension {primary} regressed; verdict must be do_not_merge")
     if primary_dir == "equivalent":
         if IN_NOISE_PHRASE not in statement.lower():

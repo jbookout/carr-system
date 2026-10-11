@@ -17,10 +17,10 @@ THIS SCRIPT IS THE ONLY WAY THE MODULE IS MEANT TO BE PRODUCED, and --check is
 the same code path, so the write and the parity check cannot drift apart
 (rule a8c55a47).
 
-ONLY CLASS A IS ALWAYS ON (Joe, 2026-10-06). The module's `on` flag is the
-class file's `always_on`, and validation refuses `always_on` on any class but
-a: b and c rules reach a context just in time through the PreToolUse route
-hook, d rules are held by gates, e rules are stale. Each stays one index line.
+CLASS A IS ALWAYS ON (Joe, 2026-10-06). The module's `on` flag also retains
+B/C rules listed in keep_full_text, with a reason per id, until their just-in-time route is fixed (Joe, 2026-10-10).
+Removing an entry is sufficient to stop retaining that rule after regeneration.
+D rules are held by gates; E rules are stale.
 
 THE BUDGET GUARD. The boot text is delivered to every session and every
 subagent before its first ordinary tool call, so its size is paid on every
@@ -132,6 +132,15 @@ def validate(doc, statements=None):
     rules = doc.get("rules")
     if not isinstance(rules, dict) or not rules:
         return ["rules must be a non-empty object"]
+    keep = doc.get("keep_full_text", {})
+    if not isinstance(keep, dict):
+        problems.append("keep_full_text must map rule ids to reasons")
+    else:
+        for rid, reason in sorted(keep.items()):
+            if rid not in rules or rules[rid].get("class") not in {"b", "c"}:
+                problems.append(f"{rid}: keep_full_text requires a classified B/C rule")
+            if not isinstance(reason, str) or not reason.strip():
+                problems.append(f"{rid}: keep_full_text requires a non-empty reason")
     if statements is None:
         try:
             statements = corpus_statements()
@@ -171,7 +180,7 @@ def validate(doc, statements=None):
 
 
 def classes_digest(doc):
-    body = json.dumps(doc.get("rules"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    body = json.dumps({"rules": doc.get("rules"), "keep_full_text": doc.get("keep_full_text", {})}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -180,7 +189,7 @@ def render(doc):
     entries = []
     for rid in sorted(rules):
         row = rules[rid]
-        value = {"cls": row["class"], "on": bool(row["always_on"]),
+        value = {"cls": row["class"], "on": bool(row["always_on"] or rid in doc.get("keep_full_text", {})),
                  "summary": row["summary"], "when": row["when"]}
         if row.get("personal_to"):
             value["personal_to"] = row["personal_to"]
@@ -219,7 +228,7 @@ def estimate(doc, sponsor=None):
         owner = row.get("personal_to")
         if owner and owner != sponsor:
             continue
-        if row["always_on"]:
+        if row["always_on"] or rid in doc.get("keep_full_text", {}):
             header = f"### {rid}{' (personal)' if owner else ''}\n"
             total += len(header) + row["chars"] + 2
             big.append((row["chars"], rid))

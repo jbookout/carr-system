@@ -501,6 +501,66 @@ class Receipts(unittest.TestCase):
         self.assertTrue(any("digest" in e for e in self.errors(r)))
 
 
+class AcceptedRuleBootTradeoff(unittest.TestCase):
+    def receipt(self, root):
+        receipt = json.loads((ROOT / "evals/rule-delivery/receipt.json").read_text())
+        receipt["verdict"]["accepted_tradeoff"] = {
+            "decision_ref": "1616f64c-5935-4a31-a5cc-ffa4e6721c01",
+            "missing_classes": ["d", "e"]}
+        classes = json.loads((ROOT / "ops/config/rule-classes.v1.json").read_text())
+        cases = json.loads((ROOT / "ops/fixtures/rule-delivery-eval/cases.v2.json").read_text())
+        gold = {c["id"]: set(c["gold"]) for c in cases["cases"]}
+        rels = {"ops/config/rule-classes.v1.json": classes,
+                "ops/fixtures/rule-delivery-eval/cases.v2.json": cases}
+        for rel, doc in rels.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(doc))
+            receipt["evidence"]["dependencies"][rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        for arm in ("baseline", "candidate"):
+            rows = read_jsonl(ROOT / receipt["evidence"]["cohorts"][arm]["path"])
+            for row in rows:
+                ids = gold.get(row["case_id"], set())
+                row["available"] = sorted(ids if arm == "baseline" else {
+                    rid for rid in ids if classes["rules"].get(rid, {}).get("class") not in {"d", "e"}})
+            rel = receipt["evidence"]["cohorts"][arm]["path"]
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            receipt["evidence"]["cohorts"][arm]["sha256"] = write_jsonl(path, rows)
+        return receipt
+
+    def test_only_the_named_de_drop_is_accepted_with_critical_flag_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            receipt = self.receipt(root)
+            self.assertTrue(cer.accepted_rule_boot_tradeoff(receipt, root))
+            for decision, allowed in (("wrong", ["d", "e"]),
+                                      ("1616f64c-5935-4a31-a5cc-ffa4e6721c01", ["b", "d", "e"])):
+                changed = copy.deepcopy(receipt)
+                changed["verdict"]["accepted_tradeoff"] = {"decision_ref": decision, "missing_classes": allowed}
+                self.assertFalse(cer.accepted_rule_boot_tradeoff(changed, root))
+            changed = copy.deepcopy(receipt)
+            next(d for d in changed["dimensions"] if d["dimension_id"] == "full-text-availability")["critical"] = False
+            self.assertFalse(cer.accepted_rule_boot_tradeoff(changed, root))
+
+    def test_any_bc_loss_or_unbound_evidence_blocks_the_acceptance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            receipt = self.receipt(root)
+            block = receipt["evidence"]["cohorts"]["candidate"]
+            path = root / block["path"]
+            rows = read_jsonl(path)
+            for row in rows:
+                if "c20dc3d5" in row["available"]:
+                    row["available"].remove("c20dc3d5")
+                    break
+            block["sha256"] = write_jsonl(path, rows)
+            self.assertFalse(cer.accepted_rule_boot_tradeoff(receipt, root))
+            receipt = self.receipt(root)
+            receipt["evidence"]["cohorts"]["candidate"]["sha256"] = "0" * 64
+            self.assertFalse(cer.accepted_rule_boot_tradeoff(receipt, root))
+
+
 class NoEvalLines(unittest.TestCase):
     REASON = ("the only consumer is Joe's local Flash seat and no transcript of it is retained, "
               "so there is nothing to replay")
@@ -662,6 +722,25 @@ class EndToEnd(unittest.TestCase):
         self.commit("AGENTS.md", "boot, changed\n")
         out = self.run_check(f"no-eval: session-instructions: {NoEvalLines.REASON}")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_research_tasks_need_their_own_exemption_when_hooks_also_change(self):
+        self.commit("hooks/guard-unattended.py", "print('changed')\n")
+        tasks = ("contact-enrichment-weekly", "content-fuel-harvest-weekly",
+                 "deal-history-research-weekly", "social-batch-weekly")
+        for task in tasks:
+            self.commit(f"ops/scheduled-tasks/{task}.SKILL.md",
+                        "Read the research-site index, then search the open web.\n")
+        body = f"no-eval: context-hooks: {NoEvalLines.REASON}"
+        out = self.run_check(body)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        failures = self.fails(out)
+        self.assertEqual(len(failures), 1, out.stderr)
+        self.assertIn("session-instructions changed", failures[0])
+        for task in tasks:
+            self.assertIn(f"{task}.SKILL.md", failures[0])
+        out = self.run_check(body + f"\nno-eval: session-instructions: {NoEvalLines.REASON}")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("2 surface(s) touched", out.stdout)
 
     def fails(self, out) -> list[str]:
         return [line for line in out.stderr.splitlines() if "FAIL" in line]

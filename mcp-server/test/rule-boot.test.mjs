@@ -12,7 +12,7 @@ const JOE = { id: "11111111-1111-4111-8111-111111111111", slug: "joe", human: tr
 
 const classified = Object.keys(RULE_BOOT_CLASSES).sort();
 const alwaysOnId = classified.find(id => RULE_BOOT_CLASSES[id].on && !RULE_BOOT_CLASSES[id].personal_to);
-const actionId = classified.find(id => RULE_BOOT_CLASSES[id].cls === "b" && !RULE_BOOT_CLASSES[id].personal_to);
+const actionId = classified.find(id => RULE_BOOT_CLASSES[id].cls === "b" && !RULE_BOOT_CLASSES[id].on && !RULE_BOOT_CLASSES[id].personal_to);
 const joePersonalId = classified.find(id => RULE_BOOT_CLASSES[id].personal_to === "joe");
 
 function row(short, statement, personalTo = null) {
@@ -69,10 +69,8 @@ test("every active rule in scope appears exactly once: full text in Part 1 or on
   assert.match(part1, /^### ffff0001$/m, "an unclassified rule carries its full text");
 });
 
-test("full text only for class A and unclassified rules; B, C, D and E are index lines only", () => {
-  // Joe, 2026-10-06: loading every rule's full text at every boot and every
-  // compaction is not good design. B and C rules reach a context just in time
-  // (the PreToolUse route hook), D rules are held by gates, E rules are stale.
+test("full text for class A, retained B/C route gaps and unclassified rules", () => {
+  // Missed B/C route rules stay in full until their route is fixed.
   const rows = corpus();
   const { text, always_on_ids: on, counts } = renderRuleBoot(rows, "joe");
   const [part1, index] = text.split("## PART 2");
@@ -80,7 +78,7 @@ test("full text only for class A and unclassified rules; B, C, D and E are index
   for (const id of shared) {
     const cls = RULE_BOOT_CLASSES[id]?.cls;
     const full = part1.includes(`END-${id}`);
-    if (!cls || cls === "a") {
+    if (!cls || RULE_BOOT_CLASSES[id].on) {
       assert.ok(full, `${id} (${cls || "U"}) must carry its full text`);
       assert.ok(on.includes(id), `${id} is always on`);
     } else {
@@ -100,9 +98,10 @@ test("full text only for class A and unclassified rules; B, C, D and E are index
   assert.match(text, /standing-context with rule_ids/, "the boot names the door to any rule's full text");
 });
 
-test("every class-A rule in the committed classification is the always-on set, and nothing else", () => {
+test("full text selection follows class A plus the declared route-gap list", () => {
+  const keep = JSON.parse(readFileSync(new URL("../../ops/config/rule-classes.v1.json", import.meta.url))).keep_full_text;
   for (const [id, c] of Object.entries(RULE_BOOT_CLASSES)) {
-    assert.equal(c.on, c.cls === "a", `${id}: on must be exactly class a (class ${c.cls})`);
+    assert.equal(c.on, c.cls === "a" || Object.hasOwn(keep, id), `${id}: on must follow class A or keep_full_text (class ${c.cls})`);
   }
 });
 

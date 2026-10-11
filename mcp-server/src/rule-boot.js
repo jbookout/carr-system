@@ -3,8 +3,8 @@
 // WHAT IT CARRIES (slimmed 2026-10-07 on Joe's ruling that loading every rule's
 // full text "after every compaction and every session start" is not good
 // design): Part 1 is the full text of class A (always-on conduct and standing
-// facts) and of any rule not yet classified (U). Part 2 is one index line for
-// every OTHER active rule: B and C reach a context just in time through the
+// facts), retained B/C route gaps and unclassified rules (U). Part 2 indexes
+// every other active rule. Unretained B/C rules reach a context through the
 // PreToolUse route hook, D rules are held by their gates, E rules are stale.
 // Every active rule appears exactly once. standing-context rule_ids returns any
 // rule's full text.
@@ -41,7 +41,6 @@ export const RULE_BOOT_SCHEMA = "carr-rule-boot/v1";
 // adds 2-4%), inside a 30k Bash result; the test pins the JSON-encoded size.
 export const RULE_BOOT_PAGE_CHARS = 25000;
 
-
 // One view of the corpus for ONE sponsor. The SQL that feeds this already
 // scopes personal rules to the authenticated sponsor; the two checks below are
 // the belt to that brace, so a mis-scoped row can never render.
@@ -70,10 +69,10 @@ export function renderRuleBoot(rows, sponsor, classes = RULE_BOOT_CLASSES) {
   out.push("# CARR RULE BOOT — read every page before acting");
   out.push("");
   out.push(`Served live from the CARR doctrine store (the only source of truth) for ${sponsor ? `sponsor ${sponsor}` : "an unsponsored runtime (shared rules only)"}.`);
-  out.push("Part 1 is the FULL TEXT of the always-on rules (class A) and of any rule not yet classified (U).");
+  out.push("Part 1 is the FULL TEXT of the always-on rules (class A) plus retained route-gap rules and any rule not yet classified (U).");
   out.push("Part 2 is a one-line INDEX of every other active rule: `id | class | summary | when it applies`.");
-  out.push("B binds at an action point and C when a topic is present: the route hook delivers their full text");
-  out.push("at that moment. D is already enforced by a gate. E is stale or duplicate. Each rule appears once.");
+  out.push("B binds at an action point and C when a topic is present: proven route gaps stay in Part 1;");
+  out.push("other B/C rules arrive through the route hook. D is already enforced by a gate. E is stale or duplicate. Each rule appears once.");
   out.push("Before acting on an index line, fetch its binding text: standing-context with rule_ids:[\"<id>\"].");
   out.push("Never quote an index summary as the rule itself.");
   out.push(`Classification: ${RULE_BOOT_CLASSES_DIGEST}.`);

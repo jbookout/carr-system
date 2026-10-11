@@ -143,5 +143,27 @@ class StandingFactsTests(unittest.TestCase):
         self.assertIn(boot.classes_digest(doc), boot.render(doc))
 
 
+class RetainedTextTests(unittest.TestCase):
+    def test_retention_is_validated_rendered_measured_and_removable(self):
+        doc = copy.deepcopy(boot.load())
+        rid = "0e22e34a"
+        doc["keep_full_text"] = {rid: "Gold route miss; retain until its route is fixed."}
+        self.assertEqual(boot.validate(doc), [])
+        self.assertIn('"on": true', next(line for line in boot.render(doc).splitlines() if f'"{rid}"' in line))
+        removed = copy.deepcopy(doc)
+        removed["keep_full_text"].pop(rid)
+        self.assertNotEqual(boot.classes_digest(doc), boot.classes_digest(removed))
+        self.assertGreater(boot.estimate(doc, "joe")[0], boot.estimate(removed, "joe")[0])
+        self.assertIn('"on": false', next(line for line in boot.render(removed).splitlines() if f'"{rid}"' in line))
+
+    def test_retention_rejects_unknown_ids_missing_reasons_and_wrong_classes(self):
+        for keep in ([], {"ffffffff": "missing"}, {"0e22e34a": ""},
+                     {"0e22e34a": 3}, {"725dff46": "already A"}, {"14181e60": "gate"}):
+            with self.subTest(keep=keep):
+                doc = copy.deepcopy(boot.load())
+                doc["keep_full_text"] = keep
+                self.assertTrue(boot.validate(doc))
+
+
 if __name__ == "__main__":
     unittest.main()
