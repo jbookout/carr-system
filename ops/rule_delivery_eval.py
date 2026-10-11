@@ -202,14 +202,17 @@ def boot_always_on_ids(repo, sponsor="joe"):
     """Ids the live boot would render in full for one sponsor.
 
     The runtime scopes active store rows first, then applies the class file's
-    personal boundary; every rule in scope keeps its full text. The committed
-    class file contains classified ids; this replays selection without store
-    access.
+    personal boundary; class A and declared B/C route gaps keep full text
+    (Joe, 2026-10-10). Unclassified store rows also render in full, but the
+    committed class file names classified ids only; this replays selection
+    without store access.
     """
     path = os.path.join(repo, "ops", "config", "rule-classes.v1.json")
     with open(path, "r", encoding="utf-8") as handle:
-        rows = json.load(handle)["rules"]
-    return {rid for rid, row in rows.items() if row.get("personal_to") in (None, sponsor)}
+        doc = json.load(handle)
+    rows = doc["rules"]
+    return {rid for rid, row in rows.items()
+            if (row.get("always_on") or rid in doc.get("keep_full_text", {})) and row.get("personal_to") in (None, sponsor)}
 
 
 def universes(meta, names, *, boot_ids=None):
