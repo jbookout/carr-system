@@ -67,6 +67,39 @@ def verdicts(report):
 
 
 class ParseRequirements(unittest.TestCase):
+    def test_trailing_context_after_blank_is_not_an_obligation(self):
+        source = ("BUILD (all required):\n1. Change hooks/escalation-gate.py\n\n"
+                  "Context: the old notes live in docs/old-notes.md if useful.\n")
+        report = bc.check(source, pr(1544), exists_in_base=in_base())
+        self.assertEqual(report["requirements"][0]["text"], "Change hooks/escalation-gate.py")
+        self.assertEqual(verdicts(report), ["met"])
+        self.assertEqual(bc.report_status(report), 0)
+
+    def test_mixed_case_conduct_section_ends_build_list(self):
+        for separator in ("\n", "\n\n"):
+            with self.subTest(separator=separator):
+                source = ("BUILD (all required):\n1. Change hooks/escalation-gate.py" + separator
+                          + "Rules for this job (all required):\n1. Never merge\n")
+                self.assertEqual(bc.parse_requirements(source),
+                                 [{"n": 1, "text": "Change hooks/escalation-gate.py"}])
+
+    def test_blank_separated_items_and_indented_continuation_survive(self):
+        source = ("BUILD (all required):\n1. First\n\n  continuation\n\n"
+                  "  2. Second\n\n\n3. Third\n")
+        self.assertEqual(bc.parse_requirements(source),
+                         [{"n": 1, "text": "First continuation"},
+                          {"n": 2, "text": "Second"}, {"n": 3, "text": "Third"}])
+
+    def test_empty_obligations_are_rejected_before_grading(self):
+        for source in ("1. \n", "1.\n", "1. \t\n",
+                       "1. First\n2. \n\nContext: notes\n"):
+            with self.subTest(source=source), self.assertRaisesRegex(bc.BriefError, "empty requirement"):
+                bc.check("BUILD (all required):\n" + source, pr(1544))
+
+    def test_empty_first_line_can_have_indented_obligation(self):
+        self.assertEqual(bc.parse_requirements("BUILD (all required):\n1. \n  Add tests\n"),
+                         [{"n": 1, "text": "Add tests"}])
+
     def test_gap_brief_build_list_excludes_the_job_rules(self):
         items = bc.parse_requirements(brief("gap1.md"))
         self.assertEqual([i["n"] for i in items], [1, 2, 3, 4, 5, 6])
