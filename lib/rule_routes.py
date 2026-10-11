@@ -61,7 +61,8 @@ BASH_TOOLS = frozenset({"Bash", "functions.exec"})
 KNOWN_BUILTIN_TOOLS = frozenset({
     "Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Agent", "Task",
     "WebFetch", "WebSearch", "Skill", "Artifact", "AskUserQuestion", "SendMessage",
-    "PushNotification", "Grep", "Glob", "functions.exec",
+    "PushNotification", "Grep", "Glob", "functions.exec", "EnterPlanMode", "UpdatePlan",
+    "update_plan", "functions.update_plan",
 })
 KNOWN_CONNECTOR_TOOLS = frozenset({
     # mail connector

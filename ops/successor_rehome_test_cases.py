@@ -21,7 +21,7 @@ class SuccessorCommands(unittest.TestCase):
         self.git('config', 'user.name', 'Fixture')
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('remote', 'set-url', 'origin', str(self.repo))
-        self.git('branch', 'main', 'HEAD')
+        self.git('switch', '-C', 'main', 'HEAD')
         self.git('switch', '-qc', 'feature')
         self.base = self.head()
         old = json.loads((self.repo / 'ops/config/scac-registry-chain.json').read_text())

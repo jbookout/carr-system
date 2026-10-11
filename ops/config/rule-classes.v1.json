@@ -1,8 +1,11 @@
 {
- "_note": "Committed classification for the gated rule boot (standing-context detail=boot, mcp-server/src/rule-boot.js). Holds ids, class, a <=20-word trigger summary and a length per rule; NEVER a rule statement. Statements are read live from the store when a context fetches its boot. `chars` is the statement length at classification, read only by the CI budget guard, which has no store to call. Class a includes standing person, team and business facts independent of task, including factual premises in mixed rules. ops/sync-rule-boot-classes.py validates supported fact shapes against the existing rule-selection corpus; unrecognized shapes require full-statement review. always_on = class a, plus rules whose only enforcement is a Stop gate (chat_lint, conduct_stop, completion_evidence: the gate fires after the reply is written), plus class-b rules with a conversational moment that Jev confirmed against the rule text. sponsors lists every partner whose scope the budget check measures.",
- "budget_tokens": 80000,
+ "_note": "Class A is always on. keep_full_text retains measured B/C route gaps with a reason per id. Unclassified active store rules render in full. D/E stay indexed under Joe decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01. Statements come from the store; chars only estimates budget.",
+ "budget_tokens": 48000,
  "chars_per_token": 3.6,
- "sponsors": ["dell", "joe"],
+ "sponsors": [
+  "dell",
+  "joe"
+ ],
  "class_legend": {
   "a": "always-on conduct and standing facts: full text loaded",
   "b": "action point",
@@ -179,8 +182,7 @@
    "when": "unexpected friction"
   },
   "1d50a3bb": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:conduct_stop",
+   "always_on": false,
    "chars": 1393,
    "class": "d",
    "moment": "conduct_stop gate",
@@ -188,8 +190,7 @@
    "when": "conduct_stop gate"
   },
   "1f3a7372": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1516,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -231,8 +232,7 @@
    "when": "new builds, predictions or confident direction"
   },
   "2271e684": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 159,
    "class": "d",
    "moment": "completion_evidence gate, terminal technical claim",
@@ -348,13 +348,14 @@
    "when": "before a change reaches main"
   },
   "30a189fb": {
-   "always_on": false,
+   "always_on": true,
    "chars": 138,
-   "class": "c",
+   "class": "a",
    "moment": "non-CARR task detected",
    "personal_to": "joe",
    "summary": "When a task isn't CARR-related, stop and ask if it belongs in Life AI instead",
-   "when": "non-CARR task detected"
+   "when": "non-CARR task detected",
+   "always_on_reason": "Only delivered through the boot; preserve the existing slim-boot classification."
   },
   "347a9ca6": {
    "always_on": true,
@@ -384,8 +385,7 @@
    "when": "candidate duplicate classification"
   },
   "38b15dc6": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 1648,
    "class": "d",
    "moment": "chat_lint gate",
@@ -393,8 +393,7 @@
    "when": "chat_lint gate"
   },
   "3a9dbafd": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:conduct_stop",
+   "always_on": false,
    "chars": 2598,
    "class": "d",
    "moment": "conduct_stop (conduct-stop-gate.py Stop)",
@@ -452,8 +451,7 @@
    "when": "working with LOI template terms"
   },
   "43e2ef76": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1272,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -536,8 +534,7 @@
    "when": "update-document-status verb (outbound_format split)"
   },
   "4e104d4c": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2282,
    "class": "d",
    "moment": "completion_evidence gate, new-verb deployment claim",
@@ -641,8 +638,7 @@
    "when": "correcting one of Joe's mislabeled statements"
   },
   "590b11e1": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1385,
    "class": "d",
    "moment": "completion_evidence gate, metric completion claim",
@@ -659,8 +655,7 @@
    "when": "a tool error blames a subsystem"
   },
   "5be2f462": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 2532,
    "class": "d",
    "moment": "chat_lint gate",
@@ -771,8 +766,7 @@
    "when": "building or evaluating Dr. CRE (Doc) features"
   },
   "6a4e6283": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 262,
    "class": "d",
    "moment": "completion_evidence gate (shipping claim)",
@@ -821,8 +815,7 @@
    "when": "lead board presentation"
   },
   "73381d78": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1503,
    "class": "d",
    "moment": "completion_evidence stop_gate - config-file change completion",
@@ -846,8 +839,7 @@
    "when": "projecting a long-running job's completion time"
   },
   "767f9b41": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 156,
    "class": "d",
    "moment": "completion_evidence gate, confirmation response",
@@ -888,9 +880,16 @@
    "summary": "When convening a red team, assign distinct lenses and one seat that re-runs the evidence, never redundant votes.",
    "when": "convening a red team/review panel"
   },
+  "8400cd3d": {
+   "always_on": false,
+   "chars": 211,
+   "class": "b",
+   "moment": "starting a plan, a heavy-build plan, propose-ready-plan, or a Codex or Dot brief",
+   "summary": "Size new work first: one go for tiny, /grill-with-docs for medium-to-large, and /wayfinder only after one session.",
+   "when": "starting a plan, a heavy-build plan, propose-ready-plan, or a Codex or Dot brief"
+  },
   "847f9995": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2730,
    "class": "d",
    "moment": "completion_evidence stop_gate - unattended-path credential verification",
@@ -922,8 +921,7 @@
    "when": "choosing Copilot vs Claude for a task"
   },
   "8c1e6057": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 197,
    "class": "d",
    "moment": "chat_lint stop_gate - asking a partner to open/edit/review a file",
@@ -1001,8 +999,7 @@
    "when": "any turn asserting a date or time"
   },
   "97326357": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 371,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -1093,8 +1090,7 @@
    "when": "proposing a restructuring"
   },
   "a6e6ab4e": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 1111,
    "class": "d",
    "moment": "completion_evidence stop_gate - changed-system completion",
@@ -1127,8 +1123,7 @@
    "always_on_reason": "class-a; standing-fact:partner_persona"
   },
   "a9ecd5b4": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2381,
    "class": "d",
    "moment": "completion_evidence stop_gate - check-result reporting",
@@ -1279,8 +1274,7 @@
    "when": "handing up or acting on a subagent finding"
   },
   "c315befa": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 522,
    "class": "d",
    "moment": "chat_lint gate",
@@ -1418,8 +1412,7 @@
    "when": "deal_guard schema (deal value write)"
   },
   "d7f74c93": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:chat_lint",
+   "always_on": false,
    "chars": 1930,
    "class": "d",
    "moment": "chat_lint gate",
@@ -1456,8 +1449,7 @@
    "when": "before reporting work as blocked or parked"
   },
   "dcf98880": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 106,
    "class": "d",
    "moment": "completion_evidence gate (human verification instruction)",
@@ -1491,8 +1483,7 @@
    "when": "answering an opinion request from Joe"
   },
   "e313a3ca": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:conduct_stop",
+   "always_on": false,
    "chars": 2295,
    "class": "d",
    "moment": "conduct_stop gate (before command handoff)",
@@ -1517,8 +1508,7 @@
    "when": "building any gate, hook, linter, or CI validator"
   },
   "e8868cbe": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2852,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -1526,8 +1516,7 @@
    "when": "shipping, parking work on Joe, or weekend-spanning runs"
   },
   "eaa31ac5": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2177,
    "class": "d",
    "moment": "completion_evidence gate (delivery claim)",
@@ -1568,8 +1557,7 @@
    "when": "after a non-trivial build works, before shipping"
   },
   "f04a05aa": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 446,
    "class": "d",
    "moment": "completion_evidence gate (autonomous-run completion)",
@@ -1595,8 +1583,7 @@
    "always_on_reason": "class-a; standing-fact:organization_service_model"
   },
   "f47a8fe9": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 2045,
    "class": "d",
    "moment": "completion_evidence gate",
@@ -1638,8 +1625,7 @@
    "when": "client_asset_packet render (search-packet)"
   },
   "fa217e48": {
-   "always_on": true,
-   "always_on_reason": "stop-gate:completion_evidence",
+   "always_on": false,
    "chars": 193,
    "class": "d",
    "moment": "completion_evidence gate (completion/file claims)",
@@ -1699,5 +1685,37 @@
    "when": "any turn - evaluating whether to add structure or ideas"
   }
  },
- "schema": "carr-rule-classes/v1"
+ "schema": "carr-rule-classes/v1",
+ "keep_full_text": {
+  "0e22e34a": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "113b3833": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 11 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "185013c6": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 4 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "1b8e7f43": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 2 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "204391be": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "20d106f1": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 4 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "24e10ee8": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 23 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "25fcddee": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "2b66211d": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 18 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "2e362970": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 6 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "412d37d3": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "4a9188f3": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 44 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "57d13061": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 2 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "5cd8d0f6": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 2 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "5e89c211": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 8 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "6cfb67f5": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 3 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "80def9d2": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 9 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "86647daf": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 11 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "a7784a18": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 24 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "a8c55a47": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 2 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "b42f11a0": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "bbffc139": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 38 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "c1547ed1": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 4 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "c20dc3d5": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 55 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "c66dc739": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "d26d63b0": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "e65efc68": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 21 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "ede4c735": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "eeb3d106": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 1 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01.",
+  "fb110a39": "Gold route miss in rule-delivery replay (v2 gold plus hard-case required; 17 occurrences, train + test); retain until its route is fixed. Joe 2026-10-10, decision 1616f64c-5935-4a31-a5cc-ffa4e6721c01."
+ }
 }

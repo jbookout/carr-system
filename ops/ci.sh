@@ -527,6 +527,8 @@ tree_fingerprint() {
 # promotion gate in their own right rather than developer convenience.
 check_gates() {
   local failures="" count=0 skiplist="" gates_timed_out=0
+  run_quiet "$LOGDIR/gate-declarations.log" "$PY" lib/gate_declarations.py --check \
+    || { failures="$failures gate-declarations"; tail -15 "$LOGDIR/gate-declarations.log" >&2; }
 
   # EVERY GATE FIRED IN THIS CLASS IS A FIXTURE, and saying so once here is what
   # keeps the enforcement numbers honest. A selftest drives a real gate with an
@@ -1153,7 +1155,7 @@ check_pushfloor() {
     # guessing and buy the full class below.
     for touched_gate in $(printf '%s\n' "$gate_surface" | grep -E '^hooks/[^/]+\.py$' | grep -v -- '-selftest\.py$' || true); do
       base="$(basename "$touched_gate" .py)"
-      paired="ops/$base-selftest.py"
+      paired="$("$PY" lib/gate_declarations.py --paired "$touched_gate" 2>/dev/null || true)"
       if [ -f "$paired" ]; then
         run_quiet "$LOGDIR/pushfloor-$base-selftest.log" "$PY" "$paired" \
           || { tail -15 "$LOGDIR/pushfloor-$base-selftest.log" >&2
@@ -1391,6 +1393,21 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
   _mstep migrate
+  local definer_pg_proof definer_pg_log
+  for definer_pg_proof in \
+    mcp-server/test/security-definer-search-path-postgres.sql \
+    mcp-server/test/definer-temp-substitution-postgres.sql \
+    mcp-server/test/definer-hardening-catalog-postgres.sql \
+    mcp-server/test/completion-tenant-barriers-postgres.sql \
+    mcp-server/test/dot-security-definers-postgres.sql; do
+    definer_pg_log="$LOGDIR/$(basename "$definer_pg_proof" .sql).log"
+    if ! run_quiet "$definer_pg_log" \
+         "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" -f "$definer_pg_proof"; then
+      tail -30 "$definer_pg_log" >&2
+      bad migration "SECURITY DEFINER PostgreSQL acceptance failed: $definer_pg_proof"
+      return
+    fi
+  done
   if ! CARR_INVOICE_TEST_DATABASE_URL="$dsn" CARR_INVOICE_TEST_REQUIRED=1 \
        run_quiet "$LOGDIR/invoice-tracker-transaction.log" \
        node --test mcp-server/test/invoice-tracker-transaction.test.mjs; then

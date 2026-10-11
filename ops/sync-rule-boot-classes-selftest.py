@@ -143,5 +143,67 @@ class StandingFactsTests(unittest.TestCase):
         self.assertIn(boot.classes_digest(doc), boot.render(doc))
 
 
+class RetainedTextTests(unittest.TestCase):
+    def test_gaps_include_hard_required_but_not_acceptable_gold(self):
+        cases = [
+            {"id": "v2", "gold": ["0e22e34a"], "split": "test", "source": "v2"},
+            {"id": "hard", "gold": ["412d37d3"], "split": "train", "source": "hard"},
+        ]
+        observations = [{"case_id": "v2", "delivered": []},
+                        {"case_id": "hard", "delivered": []}]
+        gaps = boot.route_gaps(boot.load(), cases, observations)
+        self.assertEqual(gaps["all"]["b"], {"0e22e34a": 1})
+        self.assertEqual(gaps["all"]["c"], {"412d37d3": 1})
+        self.assertEqual(gaps["test"]["c"], {})
+        observations[1]["delivered"] = ["412d37d3"]
+        self.assertEqual(boot.route_gaps(boot.load(), cases, observations)["all"]["c"], {})
+        with self.assertRaises(ValueError):
+            boot.route_gaps(boot.load(), cases, observations[:1])
+
+    def test_live_hard_required_hipaa_is_retained_and_cannot_be_removed(self):
+        doc = boot.load()
+        evidence = boot.gap_evidence(doc)
+        self.assertEqual(evidence["missing_route_occurrences"]["hard"]["c"]["412d37d3"], 1)
+        self.assertEqual(boot.retention_findings(doc, evidence), [])
+        removed = copy.deepcopy(doc)
+        removed["keep_full_text"].pop("412d37d3", None)
+        self.assertTrue(any("412d37d3" in p for p in boot.retention_findings(removed, evidence)))
+        with tempfile.TemporaryDirectory() as tmp:
+            classes = Path(tmp) / "classes.json"
+            classes.write_text(json.dumps(removed))
+            result = subprocess.run([sys.executable, str(REPO / "ops/sync-rule-boot-classes.py"),
+                "--check", "--classes", str(classes)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("RULE BOOT RETENTION: 412d37d3", result.stdout)
+
+    def test_hard_labels_use_required_only_and_frozen_split(self):
+        cases = boot.gap_cases(
+            {"cases": []},
+            {"cases": [{"id": "hard", "required": ["412d37d3"], "acceptable": ["0e22e34a"]}]},
+            {"cases": {"hard": {"split": "train"}}})
+        self.assertEqual(cases, [{"id": "hard", "gold": ["412d37d3"],
+                                  "split": "train", "source": "hard"}])
+
+    def test_retention_is_validated_rendered_measured_and_removable(self):
+        doc = copy.deepcopy(boot.load())
+        rid = "0e22e34a"
+        doc["keep_full_text"] = {rid: "Gold route miss; retain until its route is fixed."}
+        self.assertEqual(boot.validate(doc), [])
+        self.assertIn('"on": true', next(line for line in boot.render(doc).splitlines() if f'"{rid}"' in line))
+        removed = copy.deepcopy(doc)
+        removed["keep_full_text"].pop(rid)
+        self.assertNotEqual(boot.classes_digest(doc), boot.classes_digest(removed))
+        self.assertGreater(boot.estimate(doc, "joe")[0], boot.estimate(removed, "joe")[0])
+        self.assertIn('"on": false', next(line for line in boot.render(removed).splitlines() if f'"{rid}"' in line))
+
+    def test_retention_rejects_unknown_ids_missing_reasons_and_wrong_classes(self):
+        for keep in ([], {"ffffffff": "missing"}, {"0e22e34a": ""},
+                     {"0e22e34a": 3}, {"725dff46": "already A"}, {"14181e60": "gate"}):
+            with self.subTest(keep=keep):
+                doc = copy.deepcopy(boot.load())
+                doc["keep_full_text"] = keep
+                self.assertTrue(boot.validate(doc))
+
+
 if __name__ == "__main__":
     unittest.main()

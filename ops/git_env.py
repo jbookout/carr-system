@@ -70,6 +70,15 @@ GIT_CONFIG_VARS = (
 )
 
 
+# Fixture porcelain and auto-GC own every writer until they return. Tests that
+# invoke real hooks also persist these settings because real-work scrubbing
+# deliberately removes command-level config from the hook environment.
+FIXTURE_GIT_CONFIG = (
+    ("maintenance.autoDetach", "false"),
+    ("gc.autoDetach", "false"),
+)
+
+
 def scrubbed_env(base=None):
     """Environment for a git call that must act on the directory it is given.
 
@@ -103,11 +112,17 @@ def fixture_env(base=None):
 
     Everything scrubbed_env() removes, plus system and global config discovery,
     so the fixture cannot inherit a real identity and a `git config` that
-    escaped --local has nowhere real to land.
+    escaped --local has nowhere real to land. Automatic maintenance remains
+    enabled but must finish before the command returns, so temporary repository
+    teardown cannot race a detached writer.
     """
     env = scrubbed_env(base)
     for var in GIT_CONFIG_VARS:
         env.pop(var, None)
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_COUNT"] = str(len(FIXTURE_GIT_CONFIG))
+    for n, (key, value) in enumerate(FIXTURE_GIT_CONFIG):
+        env[f"GIT_CONFIG_KEY_{n}"] = key
+        env[f"GIT_CONFIG_VALUE_{n}"] = value
     return env
