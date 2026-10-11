@@ -85,7 +85,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HOOKS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HOOKS)
 
-from stop_latch import announce, claim_identity, latched, record_fire  # noqa: E402
+from stop_latch import announce  # noqa: E402
 try:                                    # telemetry only — never load-bearing
     import hook_meter
     LOG = hook_meter.guard_log_path(REPO)
@@ -198,80 +198,84 @@ def artifact_path(path, cwd=None):
 
 
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
+
+
+def _decision_error(exc):
+    log(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    if (payload.get("hook_event_name") or "Stop") != "Stop":
+        sys.exit(0)
+    if payload.get("stop_hook_active"):
+        sys.exit(0)
+    path = payload.get("transcript_path")
+    if not path or not os.path.exists(path):
+        sys.exit(0)
+
+    read_tail, strip_fences = helpers()
+    records = list(read_tail(path, limit=4000))
+    text = ""
+    for rec in records:
+        message = rec.get("message") or {}
+        content = message.get("content")
+        if rec.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                if (block.get("text") or "").strip():
+                    text = block["text"].strip()
+    if len(text) < 40:
+        sys.exit(0)
+
+    prose = strip_fences(text)
+    claims = asserted_paths(prose)
+    if not claims:
+        sys.exit(0)
+
+    cwd = payload.get('cwd') or payload.get('working_directory') or os.getcwd()
+    known = known_paths(records, cwd)
+    unread = [c for c in claims if artifact_path(c, cwd) not in known]
+    if not unread:
+        sys.exit(0)
+
+    # ONE FINDING PER SET OF UNREAD FILES, per session. See the docstring:
+    # the identity is what was claimed, never how it was phrased.
+    session = payload.get("session_id") or payload.get("sessionId")
+    if payload.latch("unread-artifact-gate", "unread", unread):
+        sys.exit(0)
+
+    listed = "\n".join(f"  · {p}" for p in unread[:8])
+    log(f"ANNOUNCE unread={unread[:5]}")
+    raise SystemExit(announce(
+        "UNREAD ARTIFACT — you are describing what a file DOES, and this "
+        f"session never opened it:\n{listed}\n\n"
+        "On 2026-08-14 this exact shape produced four self-filed defects in "
+        "one day: a grep hit read as a write site, three renderings counted "
+        "as three confirmations, five files described without opening one of "
+        "them, and a ruling called drift with the explanation twenty lines "
+        "above the function that produced it. Every other gate here missed "
+        "all four, because they check claims against RULES and these broke "
+        "none — they were simply false, in a register that reads as "
+        "authoritative.\n\n"
+        "GREP DOES NOT COUNT AS READING, and that is the point. A hit proves "
+        "a string occurs; it cannot tell a write from a watch, a comment, a "
+        "docstring or a test fixture — which is the exact distinction that "
+        "was got wrong.\n\n"
+        "Open the file, then say what it does — or, if you have already read "
+        "it another way and the claim is sound, let it stand. This is said "
+        "once per set of unread files and it does not reopen your turn, so "
+        "acting on it is the next thing you do rather than a redo of the "
+        "last thing you said."))
+
+
 def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception:
-        sys.exit(0)
-    try:
-        if (payload.get("hook_event_name") or "Stop") != "Stop":
-            sys.exit(0)
-        if payload.get("stop_hook_active"):
-            sys.exit(0)
-        path = payload.get("transcript_path")
-        if not path or not os.path.exists(path):
-            sys.exit(0)
-
-        read_tail, strip_fences = helpers()
-        records = list(read_tail(path, limit=4000))
-        text = ""
-        for rec in records:
-            message = rec.get("message") or {}
-            content = message.get("content")
-            if rec.get("type") != "assistant" or not isinstance(content, list):
-                continue
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    if (block.get("text") or "").strip():
-                        text = block["text"].strip()
-        if len(text) < 40:
-            sys.exit(0)
-
-        prose = strip_fences(text)
-        claims = asserted_paths(prose)
-        if not claims:
-            sys.exit(0)
-
-        cwd = payload.get('cwd') or payload.get('working_directory') or os.getcwd()
-        known = known_paths(records, cwd)
-        unread = [c for c in claims if artifact_path(c, cwd) not in known]
-        if not unread:
-            sys.exit(0)
-
-        # ONE FINDING PER SET OF UNREAD FILES, per session. See the docstring:
-        # the identity is what was claimed, never how it was phrased.
-        session = payload.get("session_id") or payload.get("sessionId")
-        identity = claim_identity("unread-artifact-gate", "unread", unread)
-        if latched(session, identity):
-            sys.exit(0)
-        record_fire(session, identity)
-
-        listed = "\n".join(f"  · {p}" for p in unread[:8])
-        log(f"ANNOUNCE unread={unread[:5]}")
-        raise SystemExit(announce(
-            "UNREAD ARTIFACT — you are describing what a file DOES, and this "
-            f"session never opened it:\n{listed}\n\n"
-            "On 2026-08-14 this exact shape produced four self-filed defects in "
-            "one day: a grep hit read as a write site, three renderings counted "
-            "as three confirmations, five files described without opening one of "
-            "them, and a ruling called drift with the explanation twenty lines "
-            "above the function that produced it. Every other gate here missed "
-            "all four, because they check claims against RULES and these broke "
-            "none — they were simply false, in a register that reads as "
-            "authoritative.\n\n"
-            "GREP DOES NOT COUNT AS READING, and that is the point. A hit proves "
-            "a string occurs; it cannot tell a write from a watch, a comment, a "
-            "docstring or a test fixture — which is the exact distinction that "
-            "was got wrong.\n\n"
-            "Open the file, then say what it does — or, if you have already read "
-            "it another way and the claim is sound, let it stand. This is said "
-            "once per set of unread files and it does not reopen your turn, so "
-            "acting on it is the next thing you do rather than a redo of the "
-            "last thing you said."))
-    except Exception as exc:
-        log(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    sys.exit(run(decide))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

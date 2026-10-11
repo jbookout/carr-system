@@ -20,7 +20,8 @@ class RecallContract(unittest.TestCase):
     def test_caller_authored_proof_files_never_remove_a_rule_from_boot(self):
         """Both review bypasses: every receipt is one reused boot snapshot, or a
         genuine complete boot copied into the observations, over a synthetic
-        200-turn frame. Committed JSON cannot show the replacement route ran."""
+        200-turn frame. Committed JSON cannot show the replacement route ran,
+        so an always-on rule stays in the boot whatever proof files say."""
         spec = importlib.util.spec_from_file_location("eval_ops", ROOT / "ops/rule_delivery_eval.py")
         evaluation = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(evaluation)
@@ -42,7 +43,7 @@ class RecallContract(unittest.TestCase):
                     return {"path": path, "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
                 route = {"routes": [{"kind": "trigger", "tools": ["Write"]}]}
                 put("ops/config/rule-classes.v1.json", {"rules": {rid: {
-                    "class": "b", "always_on": False, "chars": 12, "summary": "Test", "when": "Test"}}})
+                    "class": "a", "always_on": True, "chars": 12, "summary": "Test", "when": "Test"}}})
                 put("ops/config/rule-selection-corpus.v1.json", {"rules": boot_rules})
                 put("ops/config/rule-routes.v1.json", {"rules": {rid: route}})
                 cases = json.loads((ROOT / "ops/fixtures/rule-delivery-eval/cases.v2.json").read_text())
@@ -108,14 +109,21 @@ class RecallContract(unittest.TestCase):
             for page in (1, 2, 3):
                 case.fetch(page)
             self.assertIsNone(case.call(*module.READ))
-    def test_generator_retains_unproven_action_rule(self):
+    def test_generator_keeps_action_rules_out_of_boot_full_text(self):
+        """Joe, 2026-10-06: only class A loads in full at boot; an action rule is
+        one index line and reaches a context through its route."""
         spec = importlib.util.spec_from_file_location("boot_sync", ROOT / "ops/sync-rule-boot-classes.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         doc = {"rules": {"abcdef12": {"class": "b", "always_on": False,
                "chars": 360, "summary": "Test event rule", "when": "before test event"}}}
+        self.assertIn('"on": false', module.render(doc))
+        indexed = module.estimate(doc)[0]
+        doc["rules"]["abcdef12"].update({"class": "a", "always_on": True})
         self.assertIn('"on": true', module.render(doc))
-        self.assertGreater(module.estimate(doc)[0], 2800)
+        self.assertGreater(module.estimate(doc)[0], indexed + 300, "full text is charged only for class a")
+        doc["rules"]["abcdef12"].update({"class": "d", "always_on": True})
+        self.assertTrue(any("only class a" in p for p in module.validate(doc, statements={})))
 
     def test_receipt_does_not_count_a_selector_match_as_delivery(self):
         summary = rule_recall.delivery_counts([{"at": "2026-10-05T12:00:00Z",

@@ -513,152 +513,160 @@ REMEDY = {
 }
 
 
-def main():
-    try:
-        payload = json.load(sys.stdin)
-    except Exception as exc:
-        dlog(f"ALLOW(parse-error) {exc}")
-        sys.exit(0)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from lib.hook_runtime import decision, run
 
-    try:
-        # NEVER loop on the CONDUCT classes. If we already blocked once this
-        # turn, those let it through — unchanged, and the reason is unchanged:
-        # a wedged session is worse than one offload reaching Joe.
-        #
-        # The delta check is the one thing that runs here instead, because a
-        # resend is the only moment it can possibly apply, and it is bounded to
-        # speak once per blocked message by repeats_blocked() marking the
-        # record spent as it reads it (rule 1d50a3bb).
-        if payload.get("stop_hook_active"):
-            path = payload.get("transcript_path")
-            if not path or not os.path.exists(path):
-                sys.exit(0)
-            recs = read_tail(path)
-            resend = ""
-            for r in recs:
-                t = text_of(r, ("assistant",))
-                if t and t.strip():
-                    resend = t.strip()
-            session_id = payload.get("session_id")
-            repeat, overlap = repeats_blocked(resend, session_id)
-            if repeat:
-                audit({
-                    "ts": now(),
-                    "hook": "conduct-stop-gate",
-                    "classes": ["repeated_message"],
-                    "patterns": [f"delta:overlap={overlap:.2f}"],
-                    "session": session_id,
-                    "excerpt": " ".join(resend.split())[:400],
-                })
-                dlog(f"BLOCK delta :: overlap={overlap:.2f}")
-                print(json.dumps({"decision": "block",
-                                  "reason": DELTA_REASON.format(pct=round(overlap * 100))}))
-            sys.exit(0)
 
+def _parse_error(exc):
+    dlog(f"ALLOW(parse-error) {exc}")
+    return 0
+
+
+def _decision_error(exc):
+    dlog(f"ALLOW(internal-error) {exc}")
+    return 0
+
+
+@decision(on_error=_decision_error)
+def decide(payload):
+    # NEVER loop on the CONDUCT classes. If we already blocked once this
+    # turn, those let it through — unchanged, and the reason is unchanged:
+    # a wedged session is worse than one offload reaching Joe.
+    #
+    # The delta check is the one thing that runs here instead, because a
+    # resend is the only moment it can possibly apply, and it is bounded to
+    # speak once per blocked message by repeats_blocked() marking the
+    # record spent as it reads it (rule 1d50a3bb).
+    if payload.get("stop_hook_active"):
         path = payload.get("transcript_path")
         if not path or not os.path.exists(path):
-            dlog("ALLOW(no-transcript)")
             sys.exit(0)
-
         recs = read_tail(path)
-        if not recs:
-            sys.exit(0)
-
-        # Last genuine human turn (for exemptions), and every assistant text
-        # emitted after it (that is "this turn").
-        last_human_idx, last_human = None, None
-        for i in range(len(recs) - 1, -1, -1):
-            t = text_of(recs[i], ("user", "human"))
-            if t is None or is_harness_injected(recs[i], t):
-                continue
-            last_human_idx, last_human = i, t
-            break
-
-        # SCAN THE FINAL MESSAGE ONLY, not every message since the human spoke.
-        # The first version joined them all, and the audit ledger showed why that
-        # is wrong: once this gate blocks a turn, the harness-injected feedback is
-        # correctly skipped as not-the-human, so the window keeps stretching back
-        # across messages ALREADY DELIVERED AND ACCEPTED. An id or a command
-        # mentioned several messages ago then re-fires on every later turn and the
-        # session can never close. Measured 2026-08-09: one fire listed A11-A17
-        # and four hex ids that appeared nowhere in the closing prose — they came
-        # from verb-call arguments and from older messages Joe had already read.
-        #
-        # Only assistant TEXT blocks count; text_of() excludes tool_use inputs on
-        # purpose. A verb call legitimately carries raw ids (update-loop needs
-        # "A15") — that is machine-to-machine, and this rule is about what
-        # reaches Joe's eyes, not what crosses the wire.
-        start = (last_human_idx + 1) if last_human_idx is not None else 0
-        assistant = ""
-        for r in recs[start:]:
+        resend = ""
+        for r in recs:
             t = text_of(r, ("assistant",))
             if t and t.strip():
-                assistant = t.strip()   # keep overwriting; the last one wins
-        if not assistant:
-            sys.exit(0)
+                resend = t.strip()
+        session_id = payload.get("session_id")
+        repeat, overlap = repeats_blocked(resend, session_id)
+        if repeat:
+            audit({
+                "ts": now(),
+                "hook": "conduct-stop-gate",
+                "classes": ["repeated_message"],
+                "patterns": [f"delta:overlap={overlap:.2f}"],
+                "session": session_id,
+                "excerpt": " ".join(resend.split())[:400],
+            })
+            dlog(f"BLOCK delta :: overlap={overlap:.2f}")
+            print(json.dumps({"decision": "block",
+                              "reason": DELTA_REASON.format(pct=round(overlap * 100))}))
+        sys.exit(0)
 
-        fired, findings = scan(assistant, last_human, denied_commands(recs, start))
+    path = payload.get("transcript_path")
+    if not path or not os.path.exists(path):
+        dlog("ALLOW(no-transcript)")
+        sys.exit(0)
 
-        # WR-000019 S8: the writing shadow check runs regardless of whether
-        # any OTHER conduct class fired — it is measuring its own catch rate
-        # independently, and it never influences `fired` either way.
-        shadow_writing_check(assistant, payload.get("session_id"))
+    recs = read_tail(path)
+    if not recs:
+        sys.exit(0)
 
-        review_advisory = ("handoff_review", "needs_review") in findings
-        if review_advisory:
-            audit({"ts": now(), "hook": "conduct-stop-gate", "classes": ["handoff_review"],
-                   "patterns": ["needs_review"], "session": payload.get("session_id")})
-            if not fired:
-                print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE}))
-            findings = [(k, n) for k, n in findings if k != "handoff_review"]
+    # Last genuine human turn (for exemptions), and every assistant text
+    # emitted after it (that is "this turn").
+    last_human_idx, last_human = None, None
+    for i in range(len(recs) - 1, -1, -1):
+        t = text_of(recs[i], ("user", "human"))
+        if t is None or is_harness_injected(recs[i], t):
+            continue
+        last_human_idx, last_human = i, t
+        break
+
+    # SCAN THE FINAL MESSAGE ONLY, not every message since the human spoke.
+    # The first version joined them all, and the audit ledger showed why that
+    # is wrong: once this gate blocks a turn, the harness-injected feedback is
+    # correctly skipped as not-the-human, so the window keeps stretching back
+    # across messages ALREADY DELIVERED AND ACCEPTED. An id or a command
+    # mentioned several messages ago then re-fires on every later turn and the
+    # session can never close. Measured 2026-08-09: one fire listed A11-A17
+    # and four hex ids that appeared nowhere in the closing prose — they came
+    # from verb-call arguments and from older messages Joe had already read.
+    #
+    # Only assistant TEXT blocks count; text_of() excludes tool_use inputs on
+    # purpose. A verb call legitimately carries raw ids (update-loop needs
+    # "A15") — that is machine-to-machine, and this rule is about what
+    # reaches Joe's eyes, not what crosses the wire.
+    start = (last_human_idx + 1) if last_human_idx is not None else 0
+    assistant = ""
+    for r in recs[start:]:
+        t = text_of(r, ("assistant",))
+        if t and t.strip():
+            assistant = t.strip()   # keep overwriting; the last one wins
+    if not assistant:
+        sys.exit(0)
+
+    fired, findings = scan(assistant, last_human, denied_commands(recs, start))
+
+    # WR-000019 S8: the writing shadow check runs regardless of whether
+    # any OTHER conduct class fired — it is measuring its own catch rate
+    # independently, and it never influences `fired` either way.
+    shadow_writing_check(assistant, payload.get("session_id"))
+
+    review_advisory = ("handoff_review", "needs_review") in findings
+    if review_advisory:
+        audit({"ts": now(), "hook": "conduct-stop-gate", "classes": ["handoff_review"],
+               "patterns": ["needs_review"], "session": payload.get("session_id")})
         if not fired:
-            sys.exit(0)
-
-        classes = []
-        for k, _ in findings:
-            if k not in classes:
-                classes.append(k)
-
-        audit({
-            "ts": now(),
-            "hook": "conduct-stop-gate",
-            "classes": classes,
-            "patterns": [f"{k}:{n}" for k, n in findings],
-            "session": payload.get("session_id"),
-            "excerpt": " ".join(assistant.split())[-400:],
-        })
-
-        body = REASON_HEAD + "\n\n".join(REMEDY[c] for c in classes if c in REMEDY)
-        body += (
-            "\n\nDO THIS NOW, in this same turn: carry out the work you were about "
-            "to hand over, then send ONLY THE DELTA — the result of that work, plus "
-            "at most a one-line pointer to what you already said. Rule 1d50a3bb "
-            "binds here: Joe has ALREADY READ the blocked message, so restating it "
-            "with the fix folded in charges him twice for the same text, which is "
-            "the exact thing he taught against on 2026-08-13. Do not re-explain "
-            "this gate to Joe and do not apologise — just deliver the finished "
-            "result.\n\n"
-            "This gate exists because rules 14e0408b, e313a3ca and 179be4b8 were "
-            "all ACTIVE and all recited at the start of this session, and were "
-            "violated anyway. Prose does not bind; this does."
-        )
-
-        # Remember what is being blocked, so the resend can be checked against
-        # it for repetition (rule 1d50a3bb). Never raises; a memory that fails
-        # to write costs one comparison, not the session.
-        remember_blocked(assistant, payload.get("session_id"))
-
-        dlog(f"BLOCK {classes} :: {[n for _, n in findings]}")
-        response = {"decision": "block", "reason": body}
-        if review_advisory:
-            response["systemMessage"] = HANDOFF_REVIEW_MESSAGE
-        print(json.dumps(response))
+            print(json.dumps({"systemMessage": HANDOFF_REVIEW_MESSAGE}))
+        findings = [(k, n) for k, n in findings if k != "handoff_review"]
+    if not fired:
         sys.exit(0)
 
-    except Exception as exc:
-        dlog(f"ALLOW(internal-error) {exc}")
-        sys.exit(0)
+    classes = []
+    for k, _ in findings:
+        if k not in classes:
+            classes.append(k)
+
+    audit({
+        "ts": now(),
+        "hook": "conduct-stop-gate",
+        "classes": classes,
+        "patterns": [f"{k}:{n}" for k, n in findings],
+        "session": payload.get("session_id"),
+        "excerpt": " ".join(assistant.split())[-400:],
+    })
+
+    body = REASON_HEAD + "\n\n".join(REMEDY[c] for c in classes if c in REMEDY)
+    body += (
+        "\n\nDO THIS NOW, in this same turn: carry out the work you were about "
+        "to hand over, then send ONLY THE DELTA — the result of that work, plus "
+        "at most a one-line pointer to what you already said. Rule 1d50a3bb "
+        "binds here: Joe has ALREADY READ the blocked message, so restating it "
+        "with the fix folded in charges him twice for the same text, which is "
+        "the exact thing he taught against on 2026-08-13. Do not re-explain "
+        "this gate to Joe and do not apologise — just deliver the finished "
+        "result.\n\n"
+        "This gate exists because rules 14e0408b, e313a3ca and 179be4b8 were "
+        "all ACTIVE and all recited at the start of this session, and were "
+        "violated anyway. Prose does not bind; this does."
+    )
+
+    # Remember what is being blocked, so the resend can be checked against
+    # it for repetition (rule 1d50a3bb). Never raises; a memory that fails
+    # to write costs one comparison, not the session.
+    remember_blocked(assistant, payload.get("session_id"))
+
+    dlog(f"BLOCK {classes} :: {[n for _, n in findings]}")
+    response = {"decision": "block", "reason": body}
+    if review_advisory:
+        response["systemMessage"] = HANDOFF_REVIEW_MESSAGE
+    print(json.dumps(response))
+    sys.exit(0)
+
+
+def main():
+    sys.exit(run(decide, parse_error=_parse_error))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -12,6 +12,7 @@ all-repos board is built here from gh data on every publish.
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import fcntl
 import functools
@@ -34,7 +35,7 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
 
-STATUSES = ("queued", "running", "review", "blocked", "done", "failed", "superseded")
+STATUSES = ("queued", "running", "review", "blocked", "question-for-orchestrator", "done", "failed", "superseded")
 # Failed and superseded cards leave the pipeline: they show only in History,
 # each with its reason.
 RETIRED_STATUSES = ("failed", "superseded")
@@ -54,6 +55,7 @@ STATUS_TO_STAGE = {
     "running": "build",
     "review": "review",
     "blocked": "review",
+    "question-for-orchestrator": "review",
     "failed": "ci",
     "superseded": "ci",
 }
@@ -1859,16 +1861,18 @@ def refresh_and_publish(project: str) -> None:
                          f"Retry: tools/progress_board.py render {project} --publish")
 
 
-def mutate(project: str, change: Callable[[dict[str, Any]], bool | None]) -> None:
+def mutate(project: str, change: Callable[[dict[str, Any]], bool | None], *, refresh: bool = True) -> bool:
     """Read, change and write one board as a single locked transaction, then
     refresh and publish it."""
     with board_lock(project):
         state = read_state(project)
         if change(state) is False:
-            return
+            return False
         state["updated_at"] = stamp()
         write_json(state)
-    refresh_and_publish(project)
+    if refresh:
+        refresh_and_publish(project)
+    return True
 
 
 def call_verb(verb: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -2197,7 +2201,8 @@ def command_render(args: argparse.Namespace) -> None:
         publish_board(args.project)
     if args.project == LAUNCHD_BOARD:
         poll_board_answers(args.project)
-        # The system-wide board rides the same two-minute job, after the
+        publish_needs_joe_local()
+        # The system-wide board rides the same scheduled job, after the
         # project board so a gh outage never holds that one back. A failed
         # rebuild is logged and the last known board is published again.
         try:
@@ -2207,6 +2212,22 @@ def command_render(args: argparse.Namespace) -> None:
             if not state_path(ALL_REPOS_BOARD).exists():
                 return
         publish_board(ALL_REPOS_BOARD)
+
+
+def publish_needs_joe_local() -> None:
+    """Publish the machine-local half of governance-queue's needs_joe list.
+    A failure is logged and left for the verb to report: it marks the page
+    stale after two hours, so a dead publisher shows on Joe's list itself."""
+    def pr_state(repo: str, number: int) -> dict[str, Any]:
+        return gh_json(["pr", "view", str(number), "--repo", repo, "--json", "state,title"])
+    try:
+        import needs_joe_local
+
+        count = needs_joe_local.publish(call_verb, stable_key, pr_state,
+                                        needs_joe_local.read_source(), stamp())
+        log(f"needs-joe local page published with {count} item(s)")
+    except Exception as exc:
+        log(f"needs-joe local page not published: {exc}")
 
 
 def command_poll(args: argparse.Namespace) -> None:
@@ -2241,18 +2262,30 @@ def command_task(args: argparse.Namespace) -> None:
     expected = json.loads(args.expected_task) if args.expected_task is not None else None
     if args.expected_task is not None and not isinstance(expected, dict):
         raise SystemExit("--expected-task must be a task object")
+    receipt = {"applied": False, "before": None, "after": None}
     def change(state):
+        before = copy.deepcopy(state.get("tasks", {}).get(args.task_id))
+        receipt["before"] = before
         if expected is not None and any(
                 state.get("tasks", {}).get(args.task_id, {}).get(key) != value
                 for key, value in expected.items()):
+            receipt["after"] = before
             return False
         update_task(state, args)
-    mutate(args.project, change)
+        receipt["applied"] = True
+        receipt["after"] = copy.deepcopy(state["tasks"][args.task_id])
+    mutate(args.project, change, refresh=not args.defer_refresh)
+    if args.receipt:
+        print(json.dumps(receipt, separators=(",", ":")))
 
 
 def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
     task_time = stamp()
     prior = state.setdefault("tasks", {}).get(args.task_id, {})
+    if prior and args.creation_defaults:
+        args = copy.copy(args)
+        for field in ("title", "executor", "provider", "model", "effort"):
+            setattr(args, field, None)
     if not prior and not all((args.title, args.status, args.executor)):
         raise SystemExit("new tasks require --title, --status, and --executor")
     stage = "live" if args.stage == "measured" else args.stage
@@ -2313,6 +2346,7 @@ def update_task(state: dict[str, Any], args: argparse.Namespace) -> None:
             task["blocked_reason"] = args.reason.strip()
     if args.next_action is not None:
         task["next_action"] = args.next_action.strip()
+    settle_done_without_pr(task)
     normalize_task(task)
     finished = task.get("status") == "done" or task_stage(task) == "live"
     if not finished and (task.get("status") == "blocked" or task.get("health") == "blocked"):
@@ -2418,6 +2452,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--provider")
     task.add_argument("--model")
     task.add_argument("--effort")
+    task.add_argument("--creation-defaults", action="store_true",
+                      help="apply title and executor metadata only when creating a task")
     task.add_argument("--summary")
     task.add_argument("--pr", type=int)
     task.add_argument("--repo")
@@ -2428,6 +2464,8 @@ def parser() -> argparse.ArgumentParser:
     task.add_argument("--next-action", dest="next_action", help="what unblocks it (required with blocked)")
     task.add_argument("--lane", choices=("status", "needs-joe"))
     task.add_argument("--expected-task", help="update only if these task fields still match this JSON object")
+    task.add_argument("--receipt", action="store_true", help="print the locked before/after task mutation receipt")
+    task.add_argument("--defer-refresh", action="store_true", help="save the task without refreshing or publishing the board")
     task.add_argument("--note")
     task.add_argument("--evidence")
     task.add_argument("--delivery-target", choices=("worker", "app", "workstation", "database", "manual"),

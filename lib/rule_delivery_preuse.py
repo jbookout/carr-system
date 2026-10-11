@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from lib.rule_delivery_shadow import file_sha256, source_sha256
+from lib.rule_routes import ROUTE_RECEIPT_SCHEMA, validate_route_receipt, within_cap
 
 
 PACK = "scheduled-automation"
@@ -485,7 +486,8 @@ def receipt_from_envelope(record: object) -> dict | None:
             and len(attachment["content"]) == 1):
         row = _json_text(attachment["content"][0])
         if (row and row.get("client") == "claude"
-                and row.get("schema") == RECEIPT_SCHEMA
+                and isinstance(row.get("schema"), str)
+                and row.get("schema") in {RECEIPT_SCHEMA, ROUTE_RECEIPT_SCHEMA}
                 and attachment.get("hookEvent") == "PreToolUse"
                 and attachment.get("hookName") == f"PreToolUse:{row.get('tool_name')}"
                 and attachment.get("toolUseID") == row.get("tool_use_id")
@@ -633,6 +635,14 @@ def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
             return None
         delivery = row["rule_delivery"]
         return delivery["mode"], list(row["packs"]), []
+    if row.get("schema") == ROUTE_RECEIPT_SCHEMA:
+        if (not validate_route_receipt(row, repo=repo)
+                or not within_cap(canonical(row).decode("utf-8"))
+                or not matched_tool_call(row, prior_records)
+                or PACK not in row["packs"]
+                or not set(scheduled_rule_ids(repo)) <= {r["id"] for r in row["rules"]}):
+            return None
+        return row["rule_delivery"]["mode"], [PACK], []
     if (not validate_receipt(row, repo=repo)
             or not matched_tool_call(row, prior_records)):
         return None
@@ -642,11 +652,12 @@ def preuse_delivery(record: dict, prior_records: list[dict], *, repo: Path):
 
 def contains_receipt_marker(value: object) -> bool:
     if isinstance(value, dict):
-        return (value.get("schema") == RECEIPT_SCHEMA
+        return (isinstance(value.get("schema"), str)
+                and value.get("schema") in {RECEIPT_SCHEMA, ROUTE_RECEIPT_SCHEMA}
                 or value.get("schema") == SEMANTIC_RECEIPT_SCHEMA
                 or value.get("schema") == POSTWRITE_RECEIPT_SCHEMA
                 or any(contains_receipt_marker(item) for item in value.values()))
     if isinstance(value, list):
         return any(contains_receipt_marker(item) for item in value)
     return (isinstance(value, str)
-            and (RECEIPT_SCHEMA in value or SEMANTIC_RECEIPT_SCHEMA in value or POSTWRITE_RECEIPT_SCHEMA in value))
+            and (RECEIPT_SCHEMA in value or ROUTE_RECEIPT_SCHEMA in value or SEMANTIC_RECEIPT_SCHEMA in value or POSTWRITE_RECEIPT_SCHEMA in value))

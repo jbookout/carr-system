@@ -107,6 +107,35 @@ class Rendering(unittest.TestCase):
                 self.assertTrue("observed_count<>13 or observed_digest<>'" + old['column_dml']['digest'] + "'" in sql)
                 self.assertIn('observed_count=14 and', sql)
 
+    def test_generated_definers_pin_temporary_schema_last(self):
+        from registry_chain import registry_chain
+        predecessor = registry_chain()['versions'][-1]
+        template = (ROOT / predecessor['migration']).read_text()
+        old = dict(number=predecessor['number'], digest=predecessor['digest'],
+                   entry_count=predecessor['entry_count'], source_count=predecessor['source_count'],
+                   catalog=predecessor['catalog'], entry_set=predecessor['entry_set_digest'])
+        catalog = {**old['catalog'], 'projection_version': f"scac-db-catalog-projection.v{old['number']+1}"}
+        sql = render_sql(template, old, [], catalog, 'sha256:'+'a'*64, [])
+        paths = re.findall(r'security definer set search_path=([^\n]+?) as \$fn\$', sql)
+        self.assertTrue(paths)
+        self.assertTrue(all(path.endswith(',pg_temp') for path in paths), paths)
+
+    def test_generation_workspace_uses_owned_worktree_git_directory(self):
+        import tempfile
+        from successor_generation import generation_workspace
+        from git_env import fixture_env
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / 'repo'
+            tree = Path(directory) / 'tree'
+            env = fixture_env()
+            subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True)
+            subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                            '-C', str(repo), 'commit', '-q', '--allow-empty', '-m', 'Seed'], env=env, check=True)
+            subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-qb', 'fixture', str(tree)], env=env, check=True)
+            self.assertTrue((tree / '.git').is_file())
+            self.assertEqual(generation_workspace(tree), (repo / '.git/worktrees/tree').resolve())
+
     def test_predecessor_rows_use_validated_frozen_inventory(self):
         import successor_generation
         rows = successor_generation.predecessor_rows(ROOT, 'scac-mutation-registry.v110')
