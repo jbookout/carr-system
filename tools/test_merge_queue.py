@@ -321,6 +321,143 @@ class QueueTests(unittest.TestCase):
         self.assertGreaterEqual(len(sleeps), 2)
         self.assertGreaterEqual(starts[1] - starts[0], 2.0)
 
+    def test_shared_gh_spacing_waits_for_reserved_slot_when_wall_clock_lags(self):
+        q = module.Queue(self.state, self.root)
+        other = module.Queue(self.root / 'other-state', self.root)
+        self.addCleanup(q.db.close); self.addCleanup(other.db.close)
+        wall, monotonic, starts, sleeps = [100.0], [100.0], [], []
+        q.budget.clock = other.budget.clock = lambda: wall[0]
+        def sleep(seconds):
+            sleeps.append(seconds)
+            monotonic[0] += seconds
+            wall[0] += seconds / 2
+        def command(argv, **kwargs):
+            starts.append((wall[0], monotonic[0]))
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+            reserved_slot = json.loads(q.budget.path.read_text())[q.budget.shared]['next_start']
+            other.api('repos/example/repo')
+        self.assertGreaterEqual(starts[1][0], reserved_slot)
+        self.assertGreaterEqual(starts[1][1] - starts[0][1], 2.0)
+        self.assertGreaterEqual(len(sleeps), 2)
+
+    def test_shared_gh_spacing_survives_forward_wall_clock_step_from_delay_peer(self):
+        q = module.Queue(self.state, self.root)
+        self.addCleanup(q.db.close)
+        wall, monotonic, starts = [100.0], [100.0], []
+        q.budget.clock = lambda: wall[0]
+        peer = module.GitHubReadBudget({}, path=q.budget.path, clock=lambda: wall[0])
+        self.assertEqual(peer.reserve('core'), 0.0)
+        peer_start = monotonic[0]
+        def sleep(seconds):
+            monotonic[0] += seconds
+            wall[0] += seconds + (1.9 if monotonic[0] < 100.3 else 0)
+        def command(argv, **kwargs):
+            starts.append(monotonic[0])
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+        self.assertGreaterEqual(starts[0] - peer_start, 2.0)
+
+    def test_reservation_suite_runs_as_script_without_pythonpath(self):
+        env = os.environ.copy()
+        env.pop('PYTHONPATH', None)
+        result = subprocess.run([sys.executable, str(ROOT / 'tools/test_github_rate_limit.py')],
+                                cwd=ROOT, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_forward_clock_step_before_reserve_returns_preserves_peer_gap(self):
+        q = module.Queue(self.state, self.root)
+        self.addCleanup(q.db.close)
+        wall, monotonic, starts = [100.0], [100.0], []
+        q.budget.clock = lambda: wall[0]
+        peer = module.GitHubReadBudget({}, path=q.budget.path, clock=lambda: wall[0])
+        self.assertEqual(peer.reserve('core'), 0.0)
+        peer_start = monotonic[0]
+        original_reserve = q.budget.reserve
+        def reserve(*args, **kwargs):
+            reservation = original_reserve(*args, **kwargs)
+            wall[0] += 1.9
+            return reservation
+        def sleep(seconds):
+            monotonic[0] += seconds
+            wall[0] += seconds
+        def command(argv, **kwargs):
+            starts.append(monotonic[0])
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(q.budget, 'reserve', side_effect=reserve), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+        self.assertGreaterEqual(starts[0] - peer_start, 2.0)
+
+    def test_successful_budget_check_crossing_spacing_deadline_prevents_dispatch(self):
+        for bound, rollback in ((3, .8), (30, 27.8), (3, 0)):
+            with self.subTest(bound=bound, rollback=rollback):
+                q = module.Queue(self.root / f'late-check-{bound}-{rollback}', self.root)
+                self.addCleanup(q.db.close)
+                wall, monotonic, checks = [100.0], [100.0], []
+                q.budget.clock = lambda: wall[0]
+                with q.budget.state() as data:
+                    data[q.budget.shared] = {'next_start': 102.0}
+                original_reserve, original_check = q.budget.reserve, q.budget.check
+                def reserve(*args, **kwargs):
+                    reservation = original_reserve(*args, **kwargs)
+                    wall[0] -= rollback
+                    return reservation
+                def sleep(seconds):
+                    monotonic[0] += seconds
+                    wall[0] += seconds
+                def check(resource):
+                    original_check(resource)
+                    checks.append(monotonic[0])
+                    sleep(1)
+                with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                        patch.object(module.time, 'sleep', side_effect=sleep), \
+                        patch.dict(module.BOUNDS['spacing'], seconds=bound), \
+                        patch.object(q.budget, 'reserve', side_effect=reserve), \
+                        patch.object(q.budget, 'check', side_effect=check), \
+                        patch.object(module, 'command', return_value='{}') as command:
+                    with self.assertRaises(module.WaitExpired):
+                        q.api('repos/example/repo')
+                command.assert_not_called()
+                self.assertEqual(len(checks), 1)
+                self.assertGreaterEqual(monotonic[0], 100 + bound)
+
+    def test_reserved_slot_is_rechecked_after_provider_budget_check(self):
+        q = module.Queue(self.state, self.root)
+        self.addCleanup(q.db.close)
+        wall, monotonic, starts = [100.0], [100.0], []
+        q.budget.clock = lambda: wall[0]
+        with q.budget.state() as data:
+            data[q.budget.shared] = {'next_start': 102.0}
+        original_check = q.budget.check
+        checks = []
+        def check(resource):
+            original_check(resource)
+            checks.append(wall[0])
+            if len(checks) == 1:
+                wall[0] -= 1.0
+        def sleep(seconds):
+            wall[0] += seconds
+            monotonic[0] += seconds
+        def command(argv, **kwargs):
+            starts.append(wall[0])
+            return '{}'
+        with patch.object(module.time, 'monotonic', side_effect=lambda: monotonic[0]), \
+                patch.object(module.time, 'sleep', side_effect=sleep), \
+                patch.object(q.budget, 'check', side_effect=check), \
+                patch.object(module, 'command', side_effect=command):
+            q.api('repos/example/repo')
+        self.assertGreaterEqual(starts[0], 102.0)
+        self.assertGreaterEqual(len(checks), 2)
+
     def test_cancelled_mutation_retains_uncertainty_and_shared_cooldown(self):
         q = module.Queue(self.state, self.root)
         self.addCleanup(q.db.close)
@@ -898,6 +1035,103 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(len(self.calls('merge')),1)
         self.assertIn('progress_board_write_failed',(self.state/'queue.log').read_text())
         self.assertEqual(self.q.db.execute('SELECT phase FROM entries').fetchone()[0],'done')
+
+    def test_real_board_cli_creates_and_updates_queue_cards(self):
+        board_root = self.root / 'board-output'
+        env = {'PROGRESS_BOARD_ROOT': str(board_root), 'PROGRESS_BOARD_LOCAL_ONLY': '1',
+               'PROGRESS_BOARD_SKIP_GH': '1', 'PROGRESS_BOARD_SKIP_PROBE': '1'}
+        with patch.dict(os.environ, env):
+            module.command([sys.executable, str(ROOT / 'tools/progress_board.py'),
+                            'init', 'carr-v5', '--title', 'Queue test'])
+            self.q.root = ROOT
+            for repo in module.REPOS:
+                with self.q.db:
+                    self.q.event(repo, 123, 'queued', 'Approved test head')
+            self.q.flush_events()
+            path = board_root / 'boards/carr-v5.json'
+            tasks = json.loads(path.read_text())['tasks']
+            for card, repo in zip(('pr-123', 'app-pr-123', 'factory-pr-123'), module.REPOS):
+                self.assertEqual(tasks[card]['repo'], repo)
+                self.assertEqual(tasks[card]['pr'], 123)
+                self.assertEqual(tasks[card]['status'], 'review')
+                self.assertEqual(tasks[card]['executor'], 'Merge queue')
+                self.assertEqual(tasks[card]['title'], f'{repo.split("/")[-1]} PR #123')
+            with self.q.db:
+                self.q.event(module.REPOS[0], 123, 'waiting_ci', 'Hosted checks pending')
+            self.q.flush_events()
+            card = json.loads(path.read_text())['tasks']['pr-123']
+            self.assertEqual(card['stage'], 'ci')
+            self.assertEqual(card['note'], 'Merge queue: waiting_ci. Hosted checks pending')
+            self.assertEqual(self.q.db.execute('SELECT COUNT(*) FROM events WHERE published=1').fetchone()[0], 4)
+
+    def test_real_board_queue_events_preserve_existing_card_metadata(self):
+        board_root = self.root / 'board-output'
+        env = {'PROGRESS_BOARD_ROOT': str(board_root), 'PROGRESS_BOARD_LOCAL_ONLY': '1',
+               'PROGRESS_BOARD_SKIP_GH': '1', 'PROGRESS_BOARD_SKIP_PROBE': '1'}
+        board_cli = [sys.executable, str(ROOT / 'tools/progress_board.py')]
+        metadata = {'title': 'Assigned task', 'executor': 'Codex', 'provider': 'OpenAI',
+                    'model': 'fixture', 'effort': 'high'}
+        with patch.dict(os.environ, env):
+            module.command(board_cli + ['init', 'carr-v5', '--title', 'Queue test'])
+            for card, repo in zip(('pr-123', 'app-pr-123', 'factory-pr-123'), module.REPOS):
+                fields = [value for key, value in metadata.items() for value in ('--' + key, value)]
+                module.command(board_cli + ['task', 'carr-v5', card, *fields,
+                                            '--status', 'review', '--repo', repo, '--pr', '123'])
+            self.q.root = ROOT
+            for outcome, stage in (('waiting_ci', 'ci'), ('blocked_review', 'review')):
+                for repo in module.REPOS:
+                    with self.q.db:
+                        self.q.event(repo, 123, outcome, 'Queue update')
+                self.q.flush_events()
+                tasks = json.loads((board_root / 'boards/carr-v5.json').read_text())['tasks']
+                for card in ('pr-123', 'app-pr-123', 'factory-pr-123'):
+                    self.assertEqual({key: tasks[card][key] for key in metadata}, metadata)
+                    self.assertEqual(tasks[card]['stage'], stage)
+                    self.assertEqual(tasks[card]['note'], f'Merge queue: {outcome}. Queue update')
+            self.assertEqual(self.q.db.execute('SELECT COUNT(*) FROM events WHERE published=1').fetchone()[0], 6)
+
+    def test_board_stderr_survives_retry_exhaustion_and_restart(self):
+        script = self.root / 'tools/progress_board.py'
+        script.write_text("import sys\nprint('board rejected: missing executor', file=sys.stderr)\nsys.exit(1)\n")
+        self.q.enqueue(module.REPOS[0], 123, self.approved)
+        for _ in range(module.MAX_ATTEMPTS):
+            self.q.flush_events()
+        self.q.db.close()
+        self.q = module.Queue(self.state, self.root, gap=0)
+        self.addCleanup(self.q.db.close)
+        self.q.flush_events()
+        rows = [json.loads(line) for line in (self.state / 'queue.log').read_text().splitlines()]
+        failures = [row for row in rows if row['outcome'].startswith('progress_board_write_')]
+        self.assertEqual(failures[-1]['outcome'], 'progress_board_write_exhausted')
+        self.assertIn('board rejected: missing executor', failures[-1]['detail'])
+        self.assertIn('exhausted 4 attempts', failures[-1]['detail'])
+        self.assertEqual(self.q.db.execute('SELECT published FROM events').fetchone()[0], 0)
+
+    def test_board_stderr_is_redacted_before_bounding(self):
+        script = self.root / 'tools/progress_board.py'
+        script.write_text("import sys\nprint('prefix-' + 'x' * 3000 + ' postgres://user:secret@host/database token=ghp_' + 'a' * 3000 + ' final failure', file=sys.stderr)\nsys.exit(1)\n")  # ci-secret-scan: allow
+        self.q.enqueue(module.REPOS[0], 123, self.approved)
+        self.q.flush_events()
+        row = json.loads((self.state / 'queue.log').read_text().splitlines()[-1])
+        self.assertIn('final failure', row['detail'])
+        self.assertIn('[REDACTED]', row['detail'])
+        self.assertNotIn('postgres://', row['detail'])
+        self.assertNotIn('a' * 100, row['detail'])
+        self.assertNotIn('prefix-', row['detail'])
+        self.assertLess(len(row['detail']), 2200)
+
+    def test_board_timeout_keeps_partial_stderr_and_stops_retries(self):
+        self.q.enqueue(module.REPOS[0], 123, self.approved)
+        timeout = subprocess.TimeoutExpired('board', 60, stderr=b'publication stalled: token=ghp_abcdefghijklmnopqrstuv')
+        with patch.object(module.subprocess, 'run', side_effect=timeout) as run:
+            self.q.flush_events()
+            self.q.flush_events()
+        row = json.loads((self.state / 'queue.log').read_text().splitlines()[-1])
+        self.assertEqual(row['outcome'], 'progress_board_write_exhausted')
+        self.assertIn('publication stalled', row['detail'])
+        self.assertIn('[REDACTED]', row['detail'])
+        self.assertNotIn('ghp_', row['detail'])
+        self.assertEqual(run.call_count, 1)
 
     def test_fifo_across_repositories(self):
         self.pr(n=2, repo=module.REPOS[1])

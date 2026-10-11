@@ -25,6 +25,47 @@ class ReviewRegressions(unittest.TestCase):
     send = ownership_tests.OwnershipTests.send
     active = ownership_tests.OwnershipTests.active
 
+    def test_foreign_machine_provider_and_no_launch_receipts_stay_held(self):
+        local = ownership.process_owner()
+        provider = {'kind': 'codex_turn', 'socket': '/fixture.sock',
+                    'thread_id': 'thread', 'turn_id': 'turn'}
+        desktop = {'kind': 'codex_desktop', 'thread_id': 'thread', 'marker': 'marker'}
+        no_launch = {'kind': 'no_launch', 'reason': 'setup_pending'}
+        for identity in (provider, desktop, no_launch):
+            for foreign_part in ('owner_process', 'executor'):
+                with self.subTest(kind=identity['kind'], foreign_part=foreign_part):
+                    owner = {**local, 'pid': 1234, 'start_time': 'dead'}
+                    executor = {**identity, 'host': local['host'], 'machine_id': local['machine_id']}
+                    if foreign_part == 'owner_process':
+                        owner['machine_id'] = 'f' * 32
+                    else:
+                        executor['machine_id'] = 'f' * 32
+                    self.active(owner_process=owner, executor=executor)
+                    with patch.object(codex_wire, 'turn_terminated', return_value=True) as turn, \
+                         patch.object(codex_wire, 'desktop_turn_terminated', return_value=True) as history:
+                        self.assertEqual(ownership.reconcile('other')[0]['ownership_state'], 'held')
+                    turn.assert_not_called()
+                    history.assert_not_called()
+
+    def test_pid_bearing_unconfirmed_executor_survives_dispatcher_death(self):
+        local = ownership.process_owner()
+        self.active(gated_launch=True,
+            owner_process={**local, 'pid': 1234, 'start_time': 'dead'},
+            executor={**local, 'kind': 'unconfirmed', 'pid': 5678,
+                      'pgid': 5678, 'start_time': 'dead-executor'})
+        with patch.object(ownership.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(ownership.os, 'killpg', side_effect=ProcessLookupError):
+            self.assertEqual(ownership.reconcile('other')[0]['ownership_state'], 'held')
+
+    def test_normalized_empty_placeholder_releases_after_dispatcher_death(self):
+        local = ownership.process_owner()
+        self.active(gated_launch=True,
+            owner_process={**local, 'pid': 1234, 'start_time': 'dead'},
+            executor={k: v for k, v in {**local, 'kind': 'unconfirmed'}.items()
+                      if k in ('kind', 'host', 'machine_id')})
+        with patch.object(ownership.os, 'kill', side_effect=ProcessLookupError):
+            self.assertEqual(ownership.reconcile('other')[0]['ownership_state'], 'released')
+
     def test_path_aliases_cannot_bypass_pr_or_job_ownership(self):
         for alias in ('src/./a.py', 'src//a.py', '././src/a.py'):
             for active in (False, True):
@@ -100,13 +141,48 @@ class ReviewRegressions(unittest.TestCase):
             self.assertTrue(snapshot.wait(3))
             writer = threading.Thread(target=handoff)
             writer.start()
-            was_released = released.wait(.15)
+            # The handoff no longer waits for the slow snapshot; a claim
+            # released mid-scan still refuses the overlapping reservation.
+            self.assertTrue(released.wait(3), 'handoff blocked behind the PR snapshot')
             resume.set()
             reader.join(3)
             writer.join(3)
-        self.assertFalse(was_released, 'handoff released ownership while snapshot was in flight')
         self.assertEqual(failures, ['write_set_overlap'])
         self.assertTrue(released.is_set())
+
+    def test_claim_created_and_released_during_snapshot_still_refuses(self):
+        # PR 1681 review: B reserves, publishes and releases while A's PR scan
+        # is in flight, so A's snapshot misses B's PR and B is no longer held.
+        snapshot, resume = threading.Event(), threading.Event()
+        failures = []
+        def read(cwd):
+            snapshot.set()
+            self.assertTrue(resume.wait(3))
+            return 'owner/repo', []
+        def reserve_a():
+            try:
+                ownership.reserve({'msg_id': 'a', 'task': 'build'}, '.', ['src/a.py'])
+            except desks.DeskError as exc:
+                failures.append(exc.code)
+        with patch.object(ownership, 'open_prs', side_effect=read), \
+             patch.object(ownership, 'termination_evidence', return_value='terminated fixture'):
+            reader = threading.Thread(target=reserve_a)
+            reader.start()
+            self.assertTrue(snapshot.wait(3))
+            with patch.object(ownership, 'open_prs', return_value=('owner/repo', [])):
+                ownership.reserve({'msg_id': 'b', 'task': 'build'}, '.', ['src/a.py'])
+            ownership.release('b', reason='PR published')
+            resume.set()
+            reader.join(3)
+        self.assertEqual(failures, ['write_set_overlap'])
+
+    def test_claim_released_before_snapshot_does_not_block(self):
+        with patch.object(ownership, 'open_prs', return_value=('owner/repo', [])), \
+             patch.object(ownership, 'termination_evidence', return_value='terminated fixture'):
+            ownership.reserve({'msg_id': 'old', 'task': 'build'}, '.', ['src/a.py'])
+            ownership.release('old', reason='merged long ago')
+            row = ownership.reserve({'msg_id': 'new', 'task': 'build'}, '.', ['src/a.py'])
+        self.assertEqual(row['ownership_state'], 'held')
 
     def test_registry_migration_cannot_overwrite_thread_update(self):
         path = self.root / 'legacy.json'

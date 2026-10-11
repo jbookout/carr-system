@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'ops'))
 sys.path.insert(0, str(ROOT))
 from git_env import scrubbed_env
+from lib.secret_redaction import redacted_tail, sensitive_env_values
 from lib.github_rate_limit import GitHubReadBudget, GitHubReadPaused, GitHubBudgetLockTimeout, resource_for, split_response
 REPOS = ('jbookout/carr-system', 'jbookout/doctorcre-app', 'jbookout/software-factory')
 HOLD = 'do_not_merge'
@@ -49,6 +50,10 @@ def bounded_items(policy, iterable):
         if index >= limit:
             raise WaitExpired(f'{policy} exceeded {limit} iterations; reconcile before retry')
         yield item
+
+
+class CommandFailed(RuntimeError):
+    pass
 
 
 class MergeRejected(RuntimeError):
@@ -101,7 +106,7 @@ def gh_api_read(argv):
     return (method or ('POST' if fields or body else 'GET')).upper() in ('GET', 'HEAD')
 
 
-def command(argv, *, cwd=None, data=None, timeout=None, observe=None):
+def command(argv, *, cwd=None, data=None, timeout=None, observe=None, diagnostics=False):
     if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
         raise ValueError('transport timeout must be positive and finite')
     timeout = min(timeout or BOUNDS['command']['seconds'], BOUNDS['command']['seconds'])
@@ -109,8 +114,12 @@ def command(argv, *, cwd=None, data=None, timeout=None, observe=None):
         p = subprocess.run(argv, cwd=cwd, input=data, text=True, capture_output=True,
                            env=scrubbed_env() if argv[0] == 'git' else None,
                            stdin=None if data is not None else subprocess.DEVNULL, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise WaitExpired(f'{Path(argv[0]).name} transport deadline expired; reconcile before retry') from None
+    except subprocess.TimeoutExpired as exc:
+        detail = f'{Path(argv[0]).name} transport deadline expired; reconcile before retry'
+        if diagnostics:
+            stderr = exc.stderr.decode(errors='replace') if isinstance(exc.stderr, bytes) else exc.stderr
+            detail += '; stderr tail: ' + (redacted_tail(stderr, known_secrets=sensitive_env_values(os.environ)).strip() or '(empty)')
+        raise WaitExpired(detail) from None
     if observe is not None:
         observe(p)
     if p.returncode:
@@ -125,8 +134,11 @@ def command(argv, *, cwd=None, data=None, timeout=None, observe=None):
             raise ReadRejected(f'GitHub read rejected (HTTP {status[1]}); reread before retry')
         if argv[0] == 'gh' and status:
             raise ActionRejected(f'GitHub rejected the action (HTTP {status[1]}); reread before retry')
-        # Child stderr can contain authenticated URLs. Keep it in the child's domain.
-        raise RuntimeError(f'{Path(argv[0]).name} {argv[1]} failed (exit {p.returncode})')
+        detail = f'{Path(argv[0]).name} {argv[1]} failed (exit {p.returncode})'
+        if diagnostics:
+            detail += '; stderr tail: ' + (redacted_tail(p.stderr, known_secrets=sensitive_env_values(os.environ)).strip() or '(empty)')
+            raise CommandFailed(detail)
+        raise RuntimeError(detail)
     return p.stdout
 
 
@@ -292,7 +304,7 @@ class Queue:
         except (RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
             if isinstance(exc, (GitHubBudgetLockTimeout, subprocess.TimeoutExpired)):
                 exc = WaitExpired('External transport or lock deadline expired; intent retained; reconcile before retry')
-            if isinstance(exc, (ReadRejected, ActionRejected, MergeRejected)):
+            if isinstance(exc, (ReadRejected, ActionRejected, MergeRejected, CommandFailed)):
                 detail = str(exc)
             if isinstance(exc, WaitExpired):
                 detail = str(exc)
@@ -322,15 +334,26 @@ class Queue:
         with self.budget.call_slot(timeout=BOUNDS['pacing_lock']['seconds']) as mark_started:
             read = gh_api_read(['gh', *args]) if args[0] == 'api' else args[:2] == ('pr', 'checks')
             resource = resource_for(list(args))
-            delay = max(self.budget.reserve(resource), self.gap - (time.monotonic() - self.last_gh))
-            end = time.monotonic() + max(0, delay)
+            slot, reserved_delay = self.budget.reserve(resource, with_slot=True)
+            clock = self.budget.clock
+            slot_deadline = time.monotonic() + reserved_delay
+            end = time.monotonic() + BOUNDS['spacing']['seconds']
+            delay = max(slot - clock(), slot_deadline - time.monotonic(), self.last_gh + self.gap - time.monotonic())
             if delay > BOUNDS['spacing']['seconds']:
                 raise WaitExpired('Shared pacing reservation exceeds spacing deadline; entry stopped')
             while time.monotonic() < end:
                 self.check_cancelled()
-                time.sleep(min(.2, max(0, end - time.monotonic())))
-            self.budget.check(resource)
-            self.check_cancelled()
+                if clock() < slot or time.monotonic() < max(slot_deadline, self.last_gh + self.gap):
+                    time.sleep(min(.2, max(0, end - time.monotonic())))
+                    continue
+                self.budget.check(resource)
+                self.check_cancelled()
+                if time.monotonic() >= end:
+                    raise WaitExpired('Shared pacing wait exceeded spacing deadline; entry stopped')
+                if clock() >= slot and time.monotonic() >= max(slot_deadline, self.last_gh + self.gap):
+                    break
+            else:
+                raise WaitExpired('Shared pacing wait exceeded spacing deadline; entry stopped')
             include = args[0] == 'api' and '--include' not in args
             observed_at = time.time()
             def observe(p):
@@ -465,9 +488,10 @@ class Queue:
                         'factory-pr-' if ev['repo'] == REPOS[2] else 'pr-') + str(ev['pr'])
                 try:
                     self.bounded_operation(['progress-board'], False, lambda: command([sys.executable, str(self.root / 'tools/progress_board.py'), 'task', 'carr-v5', card,
+                             '--title', f"{ev['repo'].split('/')[-1]} PR #{ev['pr']}", '--executor', 'Merge queue', '--creation-defaults',
                              '--repo', ev['repo'], '--pr', str(ev['pr']), '--status', 'review', '--stage', stage,
                              '--health', health, '--note', f"Merge queue: {ev['outcome']}. {ev['detail']}"],
-                            cwd=self.root, timeout=BOUNDS['board']['seconds']), 'Progress board command failed',
+                            cwd=self.root, timeout=BOUNDS['board']['seconds'], diagnostics=True), 'Progress board command failed',
                             entry_budget=False, scope='progress-board')
                 except (Cancelled, GitHubReadPaused):
                     return

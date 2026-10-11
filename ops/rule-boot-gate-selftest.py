@@ -719,6 +719,50 @@ def case_piped_formatter(c):
                              agent="py-root", cwd="/tmp")), "python after cd to the repo root is fine"
 
 
+
+def case_hint_output_with_identity(c):
+    c.stub_sized("ab", 1)
+    identity = "local-verb identity -> local machine actor (via local-token) -> https://api.doctorcre.com/mcp\n"
+    for prefix in ("", identity):
+        for filtered in (False, True):
+            c.arm()
+            before = c.call(*READ)
+            assert denied(before), "the hint must hold an unread context"
+            notice = before["permissionDecisionReason"]
+            command = next(line.strip().removeprefix("Bash: ") for line in notice.splitlines() if "  Bash: " in line)
+            if filtered:
+                command += " | jq -c '{ok: .ok, rule_boot: {digest: .rule_boot.digest}}'"
+            def output(body):
+                doc = json.loads(body)
+                if filtered:
+                    doc = {"ok": doc["ok"], "rule_boot": {"digest": doc["rule_boot"]["digest"]}}
+                return prefix + json.dumps(doc)
+            pre, post = c.fetch_cmd(command, 1, stdout=output)
+            assert not denied(pre), command
+            assert post is None, f"hint output must count, identity={bool(prefix)}, filtered={filtered}: {post}"
+            assert c.call(*READ) is None, "the proved hint unlocks the gate"
+    for ok, digest in ((False, "sha256:" + "ab" * 8), (True, "sha256:wrong")):
+        c.arm()
+        command = abs_cmd(1) + " | jq -c '{ok: .ok, rule_boot: {digest: .rule_boot.digest}}'"
+        c.fetch_cmd(command, 1, stdout=lambda body: identity + json.dumps({"ok": ok, "rule_boot": {"digest": digest}}))
+        assert denied(c.call(*READ)), "failure or wrong digest never confirms a page"
+
+
+def case_digest_only_never_delivers_text(c):
+    c.stub_sized("ab", 2)
+    for source in ("startup", "compact"):
+        c.arm(source)
+        assert denied(c.call(*READ)), f"{source}: prior-context pages do not unlock tools"
+        for page in (1, 2):
+            command = f"{abs_cmd(page)} | jq -r '.rule_boot.digest'"
+            pre, post = c.fetch_cmd(command, page, stdout=lambda body: json.loads(body)["rule_boot"]["digest"])
+            assert not denied(pre), "recovery fetch remains available"
+            assert post and "does not count as read" in post["additionalContext"]
+        assert denied(c.call(*READ)), f"{source}: digest-only output cannot authorize a tool"
+        for page in (1, 2):
+            c.fetch(page)
+        assert c.call(*READ) is None, f"{source}: retained complete text authorizes the tool"
+
 def case_parallel_batch(c):
     """Seven page fetches sent at once, as a model batches them: every PreToolUse
     runs before any tool, then every PostToolUse, each set concurrently."""
@@ -1179,7 +1223,7 @@ CASES = [case_error_echo_filter_cannot_confirm, case_failed_upstream_filter_cann
          case_outage_keeps_effects_held, case_fetch_never_denied, case_deny_before_allow_after,
          case_digest_change_rearms, case_rearm_on_compact, case_subagent_path,
          case_answer_parsing,
-         case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_parallel_batch,
+         case_absolute_form, case_cd_then_run_sh, case_piped_formatter, case_hint_output_with_identity, case_digest_only_never_delivers_text, case_parallel_batch,
          case_all_pages_clear_advisory, case_three_mcp_prefixes, case_connector_after_compaction,
          case_confirm_needs_the_real_page,
          case_same_checkout_worktree,
@@ -1264,6 +1308,9 @@ def check_pending_install():
 # ------------------------------------------------------------------ mutants
 
 MUTANTS = {
+    "identity-prefix-rejected": [(
+        '        lines = stdout.splitlines()\n        start = next(i for i, line in enumerate(lines) if line.lstrip().startswith("{"))\n        receipt = json.loads("\\n".join(lines[start:]))',
+        '        receipt = json.loads(stdout)')],
     # First round (the coordinator's three, plus two).
     "never-denies": [('\n    return "deny", reason\n', '\n    return "allow", reason\n')],
     "denies-the-fetch-itself": [('    if kind == "fetch":\n        if page is not None:',

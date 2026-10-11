@@ -2,17 +2,17 @@
   "schema_version": 1,
   "surface": "rule-delivery",
   "change": "Restore non-private routing cues and probabilities lost during identity anonymization",
-  "measured_on": "2026-10-09",
+  "measured_on": "2026-10-11",
   "rung": "regression",
   "adapter": {
     "surface": "offline_programmatic",
     "adapter_id": "public-routing-census",
     "adapter_version": "1",
     "harness_id": "python-stdlib-regex",
-    "harness_version": "3.14.7",
+    "harness_version": "3.14.6",
     "provider_id": "local",
     "model_id": "none-programmatic",
-    "native_session_ref": "01a12019-ba76-7be0-a3b5-5a5511ae3500",
+    "native_session_ref": "01a12901-c908-7513-b43b-21aa1c012fea",
     "configuration_fingerprint": "sha256:5e160660cef1292d0998521d9fab32357913cfa4563f6569e2e1b71e6287356d"
   },
   "cases": {

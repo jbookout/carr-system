@@ -255,9 +255,9 @@ def test_deterministic_adapters(ev, cases, meta):
     # older enforcement-map layer0 is only a historical comparison path.
     classes = json.loads((REPO / "ops" / "config" / "rule-classes.v1.json").read_text())
     joe_boot = {rid for rid, row in classes["rules"].items()
-                if row.get("personal_to") in (None, "joe")}
+                if (row.get("always_on") or rid in classes.get("keep_full_text", {})) and row.get("personal_to") in (None, "joe")}
     dell_boot = {rid for rid, row in classes["rules"].items()
-                 if row.get("personal_to") in (None, "dell")}
+                 if (row.get("always_on") or rid in classes.get("keep_full_text", {})) and row.get("personal_to") in (None, "dell")}
     check("live boot contract carries a nonempty always-on set", bool(joe_boot),
           len(joe_boot))
     check("boot adapter respects the sponsor's personal boundary",
@@ -267,10 +267,11 @@ def test_deterministic_adapters(ev, cases, meta):
     check("actual boot adapter is separate from legacy layer zero",
           "boot_always_on" in deliveries, sorted(deliveries))
     if "boot_always_on" in deliveries:
-        check("actual boot retains every unproven Joe-scoped rule",
-              all(out["rules"] == joe_boot for out in deliveries["boot_always_on"].values()))
-        check("actual boot includes rules legacy layer zero omits",
-              {"5be2f462", "fa217e48"} <= joe_boot - layer0)
+        check("actual boot carries exactly the Joe-scoped A and retained B/C rules",
+              all(out["rules"] == joe_boot for out in deliveries["boot_always_on"].values())
+              and all(classes["rules"][rid]["class"] == "a" or rid in classes.get("keep_full_text", {}) for rid in joe_boot))
+        check("actual boot leaves D and unretained B/C rules indexed",
+              not ({"5be2f462", "fa217e48", "fb2b263d"} & joe_boot))
         check("actual boot universe charges only its own rule set",
               ev.universes(meta, ["boot_always_on"], boot_ids=joe_boot)["boot_always_on"]
               == joe_boot)
