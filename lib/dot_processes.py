@@ -1,4 +1,4 @@
-"""Capture bounded review output and reap processes from its scratch workspace."""
+"""Capture bounded review output and reap newly started same-user orphan processes."""
 from __future__ import annotations
 
 import ctypes
@@ -102,6 +102,7 @@ class _Tracker:
         self.baseline = {process.identity for process in baseline.values()}
         self.started = started
         self.owned = {}
+        self.observed = {}
 
     def observe(self, rows):
         live_owned = {pid for pid, process in self.owned.items()
@@ -111,9 +112,14 @@ class _Tracker:
             if (pid == os.getpid() or process.uid != os.geteuid() or
                     process.identity in self.baseline or process.start < self.started):
                 continue
+            previous = self.observed.setdefault(process.identity, process)
             if pid not in live_owned:
                 cwd = _cwd(pid)
-                if cwd is not None and cwd.is_relative_to(self.tree):
+                orphan = (process.ppid == 1 or process.ppid not in rows or
+                          previous.ppid != process.ppid and previous.ppid in self.owned)
+                workspace = cwd is not None and any(cwd.is_relative_to(root) for root in
+                                                    (self.tree, Path(str(self.tree) + '.scratch')))
+                if orphan or workspace:
                     self.owned[pid] = process
                     live_owned.add(pid)
         # Keep an observed identity after it changes session, parent, or cwd.

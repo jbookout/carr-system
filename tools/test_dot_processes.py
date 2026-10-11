@@ -19,7 +19,7 @@ from lib import dot_processes as processes
 
 
 class BoundedProcessTests(unittest.TestCase):
-    def escaped_child(self, *, parent_delay, hide_attached=False, outside_cwd=False):
+    def escaped_child(self, *, parent_delay, hide_attached=False, outside_cwd=False, initial_cwd=None):
         with tempfile.TemporaryDirectory(prefix='dot-process-test-') as tmp, \
                 tempfile.TemporaryDirectory(prefix='dot-process-outside-') as outside:
             tree = Path(tmp)
@@ -37,7 +37,7 @@ class BoundedProcessTests(unittest.TestCase):
             code = (
                 'import json,os,subprocess,sys,time;from pathlib import Path\n'
                 f'Path({str(parent)!r}).write_text(json.dumps(dict(pid=os.getpid(),ppid=os.getppid())))\n'
-                f'subprocess.Popen([sys.executable,"-c",{child_code!r}],env={{}},start_new_session=True)\n'
+                f'subprocess.Popen([sys.executable,"-c",{child_code!r}],env={{}},start_new_session=True,cwd={initial_cwd!r})\n'
                 f'time.sleep({parent_delay!r})\n'
             )
             actual_run = subprocess.run
@@ -97,6 +97,47 @@ class BoundedProcessTests(unittest.TestCase):
     def test_observed_child_is_retained_after_reparenting_and_leaving_workspace(self):
         self.escaped_child(parent_delay=.12, outside_cwd=True)
 
+    def test_immediate_orphan_initially_at_root_with_fixture_inventory(self):
+        self.escaped_child(parent_delay=0, hide_attached=True, initial_cwd='/')
+
+    def test_immediate_orphan_initially_at_scratch_with_fixture_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scratch = Path(tmp) / 'tree.scratch'
+            scratch.mkdir()
+            self.escaped_child(parent_delay=0, hide_attached=True, initial_cwd=str(scratch))
+
+    def test_native_immediate_orphan_initially_at_root_is_killed(self):
+        self.native_immediate_orphan('root')
+
+    def test_native_immediate_orphan_initially_at_scratch_is_killed(self):
+        self.native_immediate_orphan('scratch')
+
+    def native_immediate_orphan(self, kind):
+        with self.subTest(cwd=kind), tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / 'tree'
+            tree.mkdir()
+            scratch = Path(str(tree) + '.scratch')
+            scratch.mkdir()
+            marker, pidfile = Path(tmp) / 'escaped', Path(tmp) / 'pid'
+            cwd = '/' if kind == 'root' else str(scratch)
+            descendant = ('import os,time;from pathlib import Path;'
+                          f'Path({str(pidfile)!r}).write_text(str(os.getpid()));'
+                          f'time.sleep(.8);Path({str(marker)!r}).write_text("escaped")')
+            parent = ('import subprocess,sys;'
+                      f'subprocess.Popen([sys.executable,"-c",{descendant!r}],'
+                      f'cwd={cwd!r},env={{}},start_new_session=True,'
+                      'stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)')
+            try:
+                processes.run_bounded([sys.executable, '-c', parent], tree, {}, timeout=.4, limit=1024)
+                time.sleep(1)
+                self.assertFalse(marker.exists(), f'orphan escaped with cwd={cwd}')
+            finally:
+                if pidfile.exists():
+                    try:
+                        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def own_inventory(self):
         process = processes._process(os.getpid())
         return {process.pid: process}
@@ -131,14 +172,15 @@ class BoundedProcessTests(unittest.TestCase):
             baseline = processes._Process(700001, 1, uid, 120)
             root = processes._Process(700002, 1, uid, 150)
             old = processes._Process(700003, 1, uid, 90)
-            outside = processes._Process(700004, 1, uid, 170)
+            outside = processes._Process(700004, os.getpid(), uid, 170)
             inside = processes._Process(700005, 1, uid, 170)
             descendant = processes._Process(700006, inside.pid, uid, 180)
             other_uid = processes._Process(700007, 1, uid + 1, 170)
             reused = processes._Process(700008, 1, uid, 170)
-            sibling = processes._Process(700009, 1, uid, 170)
+            sibling = processes._Process(700009, os.getpid(), uid, 170)
             rows = {row.pid: row for row in
                     (baseline, root, old, outside, inside, descendant, other_uid, reused, sibling)}
+            rows[os.getpid()] = processes._process(os.getpid())
             tracker = processes._Tracker(tree, {baseline.pid: baseline}, 100)
             tracker.owned[root.pid] = root
             cwd = {pid: tree for pid in rows}

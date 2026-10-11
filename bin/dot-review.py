@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-"""Shared free-first review routing and SHA-bound Dot completion."""
+"""Shared free-first review routing and SHA-bound Dot completion.
+
+Before enabling reviews, enroll PUBLIC actor identifiers (no credentials):
+  bin/dot-review.py configure-actor --sender <DOT_SLACK_SENDER> \
+      --channel <SLACK_HOME_CHANNEL> --github-actor <Dot GitHub login>
+The explicit mapping must match the relay's configured Slack sender/channel.
+Consumer checks use the enrolled GitHub login against fresh PR/commit authors.
+Changing an enrolled identity requires operator reconciliation, never inference.
+
+For hosts that ran unmerged v1 receipt code, stop relay watchers, then run:
+  bin/dot-review.py archive-v1 --operator <operator-name>
+This moves only verified v1 binding folders to a sibling .v1-archive directory.
+Its archive-receipt.json records operator, original paths and content hashes;
+the external anchor database also retains that receipt. Retry is a no-op after
+all folders move. Keep the archive for audit; never convert v1 into authority.
+A failed partial move stays receipted and must be reconciled before restarting.
+
+Chain heads and relay audit records live outside the receipt directory in
+<receipt-directory>.anchors.sqlite3 (override CARR_DOT_REVIEW_ANCHORS).
+Do not delete or rebuild an anchor to silence an alarm. A ledger changed without
+its checkpoint refuses approval/publication and requires operator reconciliation.
+"""
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
@@ -432,7 +453,8 @@ def publish(directory, meta, report, api=gh_api, requeue=None, known_secrets=(),
             raise ValueError('PR closed before Dot publication')
         dot_review_receipts.record(meta, body, builder=(pr.get('user') or {}).get('login'),
                                   reviewer=reviewer, relay_run_id=relay_run_id,
-                                  branch_author=((pr.get('head') or {}).get('user') or {}).get('login'))
+                                  branch_author=((pr.get('head') or {}).get('user') or {}).get('login'),
+                                  report=report, anchor=True)
         if dot_review_receipts.matching(meta, body, api=api) is None:
             raise ValueError('Dot publication lacks an independent relay run receipt')
         save(path, {'status': 'posting', 'marker': marker})
@@ -503,19 +525,20 @@ class ReviewRelay(dot_relay.Relay):
             # Reassemble only messages authenticated and consumed by the core relay.
             messages = self.transport.replies(thread)
             dot_relay._validate_messages(messages)
-            texts = [m['text'] for m in sorted(messages, key=lambda m: dot_relay._timestamp_key(m['ts']))
+            reports = [m for m in sorted(messages, key=lambda m: dot_relay._timestamp_key(m['ts']))
                      if m['ts'] in state['messages'] and self.sender in (m.get('user'), m.get('bot_id'))
                      and not m.get('edited') and m.get('subtype') in (None, 'bot_message')
                      and not dot_relay._protocol(m['text'])[0]]
+            texts = [m['text'] for m in reports]
             start = next((i for i, text in enumerate(texts) if text.splitlines() and
                           text.splitlines()[0] in ('APPROVE', 'REVIEW: BLOCKED')), None)
             if start is None:
                 raise ValueError('completed Dot review has no verdict header')
             report = '\n'.join(texts[start:])
             meta = json.loads(meta_file.read_text())
-            run_id = f'{self.transport.channel}:{thread}'
-            dot_review_receipts.record_run(meta, publication_body(meta, report, self.secrets),
-                                           reviewer=self.sender, relay_run_id=run_id)
+            run_id = f'{self.transport.channel}:{reports[start]["ts"]}'
+            dot_review_receipts.attest_run(meta, publication_body(meta, report, self.secrets),
+                                           reviewer=self.sender, relay_run_id=run_id, report=report)
             publish(directory, meta, report,
                     requeue=lambda meta: submit(meta['repo'], meta['pr'], Path(os.environ.get('CARR_ORCH_DIR', ROOT / 'out/orch'))),
                     known_secrets=self.secrets, reviewer=self.sender,
@@ -533,11 +556,22 @@ def main():
     route.add_argument('--head')
     sub.add_parser('adopt')
     sub.add_parser('drain')
+    actor = sub.add_parser('configure-actor', help='enroll public Dot Slack/GitHub identities')
+    actor.add_argument('--sender', required=True)
+    actor.add_argument('--channel', required=True)
+    actor.add_argument('--github-actor', required=True)
+    archive = sub.add_parser('archive-v1', help='archive legacy folders with an operator receipt')
+    archive.add_argument('--operator', required=True)
     submission = sub.add_parser('submit')
     submission.add_argument('repo', choices=sorted(REPOS))
     submission.add_argument('pr', type=int)
     args = parser.parse_args()
-    if args.cmd == 'adopt':
+    if args.cmd == 'configure-actor':
+        dot_review_receipts.configure_actor(args.sender, args.channel, args.github_actor)
+        print(json.dumps({'configured': True, 'anchor_database': str(dot_review_receipts.anchor_database())}))
+    elif args.cmd == 'archive-v1':
+        print(json.dumps(dot_review_receipts.archive_legacy(operator=args.operator)))
+    elif args.cmd == 'adopt':
         print(adopt(args.orch))
     elif args.cmd == 'drain':
         drain(args.orch)

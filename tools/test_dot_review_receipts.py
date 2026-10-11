@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Receipt provenance and author independence at the consumer interface."""
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, closing
 import io
 import hashlib
 import json
@@ -19,10 +19,12 @@ class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.store = Path(self.temp.name)
-        self.env = patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': self.temp.name})
+        self.store = Path(self.temp.name) / 'relay'
+        self.store.mkdir()
+        self.env = patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(self.store)})
         self.env.start()
         self.addCleanup(self.env.stop)
+        receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
         self.meta = {'repo': 'fixture/repo', 'pr': 1, 'sha': 'a' * 40}
         self.body = 'APPROVE\nReviewed-SHA: ' + self.meta['sha'] + '\nReviewer: ChatGPT Dot'
         self.pr = {'user': {'login': 'builder'}}
@@ -43,13 +45,13 @@ class ReceiptTests(unittest.TestCase):
             return self.commits
         raise AssertionError(path)
 
-    def record(self, body=None, meta=None, run='fixture-run', reviewer='dot-user'):
+    def record(self, body=None, meta=None, run='fixture-channel:1.000001', reviewer='dot-user', anchor=False):
         return receipts.record(meta or self.meta, body or self.body, builder='invented-builder',
-                               reviewer=reviewer, relay_run_id=run, branch_author='invented-author')
+                               reviewer=reviewer, relay_run_id=run, branch_author='invented-author', anchor=anchor)
 
-    def pair(self, body=None, meta=None, run='fixture-run', reviewer='dot-user'):
-        receipts.record_run(meta or self.meta, body or self.body, reviewer=reviewer, relay_run_id=run)
-        return self.record(body, meta, run, reviewer)
+    def pair(self, body=None, meta=None, run='fixture-channel:1.000001', reviewer='dot-user'):
+        receipts.attest_run(meta or self.meta, body or self.body, reviewer=reviewer, relay_run_id=run, report=body or self.body)
+        return self.record(body, meta, run, reviewer, anchor=True)
 
     def matching(self, body=None, meta=None):
         return receipts.matching(meta or self.meta, body or self.body, api=self.api)
@@ -58,14 +60,122 @@ class ReceiptTests(unittest.TestCase):
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             self.assertIsNone(action())
+            self.assertEqual(receipts.deciding([{'id': 1, 'body': self.body, 'author_association': 'OWNER'}],
+                'fixture/repo', 1, policy=self.policy, config={}, api=self.api), (None, None))
         self.assertIn('DOT_REVIEW_RECEIPT_ALARM', stderr.getvalue())
+
+    def test_appended_run_and_receipt_pair_alarm_and_refuse(self):
+        self.pair()
+        forged = self.body + '\nForged appended verdict'
+        receipts.record_run(self.meta, forged, reviewer='dot-user', relay_run_id='fixture-channel:2.000001')
+        self.record(body=forged, run='fixture-channel:2.000001')
+        self.assert_alarm_refusal(lambda: self.matching(body=forged))
+
+    def test_rewritten_tail_pair_alarm_and_refuse(self):
+        self.pair()
+        self.pair(body=self.body + '\nOriginal tail', run='fixture-channel:2.000001')
+        forged = self.body + '\nRewritten tail'
+        for ledger in ('runs', 'receipts'):
+            path = sorted((self.store / ledger).glob('*.json'))[-1]
+            value = json.loads(path.read_text())
+            value['body_sha256'] = hashlib.sha256(forged.encode()).hexdigest()
+            value['sha256'] = receipts._digest({k: v for k, v in value.items() if k != 'sha256'})
+            path.write_text(json.dumps(value))
+        self.assert_alarm_refusal(lambda: self.matching(body=forged))
+
+    def test_truncated_tail_pair_alarm_and_refuse_even_for_older_verdict(self):
+        self.pair()
+        self.pair(body=self.body + '\nTail', run='fixture-channel:2.000001')
+        for ledger in ('runs', 'receipts'):
+            sorted((self.store / ledger).glob('*.json'))[-1].unlink()
+        self.assert_alarm_refusal(self.matching)
+
+    def test_wrong_configured_sender_and_channel_alarm_before_attestation(self):
+        for reviewer, run in [('invented-reviewer', 'fixture-channel:1.000001'),
+                              ('dot-user', 'wrong-channel:1.000001')]:
+            with self.subTest(reviewer=reviewer, run=run):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr), self.assertRaises(ValueError):
+                    receipts.attest_run(self.meta, self.body, reviewer=reviewer,
+                                        relay_run_id=run, report=self.body)
+                self.assertIn('DOT_REVIEW_RECEIPT_ALARM', stderr.getvalue())
+                self.assertIsNone(self.matching())
+
+    def test_anchors_are_outside_store_and_cannot_be_reenrolled(self):
+        self.pair()
+        self.assertFalse(receipts.anchor_database().is_relative_to(self.store))
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            receipts.configure_actor('other-sender', 'fixture-channel', 'dot-github-user')
+        with patch.dict('os.environ', {'CARR_DOT_REVIEW_ANCHORS': str(self.store / 'anchor.sqlite3')}):
+            self.assert_alarm_refusal(self.matching)
+
+    def test_actor_mapping_does_not_compare_slack_id_to_github_login(self):
+        self.pair()
+        self.pr['user']['login'] = 'dot-user'
+        self.assertIsNotNone(self.matching())
+        self.pr['user']['login'] = 'dot-github-user'
+        self.assert_alarm_refusal(self.matching)
+
+    def test_anchor_rollback_is_detected_even_with_truncated_ledgers(self):
+        import sqlite3
+        first = self.pair()
+        self.pair(body=self.body + '\nTail', run='fixture-channel:2.000001')
+        for ledger in ('runs', 'receipts'):
+            sorted((self.store / ledger).glob('*.json'))[-1].unlink()
+            head = json.loads(next((self.store / ledger).glob('*.json')).read_text())
+            with closing(sqlite3.connect(receipts.anchor_database())) as db:
+                db.execute('UPDATE heads SET sequence=?,sha256=? WHERE ledger=?',
+                           (first['sequence'], head['sha256'], ledger))
+                db.commit()
+        self.assert_alarm_refusal(self.matching)
+
+    def test_archive_v1_has_operator_receipt_and_restores_new_reviews(self):
+        original = self.pair()
+        legacy = self.store / ('f' * 64)
+        legacy.mkdir()
+        content = json.dumps({'schema': 'carr-dot-review-receipt/v1'})
+        (legacy / 'old.json').write_text(content)
+        self.assert_alarm_refusal(self.matching)
+        archive = receipts.archive_legacy(operator='fixture-operator')
+        destination = Path(archive['destination'])
+        self.assertFalse(legacy.exists())
+        self.assertEqual((destination / legacy.name / 'old.json').read_text(), content)
+        self.assertEqual(json.loads((destination / 'archive-receipt.json').read_text()), archive)
+        self.assertEqual(archive['folders'][legacy.name]['old.json'], hashlib.sha256(content.encode()).hexdigest())
+        self.assertIsNone(receipts.archive_legacy(operator='fixture-operator'))
+        self.assertEqual(self.matching(), original)
+
+    def test_archive_cli_returns_operator_receipt_without_live_store_access(self):
+        import subprocess
+        legacy = self.store / ('e' * 64)
+        legacy.mkdir()
+        (legacy / 'v1.json').write_text(json.dumps({'schema': 'carr-dot-review-receipt/v1'}))
+        configured = subprocess.run([sys.executable, str(ROOT / 'bin/dot-review.py'), 'configure-actor',
+            '--sender', 'dot-user', '--channel', 'fixture-channel', '--github-actor', 'dot-github-user'],
+            text=True, capture_output=True, check=True, timeout=10)
+        self.assertTrue(json.loads(configured.stdout)['configured'])
+        result = subprocess.run([sys.executable, str(ROOT / 'bin/dot-review.py'), 'archive-v1',
+            '--operator', 'fixture-cli'], text=True, capture_output=True, check=True, timeout=10)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt['operator'], 'fixture-cli')
+        self.assertTrue((Path(receipt['destination']) / 'archive-receipt.json').exists())
+        self.assertFalse(legacy.exists())
+        self.pair()
+        self.assertIsNotNone(self.matching())
+
+    def test_archive_unknown_storage_refuses_without_moving(self):
+        unknown = self.store / 'unrecognized'
+        unknown.mkdir()
+        with self.assertRaisesRegex(ValueError, 'unrecognized'):
+            receipts.archive_legacy(operator='fixture-operator')
+        self.assertTrue(unknown.exists())
 
     def test_record_without_run_is_refused(self):
         self.record()
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             self.assertIsNone(receipts.matching(self.meta, self.body))
-        self.assertIn('receipt lacks a matching relay run', stderr.getvalue())
+        self.assertIn('external anchor', stderr.getvalue())
         self.assert_alarm_refusal(self.matching)
         self.assertEqual(self.calls, [])
 
@@ -83,13 +193,13 @@ class ReceiptTests(unittest.TestCase):
             self.record(reviewer='different-reviewer')
         with self.assertRaisesRegex(ValueError, 'append-only'):
             receipts.record_run(self.meta, self.body, reviewer='different-reviewer',
-                                relay_run_id='fixture-run')
+                                relay_run_id='fixture-channel:1.000001')
 
     def test_append_preserves_prior_entries_and_links_each_chain(self):
         first = self.pair()
         paths = sorted(self.store.rglob('*.json'))
         original = {p: p.read_bytes() for p in paths}
-        second = self.pair(body=self.body + '\nSecond report', run='second-run')
+        second = self.pair(body=self.body + '\nSecond report', run='fixture-channel:2.000001')
         for path, content in original.items():
             self.assertEqual(path.read_bytes(), content)
         self.assertEqual(second['prev_sha256'], first['sha256'])
@@ -97,7 +207,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_receipt_tampering_is_detected_even_for_unrelated_binding(self):
         self.pair()
-        self.pair(body=self.body + '\nOther report', run='second-run')
+        self.pair(body=self.body + '\nOther report', run='fixture-channel:2.000001')
         path = sorted((self.store / 'receipts').glob('*.json'))[-1]
         value = json.loads(path.read_text())
         path.write_text(json.dumps({**value, 'reviewer': 'forged-reviewer'}))
@@ -105,7 +215,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_chain_gap_and_invalid_previous_hash_are_detected(self):
         self.pair()
-        self.pair(body=self.body + '\nOther report', run='second-run')
+        self.pair(body=self.body + '\nOther report', run='fixture-channel:2.000001')
         first, second = sorted((self.store / 'receipts').glob('*.json'))
         original = first.read_bytes()
         first.unlink()
@@ -129,7 +239,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_run_must_match_receipt_binding_and_reviewer(self):
         receipts.record_run(self.meta, self.body + '\nDifferent report',
-                            reviewer='dot-user', relay_run_id='fixture-run')
+                            reviewer='dot-user', relay_run_id='fixture-channel:1.000001')
         self.record()
         self.assert_alarm_refusal(self.matching)
 
@@ -146,15 +256,15 @@ class ReceiptTests(unittest.TestCase):
     def test_pr_and_commit_authors_are_checked_fresh_and_casefolded(self):
         self.pair()
         self.assertIsNotNone(self.matching())
-        self.pr['user']['login'] = 'DOT-USER'
+        self.pr['user']['login'] = 'DOT-GITHUB-USER'
         self.assert_alarm_refusal(self.matching)
         self.pr['user']['login'] = 'builder'
-        self.commits[0]['author']['login'] = 'DoT-UsEr'
+        self.commits[0]['author']['login'] = 'DoT-GiThUb-UsEr'
         self.assert_alarm_refusal(self.matching)
 
     def test_known_commit_author_aliases_are_checked(self):
         self.pair()
-        self.commits[0]['commit']['author']['name'] = 'DOT-USER'
+        self.commits[0]['commit']['author']['name'] = 'DOT-GITHUB-USER'
         self.assert_alarm_refusal(self.matching)
 
     def test_unknown_authors_and_author_read_errors_fail_closed(self):

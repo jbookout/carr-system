@@ -1,7 +1,8 @@
 """Detect local receipt tampering and bind Dot decisions to relay runs and live authors.
 
-Both ledgers are append-only hash chains, not an authentication boundary against
-the same OS user rewriting both chains consistently.
+An external SQLite checkpoint detects changes to either ledger head. Authenticated
+relay consumption advances it; raw ledger writes do not. Full coordinated rewriting
+of the ledgers, checkpoint history and external evidence remains out of scope.
 """
 from __future__ import annotations
 
@@ -13,6 +14,9 @@ import os
 from pathlib import Path
 import re
 import sys
+import sqlite3
+import shutil
+import time
 
 SCHEMA = 'carr-dot-review-receipt/v2'
 RUN_SCHEMA = 'carr-dot-relay-run/v1'
@@ -26,6 +30,123 @@ STAMP = re.compile(r'^APPROVE\r?\nReviewed-SHA: [0-9a-f]{40}\r?\n(?:\r?\n)?'
 def receipt_directory():
     return Path(os.environ.get('CARR_DOT_REVIEW_RECEIPTS',
                                str(Path.home() / '.local/state/carr/merge-queue/relay')))
+
+
+def anchor_database():
+    directory = receipt_directory().resolve()
+    path = Path(os.environ.get('CARR_DOT_REVIEW_ANCHORS', str(directory) + '.anchors.sqlite3')).resolve()
+    if path.is_relative_to(directory):
+        raise _ChainError('chain anchor must be outside the receipts directory')
+    return path
+
+
+@contextmanager
+def _anchors():
+    path = anchor_database()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path, timeout=5)
+    try:
+        db.execute('CREATE TABLE IF NOT EXISTS actor (sender TEXT, channel TEXT, github_actor TEXT)')
+        db.execute('CREATE TABLE IF NOT EXISTS heads (ledger TEXT PRIMARY KEY, sequence INTEGER, sha256 TEXT)')
+        db.execute('CREATE TABLE IF NOT EXISTS audit (event TEXT, detail TEXT)')
+        db.execute('BEGIN IMMEDIATE')
+        yield db
+    finally:
+        db.close()
+
+
+def configure_actor(sender, channel, github_actor):
+    """Enroll public identities explicitly; never infer GitHub identity from Slack IDs."""
+    if any(not isinstance(v, str) or not v.strip() or re.search(r'[\s:]', v)
+           for v in (sender, channel, github_actor)):
+        raise ValueError('Dot sender, channel and GitHub actor mapping are required')
+    with _anchors() as db:
+        current = db.execute('SELECT sender, channel, github_actor FROM actor').fetchall()
+        values = (sender, channel, github_actor.casefold())
+        if current and current != [values]:
+            raise ValueError('configured Dot actor differs; reconcile identity explicitly')
+        if not current:
+            db.execute('INSERT INTO actor VALUES (?,?,?)', values)
+            for ledger in ('runs', 'receipts'):
+                db.execute('INSERT INTO heads VALUES (?,?,?)', (ledger, 0, GENESIS))
+            db.execute('INSERT INTO audit VALUES (?,?)', ('configure_actor', json.dumps(values)))
+        db.commit()
+
+
+def _actor(db):
+    rows = db.execute('SELECT sender, channel, github_actor FROM actor').fetchall()
+    if len(rows) != 1:
+        raise _ChainError('configured Dot actor mapping is unavailable')
+    return dict(zip(('sender', 'channel', 'github_actor'), rows[0]))
+
+
+def _identity(value, actor):
+    if value.get('reviewer') != actor['sender']:
+        raise _ChainError('relay reviewer is not the configured Dot Slack sender')
+    ts = value.get('slack_message_ts', '')
+    if (not isinstance(ts, str) or not re.fullmatch(r'[0-9]+\.[0-9]{6}', ts) or
+            value.get('relay_run_id') != actor['channel'] + ':' + ts):
+        raise _ChainError('relay run does not match configured channel and Slack message timestamp')
+    if (not isinstance(value.get('report_sha256'), str) or
+            not re.fullmatch(r'[0-9a-f]{64}', value['report_sha256'])):
+        raise _ChainError('relay report text hash is missing')
+
+
+def _head(chain):
+    return (chain[-1]['sequence'], chain[-1]['sha256']) if chain else (0, GENESIS)
+
+
+def _verify_heads(db, ledgers):
+    actor = _actor(db)
+    for ledger, chain in ledgers.items():
+        anchored = db.execute('SELECT sequence, sha256 FROM heads WHERE ledger=?', (ledger,)).fetchone()
+        audit = db.execute('SELECT detail FROM audit WHERE event=? ORDER BY rowid DESC LIMIT 1',
+                           ('anchor_' + ledger,)).fetchone()
+        recorded = _head([json.loads(audit[0])]) if audit else (0, GENESIS)
+        if anchored != recorded:
+            raise _ChainError(f'{ledger} external anchor moved backwards or diverged from its audit history')
+        if anchored != _head(chain):
+            raise _ChainError(f'{ledger} chain head moved backwards or diverged from external anchor')
+        for entry in chain:
+            _identity(entry, actor)
+    return actor
+
+
+def archive_legacy(*, operator):
+    """Move only v1 binding folders aside and receipt their names and content hashes."""
+    if not isinstance(operator, str) or not operator.strip():
+        raise ValueError('archive requires a named operator')
+    directory = receipt_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    with _locked(directory), _anchors() as db:
+        folders = []
+        for path in sorted(directory.iterdir()):
+            if path.name in {'.lock', 'runs', 'receipts'}:
+                continue
+            if path.is_symlink() or not path.is_dir() or not re.fullmatch(r'[0-9a-f]{64}', path.name):
+                raise _ChainError('unrecognized receipt storage cannot be archived as v1')
+            files = sorted(path.iterdir())
+            if not files or any(f.is_symlink() or not f.is_file() or
+                                json.loads(f.read_text()).get('schema') != 'carr-dot-review-receipt/v1'
+                                for f in files):
+                raise _ChainError('legacy folder contains non-v1 evidence')
+            folders.append((path, {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in files}))
+        if not folders:
+            return None
+        destination = directory.parent / (directory.name + '.v1-archive') / str(time.time_ns())
+        destination.mkdir(parents=True)
+        receipt = {'schema': 'carr-dot-v1-archive/v1', 'operator': operator,
+                   'source': str(directory.resolve()), 'destination': str(destination.resolve()),
+                   'folders': {p.name: hashes for p, hashes in folders}}
+        # Persist the manifest before moving; a failed partial move remains receipted.
+        (destination / 'archive-receipt.json').write_text(json.dumps(receipt, sort_keys=True) + '\n')
+        db.execute('INSERT INTO audit VALUES (?,?)', ('archive_v1', json.dumps(receipt, sort_keys=True)))
+        db.commit()
+        for path, _ in folders:
+            shutil.move(str(path), str(destination / path.name))
+        _sync(destination)
+        _sync(directory)
+        return receipt
 
 
 def _binding(meta, body):
@@ -114,13 +235,24 @@ def _sync(directory):
         os.close(fd)
 
 
-def _append(ledger, value):
+def _append(ledger, value, *, anchor=False):
     directory = receipt_directory()
     directory.mkdir(parents=True, exist_ok=True)
     with _locked(directory):
         try:
-            chain = _read_ledgers(directory)[ledger]
-        except (OSError, _ChainError) as error:
+            ledgers = _read_ledgers(directory)
+            chain = ledgers[ledger]
+            if anchor:
+                with _anchors() as db:
+                    actor = _verify_heads(db, ledgers)
+                    _identity(value, actor)
+                    if ledger == 'receipts' and not any(
+                            all(run.get(k) == value.get(k) for k in
+                                ('repo', 'pr', 'reviewed_sha', 'body_sha256', 'reviewer',
+                                 'relay_run_id', 'slack_message_ts', 'report_sha256'))
+                            for run in ledgers['runs']):
+                        raise _ChainError('publication lacks its anchored relay run')
+        except (OSError, sqlite3.Error, ValueError) as error:
             _alarm(str(error))
             raise ValueError('append-only Dot ledger failed validation') from error
         for entry in chain:
@@ -143,30 +275,42 @@ def _append(ledger, value):
             os.fsync(stream.fileno())
         _sync(destination)
         _sync(directory)
+        if anchor:
+            with _anchors() as db:
+                db.execute('UPDATE heads SET sequence=?, sha256=? WHERE ledger=?',
+                           (value['sequence'], value['sha256'], ledger))
+                db.execute('INSERT INTO audit VALUES (?,?)', ('anchor_' + ledger, json.dumps(value, sort_keys=True)))
+                db.commit()
         return value
 
 
-def _value(schema, meta, body, reviewer, relay_run_id):
+def _value(schema, meta, body, reviewer, relay_run_id, report=None):
     if (not isinstance(reviewer, str) or not reviewer.strip() or
             not isinstance(relay_run_id, str) or not relay_run_id.strip()):
         raise ValueError('Dot ledger requires an authenticated reviewer and relay run')
     return {'schema': schema, **_binding(meta, body), 'reviewer': reviewer.strip(),
-            'relay_run_id': relay_run_id.strip()}
+            'relay_run_id': relay_run_id.strip(), 'slack_message_ts': relay_run_id.rsplit(':', 1)[-1],
+            'report_sha256': hashlib.sha256((body if report is None else report).encode()).hexdigest()}
 
 
-def record_run(meta, body, *, reviewer, relay_run_id):
-    """Append only after the relay consumes a completed authenticated Dot report."""
-    return _append('runs', _value(RUN_SCHEMA, meta, body, reviewer, relay_run_id))
+def record_run(meta, body, *, reviewer, relay_run_id, report=None):
+    """Append unanchored run evidence; this alone never authorizes a verdict."""
+    return _append('runs', _value(RUN_SCHEMA, meta, body, reviewer, relay_run_id, report))
 
 
-def record(meta, body, *, reviewer, relay_run_id, builder=None, branch_author=None):
-    """Append publication provenance; builder strings are informational only."""
-    value = _value(SCHEMA, meta, body, reviewer, relay_run_id)
+def record(meta, body, *, reviewer, relay_run_id, builder=None, branch_author=None, report=None, anchor=False):
+    """Append publication provenance; anchor only after an attested run matches."""
+    value = _value(SCHEMA, meta, body, reviewer, relay_run_id, report)
     if builder is not None:
         value['builder'] = builder
     if branch_author is not None:
         value['branch_author'] = branch_author
-    return _append('receipts', value)
+    return _append('receipts', value, anchor=anchor)
+
+
+def attest_run(meta, body, *, reviewer, relay_run_id, report):
+    """Called by the relay after consuming the configured sender's Slack report."""
+    return _append('runs', _value(RUN_SCHEMA, meta, body, reviewer, relay_run_id, report), anchor=True)
 
 
 def _live_authors(meta, api):
@@ -198,11 +342,21 @@ def _matching(meta, body, api):
     binding = _binding(meta, body)
     directory = receipt_directory()
     if not directory.exists():
+        if not anchor_database().exists():
+            return None, False
+        try:
+            with _anchors() as db:
+                _verify_heads(db, {'runs': [], 'receipts': []})
+        except (OSError, sqlite3.Error, ValueError) as error:
+            _alarm(str(error))
+            return None, _claims_relay(body)
         return None, False
     try:
         with _locked(directory):
             ledgers = _read_ledgers(directory)
-    except (OSError, _ChainError) as error:
+            with _anchors() as db:
+                actor = _verify_heads(db, ledgers)
+    except (OSError, sqlite3.Error, ValueError) as error:
         _alarm(str(error))
         return None, _claims_relay(body)
     candidates = [entry for entry in ledgers['receipts']
@@ -230,8 +384,8 @@ def _matching(meta, body, api):
         _alarm(f'live GitHub author verification failed ({type(error).__name__})')
         return None, True
     for entry in paired:
-        if entry['reviewer'].casefold() in authors:
-            _alarm('relay reviewer is a live PR or commit author')
+        if actor['github_actor'].casefold() in authors:
+            _alarm('mapped Dot GitHub actor is a live PR or commit author')
         else:
             return entry, True
     return None, True

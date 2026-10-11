@@ -193,9 +193,12 @@ class QueueTests(unittest.TestCase):
         self.addCleanup(self.q.db.close)
 
     def receipt(self, meta, body, **fields):
-        module.dot_review_receipts.record_run(meta, body, reviewer=fields['reviewer'],
-                                             relay_run_id=fields['relay_run_id'])
-        return module.dot_review_receipts.record(meta, body, **fields)
+        import hashlib
+        module.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
+        fields['relay_run_id'] = 'fixture-channel:' + str(int(hashlib.sha256(fields['relay_run_id'].encode()).hexdigest()[:12], 16)) + '.000001'
+        module.dot_review_receipts.attest_run(meta, body, reviewer=fields['reviewer'],
+                                             relay_run_id=fields['relay_run_id'], report=body)
+        return module.dot_review_receipts.record(meta, body, **fields, anchor=True)
 
     def test_builder_minted_receipt_without_run_is_refused(self):
         repo = module.REPOS[0]
@@ -218,7 +221,7 @@ class QueueTests(unittest.TestCase):
         self.receipt({'repo':repo,'pr':1,'sha':self.approved}, body, reviewer='dot-user',
                      relay_run_id='fresh-author-fixture',builder='fictional-maker',branch_author=None)
         self.assertEqual(self.q.approval(repo, 1), self.approved)
-        for pr_author, commit_author in [(' DOT-USER ', 'other'), ('builder', 'Dot-User')]:
+        for pr_author, commit_author in [(' DOT-GITHUB-USER ', 'other'), ('builder', 'Dot-Github-User')]:
             with self.subTest(pr_author=pr_author, commit_author=commit_author):
                 pr['user'] = {'login':pr_author}
                 pr['commits'] = [{'author':{'login':commit_author}}]

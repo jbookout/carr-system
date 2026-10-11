@@ -18,11 +18,12 @@ SHA = 'a' * 40
 
 def publish_review(directory, *args, **kwargs):
     kwargs.setdefault('reviewer', 'dot-user')
-    kwargs.setdefault('relay_run_id', 'fixture-channel:fixture-thread' if Path(directory).name == 'thread' else 'fixture-channel:'+Path(directory).name)
+    kwargs.setdefault('relay_run_id', 'fixture-channel:1.000001' if Path(directory).name == 'thread' else 'fixture-channel:2.000001')
     with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(directory).parent/'relay-receipts')}):
         body = dot.publication_body(args[0], args[1], kwargs.get('known_secrets', ()))
-        dot.dot_review_receipts.record_run(args[0], body, reviewer=kwargs['reviewer'],
-                                           relay_run_id=kwargs['relay_run_id'])
+        dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
+        dot.dot_review_receipts.attest_run(args[0], body, reviewer=kwargs['reviewer'],
+                                           relay_run_id=kwargs['relay_run_id'], report=args[1])
         return dot.publish(directory, *args, **kwargs)
 
 
@@ -93,6 +94,7 @@ class RelayTests(unittest.TestCase):
                 with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}):
                     return actual(*args, **kw)
             with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}), patch.object(dot, 'publish', side_effect=publish):
+                dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
                 self.assertTrue(engine.poll(thread, execute=True))
                 restarted = dot.ReviewRelay(slack, state, repo, 'dot-user')
                 self.assertTrue(restarted.poll(thread, execute=True))
@@ -100,6 +102,13 @@ class RelayTests(unittest.TestCase):
             self.assertIn('Part one\nPart two', posts[0])
             self.assertNotIn('Still reading', posts[0])
             self.assertNotIn('REVIEW: BLOCKED', posts[0])
+            with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(Path(tmp)/'relay-receipts')}):
+                receipt = dot.dot_review_receipts.matching(meta, posts[0], api=api)
+                self.assertEqual(receipt['slack_message_ts'], '4.000001')
+                self.assertEqual(receipt['relay_run_id'], 'fixture-channel:4.000001')
+                import hashlib
+                self.assertEqual(receipt['report_sha256'], hashlib.sha256(
+                    ('APPROVE\nReviewed-SHA: '+SHA+'\nPart one\nPart two\nDOT-REPORT-END').encode()).hexdigest())
 
 
 class EvidenceTests(unittest.TestCase):
@@ -225,7 +234,7 @@ class PublicationTests(unittest.TestCase):
                 receipt = dot.dot_review_receipts.matching(self.meta, kwargs['body'], api=self.api)
                 self.assertEqual(receipt['builder'], 'builder')
                 self.assertEqual(receipt['reviewer'], 'dot-user')
-                self.assertEqual(receipt['relay_run_id'], 'fixture-channel:fixture-thread')
+                self.assertEqual(receipt['relay_run_id'], 'fixture-channel:1.000001')
             return self.api(path, **kwargs)
         self.assertEqual(publish_review(self.directory, self.meta,
             'APPROVE\nReviewed-SHA: '+SHA, api, orch=self.directory.parent/'orch'), 'posted')
@@ -240,12 +249,31 @@ class PublicationTests(unittest.TestCase):
         with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(self.directory.parent/'forged')}):
             dot.dot_review_receipts.record(self.meta, body, builder='builder',
                 reviewer='invented-reviewer',relay_run_id='invented-thread',branch_author=None)
-            with self.assertRaisesRegex(ValueError, 'relay run'):
+            with self.assertRaisesRegex(ValueError, 'ledger failed validation'):
                 dot.publish(self.directory, self.meta, 'APPROVE\nReviewed-SHA: '+SHA+'\nNo blockers.',
                             self.api, orch=self.directory.parent/'orch',
                             reviewer='invented-reviewer',relay_run_id='invented-thread')
         self.assertEqual(self.posts, [])
         self.assertEqual(list((self.directory.parent/'review-publications').glob('*.json')), [])
+
+    def test_appended_forged_pair_cannot_suppress_publication(self):
+        from contextlib import redirect_stderr
+        import io
+        self.finish()
+        report = 'APPROVE\nReviewed-SHA: '+SHA+'\nForged replacement'
+        body = dot.publication_body(self.meta, report)
+        self.comments = [{'body': body, 'author_association': 'OWNER', 'user': {'login': 'builder'}}]
+        stderr = io.StringIO()
+        with patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS': str(self.directory.parent/'relay-receipts')}):
+            dot.dot_review_receipts.record_run(self.meta, body, reviewer='dot-user',
+                                               relay_run_id='fixture-channel:2.000001', report=report)
+            dot.dot_review_receipts.record(self.meta, body, reviewer='dot-user',
+                                           relay_run_id='fixture-channel:2.000001', report=report)
+            with redirect_stderr(stderr), self.assertRaisesRegex(ValueError, 'relay receipt'):
+                dot.publish(self.directory, self.meta, report, self.api, orch=self.directory.parent/'orch',
+                            reviewer='dot-user', relay_run_id='fixture-channel:2.000001')
+        self.assertIn('DOT_REVIEW_RECEIPT_ALARM', stderr.getvalue())
+        self.assertEqual(len(self.posts), 1)
 
     def test_legacy_posted_state_without_receipt_cannot_reconcile(self):
         import hashlib
@@ -643,12 +671,13 @@ class LoopRegressionTests(unittest.TestCase):
             def green(self, *a): return True
             def pages(self, path):
                 return [{'author':{'login':'commit-author'}}] if '/commits?' in path else [{'body':body,'author_association':'OWNER'}]
-        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'CARR_DOT_REVIEW_RECEIPTS':str(Path(tmp)/'relay')}):
             self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], '')
-            dot.dot_review_receipts.record_run({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
-                reviewer='dot-user',relay_run_id='loop-fixture')
+            dot.dot_review_receipts.configure_actor('dot-user', 'fixture-channel', 'dot-github-user')
+            dot.dot_review_receipts.attest_run({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
+                reviewer='dot-user',relay_run_id='fixture-channel:1.000001', report=body)
             dot.dot_review_receipts.record({'repo':'jbookout/carr-system','pr':1,'sha':'b'*40}, body,
-                builder='builder',reviewer='dot-user',relay_run_id='loop-fixture',branch_author='builder')
+                builder='builder',reviewer='dot-user',relay_run_id='fixture-channel:1.000001',branch_author='builder', anchor=True)
             self.assertEqual(m['inspect'](Q(),'jbookout/carr-system',1)['verdict'], 'APPROVE-STALE')
 
     def test_14_watchdog_uses_authenticated_consumed_completion(self):
