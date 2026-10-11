@@ -28,9 +28,9 @@
   "dimensions": [
     {
       "baseline": {
-        "ci_high": 0.8538812785388128,
-        "ci_low": 0.7891963109354414,
-        "score": 0.8214783821478382
+        "ci_high": 1.0,
+        "ci_low": 1.0,
+        "score": 1.0
       },
       "candidate": {
         "ci_high": 0.7093373493975904,
@@ -39,9 +39,9 @@
       },
       "critical": true,
       "delta": {
-        "ci_high": -0.0949640287769784,
-        "ci_low": -0.19413407821229056,
-        "value": -0.14504881450488138
+        "ci_high": -0.2906626506024096,
+        "ci_low": -0.3567164179104477,
+        "value": -0.3235704323570432
       },
       "dimension_id": "full-text-availability",
       "direction_vs_baseline": "regressed",
@@ -53,9 +53,9 @@
     },
     {
       "baseline": {
-        "ci_high": 0.6,
-        "ci_low": 0.0,
-        "score": 0.3
+        "ci_high": 1.0,
+        "ci_low": 1.0,
+        "score": 1.0
       },
       "candidate": {
         "ci_high": 1.0,
@@ -64,12 +64,12 @@
       },
       "critical": true,
       "delta": {
-        "ci_high": 1.0,
-        "ci_low": 0.4,
-        "value": 0.7
+        "ci_high": 0.0,
+        "ci_low": 0.0,
+        "value": 0.0
       },
       "dimension_id": "envelope-prompt-clean-delivery",
-      "direction_vs_baseline": "improved",
+      "direction_vs_baseline": "equivalent",
       "evidence_refs": [
         "evals/rule-delivery/evidence/baseline.jsonl",
         "evals/rule-delivery/evidence/candidate.jsonl"
@@ -78,9 +78,9 @@
     },
     {
       "baseline": {
-        "ci_high": 0.5032258064516129,
-        "ci_low": 0.28776978417266186,
-        "score": 0.4
+        "ci_high": 0.4970414201183432,
+        "ci_low": 0.2810810810810811,
+        "score": 0.39375
       },
       "candidate": {
         "ci_high": 0.4970414201183432,
@@ -90,8 +90,8 @@
       "critical": true,
       "delta": {
         "ci_high": 0.0,
-        "ci_low": -0.021428571428571463,
-        "value": -0.006250000000000033
+        "ci_low": 0.0,
+        "value": 0.0
       },
       "dimension_id": "human-required-recall",
       "direction_vs_baseline": "equivalent",
@@ -103,9 +103,9 @@
     },
     {
       "baseline": {
-        "ci_high": 0.3265993265993266,
-        "ci_low": 0.20520231213872833,
-        "score": 0.2640449438202247
+        "ci_high": 0.3223684210526316,
+        "ci_low": 0.20306513409961685,
+        "score": 0.260989010989011
       },
       "candidate": {
         "ci_high": 0.3223684210526316,
@@ -114,9 +114,9 @@
       },
       "critical": true,
       "delta": {
-        "ci_high": 0.0034241706161137198,
-        "ci_low": -0.010287427626137269,
-        "value": -0.0030559328312136924
+        "ci_high": 0.0,
+        "ci_low": 0.0,
+        "value": 0.0
       },
       "dimension_id": "human-delivery-precision",
       "direction_vs_baseline": "equivalent",
@@ -131,37 +131,37 @@
     "baseline": {
       "dependencies": {
         "evals/rule-delivery/hard_cases.v1.json": "abc3a372b4ea3c25bd2b1db10850b3ebf1d5239049711ab3a015df378cd844ff",
-        "hooks/rule-pack-preuse-reselection.py": "686d531165ac24836d8e82cbf85ab64e536a8612a739a00357eb2cdc1505b4a1",
+        "hooks/rule-pack-preuse-reselection.py": "dbb3268002ab1fb448fd114f1366b8a1fcfd39de73e7ba08a7fe6dd399740b25",
         "lib/claude_continuity_config.py": "9e6d1afd1c5714bd61892ca1da7de058dbcfebae84f9131fd70d24d6a91985f5",
         "lib/claude_rule_delivery_dedupe.py": "6b37b3e0cd950410332fcc4099c17b61650d87eb63158bf550c5d259ca0540b4",
-        "lib/rule_delivery_preuse.py": "8a356537cac8c476aee4fa70d0fb3287af2e304fad08a0840e7849464db90a74",
+        "lib/hook_runtime.py": "98fb90335be414e80e52aac30d93f9d150a6f8112287692a1b4c9d296e5afa5a",
+        "lib/rule_delivery_preuse.py": "2665f2aef16ad69ca49935c0feb6495ea26a485d872d8efc60bac55a6360bb70",
         "lib/rule_delivery_shadow.py": "b39b504ff0bf77819b578a12f97821bc3da2e8226e90b5f17d3a40ccb1cb7417",
-        "lib/rule_routes.py": "e3c6a77bb3cbdfc64482cf9cee0da32857b0c019160e4e558127079dd46bb760",
-        "ops/config/jev-cost-guard.v1.json": "62aab9867fa6b200677d405b2e1588ac248e443625cfcb0e3710d0b573f24cc6",
-        "ops/config/rule-classes.v1.json": "8f8d24ddf0c1d012db9f31aa250bd30da45ee6f1156ec98bc9a194381fdc5f23",
-        "ops/config/rule-enforcement-map.json": "43ac7f513c173114b1723a886baf56a83ec40e7fef8b187ed3dead7d16d90ada",
-        "ops/config/rule-jev-triggers.v1.json": "cb644e0c73eb0ae68cc9ad56fb89f5654c678fce1985e422f4297f1e6a9e622f",
-        "ops/config/rule-jit-triggers.v1.json": "32aa6c4843022a334e9088069c7a56a84b3c02bb0c4bc0b52a661b04a147b871",
-        "ops/config/rule-routes.v1.json": "6bd10a8e9801debf21c81d8371c2eddb7052d3cc08a7d7abc23b814fd37f7114",
-        "ops/config/rule-selection-corpus.v1.json": "90f0e31475f1cd2c445475f8742de3dc94b62a2474d581fcefb5429a5eae102f",
-        "ops/config/rule-triage.v1.json": "61976718a46b0c94a49a7e9251ecbc9ed85eb429135633ad8cebbadcbed8391c",
+        "lib/rule_routes.py": "03358163502892be114cb13de447c589ee1e8a7bcf1c0034408992885ad38ad0",
+        "mcp-server/src/jev-request-contract.v1.json": "0687a4cda641c5f08bb856de5b9f234f7e8a097e21e92762b5ed3f582ddca185",
+        "ops/config/jev-cost-guard.v1.json": "8920873a41078dca949d8e31f50705e1330bcfa087b5260c22693f220488a2f8",
+        "ops/config/rule-classes.v1.json": "a78009e28bf32422695c31b1c4344c82a652ff5d3b9e3f489b2afb339638a852",
+        "ops/config/rule-enforcement-map.json": "2b217aec8841409c9a9c4aa659dad74f81da4750795b03ec3f4f490bac4a76f4",
+        "ops/config/rule-jev-triggers.v1.json": "b51679ed1288c439edd18d0b97f763a88513367f8a3d0bff771f62c49591291a",
+        "ops/config/rule-jit-triggers.v1.json": "366643d404e9203970d784337c54a4809f97a87796ca026aa565d378dd9aa2e1",
+        "ops/config/rule-routes.v1.json": "a7d07fd53511114bb4b380074f27628ff945f133be01ead9b46c7ad2f1baac75",
+        "ops/config/rule-selection-corpus.v1.json": "c21d05d993f6b3aa8265653f4f2e62f3a242803b3302059711cdc6a317cbf491",
         "ops/fixtures/real-replay/bash-commands.jsonl": "ba0fb2fa185f4bbd64a3216fb496b0d2c076a562ebe9d83a6d6080f0c8b6976c",
         "ops/fixtures/real-replay/read-calls.jsonl": "19020114d670f51ccef03cab893c40a7eaa1c58663c962499cdba132361670b9",
         "ops/fixtures/rule-delivery-eval/cases.v2.json": "20d0a652e02559241e25a8b40ebb2f700a939c7ef7dc38114d5d7978a559e0f7",
-        "ops/jev_rule_select.py": "89fce70b4056a160b4dc9cd78a9123bf895fb1b91d000d69e308c5088dda7833",
         "ops/machine_envelope.py": "749970f4dfb838af4e6cd1e6537988a278fc0006a02b32f665dfd0f943266c3f",
-        "ops/rule_delivery_eval.py": "7c846223ccc026f4f16a51dca0f695986cefadfc5f412c23adf73f57d08d022a",
-        "ops/rule_trigger_compile.py": "01fbf5c73a0e29c1d8c1660f5c2053a0fd048f460adad6b7bf00391dd5dd6291",
-        "ops/rule_trigger_delivery.py": "9ae37d7c4d334f5fee1362c7d476fcbd8b5495bb5cfe84c3cdf6d9864f3836be",
-        "ops/typesafe_client.py": "7f826dc29e501f4f5ccd5eeb838ea089d7274688b8615ef658b21b21cdf2d0af",
+        "ops/rule_delivery_eval.py": "4783bf0a9190dfe6ebe3026b2d311b23249350e0335995981ef704b6d451fa9d",
+        "ops/rule_trigger_compile.py": "26e0595e793aaba54df070f206edfa9d72f33d861f77741e0f3947bf7dbccdce",
+        "ops/rule_trigger_delivery.py": "773911b40433f70242b7b85eb33c64a487e8be20dd6c9f2ba28ac70daf10edb1",
+        "ops/typesafe_client.py": "91acd006df639e545a5fe6890712507652219fadb3d972b03b1fed42f1fa086d",
         "tools/judge/interface.py": "2e0440cc85660f83f4456829006f3f00a956e414c4c72e8217ab1a22622f3ed2"
       },
-      "ref": "c11c1153a59ff90f7d348f11330c97a25cb0f2f9"
+      "ref": "2106816ed392fe7bcac30d171d8c115cba10735f"
     },
     "cohorts": {
       "baseline": {
         "path": "evals/rule-delivery/evidence/baseline.jsonl",
-        "sha256": "304ab580dd806fc4cff2b7b21bf615e8e7caff597735b1b2416e05b5947ca90e"
+        "sha256": "5663a46c45c7e3704fc345540cf1391ca0083fc95322705c82af2a616c3c3349"
       },
       "candidate": {
         "path": "evals/rule-delivery/evidence/candidate.jsonl",
@@ -223,7 +223,7 @@
   "min_useful_gain": 0.7,
   "noise_floor": 0.3,
   "notes": [
-    "The receipt retains the established pre-PR-1325 baseline c11c1153a59ff90f7d348f11330c97a25cb0f2f9. Both arms were freshly replayed with the retained production-function harness; dependency bindings now include the retired parity-route removal.",
+    "The receipt preserves merged main's reviewed full-text baseline 2106816ed392fe7bcac30d171d8c115cba10735f. Both arms were replayed with the repository production-function harness. Public source sanitization retains every protected gold occurrence and the accepted D/E boot tradeoff.",
     "A separate replay against reviewed PR 1546 head 388e5d9ae02bea8d572bb7a4040984c986c3bdeb measured zero change in all three dimensions, with zero provider cost. This cleanup claims no quality or cost improvement.",
     "Existing frozen cases have historical reuse; results are descriptive regression evidence, not new untouched holdout or live-provider evidence.",
     "Human test recall point loss against the established baseline is 0.625 percentage points; its paired interval is [-2.143, 0] points. This does not establish noninferiority at the one-point margin with 95% confidence.",
